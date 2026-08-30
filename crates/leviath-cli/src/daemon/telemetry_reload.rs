@@ -1,18 +1,16 @@
 //! Rebuilding the telemetry pipeline when `[observability]` changes.
 //!
-//! The sink was built once at daemon startup and installed as the world's
-//! `Telemetry` resource, and for OTLP a `tracing` layer went into the CLI's
-//! reload slot beside it. Both were then fixed for the life of the process, so
-//! turning export on, pointing it at a different collector, or turning it off
-//! again all needed `lev daemon restart` - and the failure mode for the first
-//! one is the worst kind: you set `enabled = true`, start a run to watch it,
-//! and nothing arrives at the collector. Nothing distinguishes that from a
-//! collector that is not listening.
+//! The pipeline has two halves and both are swappable, so turning export on,
+//! pointing it at a different collector, or turning it off again all take
+//! effect on the next run rather than on the next `lev daemon restart`. The
+//! sink is the world's `Telemetry` resource, replaced like any other resource;
+//! the OTLP log bridge lives in a `tracing_subscriber` reload layer, which
+//! `set_otel_layer` fills at boot and this refills (or empties) afterwards.
 //!
-//! Both halves turn out to be swappable. The sink is a world resource like any
-//! other, and the OTLP log bridge already lives in a `tracing_subscriber`
-//! reload layer, which is what `set_otel_layer` fills at boot and what
-//! this refills (or empties) afterwards.
+//! Worth swapping rather than documenting a restart, because a sink stuck at
+//! its boot value fails in the least readable way there is: you set
+//! `enabled = true`, start a run to watch it, and nothing arrives - which looks
+//! exactly like a collector that is not listening.
 //!
 //! What does **not** move is the base subscriber `logging::init` installs
 //! before any config is read: the fmt layer, its stderr writer, and its
@@ -181,8 +179,8 @@ mod tests {
         assert_eq!(sink_ptr(&mut world), after);
     }
 
-    /// The bug: `enabled = true` reached the file, the run went out with the
-    /// no-op sink, and the collector stayed empty.
+    /// `enabled = true` written after boot swaps the sink, so the next run
+    /// reaches the collector rather than the no-op.
     #[test]
     fn turning_export_on_after_boot_swaps_the_sink() {
         let reload = reload();

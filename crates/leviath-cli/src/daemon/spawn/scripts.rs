@@ -110,7 +110,7 @@ pub(crate) fn resolve_output_validators(
 }
 
 /// Compile every stage-hook script the blueprint declares, keyed by the path as
-/// written (issue #260).
+/// written.
 ///
 /// Fail-fast at spawn, exactly as region scripts are: an unreadable file, one
 /// that does not compile, or one the blueprint names for a hook it does not

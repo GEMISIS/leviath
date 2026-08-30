@@ -104,10 +104,10 @@ async fn handle_ws(
 /// deadline injected so tests can drive the dead-peer branches without real
 /// multi-second waits.
 ///
-/// The `select!` is deliberately **unbiased**: the old `biased;` variant
-/// polled the event branch first every iteration, so under a busy run the
-/// inbound half (`socket.recv()` - the only place Close frames and pongs are
-/// seen) could be starved indefinitely.
+/// The `select!` is deliberately **unbiased**: a `biased;` here would poll the
+/// event branch first every iteration, so under a busy run the inbound half
+/// (`socket.recv()` - the only place Close frames and pongs are seen) could be
+/// starved indefinitely.
 async fn handle_ws_with(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<ServerEvent>,
@@ -442,7 +442,7 @@ mod tests {
                 .expect("the first ping arrives");
         assert_eq!(first, 0x9, "only pings flow on an idle channel");
         // ...and goes unanswered. Reaching a second ping at all is the
-        // assertion: the old code broke the loop instead of sending it.
+        // assertion: one missed pong must not end the loop.
         let (second, payload) =
             tokio::time::timeout(std::time::Duration::from_secs(30), client.recv_frame())
                 .await

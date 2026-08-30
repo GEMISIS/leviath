@@ -543,10 +543,10 @@ async fn execute_with_shutdown(
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let scheme = tls::scheme(tls.as_ref());
 
-    // Bound before anything says it is listening. Announcing first meant a
-    // taken port printed "Leviath API server listening on http://127.0.0.1:3000"
-    // and *then* died on a bare `os error 48`, which reads as a server that
-    // started and crashed rather than one that never started (issue #586).
+    // Bound before anything says it is listening. Announcing first would print
+    // "Leviath API server listening on http://127.0.0.1:3000" on a taken port
+    // and *then* die on a bare `os error 48`, which reads as a server that
+    // started and crashed rather than one that never started.
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| bind_error(&e, &args.host, args.port))?;
@@ -583,8 +583,8 @@ async fn execute_with_shutdown(
 ///
 /// The default port is 3000, which collides with most of the JavaScript world
 /// and a fair number of agent runtimes, so "the port is taken" is the ordinary
-/// failure here rather than an exotic one. It used to surface as a bare
-/// `os error 48` / `os error 10048` with no mention of the flag that fixes it.
+/// failure here rather than an exotic one, and a bare `os error 48` /
+/// `os error 10048` says nothing about the flag that fixes it.
 ///
 /// Deliberately does not fall back to another port. The console at
 /// leviath.dev polls a fixed `http://127.0.0.1:3000`, so a server that quietly
@@ -1262,9 +1262,8 @@ mod tests {
         // the router's own catch-all has nothing to say. (The handler's real
         // behavior is covered in agents.rs.)
         //
-        // `path` used to be required, and the resulting 400 was the proof.
-        // That stopped discriminating when it became optional so a bare call
-        // could list.
+        // The status cannot carry the proof: `path` is optional, so a bare
+        // call lists rather than refusing.
         let app = test_app();
         let req = Request::builder()
             .uri("/api/agents/some-run/files")
@@ -2036,7 +2035,7 @@ system_prompt = "Run"
 
     /// A browser preflight for a request carrying `Authorization` must be
     /// allowed. `Access-Control-Allow-Headers: *` does NOT cover `Authorization`
-    /// per the Fetch spec, so the header has to be listed explicitly — without
+    /// per the Fetch spec, so the header has to be listed explicitly - without
     /// it the console's authenticated requests are blocked by the browser. Also
     /// covers the `Some("*")` CORS arm.
     #[tokio::test]
@@ -2303,7 +2302,7 @@ system_prompt = "Run"
     /// The failure people actually hit: the default port is 3000, and 3000 is
     /// taken on a great many developer machines. Holds an ephemeral port for
     /// the duration so the collision is certain rather than hoped for, then
-    /// asserts the error names the flag that fixes it (issue #586).
+    /// asserts the error names the flag that fixes it.
     #[tokio::test]
     async fn execute_on_a_taken_port_names_the_port_flag() {
         let held = tokio::net::TcpListener::bind("127.0.0.1:0")

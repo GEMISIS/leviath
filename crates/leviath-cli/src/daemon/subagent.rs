@@ -42,9 +42,9 @@ pub(crate) struct SubAgentHandle {
     ///
     /// The docs call the override absolute - it "overrides everything" - and a
     /// child named by the model at run time is part of the run, not a separate
-    /// one. Without this a spawned sub-agent quietly resolved against its own
-    /// blueprint's model list instead (issue #534). `None` when the run named
-    /// no model, which leaves every child resolving as it always has.
+    /// one. Without this a spawned sub-agent quietly resolves against its own
+    /// blueprint's model list instead. `None` when the run named no model,
+    /// which leaves every child resolving from its blueprint.
     pub model_override: Option<String>,
 }
 
@@ -214,10 +214,9 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
         return "[error] wait_for_agent requires 'agent_id'".to_string();
     }
     // The whole wait happens off the tool lane. The child's own tool batches
-    // queue on that lane, so a parent that kept lane capacity while waiting was
-    // holding the very thing the child needed to finish - a parent and child
-    // deadlocked on each other, which is what froze whole factories for hours
-    // (issue #191).
+    // queue on that lane, so a parent that kept lane capacity while waiting
+    // would hold the very thing the child needs to finish: parent and child
+    // deadlock on each other and the whole factory stops.
     leviath_runtime::tool_bridge::off_lane(poll_until_finished(h, agent_id)).await
 }
 
@@ -694,9 +693,9 @@ task = { kind = "pinned", max_tokens = 1000 }
         assert_eq!(seen[0].max_depth, Some(2));
     }
 
-    /// A child of an unattended parent is unattended. Spawning it attended left
-    /// it stopped at its first approval prompt with nobody there to answer, and
-    /// parked the parent behind it for good (issue #184).
+    /// A child of an unattended parent is unattended. Spawned attended it stops
+    /// at its first approval prompt with nobody there to answer, and parks the
+    /// parent behind it for good.
     #[tokio::test]
     async fn spawn_hands_the_parents_unattended_setting_to_the_child() {
         for unattended in [false, true] {
@@ -722,7 +721,7 @@ task = { kind = "pinned", max_tokens = 1000 }
 
     /// A run's `--model` covers the children it spawns as well. The child is
     /// named by the model at run time, so it is part of this run rather than a
-    /// separate one - and dropping the override there was silent (issue #534).
+    /// separate one, and dropping the override there is silent.
     #[tokio::test]
     async fn spawn_hands_the_parents_model_override_to_the_child() {
         let bp = temp_blueprint();
@@ -807,9 +806,9 @@ task = { kind = "pinned", max_tokens = 1000 }
     /// `wait_for_agent` waits off the tool lane.
     ///
     /// The child's own tool batches queue on that lane. A parent that kept lane
-    /// capacity for the length of the wait was holding exactly what the child
-    /// needed in order to finish, so a factory of parents waiting on children
-    /// wedged itself and stayed wedged (issue #191).
+    /// capacity for the length of the wait would hold exactly what the child
+    /// needs in order to finish, so a factory of parents waiting on children
+    /// wedges itself and stays wedged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wait_does_not_hold_the_tool_lane() {
         use leviath_runtime::tool_bridge::{ToolJob, ToolLane, ToolLaneStats};

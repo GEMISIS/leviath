@@ -1185,11 +1185,11 @@ mod tests {
     /// Every stage resolves to the first model it lists that anything serves.
     ///
     /// A blueprint's `models` is a preference order. The host picks a route
-    /// within that order; it does not get to pick a different preference. #578
-    /// was exactly that failure: entries matched as whole `provider/model`
-    /// pairs, so `default_provider` chose among routes and whatever model its
-    /// route happened to name came back. `polish` asked for
-    /// `gemini-3.1-pro-preview` and ran `claude-sonnet-5`.
+    /// within that order; it does not get to pick a different preference. The
+    /// failure this rules out: matching entries as whole `provider/model`
+    /// pairs, so `default_provider` chooses among routes and whatever model
+    /// its route names comes back - `polish` asking for
+    /// `gemini-3.1-pro-preview` and running `claude-sonnet-5`.
     ///
     /// Run over every bundled agent, because the blueprints are what ship.
     #[test]
@@ -1265,9 +1265,9 @@ mod tests {
                     .next()
                     .unwrap_or(&reachable[0].model);
 
-                // A real default provider, because the reordering #578 lived in
-                // only runs when one is set and registered. Passing the empty
-                // default skips that block entirely and tests nothing.
+                // A real default provider, because the reordering only runs
+                // when one is set and registered. Passing the empty default
+                // skips that block entirely and tests nothing.
                 let defaults = leviath_runtime::pipeline::ModelDefaults {
                     provider: "openrouter".to_string(),
                     ..Default::default()
@@ -1294,10 +1294,10 @@ mod tests {
     /// A provider claims the models it serves, and not the rest.
     ///
     /// `serves_model` decides which provider a bare model name resolves to, so a
-    /// provider that over-claims wins models it cannot run. That is the same
-    /// failure #578 was about, arriving from the other direction: there the host
-    /// picked a route and got the wrong model, here a provider claims a model it
-    /// has never heard of.
+    /// provider that over-claims wins models it cannot run. It is the stage
+    /// test above from the other direction: there the host picks a route and
+    /// gets the wrong model, here a provider claims a model it has never heard
+    /// of.
     #[test]
     fn a_provider_does_not_claim_models_from_other_vendors() {
         let providers = setup_providers();
@@ -1388,9 +1388,9 @@ mod tests {
         // machine configured with exactly one of them, every stage still runs.
         //
         // Asked of the providers themselves rather than of the spelling. A
-        // blueprint names models and leaves routing to the machine, so "does
-        // this stage name a provider" no longer answers the question - "does
-        // this provider serve anything this stage named" does.
+        // blueprint names models and leaves routing to the machine, so the
+        // question is not "does this stage name a provider" but "does this
+        // provider serve anything this stage named".
         //
         // Discovered from BUNDLED_AGENTS rather than enumerated, so a new
         // blueprint is covered the day it lands.

@@ -108,7 +108,7 @@ fn name_width(snap: &ContextSnapshot) -> usize {
 /// beside it.
 ///
 /// The cut is what makes this a cell rather than a `{:<width$}`, which pads but
-/// never truncates - so a name or a kind wider than its column used to shunt
+/// never truncates - so a name or a kind wider than its column would shunt
 /// that one row's remaining columns right of every other row's.
 ///
 /// Counted in characters, which is also what the padding counts, so the two
@@ -360,10 +360,10 @@ mod tests {
             .collect()
     }
 
-    /// A name too long for its column used to push that row's kind and token
+    /// A name too long for its column must not push that row's kind and token
     /// bar right of every other row's. `stage_instructions` is eighteen
-    /// characters and is in the layout every bundled agent uses, so this was
-    /// on screen rather than hypothetical.
+    /// characters and is in the layout every bundled agent uses, so this is on
+    /// screen rather than hypothetical.
     #[test]
     fn a_long_region_name_does_not_push_its_own_row_out_of_line() {
         let mut s = snap();

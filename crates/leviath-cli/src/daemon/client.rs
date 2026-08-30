@@ -28,27 +28,26 @@ pub(crate) struct AgentSource {
 
 /// Find the agent's manifest and parse it, once.
 ///
-/// The parse is unconditional. It used to happen only when there were region
-/// flags to validate, but the blueprint's name and description are now needed
-/// for the editor template too, and parsing here is strictly better regardless:
-/// it is the same parser the daemon runs on the same file moments later, so a
-/// manifest that fails here would have failed there, and `parse manifest: <toml
-/// error>` before the daemon is contacted beats a spawn rejection after.
+/// The parse is unconditional rather than gated on there being region flags to
+/// validate: the blueprint's name and description are needed for the editor
+/// template too, and it costs nothing either way. This is the same parser the
+/// daemon runs on the same file moments later, so a manifest that fails here
+/// would have failed there, and `parse manifest: <toml error>` before the
+/// daemon is contacted beats a spawn rejection after.
 pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
     let found = find_manifest(path)?;
     // Absolute, because this path is about to be handed to the daemon, which
     // has its own working directory. `lev run .` and `lev run ./demo` resolve
     // fine here and then arrive there as `./agent.leviath`, which the daemon
     // reads relative to wherever it happens to have been started - so the spawn
-    // failed with "read manifest './agent.leviath': No such file or directory".
-    // `lev create` prints `lev run .` as its next step, so this was the first
-    // thing a new user hit.
+    // fails with "read manifest './agent.leviath': No such file or directory".
+    // `lev create` prints `lev run .` as its next step, so that is the first
+    // thing a new user hits.
     //
     // Best-effort rather than fallible: `find_manifest` only returns paths it
     // has already confirmed resolve, so a failure here needs the file to vanish
-    // between the two calls. Falling back to what it found leaves the old
-    // behavior, which is a legible daemon-side error, rather than inventing an
-    // error arm no test can reach.
+    // between the two calls. Falling back to what it found leaves a legible
+    // daemon-side error rather than inventing an error arm no test can reach.
     let manifest = std::fs::canonicalize(&found).unwrap_or(found);
     let run_stem = manifest
         .parent()
@@ -528,9 +527,9 @@ mod tests {
     }
 
     /// The daemon has its own working directory, so a relative `PATH` has to be
-    /// resolved before the request leaves. `lev run .` used to reach the daemon
-    /// as `./agent.leviath` and fail there, which is the very command
-    /// `lev create` prints as the next step.
+    /// resolved before the request leaves: `lev run .` reaching the daemon as
+    /// `./agent.leviath` fails there, and it is the very command `lev create`
+    /// prints as the next step.
     #[test]
     fn resolve_spawn_args_sends_an_absolute_blueprint_path_for_a_relative_input() {
         // Reading the CWD is enough to race the tests that *move* it: one of

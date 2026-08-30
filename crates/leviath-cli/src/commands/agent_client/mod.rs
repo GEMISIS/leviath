@@ -440,9 +440,9 @@ impl Server {
                         // is gone. Flush what the run wrote so far, then follow
                         // the run onto the new daemon - which reloads it - by
                         // subscribing again; the control client waits a restart
-                        // out. This used to end the turn on the spot, so a
-                        // `lev daemon restart` mid-answer handed the editor a
-                        // truncated reply while the run finished unwatched.
+                        // out. Ending the turn here instead would hand the
+                        // editor a truncated reply on a `lev daemon restart`
+                        // mid-answer, with the run finishing unwatched.
                         // The turn ends only when no daemon comes back, or when
                         // one keeps coming back and dropping the stream without
                         // a single event - a daemon in that state is not going

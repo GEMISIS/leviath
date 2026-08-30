@@ -87,8 +87,8 @@ pub(crate) struct Dashboard {
     /// Cached archive of the selected run (points + visit timeline).
     pub(super) history: Option<super::history::RunHistoryCache>,
     /// Loads a run's archived points. Injected (mirroring `clock`/`yank_fn`)
-    /// so tests can count loads and prove `,`/`.` no longer re-read the
-    /// archive per keypress.
+    /// so tests can count loads and pin that `,`/`.` read the archive once
+    /// per run, not once per keypress.
     pub(super) history_loader: fn(&str) -> Vec<leviath_core::run_archive::RunPoint>,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     pub(super) detail_scroll: usize,
@@ -105,11 +105,11 @@ pub(crate) struct Dashboard {
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
     pub(super) initial_sync_done: bool,
     // ── Poll caches ───────────────────────────────────────────────────────────
-    // The sync tick runs at 10Hz and used to re-read and re-parse every run's
-    // meta.json, stages.json, and whole context.json on every tick - ~100 MB/s
-    // of allocate-parse-free with 50 runs on disk, for files that change at
-    // most once per persist tick. These stat-gated caches reduce the steady
-    // state to stat calls.
+    // The sync tick runs at 10Hz across every run on disk, and meta.json,
+    // stages.json, and context.json change at most once per persist tick.
+    // Re-reading and re-parsing them each tick costs ~100 MB/s of
+    // allocate-parse-free with 50 runs on disk; these stat-gated caches hold
+    // the steady state to stat calls.
     pub(super) meta_cache: runstate::StatCache<runstate::RunMeta>,
     pub(super) stages_cache: runstate::StatCache<Vec<leviath_core::run_meta::StageRecord>>,
     pub(super) context_cache: runstate::StatCache<runstate::ContextSnapshot>,
@@ -798,15 +798,12 @@ impl Dashboard {
         if matches!(agent.status, AgentDisplayStatus::Cancelled) {
             return false;
         }
-        // Check if there's actually a prompt to respond to
         if agent.waiting_prompt.is_none() && agent.pending_request.is_none() {
             return false;
         }
         // Gate on the selected stage matching the stage currently requiring input.
-        // Use pending_request.stage_name if available, otherwise fall back to current stage_index.
         let input_stage_idx = if let Some(req) = &agent.pending_request {
             if !req.stage_name.is_empty() {
-                // Find stage by name
                 agent
                     .stages
                     .iter()
@@ -904,7 +901,7 @@ impl Dashboard {
     /// Drop folds naming runs that no longer exist, and write the store when
     /// that changed anything.
     ///
-    /// ⚠️ Skipped while the run list is empty. Folds outlive the process now,
+    /// ⚠️ Skipped while the run list is empty. Folds outlive the process,
     /// and "no runs" is also what the very first tick sees, and what a runs
     /// directory that could not be read for a moment sees - pruning against
     /// that would delete every remembered fold on startup. An empty list has
@@ -1088,8 +1085,8 @@ mod tests {
             .collect();
         assert_eq!(before, ["run-new", "run-old"]);
 
-        // The newest run finishes; in the old bucket sort it would leap below
-        // the still-active one. Here it stays exactly where it was.
+        // The newest run finishes. Its row stays exactly where it was rather
+        // than sorting under the still-active one.
         dash.agents[1].status = AgentDisplayStatus::Complete;
         dash.update_display_indices();
         let after: Vec<String> = dash
@@ -3017,10 +3014,10 @@ mod tests {
     /// instead of reverting to ACTIVE) and when the dashboard opens on a run
     /// that was already paused.
     ///
-    /// The second case is the one that used to be wrong: the dashboard rebuilt
-    /// the timer from transitions it had watched, so a pause it never saw start,
-    /// because it was closed or because the run was paused before it opened,
-    /// counted as work.
+    /// The second case is the one with no local evidence: the timer comes from
+    /// the run's own clock, not from transitions the dashboard watched, so a
+    /// pause that began before it opened still reads as paused rather than as
+    /// work.
     #[test]
     fn sync_from_run_state_paused_run_shows_paused_with_a_stopped_timer() {
         crate::runstate::with_isolated_runs_dir("sync-paused-run", |_d| {
@@ -3508,8 +3505,8 @@ mod tests {
 
     /// Leaving a wait does not add the wait to the run's time.
     ///
-    /// The dashboard no longer reconstructs any of this: the run's own clock is
-    /// what it reads, so a wait it never observed costs nothing either.
+    /// The dashboard reconstructs none of this: it reads the run's own clock,
+    /// so a wait it never observed costs nothing either.
     #[test]
     fn sync_from_run_state_leaving_a_wait_does_not_bill_the_wait() {
         crate::runstate::with_isolated_runs_dir(

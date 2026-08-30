@@ -1,15 +1,14 @@
 //! Why `config.toml` would not load, in enough detail to point at the spot.
 //!
-//! Loading a config used to fail as an `anyhow::Error` carrying one flattened
-//! string. That is fine for a command about to exit and print it, and useless
-//! everywhere else: the daemon keeps running on its last good config, and the
-//! surfaces that then have to *explain* that - a JSON field, a dashboard
-//! banner two lines tall, a doctor check - each need the file, the one-line
-//! reason, and where in the file it is, separately.
+//! The loader produces a [`ConfigFault`]: the file, a one-line reason, and
+//! where in the file it is, each reachable on its own. A flattened string is
+//! enough for a command about to exit and print it, and not enough for
+//! anything else, because the daemon keeps running on its last good config and
+//! every surface that has to *explain* that - a JSON field, a dashboard banner
+//! two lines tall, a doctor check - lays those pieces out differently.
 //!
-//! So the loader produces a [`ConfigFault`] and the string is derived from it
-//! rather than the other way round. `Display` is still the sentence the CLI
-//! printed before, so nothing that only wanted the string had to change.
+//! `Display` renders the same sentence the CLI prints, so a caller that only
+//! wants the string can keep taking it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

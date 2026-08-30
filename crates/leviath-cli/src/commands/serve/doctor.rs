@@ -17,10 +17,10 @@ use crate::commands::run::session::build_provider_registry_from_config;
 
 /// `GET /api/doctor`: the checks that cost nothing.
 ///
-/// Config, search and resolve, then stop: exactly `lev doctor --offline`. It
-/// used to run the whole chain, which made an unauthenticated-looking read
-/// into two billed provider calls and a spawned run for anyone holding the
-/// bearer token, on every press of a button.
+/// Config, search and resolve, then stop: exactly `lev doctor --offline`.
+/// Running the whole chain here would turn a read into two billed provider
+/// calls and a spawned run for anyone holding the bearer token, on every press
+/// of a button.
 ///
 /// A failing check is an `ok: false` entry in a 200, never an HTTP error - the
 /// endpoint answering at all is not the thing being diagnosed. The config is

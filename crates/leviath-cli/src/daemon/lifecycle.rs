@@ -76,8 +76,6 @@ pub fn stop_fallback(recorded_pid: Option<u32>) -> StopFallback {
     }
 }
 
-/// The line `lev daemon stop` prints, or the error it fails with.
-///
 /// What `lev daemon stop` prints when the daemon ignores it for the whole of
 /// [`super::readiness::READY_TIMEOUT`].
 ///

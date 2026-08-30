@@ -436,7 +436,7 @@ impl Dashboard {
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" back to the prompt"),
                 ]),
-                // The response box since #708: Enter breaks the line and
+                // The response box: Enter breaks the line and
                 // Ctrl+Enter sends, with the Send button for a terminal
                 // that cannot tell the two apart. An in-place edit is the
                 // same box with a Save button, so it takes the same bar.
@@ -1215,7 +1215,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        // Enter is a newline in the box since #708; the bar must not say it sends.
+        // Enter is a newline in the box; the bar must not say it sends.
         assert!(buf.contains("[^Enter] send"), "{buf}");
         assert!(buf.contains("[Enter] newline"), "{buf}");
         assert!(buf.contains("[Tab] Send button"), "{buf}");
@@ -1850,9 +1850,9 @@ mod tests {
         assert!(wide.contains("breaker opened"), "{wide}");
     }
 
-    /// An in-place edit is the response box with a Save button, and takes
-    /// the same keys; the bar used to give it the choice list's "[Enter]
-    /// confirm" while Enter broke the line.
+    /// An in-place edit is the response box with a Save button, and takes the
+    /// same keys: the bar must not offer it the choice list's "[Enter]
+    /// confirm" while Enter breaks the line.
     #[test]
     fn draw_help_bar_input_mode_edit_text() {
         let backend = TestBackend::new(120, 2);

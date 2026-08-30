@@ -413,10 +413,9 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
 /// Every `Option` field is filled first. Several carry
 /// `skip_serializing_if = "Option::is_none"`, so a probe left at its defaults
 /// omits them and the allowlist silently refuses a field that does exist -
-/// `?fields=read_paths` and `?fields=final_output` were both rejected on runs
-/// that had them, and then `?fields=waiting_on` was, which is what the
-/// leviath.dev console asks for on every sidebar load (issue #656). Filling
-/// the options is what makes the sentence above true, and
+/// `?fields=waiting_on` on a parked run, say, which is what the leviath.dev
+/// console asks for on every sidebar load. Filling the options is what makes
+/// the sentence above true, and
 /// `every_skip_if_none_option_on_run_meta_is_filled_by_the_probe` in the tests
 /// reads the struct's source to catch the next one added without a line here.
 fn known_meta_fields() -> HashSet<String> {
@@ -590,8 +589,8 @@ fn paginate(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, Option<St
 /// The single place a `RunMeta` becomes JSON on any route. `redacted()` is what
 /// strips the webhook signing secret, and a redaction that has to be remembered
 /// per handler is the one that gets forgotten; the same goes for the spans,
-/// which are the reason `/api/runs` and `/api/agents` used to describe the same
-/// run with different keys.
+/// which are what keeps `/api/runs` and `/api/agents` describing the same run
+/// with the same keys.
 pub(super) fn run_json(meta: &RunMeta, now: i64) -> serde_json::Value {
     let mut value = serde_json::to_value(meta.redacted()).unwrap_or(serde_json::Value::Null);
     leviath_core::duration::annotate_spans(
@@ -751,7 +750,7 @@ fn remove_family(ids: &[String]) -> Result<(), (StatusCode, String)> {
 /// Separate from `DELETE /api/agents/{id}`, which cancels. The two verbs mean
 /// genuinely different things - one stops the work, the other forgets it
 /// happened - and answering 204 to both would leave a client unable to say
-/// which it got (issue #463).
+/// which it got.
 ///
 /// The deletion is real: the directory and everything in it, including the
 /// transcript. That is the point of the route. A console that offered a

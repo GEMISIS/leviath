@@ -75,8 +75,8 @@ fn mermaid_block_is_drawn_rather_than_dumped() {
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
         .collect::<String>();
-    // It used to print its own source and an errand ("install mmdc"). Now it
-    // is a diagram: the ids are in boxes with an arrow between them.
+    // A drawn diagram, not the block's own source with an "install mmdc"
+    // errand attached: the ids are in boxes with an arrow between them.
     assert!(all.contains('┌'), "{all}");
     assert!(all.contains('▼'), "{all}");
     assert!(!all.contains("mmdc"), "the errand is gone: {all}");
@@ -761,8 +761,8 @@ fn chart(source: &[&str], width: u16) -> Vec<String> {
         .collect()
 }
 
-/// A flowchart used to render as its own source with an errand attached
-/// ("install mmdc"). It is a diagram now: boxes, and arrows between them.
+/// A flowchart is drawn as a diagram - boxes, and arrows between them - not
+/// as its own source with an "install mmdc" errand attached.
 #[test]
 fn a_flowchart_is_drawn_as_boxes_and_arrows() {
     let rows = chart(
@@ -1109,9 +1109,9 @@ fn rows_of(md: &str, width: u16) -> Vec<String> {
         .collect()
 }
 
-/// A table used to arrive as its cells run together on one line. It is now a
-/// framed grid, with the header ruled off and the columns aligned as the
-/// delimiter row asked.
+/// A table is a framed grid rather than its cells run together on one line,
+/// with the header ruled off and the columns aligned as the delimiter row
+/// asked.
 #[test]
 fn a_table_is_drawn_as_a_grid() {
     let md = "| Name | Role |\n|:---|---:|\n| alpha | lead |\n| b | c |\n";

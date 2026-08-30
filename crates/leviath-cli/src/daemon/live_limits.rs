@@ -3,18 +3,16 @@
 //! The settings in this module are the ones the world is *built* with: pool
 //! sizes, lane widths, watchdog timeouts, the circuit breaker, the retry
 //! schedule, the fan-out ceiling, the listing window, the spend figures and
-//! whether runs get titles. Every one of them was read once in
-//! [`build_host`](crate::daemon::setup::build_host) and then fixed for the life
-//! of the process, so editing any of them and starting a run did nothing at
-//! all, with nothing to say so.
+//! whether runs get titles. All of them are re-applied from here whenever the
+//! daemon has a freshly reloaded config, so editing one and starting a run
+//! works without a daemon restart.
 //!
-//! One of those was worse than doing nothing. Spawn already reads a fresh
-//! config, so turning `[title]` on made spawn mark the new run `PendingTitle` -
-//! and the dispatch system, reading the boot-time `TitleSettings`, saw titling
-//! switched off and quietly dropped the marker. The run was marked for a title
-//! that could never be made. Applying the same config to the world before the
-//! spawner reads it is what closes that: both halves now answer from one
-//! document.
+//! `[title]` is the one that has to be applied *before* the spawner reads the
+//! config, not merely at some point. Spawn reads a fresh config and marks the
+//! new run `PendingTitle`; a dispatch system still on a boot-time
+//! `TitleSettings` would see titling switched off and drop the marker without a
+//! word, leaving the run marked for a title nobody will ever make. Applying
+//! here is what makes both halves answer from one document.
 //!
 //! The comparison is on the settings themselves rather than the file's mtime,
 //! so a save that only changed a tool permission does not touch the pools. Each
@@ -53,9 +51,8 @@ impl Applied {
 
 /// Applies `[limits]` and `[title]` to a live world.
 ///
-/// Built once at boot and consulted wherever the daemon has a freshly reloaded
-/// config and the world in hand: the spawner, and the reloader that pages a run
-/// back in.
+/// One per daemon, consulted wherever there is a freshly reloaded config and
+/// the world in hand: the spawner, and the reloader that pages a run back in.
 pub struct LiveLimits {
     /// The prompt hub, which holds its own timeout rather than living in the
     /// world.
@@ -124,8 +121,8 @@ impl LiveLimits {
         ecs.insert_resource(leviath_runtime::fanout::FanOutBudget(
             config.limits.max_agents_per_run,
         ));
-        // The half of the title split that used to be stuck at boot: the
-        // dispatcher and the spawner now read the same document.
+        // The dispatcher's half of the title split; the spawner reads the same
+        // document a moment later.
         ecs.insert_resource(leviath_runtime::title::TitleSettings(config.title.clone()));
 
         // Read when a prompt opens, so a prompt already waiting keeps the

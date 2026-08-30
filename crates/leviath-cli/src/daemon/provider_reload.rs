@@ -1,20 +1,19 @@
 //! Rebuilding the daemon's provider registry when `config.toml` changes.
 //!
-//! The registry is built once at boot from the config's keys, base URLs and
-//! `[model_providers]` entries, and was then fixed for the life of the
-//! process. Everything a person does to change where their runs go - `lev
-//! setup`, `PUT /api/config`, editing the file - writes that file and nothing
-//! else, so a user who moved off a provider whose credits had run out watched
-//! every new run go to it anyway, and the only thing that helped was killing
-//! the daemon. The config reloader beside this module already re-read the
-//! file for spawn-time settings; it deliberately stopped short of the
-//! registry, and this is the piece that finishes the job.
+//! The registry is built from the config's keys, base URLs and
+//! `[model_providers]` entries, and everything a person does to change where
+//! their runs go - `lev setup`, `PUT /api/config`, editing the file by hand -
+//! writes that file and nothing else. So the registry follows the file: move
+//! off a provider whose credits have run out and the next run routes somewhere
+//! else, with no daemon restart. The config reloader beside this module covers
+//! the spawn-time settings out of the same file; this is the provider half.
 //!
 //! The check is on the credentials themselves rather than the file's mtime: a
 //! save that changed a tool permission is not a reason to rebuild providers,
 //! and a rebuild that dropped a provider mid-flight would be worse than the
-//! bug. What changed is also *which* providers changed, so the circuit breaker
-//! can forget the failures that belong to a key the user has since replaced.
+//! staleness it cures. The comparison also names *which* providers changed, so
+//! the circuit breaker can forget the failures that belong to a key the user
+//! has since replaced.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -100,8 +99,8 @@ impl ProviderReload {
             return Vec::new();
         }
         // The script layer is carried over rather than rebuilt: it follows the
-        // config through its own source (issue #533) and holds the `.rhai`
-        // providers it has already compiled.
+        // config through its own source, and holds the `.rhai` providers it has
+        // already compiled.
         let built = leviath_runtime::provider_creds::build_provider_registry_with(
             &creds,
             self.build_client,
@@ -356,7 +355,7 @@ mod tests {
     fn a_rebuild_keeps_the_script_provider_layer() {
         // A `.rhai` provider the daemon has already compiled must survive a
         // key change elsewhere: rebuilding the layer would drop it, and the
-        // layer follows the config on its own anyway (issue #533).
+        // layer follows the config on its own anyway.
         let config = config_with_key("sk-ant");
         let dir = tempfile::tempdir().unwrap();
         let layer =

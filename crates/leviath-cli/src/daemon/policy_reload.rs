@@ -2,21 +2,22 @@
 //!
 //! Two files decide whether a tainted outbound call is allowed: `policy.toml`
 //! (the static allowlist and the `[mcp_overrides]`) and `rules/*.rhai` (the
-//! scripted rules consulted after it). Both were read once at daemon startup
-//! and installed as world resources, and the scripted half was worse than
-//! boot-only in an invisible way: the sources are read into a closure, so an
-//! edited rule kept answering with the text it had at boot.
+//! scripted rules consulted after it). Both are installed as world resources,
+//! and both are re-read here so `lev policy add` lands on the next run: it
+//! writes `policy.toml` and prints the rule it wrote, and a gate that goes on
+//! blocking the call that rule permits has nothing to say why.
 //!
-//! That put `lev policy add` in a bad spot. It writes `policy.toml` and prints
-//! the rule it wrote, the gate goes on blocking the call the rule was written
-//! to permit, and nothing says why. The fix is the one the config reloader
-//! beside this module already uses for `config.toml`: stat the files, reload
-//! when they moved, compare, and swap the world resource before the next run
-//! resolves anything.
+//! The scripted half needs this more than the static one, and in a way no
+//! "restart the daemon" advice covers: a rule's sources are read into a
+//! closure, so an installed checker keeps answering with the text it was built
+//! from no matter how often the file is edited. Only a rebuild picks up a
+//! change.
 //!
-//! These are not `config.toml`, so the reloader cannot carry them: they live
-//! under the platform config directory (`~/.config/leviath` on Linux) and get
-//! their own mtime check here.
+//! The shape is the config reloader's, beside this module: stat the files,
+//! reload when they moved, compare, and swap the world resource before the next
+//! run resolves anything. They cannot ride that reloader itself - they are not
+//! `config.toml`, they live under the platform config directory
+//! (`~/.config/leviath` on Linux), so they get their own mtime check here.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -353,9 +354,8 @@ mod tests {
         assert!(!reload.refresh().any());
     }
 
-    /// The bug: `lev policy add` writes the rule, prints it, and the gate goes
-    /// on blocking the call it was written to permit until the daemon is
-    /// killed.
+    /// A rule `lev policy add` wrote after boot is in force on the next run,
+    /// with no daemon restart.
     #[test]
     fn a_rule_added_after_boot_reaches_the_world() {
         let dir = tempfile::tempdir().unwrap();
@@ -384,7 +384,7 @@ mod tests {
         );
     }
 
-    /// The scripted half, which was stale in a way no restart advice covered:
+    /// The scripted half, where an edit only lands if the engine is rebuilt:
     /// the sources live inside the compiled closure.
     #[test]
     fn an_edited_rule_script_reaches_the_world() {

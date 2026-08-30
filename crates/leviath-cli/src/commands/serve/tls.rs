@@ -1,4 +1,4 @@
-//! Serving the API over HTTPS (issue #300).
+//! Serving the API over HTTPS.
 //!
 //! # Why this exists at all
 //!

@@ -8,9 +8,9 @@
 //!
 //! Every step builds a `Screen`: flat lines, plus the line each selectable
 //! row starts on. That shape is what makes the wizard survive a small window.
-//! The screens used to be `List`s of pre-sized items and assumed the terminal
-//! was tall enough, so the tuning screen's thirteen fields simply stopped at
-//! whatever row ran out of pane, with nothing on screen to say more existed.
+//! A `List` of pre-sized items assumes the terminal is tall enough, so the
+//! tuning screen's thirteen fields would stop at whatever row ran out of pane,
+//! with nothing on screen to say more existed.
 //! Wrapping happens here too, in `wrap_line`, for the same reason: the
 //! number of rows a screen occupies is only knowable once its text is wrapped,
 //! and without that number there is nothing to scroll against.
@@ -1151,9 +1151,9 @@ mod tests {
     }
 
     /// The tuning screen has thirteen two-line fields, which is more than most
-    /// windows are tall. It used to render as a `List` that simply stopped at
-    /// the bottom of the pane, so the last fields and the Continue button were
-    /// unreachable with no sign they existed.
+    /// windows are tall. Drawn as a `List` it would stop at the bottom of the
+    /// pane, leaving the last fields and the Continue button unreachable with
+    /// no sign they existed.
     #[test]
     fn a_short_window_can_still_reach_the_last_field_and_the_button() {
         let (_dir, mut w) = wizard();

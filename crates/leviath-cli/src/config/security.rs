@@ -31,9 +31,9 @@ pub struct SecurityConfig {
     /// it.
     ///
     /// This exists because the workdir defaults to wherever `lev run` was
-    /// invoked, and running from `~` is an easy thing to do by accident - issue
-    /// #252 is a machine that lost 115 GB to an agent writing under a profile
-    /// root. Confirming is cheap; noticing afterwards is not.
+    /// invoked, and running from `~` is an easy thing to do by accident. An
+    /// agent turned loose under a profile root can eat tens of gigabytes.
+    /// Confirming is cheap; noticing afterwards is not.
     #[serde(default)]
     pub allowed_workdirs: Vec<String>,
 
@@ -101,7 +101,7 @@ pub struct SecurityConfig {
     /// `SSH_AUTH_SOCK`, so `git push` over agent keys still works. `strict`
     /// drops the carve-out and also takes `AWS_PROFILE`, `KUBECONFIG` and
     /// friends. `custom` ignores the shape heuristic and withholds exactly what
-    /// [`Self::shell_env_withhold`] names. `inherit` is the old behaviour.
+    /// [`Self::shell_env_withhold`] names. `inherit` withholds nothing.
     ///
     /// Toolchain variables - `PATH`, `HOME`, `CARGO_HOME`, `JAVA_HOME`,
     /// `VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST` - pass through under

@@ -4,7 +4,7 @@
 //! the half that does it: it runs `binary.commands`, installs the blueprints the
 //! plan marks `preselected`, and applies the config migrations - the same three
 //! steps `lev update` runs, from the same [`plan`], so the console and the
-//! terminal cannot carry out different updates (issue #638).
+//! terminal cannot carry out different updates.
 //!
 //! # Why it is a job rather than a request
 //!

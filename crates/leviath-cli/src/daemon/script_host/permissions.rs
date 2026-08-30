@@ -73,7 +73,7 @@ fn script_restrictiveness(p: ScriptPermission) -> u8 {
 /// Agents ship their own `.rhai` tool scripts, so it is reasonable for a
 /// manifest to say "this agent never needs `shell`". It is not reasonable for it
 /// to say the opposite: a manifest that could set `shell = "allow"` over a user's
-/// global `deny` meant installing an agent was enough to overrule the machine's
+/// global `deny` would make installing an agent enough to overrule the machine's
 /// configuration. So a manifest may tighten a field and never loosen it, the same
 /// rule [`crate::tools::resolve_policy`] applies to `[tool_permissions]`.
 ///
@@ -87,8 +87,7 @@ pub(crate) fn effective_script_permissions(
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
     // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by
-    // junk and fails. It still compiles, so the change is silent; the tests are
-    // what caught it.
+    // junk and fails. Both spellings compile, so swapping them is silent.
     let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
         return eff;
     };

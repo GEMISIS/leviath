@@ -24,12 +24,12 @@ use crate::tool_inventory::ToolInventory;
 ///
 /// The name is looked up in the same catalog `GET /api/blueprints` lists, so an
 /// agent found through `config.agent_paths` resolves to where it actually is.
-/// It used to be `agents_dir().join(name)` unconditionally: an agent under
-/// development in a configured path was listed and could be spawned, yet its
-/// `tools/` never showed up here, its hooks could not be opened, and a
-/// `PUT /api/scripts/...?agent=` wrote into an empty `~/.leviath/agents/<name>/`
-/// nothing would load (issue #643). A name the catalog does not know still
-/// falls back to the installed directory, so a new agent can be created there.
+/// A plain `agents_dir().join(name)` would point every caller at
+/// `~/.leviath/agents/<name>/` instead: an agent under development in a
+/// configured path is listed and can be spawned, but its `tools/` and hooks
+/// live beside it, and a `PUT /api/scripts/...?agent=` would write into an
+/// empty directory nothing loads. A name the catalog does not know still falls
+/// back to the installed directory, so a new agent can be created there.
 ///
 /// The same gate, on the same directory, that `blueprint_dir` applies in
 /// `blueprints.rs`: `Path::join` neither normalizes `..` nor resists an
@@ -285,9 +285,8 @@ mod tests {
     }
 
     /// An agent listed because its directory is under `config.agent_paths`
-    /// resolves to that directory, not to an empty `~/.leviath/agents/<name>`.
-    /// The catalog and the tools route used to disagree about where such an
-    /// agent lived, so its own `tools/` never appeared (issue #643).
+    /// resolves to that directory, not to an empty `~/.leviath/agents/<name>`,
+    /// so the `tools/` beside it are the ones listed.
     #[tokio::test]
     async fn an_agent_from_a_configured_path_lists_its_own_tools() {
         with_home(|home| async move {

@@ -143,13 +143,13 @@ pub(crate) async fn setup_daemon_host_with(
     // Built before the registry, and shared with it: a script provider's
     // `[model_providers.<name>]` table is read through this, so editing it
     // takes effect on the next load exactly as editing the `.rhai` beside it
-    // already did (issue #533).
+    // does.
     //
-    // The same mirror is re-applied on every reload. Without that, the three
-    // atomics were the config the daemon *booted* with for the rest of its
-    // life, while the per-agent `allow_local_network` check next to them read
-    // the reloaded file - so tightening the switch refused the URL a script
-    // named and went on following a redirect to loopback.
+    // The same mirror is re-applied on every reload, because those three
+    // atomics have no other way to follow the file. The per-agent
+    // `allow_local_network` check beside them reads the reloaded config, so
+    // atomics left at their boot values would refuse the URL a script names
+    // while still following a redirect to loopback.
     let reloader = Arc::new(
         crate::daemon::config_reload::ConfigReloader::new(Config::config_path(), config.clone())
             .with_reload_hook(Box::new(crate::daemon::script_host::mirror_process_policy)),
@@ -162,24 +162,22 @@ pub(crate) async fn setup_daemon_host_with(
     // Ask each provider what its models are before anything runs on one.
     // `capabilities()` is synchronous and sits on the inference path, so a
     // provider whose real answer needs a network call has to be told here or
-    // never - and "never" meant an OpenRouter model this build's table does not
-    // name silently got a 128 000-token window, with every percentage region
-    // budget sized against it (#360). Awaited rather than spawned so the first
-    // run has the answer instead of racing it; failures are warnings.
+    // never - and "never" means an OpenRouter model this build's table does not
+    // name silently gets a 128 000-token window, with every percentage region
+    // budget sized against it. Awaited rather than spawned so the first run has
+    // the answer instead of racing it; failures are warnings.
     providers
         .prime_capabilities(
             std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
             // The machine's default, so a script provider named there can
-            // answer what it serves and win an open route (issue #598). No
-            // effect when the default is a native provider, which is already
-            // in the list.
+            // answer what it serves and win an open route. No effect when the
+            // default is a native provider, which is already in the list.
             &[config.default_provider.as_str()],
         )
         .await;
     // Keeps that registry in step with `config.toml` from here on: a run
     // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves
-    // against the providers the file names now, without a daemon restart
-    // (issue #684).
+    // against the providers the file names now, without a daemon restart.
     let provider_reload = crate::daemon::provider_reload::for_daemon(&config, providers.clone());
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
@@ -276,8 +274,8 @@ fn make_resumer(
 ///
 /// A struct rather than eight positional parameters because these are not
 /// arguments in the usual sense: each is a resource the host owns for the rest
-/// of the process's life, assembled once at boot and never varied. Naming them
-/// here describes the daemon; listing them at the call site described nothing.
+/// of the process's life. Naming them here describes the daemon; listing them
+/// at the call site describes nothing.
 pub struct HostParts {
     /// The resolved configuration this daemon booted with.
     pub config: Config,
@@ -298,8 +296,8 @@ pub struct HostParts {
     /// The clock, injected so a test does not depend on the wall clock.
     pub now_secs: fn() -> i64,
     /// The daemon's config source. Built before the provider registry so the
-    /// script-provider layer can follow it too (issue #533); `None` builds a
-    /// fixed one from `config`, for a caller with nothing to watch.
+    /// script-provider layer can follow it too; `None` builds a fixed one from
+    /// `config`, for a caller with nothing to watch.
     pub reloader: Option<Arc<crate::daemon::config_reload::ConfigReloader>>,
     /// Keeps the provider registry in step with `config.toml`. `None` builds
     /// one over `config` and `providers`, which is the same thing for a caller
@@ -310,7 +308,7 @@ pub struct HostParts {
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
 /// service + interaction hub, and a `Spawn`-op spawner that loads blueprints
 /// and registers per-agent tool state. The MCP connections in [`HostParts`]
-/// are built once at startup and reused by every agent.
+/// are shared: every agent dispatches through the one pool.
 pub fn build_host(parts: HostParts) -> WorldHost {
     let hub = InteractionHub::new();
     let tool_service = Arc::new(CliToolService::new());
@@ -342,10 +340,8 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // stall and wedge watchdogs, the circuit breaker, the retry schedule, the
     // fan-out ceiling, the relief threshold, the spend figures, the listing
     // window, the prompt timeout and `[title]` - is installed from one place,
-    // and reinstalled from the same place whenever `config.toml` changes. Each
-    // of these used to be read exactly here and then fixed for the life of the
-    // process, so an edit to any of them did nothing until the daemon was
-    // restarted, with nothing to say so (issue #684).
+    // and reinstalled from the same place whenever `config.toml` changes, so an
+    // edit to any of them lands without a daemon restart.
     let live_limits = crate::daemon::live_limits::for_daemon(hub.clone(), host.settings());
     live_limits.apply(&parts.config, host.world_mut());
     // Handed to each agent's tool state so its sub-agent tools reach the world
@@ -375,15 +371,14 @@ pub fn build_host(parts: HostParts) -> WorldHost {
 
     // Config hot-reload: after boot, spawn-time parts.config (permissions,
     // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
-    // when `parts.config.toml` changes on disk. The boot infrastructure that
-    // holds live connections - the MCP pool, the network policy - keeps the
-    // boot snapshot and needs a restart, so the reloader takes a clone and the
-    // boot snapshot stays usable below. The telemetry sink follows the
-    // reloaded config too, through `telemetry_reload` below.
+    // when `config.toml` changes on disk. The reloader takes a clone, so
+    // `parts.config` stays usable below as the boot snapshot the rest of this
+    // wiring reads. The telemetry sink follows the reloaded config too, through
+    // `telemetry_reload` below.
     //
     // Normally handed in: `setup_daemon_host_with` builds it before the
-    // provider registry so the script-provider layer can follow it as well
-    // (issue #533). A caller that did not gets a fixed one over its own config.
+    // provider registry so the script-provider layer can follow it as well. A
+    // caller that did not gets a fixed one over its own config.
     let reloader = parts.reloader.clone().unwrap_or_else(|| {
         std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             Config::config_path(),
@@ -477,7 +472,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // A run parked on a provider that has since been replaced re-resolves
         // its stages here, so the new set has to be in the world first: this
         // is what lets `lev resume` move a credits-paused run onto the
-        // provider the config names now (issue #684).
+        // provider the config names now.
         reload_provider_reload.refresh(&reload_config);
         reload_provider_reload.install(world);
         // A run paged back in is rebuilt from scratch, so it gets the policy
@@ -486,7 +481,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         reload_telemetry.refresh_into(world, &reload_config.observability);
         // Including its limits: a run being paged back in is as much a fresh
         // start as a spawn, and it must not resume against the numbers the
-        // daemon booted with (issue #684).
+        // daemon booted with.
         reload_limits.apply(&reload_config, world);
         // The global MCP set as it stands now, not as it stood at boot: a run
         // paged back in is rebuilt with the tools a fresh spawn would get.
@@ -513,8 +508,8 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // Last resort for a cancel the world can't service: force the run's on-disk
     // state to `Cancelled`. The reloader above declines whenever a run can't be
     // rebuilt - deleted blueprint, unreadable metadata, died mid-spawn - and
-    // without this a cancel in that state wrote nothing at all, so `meta.json`
-    // went on claiming the run was live and nothing could ever clear it.
+    // without this a cancel in that state writes nothing at all, leaving
+    // `meta.json` claiming the run is live with nothing able to clear it.
     let terminate_runs = parts.runs_dir.clone();
     host.set_force_terminator(Box::new(move |run_id| {
         crate::runstate::force_cancel_in(&terminate_runs.join(run_id), (parts.now_secs)())
@@ -522,23 +517,22 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     }));
 
     // Reap hook: when a terminal agent is reaped, tear down its sandbox and drop
-    // its per-agent tool state (the latter also fixing a prior leak where tool
-    // state was never released). Factored into `make_reaper` so the closure body
-    // is unit-testable - the daemon only ever drives it from `serve()`.
+    // its per-agent tool state, which nothing else releases. Factored into
+    // `make_reaper` so the closure body is unit-testable - the daemon only ever
+    // drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
 
     // Resume hook: a run that starts moving again re-reads the config layers a
-    // person edits to unblock it. A run parked on a denied tool used to have
-    // no way out but a cancel, because its permissions were resolved once at
-    // spawn - and with an unanswered prompt waiting for ever by default, that
-    // stall is permanent.
+    // person edits to unblock it. Without it a run parked on a denied tool has
+    // no way out but a cancel, since its permissions were resolved at spawn and
+    // an unanswered prompt waits for ever by default.
     host.set_resumer(make_resumer(tool_service.clone(), reloader.clone()));
 
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
     // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise -
     // and pre-warm the servers declared by any `worker_agent`/`worker_query`
     // fan-out worker this blueprint will spawn, so the *first* such worker already
-    // advertises them (they'd otherwise land one turn late - issue #97).
+    // advertises them (they'd otherwise land one turn late).
     let pp_pool = parts.mcp_pool.clone();
     let pp_agents_dir = leviath_core::paths::agents_dir();
     // The models too, and for a reason the MCP warming does not have: a stage's
@@ -559,14 +553,14 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         Box::pin(async move {
             // Before the blueprint's own servers, and before the sync spawner
             // reads the set: connecting is async, and this is the only hook on
-            // the spawn path that can await (issue #684's MCP half).
+            // the spawn path that can await.
             global.refresh(&config).await;
             warm_blueprint_mcp(&pool, &blueprint_path).await;
             warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
             // Before the models are warmed, not after: a provider the user
             // configured since this daemon started has to exist before anyone
             // asks it what its models are. The sync spawner installs whatever
-            // this built (issue #684).
+            // this built.
             reload.refresh_and_prime(&config).await;
             warm_blueprint_models(
                 &reload.registry(),
@@ -591,8 +585,8 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
-        // come later, and until now a failure at any of them left no trace on
-        // disk at all - no run dir, no meta.json, nothing to diagnose (#107).
+        // come later, and a failure at any of them would otherwise leave no
+        // trace on disk - no run dir, no meta.json, nothing to diagnose.
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
@@ -615,7 +609,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // The registry, before the stages resolve against it. The preprocessor
         // has usually built it already; refreshing here too covers the paths
         // that do not run one (a sub-agent spawn, a fan-out worker) and costs
-        // a credential comparison when nothing changed (issue #684).
+        // a credential comparison when nothing changed.
         spawn_provider_reload.refresh(&config);
         spawn_provider_reload.install(world);
         // Same for the taint gate: `lev policy add` and an edited `.rhai` rule
@@ -627,7 +621,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // Before the agent is built, not after: `build_agent` decides from this
         // same config whether the run is marked for a title, and the system
         // that makes titles reads the world. Applying here is what stops those
-        // two reading different documents (issue #684).
+        // two reading different documents.
         spawn_limits.apply(&config, world);
         let built = build_agent(
             world.world_mut(),
@@ -643,10 +637,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
             },
             args,
         );
-        // The placeholder above is `Starting`, which is *not* terminal - so a
-        // failed spawn used to leave a run that claimed to be alive for ever,
-        // listed by `lev ps` and the dashboard with nothing behind it. Record
-        // the failure where the placeholder is (issue #190).
+        // The placeholder above is `Starting`, which is *not* terminal, so a
+        // failed spawn would leave a run claiming to be alive for ever, listed
+        // by `lev ps` and the dashboard with nothing behind it. Record the
+        // failure where the placeholder is.
         if let Err(message) = &built {
             crate::runstate::force_error_in(
                 &spawn_runs_dir.join(&args.run_id),
@@ -1004,7 +998,7 @@ mod tests {
         // Config::default has no MCP servers → the shared MCP connect is a no-op.
         // An empty runs dir → restart recovery finds nothing to reload.
         // A key for the manifest's provider, because a spawn whose stages have
-        // no usable provider is now refused outright (issue #190).
+        // no usable provider is refused outright.
         let runs = tempfile::tempdir().unwrap();
         let mut host = setup_daemon_host(
             config_with_anthropic_key(),
@@ -1279,7 +1273,7 @@ mod tests {
         assert!(run_ids_in(&dir.path().join("nope")).is_empty());
     }
 
-    // ── per-agent MCP (issue #97) ──
+    // ── per-agent MCP ──
 
     /// A python stub MCP server written to a temp file; returns (tempdir, path).
     fn stub_server_py() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -1847,12 +1841,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         (op, reply_rx)
     }
 
-    /// The bug this whole file's provider reload exists for: the daemon boots
-    /// with one provider configured, the user configures another (`lev setup`,
-    /// `PUT /api/config`, an editor - they all write this file), and the very
-    /// next run has to be able to use it. Before the registry was rebuilt, the
-    /// second spawn was refused with "no usable provider" until the daemon was
-    /// killed and restarted (issue #684).
+    /// What the provider reload exists for: the daemon boots with one provider
+    /// configured, the user configures another (`lev setup`, `PUT /api/config`,
+    /// an editor - they all write this file), and the very next run has to be
+    /// able to use it rather than be refused with "no usable provider".
     #[tokio::test]
     async fn a_provider_configured_after_boot_is_usable_on_the_next_spawn() {
         let dir = tempfile::tempdir().unwrap();
@@ -2323,8 +2315,6 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
     /// A `[limits]` edit is picked up by the next spawn, with no daemon
     /// restart: the pools, the tool lane, the watchdogs, the breaker, the retry
     /// schedule and the fan-out ceiling all move to what the file says now.
-    /// Every one of these was read once at boot and then fixed for the life of
-    /// the process (issue #684).
     #[tokio::test]
     async fn a_limits_edit_reaches_the_world_on_the_next_spawn() {
         let dir = tempfile::tempdir().unwrap();
@@ -2398,11 +2388,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         assert_eq!(*settings.spend_notify_usd(), vec![5.0]);
     }
 
-    /// Turning `[title]` on used to leave a run marked for a title nobody would
-    /// ever make. Spawn reads a fresh config, so it marked the run
-    /// `PendingTitle`; the system that makes titles read the boot-time
-    /// `TitleSettings`, saw titling switched off, and dropped the marker
-    /// without a word. Both halves now read the same document (issue #684).
+    /// Turning `[title]` on has to reach both halves at once. Spawn reads a
+    /// fresh config and marks the run `PendingTitle`; if the system that makes
+    /// titles were still on a boot-time `TitleSettings` it would see titling
+    /// switched off and drop the marker without a word.
     #[tokio::test]
     async fn enabling_titles_reaches_the_system_that_makes_them() {
         let dir = tempfile::tempdir().unwrap();

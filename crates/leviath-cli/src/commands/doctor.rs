@@ -20,8 +20,8 @@
 //!    and waited on, then deleted. This is the only check that exercises the
 //!    handoff, which is why it is worth the second billed call: checks 1-4
 //!    passing while this one fails is exactly the "credentials are fine, the
-//!    daemon is wedged" verdict that used to take a hand-built canary agent to
-//!    establish.
+//!    daemon is wedged" verdict, which nothing short of a real spawn
+//!    establishes.
 //!
 //! The daemon-touching I/O lives behind [`crate::dispatch::RiskyExecutors`], so
 //! the cores here are driven by unit tests against injected registries and a
@@ -378,8 +378,8 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
         config.default_provider, registered
     );
 
-    // "Which keys were ignored" was previously only answerable by catching the
-    // start-up warning as it scrolled past, and only if you were looking. A
+    // Without this, "which keys were ignored" is only answerable by catching
+    // the start-up warning as it scrolls past, and only if you are looking. A
     // note on an OK line rather than a failure, matching how the `resolve`
     // check reports a config that works but probably is not what was meant:
     // the rest of the file still applies, so this is not broken wiring.
@@ -491,16 +491,16 @@ fn resolve_check(
 ///
 /// This check resolves an empty `ModelConfig`, so `default_provider` really
 /// does lose here without a `default_model`: there is no blueprint entry to
-/// promote and no model to send. A real run is the opposite case, and the note
-/// used to describe only the first one - it said the default provider "is never
-/// chosen", which someone reasonably read as a statement about their runs.
+/// promote and no model to send. A real run is the opposite case, so the note
+/// must not say the default provider "is never chosen": that reads as a
+/// statement about the reader's runs.
 ///
 /// It is not. `resolve_stage_candidates` moves every registered candidate on
 /// the default provider to the front of the blueprint's list, so
 /// `default_provider = "openrouter"` sends every stage of every bundled
-/// blueprint to that blueprint's OpenRouter entry. A run that had been quietly
-/// executing on a fallback model for weeks looked, from here, like a config
-/// line that did nothing at all.
+/// blueprint to that blueprint's OpenRouter entry. Said the other way, a run
+/// quietly executing on a fallback model for weeks would look, from here, like
+/// a config line that did nothing at all.
 ///
 /// Not a failure: the resolution is legitimate and the run will work. It is
 /// only worth saying because it is not what the config appears to ask for.

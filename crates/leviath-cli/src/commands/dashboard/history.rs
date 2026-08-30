@@ -1,7 +1,7 @@
 //! Cached run history: the archived context points and the stage-visit
 //! timeline derived from them.
 //!
-//! The `,`/`.` history keys used to re-read and re-replay the entire
+//! The `,`/`.` history keys would otherwise re-read and re-replay the entire
 //! `run.lvr` archive on every keypress; the stage explorer needs the same
 //! data plus real visit counts (stages.json holds one record per stage,
 //! rewritten in place, so revisits are invisible there). This module loads

@@ -1,19 +1,16 @@
 //! Keeping the daemon's global `[[mcp_servers]]` in step with `config.toml`.
 //!
-//! The global servers were connected once, by `ToolRegistry::build` at boot,
-//! and the tools they advertise were cloned into the spawner as a plain
-//! `Vec<Tool>` that nothing ever wrote to again. So `lev mcp add` and
-//! `POST /api/mcp/servers` wrote the file and stopped there: the server was in
-//! the config, `lev mcp list` showed it, and no run could call it until the
-//! daemon was restarted - with nothing anywhere saying so.
+//! `lev mcp add` and `POST /api/mcp/servers` write `[[mcp_servers]]` and stop
+//! there, so this module reconciles the connected set against the reloaded
+//! config before each spawn: a server added after boot is callable by the next
+//! run, not by the next daemon. The pool beside it already knows how to connect
+//! a server lazily, dedupe it by signature and tear an unused one down, so the
+//! work here is deciding *what* changed and letting the pool do the rest.
 //!
-//! This module reconciles that set against the reloaded config before each
-//! spawn. The pool beside it already knows how to connect a server lazily,
-//! dedupe it by signature and tear an unused one down, so the work here is
-//! deciding *what* changed and letting the pool do the rest. The advertised
-//! defs are then read back off the pool's own cache rather than kept in a
-//! second list, because two lists of the same thing is how the old one went
-//! stale.
+//! The advertised defs are read back off the pool's own cache rather than kept
+//! in a second list here. Two lists of the same tools is how a def list falls
+//! out of step, and one built from the config would claim a server that failed
+//! to start.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -318,10 +315,8 @@ mod tests {
         .await
     }
 
-    /// The hole this module exists for. `lev mcp add` and `POST
-    /// /api/mcp/servers` write `[[mcp_servers]]` and nothing else, so the
-    /// server was in the config, listed by `lev mcp list`, and uncallable by
-    /// every run until someone restarted the daemon - with nothing saying so.
+    /// A server written into `[[mcp_servers]]` after boot is connected and
+    /// advertised on the next reconcile, so the next run can call it.
     #[tokio::test]
     async fn a_server_added_after_boot_is_callable_by_the_next_run() {
         with_tracing(|| {});
@@ -347,8 +342,7 @@ mod tests {
     }
 
     /// And the other direction: a server taken out of the config stops being
-    /// offered, rather than lingering for the daemon's life because its defs
-    /// were cloned into the spawner at boot.
+    /// offered, rather than lingering for the daemon's life.
     #[tokio::test]
     async fn a_server_removed_from_the_config_is_gone_from_the_next_run() {
         with_tracing(|| {});
@@ -450,11 +444,10 @@ mod tests {
         .await;
     }
 
-    /// `[security] allow_env_vars` was a boot copy inside the pool, while
-    /// `daemon.md` said it took effect on the next load. Naming a variable
-    /// there now reaches an MCP server's `${VAR}` header: the server
-    /// reconnects because the allowlist that resolved its headers moved, even
-    /// though its own entry did not.
+    /// Naming a variable in `[security] allow_env_vars` reaches an MCP server's
+    /// `${VAR}` header on the next load: the server reconnects because the
+    /// allowlist that resolved its headers moved, even though its own entry did
+    /// not.
     ///
     /// `MY_MCP_TOKEN` is credential-shaped, so it is refused until it is
     /// named - which is what makes the first half a real "before" rather than

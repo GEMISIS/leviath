@@ -251,9 +251,9 @@ pub(super) fn is_ambiguous_prefix(prefix: &Path) -> bool {
 
 /// What `brew --prefix` says, when there is a `brew` to ask.
 ///
-/// Cached: this used to run once per `lev update`, and now also answers an HTTP
-/// route, where spawning a process per request to learn a thing that cannot
-/// change under a running server would be a waste worth noticing.
+/// Cached: this also answers an HTTP route, where spawning a process per
+/// request to learn a thing that cannot change under a running server would be
+/// a waste worth noticing.
 pub(crate) fn brew_prefix() -> Option<PathBuf> {
     static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     CACHED

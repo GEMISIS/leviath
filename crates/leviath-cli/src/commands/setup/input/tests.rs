@@ -992,7 +992,7 @@ fn clicking_the_button_advances_the_step() {
     assert_ne!(w.step, Step::Agents, "the button is a button when clicked");
 }
 
-/// The two actions that used to be shortcut keys and nothing else.
+/// Both credential-screen actions are clickable rows, not shortcut keys alone.
 #[test]
 fn the_credential_screen_offers_its_actions_as_clickable_rows() {
     let (_dir, mut w) = wizard();

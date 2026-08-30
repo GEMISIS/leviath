@@ -178,8 +178,7 @@ impl DaemonScriptHost {
     ///
     /// The same function the built-in file tools use, so a script's
     /// `write_file` and the agent's `write_file` cannot disagree about what a
-    /// path is allowed to be. It used to be a line-for-line copy, error
-    /// strings included.
+    /// path is allowed to be, error strings included.
     fn resolve_in_workdir(&self, requested: &str) -> Result<PathBuf, String> {
         leviath_tools::resolve_within(requested, &self.workdir, leviath_core::resolves_within)
             .map_err(|e| e.to_string())
@@ -287,7 +286,7 @@ impl ScriptHost for DaemonScriptHost {
             return Err(denied("write_file"));
         }
         // Same rule as the built-in write tools: never let `create_dir_all`
-        // resurrect a workspace that disappeared mid-run (issue #107).
+        // resurrect a workspace that disappeared mid-run.
         if !std::fs::metadata(&self.workdir).is_ok_and(|m| m.is_dir()) {
             return Err(format!(
                 "workspace '{}' is no longer accessible",
@@ -393,8 +392,8 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
 /// reqwest's own `Display` for a refused redirect is "error following redirect
 /// for url (…)" - it never mentions the reason, which for us is the whole point:
 /// "refused to follow redirect: private address" and "too many redirects" are
-/// different problems with different fixes, and both were reaching the script
-/// author as the same opaque sentence.
+/// different problems with different fixes, and without the chain they reach
+/// the script author as the same opaque sentence.
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     leviath_providers::rhai_provider::host::error_chain(e)
 }
@@ -472,9 +471,9 @@ impl RealScriptIo {
         build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
         max: u64,
     ) -> Result<String, String> {
-        // One `send()` used to be the whole story here, and a single HTTP/2
-        // stream error therefore lost the page for good: a research run cited
-        // two primary sources it had never opened because of exactly this.
+        // Retried, because a single HTTP/2 stream error would otherwise lose
+        // the page for good and a research run would cite a source it never
+        // opened.
         let resp = Self::send_with_retry(url, build)?;
         let status = resp.status();
         let content_type = resp
@@ -632,7 +631,7 @@ fn oversized_body_message(content_length: Option<u64>, max: u64) -> Option<Strin
 pub(crate) fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
         // Cut on a char boundary - a raw byte cut-off lands mid-character on
-        // multi-byte text and panics (the shape of issue #109).
+        // multi-byte text and panics, and a panic here can take the daemon out.
         s.truncate(floor_char_boundary(&s, MAX_SCRIPT_IO_BYTES));
         s.push_str("\n[...truncated by leviath: response exceeded 900 KB]");
     }
@@ -666,7 +665,7 @@ impl ScriptIo for RealScriptIo {
         // tool uses. `try_current` rather than `current`: a blocking thread can
         // outlive runtime shutdown, and `current` would *panic* there - and a
         // panic inside a Rhai native call is the shape that can abort the
-        // daemon (issue #109).
+        // whole daemon.
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err("shell is unavailable: no tokio runtime on this thread".to_string());
         };
@@ -779,8 +778,8 @@ pub(crate) fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> String {
 mod tests {
 
     /// A server that drops the first connection without answering, then serves
-    /// normally. Reproduces the "the socket did not work this time" shape that
-    /// used to lose a source outright.
+    /// normally: the "the socket did not work this time" shape that costs a
+    /// source outright when there is no retry.
     ///
     /// A blocking listener over exactly two connections, so the spawned body
     /// *returns*. An `accept` loop that runs forever leaves its own closing
@@ -1195,8 +1194,8 @@ mod tests {
             .expect("a permitted write is not clamped");
     }
 
-    /// Issue #289. `allow.write_file` answers "may this write at all"; it does
-    /// not answer "may it write *there*". This host's `write_file` is
+    /// `allow.write_file` answers "may this write at all"; it does not answer
+    /// "may it write *there*". This host's `write_file` is
     /// workdir-confined, so its `shell()` redirects are too - otherwise a script
     /// with writes permitted could put a file anywhere on the host.
     #[test]
@@ -1218,8 +1217,8 @@ mod tests {
 
     #[test]
     fn script_write_refuses_a_deleted_workspace() {
-        // Same rule as the built-in write tools (#107): a script may not
-        // resurrect a workspace that disappeared out from under the run.
+        // Same rule as the built-in write tools: a script may not resurrect a
+        // workspace that disappeared out from under the run.
         let dir = tempfile::tempdir().unwrap();
         let workdir = dir.path().join("gone");
         let io = RecordingIo::arc();
@@ -1938,9 +1937,9 @@ mod tests {
     #[test]
     fn real_shell_off_a_runtime_errors_instead_of_panicking() {
         // A blocking thread can outlive runtime shutdown; `Handle::current()`
-        // would panic there, and a panic inside a Rhai native call aborted the
-        // whole daemon before issue #109 was fixed. A plain `std::thread` is
-        // the same "no reactor on this thread" condition.
+        // would panic there, and a panic inside a Rhai native call can abort
+        // the whole daemon. A plain `std::thread` is the same "no reactor on
+        // this thread" condition.
         let dir = tempfile::tempdir().unwrap();
         let workdir = dir.path().to_path_buf();
         let err = std::thread::spawn(move || {

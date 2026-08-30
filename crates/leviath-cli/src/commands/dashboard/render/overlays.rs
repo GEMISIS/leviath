@@ -922,8 +922,8 @@ mod tests {
         assert_eq!(dash.new_run_filter, "?");
     }
 
-    /// Since #708 the unattended warning has no "don't ask again" box, so
-    /// the Questions section must not offer a key for it.
+    /// The unattended warning has no "don't ask again" box, so the Questions
+    /// section must not offer a key for it.
     #[test]
     fn the_questions_help_offers_no_dont_ask_again_box() {
         let backend = TestBackend::new(120, 60);

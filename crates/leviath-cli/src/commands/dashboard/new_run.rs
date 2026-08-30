@@ -399,8 +399,8 @@ impl Dashboard {
     /// Ctrl+Enter reaches the program only under the kitty keyboard protocol;
     /// a terminal without it sends Ctrl+Enter as a plain Enter, which is a
     /// newline here. That is what the Start button under the editor is for.
-    /// The response box in the detail view works the same way since #708,
-    /// with a Send button in place of Start.
+    /// The response box in the detail view works the same way, with a Send
+    /// button in place of Start.
     fn handle_new_run_task_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
@@ -1596,10 +1596,9 @@ mod tests {
     }
 
     /// Every switch to ON asks. Turning unattended off and on again is the
-    /// same decision as the first time, and a dialog that showed up once and
-    /// then never again read as the setting being broken rather than
-    /// remembered. Space on the dialog (which used to tick a "don't ask again"
-    /// box) changes nothing now.
+    /// same decision as the first time, and a dialog that shows up once and
+    /// then never again reads as the setting being broken rather than
+    /// remembered. Space on the dialog changes nothing.
     #[test]
     fn every_switch_to_on_asks_even_after_the_box_was_ticked() {
         let mut dash = make_test_dashboard();

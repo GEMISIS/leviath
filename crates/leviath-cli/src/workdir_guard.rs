@@ -1,9 +1,9 @@
 //! Confirming a workdir that is somewhere an agent probably should not write.
 //!
 //! `lev run`'s workdir defaults to wherever it was invoked, and running from a
-//! home directory is an easy accident. Issue #252 is a machine that lost 115 GB
-//! to an agent writing under a profile root; the agent was doing what it was
-//! told, in the directory it was given.
+//! home directory is an easy accident. An agent turned loose under a profile
+//! root can eat tens of gigabytes while doing exactly what it was told, in the
+//! directory it was given.
 //!
 //! So this asks - once, and only about the two shapes that are alarming:
 //!
@@ -115,10 +115,10 @@ fn is_within(path: &std::path::Path, base: &std::path::Path) -> bool {
 /// parks the run until something times it out and reads as a hang.
 ///
 /// The cost of that choice is that the guard is advisory in exactly the
-/// unattended case issue #252 came from, so this line is the whole mitigation:
-/// it goes to stderr on every such run, names the directory, and says how to
-/// silence it. Someone reading the log afterwards should be able to find the
-/// moment an agent was pointed at a home directory.
+/// unattended case that has the most to lose, so this line is the whole
+/// mitigation: it goes to stderr on every such run, names the directory, and
+/// says how to silence it. Someone reading the log afterwards should be able
+/// to find the moment an agent was pointed at a home directory.
 pub(crate) fn non_interactive_warning(
     workdir: &std::path::Path,
     concern: &WorkdirConcern,

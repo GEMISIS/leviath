@@ -304,7 +304,7 @@ fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
         .map(|s| ServerRow::describe(s, &store, env.now))
         .collect();
     // Also surface the global Rhai script tools (labeled `script`) so the listing
-    // covers every external tool provider, not just MCP servers (issue #97).
+    // covers every external tool provider, not just MCP servers.
     rows.extend(script_tool_rows(env.tools_dir.as_deref()));
 
     if list.json {

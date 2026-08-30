@@ -338,11 +338,10 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
 /// A stage transitions along its `Always`/`LlmChoice` edges; an edge whose
 /// target has `max_revisits` stops being followable once the budget is spent.
 /// When EVERY normal edge is like that, a long enough run strands the stage
-/// with nowhere to go - which the engine now reports as a dead-end *error*
-/// (it used to read as `complete`, from the middle of the graph, with the
-/// output stage still pending). Observed live: a wide-researcher bounced
-/// deep_dive → compare until compare's budget ran out, then "completed" with
-/// nothing produced.
+/// with nowhere to go, which the engine reports as a dead-end *error* rather
+/// than as `complete` from the middle of the graph with the output stage still
+/// pending. The live shape: a wide-researcher bouncing deep_dive → compare
+/// until compare's budget runs out, with nothing produced.
 ///
 /// The fix is one un-exhaustible way forward: an edge to a stage without
 /// `max_revisits` (an output/terminal stage usually), or a
@@ -668,12 +667,12 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     // needs its provider registered, an open one needs something that serves
     // its model.
     //
-    // That second half used to be unanswerable here. The check had no registry,
-    // so it counted an open entry as reachable on the grounds that the resolver
-    // knew better, and skipped itself entirely on any stage holding one - the
-    // form every bundled blueprint is written in. It now has the resolver's own
-    // answer in `unrouted_models`, so a stage whose every entry names something
-    // this machine cannot run is reported whichever form its entries take.
+    // Answering that second half takes the resolver, which arrives here as
+    // `unrouted_models`. Without it an open entry has to be counted reachable
+    // on the grounds that the resolver knows better, and the check skips itself
+    // on any stage holding one - the form every bundled blueprint is written
+    // in. With it, a stage whose every entry names something this machine
+    // cannot run is reported whichever form its entries take.
     //
     // `unrouted_models` is empty both when nobody asked and when everything
     // routes, and both read as reachable here. That is the safe direction: a
@@ -726,7 +725,7 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
 /// and means "summarize every region that is not pinned", which includes the
 /// ones holding the run's results. Figures that survive a paraphrase are no
 /// longer figures, and nothing about the blueprint is malformed, so the only
-/// place to say so is here (#369).
+/// place to say so is here.
 ///
 /// Scoped to regions declared `required` rather than every region a bare
 /// compact touches. `required` is the author saying "a stage must populate

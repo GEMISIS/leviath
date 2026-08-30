@@ -320,10 +320,10 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // directory branch already handles and what the docs have always promised.
     let path = args.path.as_deref().unwrap_or(".");
     let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
-    // Confirm a workdir an agent probably should not be pointed at (issue
-    // #252). Before resolving the task, so a cancelled run has not opened an
-    // editor first; `--yolo` and any non-terminal caller proceed with a warning
-    // rather than being refused.
+    // Confirm a workdir an agent probably should not be pointed at. Before
+    // resolving the task, so a cancelled run has not opened an editor first;
+    // `--yolo` and any non-terminal caller proceed with a warning rather than
+    // being refused.
     {
         let allowed = leviath_cli::config::Config::load()
             .map(|c| c.security.allowed_workdirs)

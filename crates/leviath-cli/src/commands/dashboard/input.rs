@@ -596,8 +596,8 @@ impl Dashboard {
             // takes the shifted one.)
             KeyCode::Char('t') if self.band_shown() => self.toggle_band_mode(),
             KeyCode::Char('R') if self.band_shown() => self.reset_band_layout(),
-            // Home/End are the documented jumps; b/e stay as the historical
-            // aliases. (`detail_scroll` counts up from the bottom, so "top of
+            // Home/End are the documented jumps; b/e are kept as aliases.
+            // (`detail_scroll` counts up from the bottom, so "top of
             // the document" is the maximum offset.)
             KeyCode::Char('b') | KeyCode::Home => {
                 self.detail_scroll = usize::MAX;
@@ -2260,8 +2260,8 @@ mod tests {
         );
     }
 
-    /// `c` no longer cancels from the list (it was an unconfirmed kill by
-    /// another name); it is simply unbound there.
+    /// `c` is unbound in the list: cancelling straight from a row is an
+    /// unconfirmed kill by another name.
     #[test]
     fn c_in_the_main_list_does_nothing() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();

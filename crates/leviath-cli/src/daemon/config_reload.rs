@@ -1,21 +1,15 @@
 //! Hot-reloading of the daemon's spawn-time config.
 //!
-//! The daemon loads `~/.leviath/config.toml` once at startup and would
-//! otherwise serve that snapshot for its whole life - so a user who granted a
-//! `[read_paths]` path, flipped a tool permission, or changed a limit had to
-//! restart the daemon before the next `lev run` saw it. That is a surprising
-//! loop to be stuck in: the spawn warning tells you to edit the config, and
-//! editing it appears to do nothing.
-//!
-//! [`ConfigReloader`] closes that gap for the config an agent reads *at spawn*
-//! (permissions, `[read_paths]`, sandbox defaults, limits, taint). It reloads
-//! the file when its mtime changes, mirroring the script-provider hot-reload
-//! (`leviath_runtime::script_provider`), and keeps the last good config if a
-//! reload fails so an edit saved mid-keystroke never breaks a spawn.
+//! [`ConfigReloader`] owns the config an agent reads *at spawn* (permissions,
+//! `[read_paths]`, sandbox defaults, limits, taint), so a `config.toml` edit is
+//! in force on the next `lev run` rather than the next daemon restart. It
+//! reloads the file when its mtime changes, mirroring the script-provider
+//! hot-reload (`leviath_runtime::script_provider`), and keeps the last good
+//! config if a reload fails so an edit saved mid-keystroke never breaks a
+//! spawn.
 //!
 //! Provider credentials are rebuilt from the same reloaded config by the
-//! `provider_reload` module beside this one, so a key added or removed here
-//! reaches the next run too, and `[observability]` is rebuilt by the
+//! `provider_reload` module beside this one, and `[observability]` by the
 //! `telemetry_reload` module next to that. Settings that live somewhere other
 //! than the spawn-time config follow it through
 //! [`ConfigReloader::with_reload_hook`]: a caller registers what to re-apply,
@@ -23,11 +17,13 @@
 //! process-wide network policy, which is mirrored into atomics the shared
 //! blocking HTTP client reads (`script_host::mirror_process_policy`).
 //!
-//! The global `[[mcp_servers]]` are reconciled against the reloaded config by
-//! the `mcp_reload` module beside this one, so a server added, edited or
-//! removed here reaches the next run too. What still comes from the config the
-//! daemon booted with is `[limits] mcp_idle_disconnect_secs`, which the MCP
-//! pool is built with; see `daemon.md`.
+//! The global `[[mcp_servers]]` are not reloaded here, because bringing a
+//! server up or down is async and this reload is read from the sync spawner.
+//! The `mcp_reload` module beside this one reconciles them from the spawn
+//! preprocessor, the one hook on the spawn path that can await, so a server
+//! added, edited or removed reaches the next run too. What still comes from the
+//! config the daemon booted with is `[limits] mcp_idle_disconnect_secs`, which
+//! the MCP pool is built with; see `daemon.md`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -43,8 +39,7 @@ struct Cached {
     ///
     /// Advanced on a failed load as well as a successful one, which is what
     /// makes a broken file cost one stat per spawn instead of a stat, a read,
-    /// a parse and a log line. The comment here used to claim that already;
-    /// the code only did it in the `Ok` arm.
+    /// a parse and a log line.
     mtime: Option<SystemTime>,
     /// The mtime of the config actually in force. Differs from
     /// [`mtime`](Self::mtime) exactly while the file on disk is broken, and is
@@ -60,11 +55,10 @@ struct Cached {
 
 /// Whether `config.toml` loads, and what is running while it does not.
 ///
-/// The reloader has always kept the last good config when a save did not
-/// parse. What it did not do was tell anyone: the single `tracing::warn!` went
-/// to the daemon log, so a user with a typo watched their edits do nothing and
-/// had no way to find out why. This is that fact, in a shape the API, the
-/// dashboard and the CLI can each render.
+/// A save that does not parse keeps the last good config in force, and that is
+/// invisible from outside: the `tracing::warn!` goes to the daemon log, so a
+/// user with a typo just watches their edits do nothing. This is that fact in a
+/// shape the API, the dashboard and the CLI can each render.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigHealth {
     /// The file being watched.
@@ -247,11 +241,9 @@ impl ConfigReloader {
                 // Keep the config already in force; only the "mtime last
                 // looked at", recorded above whichever way this went, moves.
                 // That is what makes the warning fire once per broken save
-                // rather than once per spawn: without it the file would be
-                // re-stat'd, re-read, re-parsed and re-warned on every spawn
-                // and every `lev serve` request until somebody fixed it, which
-                // is a log line per page load. The *next* save moves the mtime
-                // again, so a fixed file still reloads.
+                // rather than once per spawn and once per `lev serve` request.
+                // The *next* save moves the mtime again, so a fixed file still
+                // reloads.
                 let summary = fault.summary();
                 let kind = fault.kind.as_str();
                 if cached.fault.is_none() {
@@ -498,10 +490,9 @@ mod tests {
         assert_eq!(recorded(), vec![true], "a broken save applies nothing");
     }
 
-    /// A file left broken is read once, not on every spawn. It used to keep
-    /// the stale mtime, so every later `current()` re-stat'd it, re-read it,
-    /// re-parsed it and warned again - which for `lev serve` is a log line per
-    /// page load, and is the opposite of what the code's own comment claimed.
+    /// A file left broken is read once, not on every spawn: the watched mtime
+    /// advances even though the load failed. Keeping the stale mtime instead
+    /// would cost `lev serve` a read, a parse and a warning per page load.
     #[test]
     fn a_file_left_broken_is_not_re_read_on_every_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -519,11 +510,9 @@ mod tests {
             "the broken save keeps the config already in force"
         );
 
-        // What actually stops the re-read: the mtime the reloader is now
-        // comparing against is the broken file's, so the next `current()`
-        // short-circuits on the mtime check instead of reading and parsing
-        // again. Keeping the good file's mtime here is what made every later
-        // call re-read and re-warn.
+        // What stops the re-read: the mtime the reloader is now comparing
+        // against is the broken file's, so the next `current()` short-circuits
+        // on the mtime check instead of reading and parsing again.
         assert_eq!(
             reloader
                 .cache
@@ -640,9 +629,7 @@ mod tests {
     /// Probed by rewriting the file to something valid while pinning its mtime
     /// back to the failing save's: a reloader that re-reads on every call
     /// would see the good content and go healthy, and one that remembers the
-    /// mtime it already judged cannot. Before this change the failing mtime
-    /// was never recorded, so every `current()` re-read, re-parsed and
-    /// re-warned - which is what the log spam was.
+    /// mtime it already judged cannot.
     #[test]
     fn a_broken_file_is_read_once_per_failing_mtime() {
         let dir = tempfile::tempdir().unwrap();

@@ -6,9 +6,10 @@
 //! world's registered providers) and effective tool set, spawns the agent via
 //! [`leviath_runtime::pipeline::spawn_agent`], attaches its run metadata /
 //! token totals / compaction settings, and registers its per-agent tool state
-//! with the [`CliToolService`]. The heavy MCP connections are shared (built once
-//! at daemon startup), so this whole path is synchronous - which lets it run
-//! straight from the host's control loop.
+//! with the [`CliToolService`]. The heavy MCP connections are shared, and the
+//! async spawn preprocessor has already warmed the ones this run needs, so this
+//! whole path is synchronous - which lets it run straight from the host's
+//! control loop.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -134,7 +135,7 @@ fn check_spawn_request(args: &SpawnArgs) -> Result<(), String> {
     // The working directory must exist before anything is built over it.
     // `ToolContext::new` silently keeps a path it can't canonicalize, so without
     // this a bogus workdir spawns a healthy-looking agent whose every tool call
-    // fails with a message naming the shell rather than the directory (#107).
+    // fails with a message naming the shell rather than the directory.
     if !std::fs::metadata(&args.workdir).is_ok_and(|m| m.is_dir()) {
         return Err(format!(
             "workspace '{}' does not exist or is not a directory",
@@ -525,7 +526,7 @@ fn build_agent_inner(
     // fresh script scan on each mid-run refresh.
     let static_tool_defs = all_tool_defs.clone();
 
-    // 2c. Rhai script tools (issue #97): discover and compile the agent's
+    // 2c. Rhai script tools: discover and compile the agent's
     // `tools/` dir plus the global `~/.leviath/tools/` (per-agent wins on a name
     // collision). Their defs are added to `all_tool_defs` *before* stage
     // resolution so a stage's `available_tools` (Layer 1) and taint
@@ -693,9 +694,9 @@ fn build_agent_inner(
             )
         },
     );
-    // One write budget per run, created here so the seeds and the scripts
-    // that run at spawn spend the same ceiling the tool lane checks from
-    // turn one; it used to be born with the tool state, after both.
+    // One write budget per run, created before the seeds and the spawn-time
+    // scripts so they spend the same ceiling the tool lane checks from turn
+    // one. Building it with the tool state would put it after both.
     let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
         deps.config.limits.write_limits(),
     ));
@@ -727,7 +728,7 @@ fn build_agent_inner(
     // regions that weren't provided fail here - before any inference, so no
     // tokens are spent. On reload the window is restored from a snapshot after
     // this, so seeding is skipped entirely.
-    // Command seeds (issue #108) run here, so they inherit the entry stage's
+    // Command seeds run here, so they inherit the entry stage's
     // sandbox (built in step 2a above) and are refused by either the machine-wide
     // `[security] allow_seed_commands` switch or this run's `--no-seed-commands`.
     let seeds = if enforce_seeds {
@@ -788,8 +789,8 @@ fn build_agent_inner(
         HashMap::new()
     };
 
-    // 5b. Read + compile-check custom regions' Rhai scripts (issue #152) -
-    // once per distinct path, blueprint-dir-relative. Runs on fresh spawns
+    // 5b. Read + compile-check custom regions' Rhai scripts - once per
+    // distinct path, blueprint-dir-relative. Runs on fresh spawns
     // AND reloads (the hooks must work after a restart), and a broken script
     // is a hard error either way.
     let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
@@ -799,7 +800,7 @@ fn build_agent_inner(
     // Whether any stage can produce a file change the framework would see -
     // asked here, while the blueprint is still in hand, because it cannot
     // change for the rest of the run. A run that could never write is never
-    // reported as having written nothing (issue #192).
+    // reported as having written nothing.
     let outcome_flags = leviath_runtime::persistence::RunOutcomeFlags::for_blueprint(&blueprint);
     // Taken here for the same reason: the tool state is built after the
     // blueprint has been handed to the world, and this list cannot change.
@@ -888,8 +889,8 @@ fn build_agent_inner(
         unattended: args.yolo,
         model_override: args.model.clone(),
     };
-    // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
-    // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.
+    // Build the dynamic-tools re-resolution context and tag the entity
+    // `DynamicTools` so the runtime polls it for mid-run re-scans.
     let dynamic = dynamic_tools.then(|| {
         world
             .entity_mut(entity)
@@ -1364,7 +1365,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(err.contains("failed to compile"), "{err}");
     }
 
-    // ─── resolve_stage_hook_scripts (issue #260) ─────────────────────────
+    // ─── resolve_stage_hook_scripts ──────────────────────────────────────
 
     fn hooked_manifest(hooks: &str) -> leviath_core::Blueprint {
         leviath_core::manifest::parse_manifest(&format!(
@@ -1612,7 +1613,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
         // `ToolContext::new` silently keeps a path it can't canonicalize, so
         // without this check a bogus workdir spawns a healthy-looking agent
-        // whose every tool call then fails with ENOENT (issue #107).
+        // whose every tool call then fails with ENOENT.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(
@@ -2108,7 +2109,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 .is_some()
         );
         // ...and likewise for the blueprint's own stage-boundary checkpoints and
-        // the agent's `ask_user_*` tools (#107): unattended means unattended.
+        // the agent's `ask_user_*` tools: unattended means unattended.
         assert!(
             world
                 .world()
@@ -2172,7 +2173,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// A stage that kept a human tool through an unattended run has to reach the
     /// tool state with that tool in hand: the cut takes it out of the advertised
     /// set, and this set is what puts a call to it back in front of a person
-    /// instead of the auto-answering backend (issue #204).
+    /// instead of the auto-answering backend.
     /// A validator that will not compile stops the spawn, before any tokens are
     /// spent. The only other time the script is read is at the end of the run,
     /// which is the worst possible moment to learn the agent cannot hand back
@@ -2381,8 +2382,8 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[tokio::test]
     async fn build_agent_no_security_block_leaves_taint_off_by_default() {
-        // Bug regression: a blueprint with no `[security]` block and a default
-        // (taint-off) global config must NOT attach the taint gate - an
+        // A blueprint with no `[security]` block and a default (taint-off)
+        // global config must NOT attach the taint gate - an
         // `unwrap_or_default()` on the resolved security forces it on for
         // every agent.
         let dir = tempfile::tempdir().unwrap();
@@ -2459,7 +2460,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(!spawned_no_output_tools(&coder_manifest()).await);
         // A router-shaped agent delegates and never writes. Reporting it as
         // having "modified nothing" is an accusation the framework has no
-        // grounds for (issue #192).
+        // grounds for.
         assert!(
             spawned_no_output_tools(
                 "[agent]\nname = \"router\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
@@ -3083,9 +3084,9 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
 
     #[tokio::test]
     async fn build_agent_refuses_a_manifest_with_no_usable_provider() {
-        // The end-to-end shape of issue #190: this used to build an agent
-        // pointed at a provider nothing answers to, which then sat at
-        // iteration 0 for the life of the daemon.
+        // End to end: without this an agent is built pointed at a provider
+        // nothing answers to, and then sits at iteration 0 for the life of the
+        // daemon.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("ghostly.leviath");
         std::fs::write(
@@ -3637,8 +3638,8 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         assert!(docs.contains("alpha") && docs.contains("beta"));
     }
 
-    /// A seed file is read into the prompt, so it is held to the same size a
-    /// script's I/O is: a multi-megabyte file used to arrive whole.
+    /// A seed file is read into the prompt, so it is held to the same size cap
+    /// a script's I/O is: uncapped, a multi-megabyte file arrives whole.
     #[test]
     fn resolve_seeds_caps_an_oversized_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -3824,7 +3825,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         assert!(err.contains("rhai seed failed"), "got: {err}");
     }
 
-    // ─── command seeds (issue #108) ──────────────────────────────────────────
+    // ─── command seeds ───────────────────────────────────────────────────────
 
     // ── tool seeds ────────────────────────────────────────────────────────
 

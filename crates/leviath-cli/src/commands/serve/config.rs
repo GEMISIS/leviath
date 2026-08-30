@@ -72,7 +72,7 @@ fn redact(
 
 /// `GET /api/config`. Reads the file rather than a start-up copy, so an edit
 /// made through [`put_config`] - or by anything else on the machine - is
-/// visible to the very next request (issue #532).
+/// visible to the very next request.
 pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedConfig> {
     // One `health()` call rather than a `current_config()` beside it: health
     // re-checks the file itself and hands back the config in force with its
@@ -84,7 +84,7 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 }
 
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
-/// present field, and writes it back with the file's `0600` permissions — the
+/// present field, and writes it back with the file's `0600` permissions - the
 /// same file `lev setup` and MCP admin edits. Returns the new redacted config.
 pub(super) async fn put_config(
     State(state): State<AppState>,
@@ -271,8 +271,8 @@ fn validate_key_format(provider: &str, key: &str) -> (bool, Option<String>) {
             }
         }
         // A custom gateway is custom precisely because its key has no house
-        // format to check, so an unknown name is no longer a rejection: the
-        // only thing that can be said about the key is that it is not empty.
+        // format to check, so an unknown name is not a rejection: the only
+        // thing that can be said about the key is that it is not empty.
         _ => match key.trim().is_empty() {
             true => (false, Some("Key must not be empty.".to_string())),
             false => (true, None),
@@ -352,12 +352,11 @@ pub(crate) async fn list_model_ids(
 /// the dashboard's agent editor alike.
 ///
 /// Iterates `resolvable_names` rather than `provider_names`, so a Rhai script
-/// provider is asked too. It used to be skipped here: `provider_names` returns
-/// natively registered providers only, and a script provider is reachable only
-/// through `get`. The result was that The Lair listed a script provider under
-/// its gateways while offering none of its models, on the new-run page, in the
-/// agent editor and in settings alike (issue #531 - the same defect #523 fixed
-/// for the CLI).
+/// provider is asked too. `provider_names` returns natively registered
+/// providers only, and a script provider is reachable through `get` alone, so
+/// iterating that instead lists a script provider under the gateways while
+/// offering none of its models - on the new-run page, in the agent editor and
+/// in settings alike.
 pub(super) async fn list_models_from_config(
     config: &crate::config::Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
@@ -477,22 +476,16 @@ mod tests {
         crate::daemon::config_reload::ConfigReloader::fixed(Config::default()).health()
     }
 
-    /// A default config whose ollama endpoint cannot answer.
+    /// A config with a registered provider whose `list_models` cannot succeed,
+    /// which is the `Err` arm of the handler's `if let Ok(list)`.
     ///
-    /// Ollama is always registered, so on a machine running `ollama serve` its
-    /// `list_models` *succeeds* and the `if let Ok(list)` in `models_with` never
-    /// takes its other arm - which made `cargo xtask coverage --package
-    /// leviath-cli` fail locally while passing in CI, where nothing is
-    /// listening. Port 1 is reserved and never bound, so the result stops
-    /// depending on what happens to be running on the developer's machine.
-    /// A registered provider whose `list_models` cannot succeed, which is the
-    /// `Err` arm of the handler's `if let Ok(list)`.
-    ///
-    /// It used to be Ollama pointed at a dead port, but Ollama now registers
-    /// only when something answers there - so a dead address means no provider
-    /// at all, and the arm went unrun. A keyed provider is the reliable way to
-    /// put something in the registry that will then fail to list: the key
-    /// registers it, and nothing is listening at the address it calls.
+    /// A keyed provider is the reliable way to put something in the registry
+    /// that will then fail to list: the key registers it, and nothing is
+    /// listening at the address it calls. Ollama will not do, because it
+    /// registers only when something answers there, so a dead address leaves
+    /// no provider at all and the arm goes unrun. Port 1 is reserved and never
+    /// bound, so the result does not depend on what happens to be running on
+    /// the developer's machine.
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
@@ -583,9 +576,9 @@ mod tests {
         assert!(config.ollama_base_url.is_none());
     }
 
-    /// A broken save is the one thing this route could not previously say. It
-    /// kept answering with the last good config, which reads exactly like an
-    /// edit that was never made.
+    /// A config that does not parse is reported alongside the last good one.
+    /// The config on its own reads exactly like an edit that was never made,
+    /// so the error is the only thing that tells the two apart.
     #[tokio::test]
     async fn get_config_reports_a_broken_file_and_keeps_serving_the_last_good_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -658,9 +651,9 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    /// The console used to feature-detect by calling a route and reading a 404
-    /// as "unsupported" - which is also what a missing run looks like, and
-    /// costs one round trip per feature.
+    /// Without these a console feature-detects by asking for something and
+    /// reading a 404 as "unsupported" - which is also what a missing run looks
+    /// like, and costs one round trip per feature.
     #[tokio::test]
     async fn get_config_advertises_the_api_version_capabilities_and_limits() {
         let app = Router::new()
@@ -858,7 +851,7 @@ mod tests {
 
     /// A script provider's models must reach `GET /api/models`, or The Lair
     /// lists the gateway under settings while offering none of its models on
-    /// the new-run page or in the agent editor (issue #531).
+    /// the new-run page or in the agent editor.
     ///
     /// A real `.rhai` on disk under an isolated `LEVIATH_HOME`, not a mock:
     /// the endpoint builds its own registry, so the only way to put a script
@@ -988,8 +981,7 @@ mod tests {
 
     /// [`state_with_config_path`], but its config source *watches* that file
     /// rather than holding a copy - the way `lev serve` builds one. What the
-    /// handlers see is then whatever is on disk, which is the whole point of
-    /// issue #532.
+    /// handlers see is then whatever is on disk.
     fn state_watching_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
@@ -1038,10 +1030,9 @@ mod tests {
         serde_json::from_slice(&body).expect("the endpoint answers with JSON")
     }
 
-    /// The round trip issue #532 is about: save an edit, reload the page, and
-    /// the edit is still there. `put_config` writes the file and `get_config`
-    /// used to answer from a start-up copy, so the second half showed the old
-    /// value and the save read as lost.
+    /// The round trip: save an edit, reload the page, and the edit is still
+    /// there. `put_config` writes the file, so `get_config` has to read the
+    /// file back and not a start-up copy, or the save reads as lost.
     #[tokio::test]
     async fn an_edit_through_put_is_visible_to_the_next_get() {
         let dir = tempfile::tempdir().unwrap();
@@ -1670,11 +1661,10 @@ mod tests {
     #[tokio::test]
     async fn the_models_endpoint_is_empty_when_no_https_client_can_be_built() {
         // A keyed provider, so something actually asks for a client and the
-        // failing factory has a request to fail. Ollama used to be that
-        // something - it needed no key and so always reached the client cache -
-        // but it now registers only when its address answers, and on a machine
-        // without it nothing requested a client, no error was produced, and
-        // this test passed while exercising none of what it is named for.
+        // failing factory has a request to fail. Ollama will not do: it
+        // registers only when its address answers, so on a machine without it
+        // nothing asks for a client, no error is produced, and this test
+        // passes while exercising none of what it is named for.
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
             update_check: Default::default(),

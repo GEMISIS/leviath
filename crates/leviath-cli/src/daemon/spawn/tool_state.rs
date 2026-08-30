@@ -17,7 +17,7 @@ use super::*;
 /// narrower than the lint: three of them - `run_id`, `entry_stage` and
 /// `agent_name` - are all `&str`. Transposing any two of those compiles
 /// silently and produces a run whose approvals are keyed to the wrong name.
-/// Nothing else in this file was ever going to catch that.
+/// Nothing else in this file would catch that.
 pub(super) struct ToolStateParts<'a> {
     /// The run's write budget, already spent on by the seeds.
     pub(super) writes: Arc<crate::daemon::tool_service::WriteBudget>,

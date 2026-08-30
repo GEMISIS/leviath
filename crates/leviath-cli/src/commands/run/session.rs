@@ -239,7 +239,7 @@ pub(crate) fn build_provider_registry_from_config_probing(
 ///
 /// The daemon builds its registry this way so an edit to
 /// `[model_providers.<name>]` reaches the next provider load with no restart,
-/// matching the `.rhai` file's own hot-reload (issue #533). Short-lived
+/// matching the `.rhai` file's own hot-reload. Short-lived
 /// processes keep the snapshot: there is nothing to reload inside one command.
 pub(crate) fn build_provider_registry_live(
     config: &Config,
@@ -326,8 +326,7 @@ pub(crate) fn script_provider_config(
 
 /// A script-provider config source that follows `reloader`, so an edit to
 /// `[model_providers.<name>]` reaches the next provider load without a daemon
-/// restart - the same way an edit to the `.rhai` file beside it already did
-/// (issue #533).
+/// restart - the same way an edit to the `.rhai` file beside it does.
 ///
 /// Memoised on the identity of the config the reloader hands back, which is a
 /// requirement rather than an optimisation: the layer's cache compares its
@@ -822,8 +821,8 @@ mod tests {
 
     // ─── ProviderCreds seam ─────────────────────────────────────────────
 
-    /// The cache TTL reaches the provider through the creds, which is the whole
-    /// path #345 was missing: the enum existed and nothing could select it.
+    /// The cache TTL reaches the provider through the creds. Without that leg
+    /// the enum exists and nothing can select it.
     #[test]
     fn provider_creds_carry_the_anthropic_cache_ttl() {
         use leviath_providers::anthropic::CacheTtl;

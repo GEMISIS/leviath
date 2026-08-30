@@ -46,8 +46,8 @@ static TUI_HOLDS_TERMINAL: AtomicBool = AtomicBool::new(false);
 static PARKED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 /// The most [`PARKED`] may hold. A long `lev dash` session with `--verbose`
-/// used to accumulate every debug line for the life of the session; past this
-/// the oldest bytes go and the release says how many.
+/// would otherwise hold every debug line for the life of the session; past
+/// this the oldest bytes go and the release says how many.
 const PARKED_CAP: usize = 1024 * 1024;
 
 /// Bytes dropped from [`PARKED`] since the last release, reported on release.

@@ -2046,7 +2046,6 @@ system_prompt = "Do work"
             agent_paths: vec![dir.path().to_path_buf()],
             ..Default::default()
         };
-        // Should not panic even with empty dirs
         let blueprints = discover_blueprints(&config);
         // May include blueprints from ~/.leviath/agents, but no crash
         let _ = blueprints;
@@ -2058,7 +2057,6 @@ system_prompt = "Do work"
             agent_paths: vec![PathBuf::from("/nonexistent/path/unlikely_to_exist_12345")],
             ..Default::default()
         };
-        // Should not panic
         let _ = discover_blueprints(&config);
     }
 

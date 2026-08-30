@@ -125,13 +125,13 @@ pub struct ServeArgs {
 pub(crate) struct AppState {
     /// Where the config comes from, rather than a copy of it.
     ///
-    /// A snapshot taken at start-up was wrong in both directions: an edit made
-    /// through `PUT /api/config` was written to disk and never read back, so
-    /// reloading the page showed the old value and the edit read as lost; and
-    /// an edit made anywhere else - `lev setup`, an editor, the daemon's own
-    /// config - was invisible for the life of the process. `lev serve` is a
-    /// separate process from `lev daemon`, so restarting the daemon did not
-    /// help either (issue #532).
+    /// A snapshot taken at start-up would be wrong in both directions: an edit
+    /// made through `PUT /api/config` goes to disk, so a copy would keep
+    /// serving the superseded value and the edit would read as lost; and an
+    /// edit made anywhere else - `lev setup`, an editor, the daemon's own
+    /// config - would be invisible for the life of the process. `lev serve` is
+    /// a separate process from `lev daemon`, so restarting the daemon does not
+    /// help either.
     ///
     /// This is the same [`ConfigReloader`] the daemon uses for its spawn-time
     /// config: mtime-checked, last-good on a parse failure. Read it through
@@ -297,8 +297,7 @@ pub(super) fn unexpected_response(
 ///
 /// `success` when it did the thing; 404 carrying `not_found` when it could
 /// not, since every such request names a run or an interaction and "could
-/// not" means the daemon had nothing by that name in the right state. Five
-/// handlers used to carry this four-arm match each.
+/// not" means the daemon had nothing by that name in the right state.
 pub(super) fn daemon_ok(
     reply: std::io::Result<leviath_runtime::control_socket::ControlResponse>,
     success: axum::http::StatusCode,
@@ -527,8 +526,8 @@ pub(super) struct FanOutInfo {
 /// which is why this is a separate shape rather than an extra field on
 /// [`BlueprintInfo`].
 ///
-/// Flattened, so the detail route's JSON is what it always was plus
-/// `manifest`, and a client reading only the old fields is unaffected.
+/// Flattened, so the detail route's JSON is [`BlueprintInfo`]'s own fields
+/// plus `manifest`, and a client that reads only those is unaffected.
 #[derive(Debug, Serialize)]
 pub(super) struct BlueprintDetail {
     #[serde(flatten)]
@@ -708,16 +707,14 @@ pub(super) struct ListAgentsQuery {
 /// Does `filter` name this run's status?
 ///
 /// `RunStatus` reaches a client two different ways: `Json<RunMeta>` serializes
-/// it through serde, which is `snake_case` (`waiting_input`), while the status
-/// filter compared it through `Display`, which is PascalCase, lowercased
-/// (`waitinginput`). So a client that took a status out of one response and fed
-/// it back as a filter got nothing, on exactly the two multi-word variants where
-/// it is least obvious why.
+/// it through serde, which is `snake_case` (`waiting_input`), while `Display`
+/// is PascalCase, lowercased (`waitinginput`). Comparing against either
+/// spelling alone leaves a client that takes a status out of one response and
+/// feeds it back as a filter with nothing, on exactly the two multi-word
+/// variants where it is least obvious why.
 ///
 /// Normalizing both sides - lowercase, and drop `_` and `-` - accepts every
-/// spelling of the same status, including the two that already worked. That
-/// makes this strictly wider than the old comparison, so nothing a client does
-/// today can start failing.
+/// spelling of the same status.
 pub(super) fn status_matches(status: &crate::runstate::RunStatus, filter: &str) -> bool {
     fn normalize(s: &str) -> String {
         s.chars()
@@ -872,18 +869,17 @@ pub(super) enum FileOrListing {
 
 /// Response of `GET /api/agents/{id}/stages`: the run's per-stage ledger.
 ///
-/// The one thing the runtime records per run that no route served. Everything
-/// here is already on disk in `stages.json` and already read by `lev stages`;
-/// a client over HTTP had to reconstruct the interesting part by diffing
-/// `context/history` snapshots, which is expensive and cannot see a stage that
-/// ran and wrote nothing (#388).
+/// Everything here is already on disk in `stages.json` and already read by
+/// `lev stages`. Without this route a client over HTTP has to reconstruct the
+/// interesting part by diffing `context/history` snapshots, which is expensive
+/// and cannot see a stage that ran and wrote nothing.
 ///
 /// Each record carries a price as well as a token count, and a split of both by
 /// each stay in the stage. Pricing stays on this side deliberately: `cost_usd`
 /// is `None` for unknown rather than zero and `cost_is_exact` says whether the
 /// figure is the invoice or a reconstruction of it, and a console multiplying
 /// tokens by a rate card of its own would produce a fourth answer that
-/// disagrees with all three (#630).
+/// disagrees with all three.
 ///
 /// Not paginated. The list is bounded by the blueprint's stage count - a dozen
 /// at the top end - so a cursor would be ceremony over a short array. The

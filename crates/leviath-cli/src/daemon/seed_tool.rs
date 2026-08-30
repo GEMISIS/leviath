@@ -161,16 +161,15 @@ pub(crate) struct SeedToolContext {
 pub(crate) type SeedPolicyResolver = Arc<dyn Fn(&str, bool) -> ToolPolicy + Send + Sync>;
 
 /// Build the runner a real spawn uses.
-///
 pub(crate) fn production_runner(
     ctx: SeedToolContext,
     resolve: SeedPolicyResolver,
 ) -> SeedToolRunner {
     Arc::new(move |name: &str, args: &serde_json::Value| {
         let is_builtin = ctx.builtin_names.contains(name);
-        // The same three fences the tool lane applies to a mid-run call, in
-        // the same order: a seed used to skip all of them, and a seed is the
-        // one call that runs before anyone could have been asked.
+        // The same three fences the tool lane applies to a mid-run call, in the
+        // same order. A seed needs them most: it is the one call that runs
+        // before anyone could have been asked.
         let policy = resolve(name, is_builtin);
         let policy =
             crate::tools::clamp_by_effect(name, args, policy, &|| resolve("write_file", true));
@@ -476,9 +475,9 @@ mod tests {
         assert!(err.contains("nobody to prompt"), "{err}");
     }
 
-    /// A seed runs before the first inference, so it used to run before every
-    /// fence the tool lane applies: a `shell` seed could redirect outside the
-    /// workdir, which the same line as a tool call is refused for.
+    /// A seed runs before the first inference, but not before the tool lane's
+    /// fences: a `shell` seed redirecting outside the workdir is refused, the
+    /// same as the identical line issued as a tool call.
     #[test]
     fn a_seed_cannot_redirect_outside_the_workdir() {
         let dir = tempfile::tempdir().unwrap();

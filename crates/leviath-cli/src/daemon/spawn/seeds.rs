@@ -16,8 +16,8 @@ use crate::daemon::seed_tool;
 /// otherwise write `seed = { files = ["../../.leviath/config.toml"] }` and have
 /// the provider keys in that file seeded straight into a pinned context region -
 /// from where they travel to the model, and out through the answer, a webhook,
-/// or a sub-agent. `read_file` has been confined for exactly this since the
-/// symlink-escape fix; seeding was the path that stayed open.
+/// or a sub-agent. `read_file` is confined for exactly this reason, and a seed
+/// reads on the same terms.
 ///
 /// Outside the workdir falls back to `[read_paths]`, which is already the
 /// mechanism for "this agent is meant to read there and the user agreed",
