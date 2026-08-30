@@ -64,7 +64,8 @@ impl StallReason {
             // the missing-provider wording covers the remaining case.
             _ => format!(
                 "provider '{provider}' is not configured, so this run has no way to \
-                 go on; add it to config.toml (or run `lev setup`) and restart the daemon"
+                 go on; add it to config.toml (or run `lev setup`), then \
+                 `lev resume` this run"
             ),
         }
     }
