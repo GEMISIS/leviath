@@ -8,6 +8,8 @@
 #   LV_RUNS_DIR    optional; forwarded as LEVIATH_RUNS_DIR (the fake-runs corpus)
 #   LV_MOCK_OVERSIZE_MIB  optional; forwarded to mock.py, which then answers
 #                  every completion with one frame that never closes
+#   LV_MOCK_SPLIT_UTF8  optional; forwarded to mock.py, which then streams a
+#                  reply with CJK and an emoji, flushed mid-character
 #
 # Nothing here reads the caller's environment: `env -i` first, then exactly
 # these names, so a probe cannot accidentally reach a real provider.
@@ -32,6 +34,7 @@ exec env -i \
   TERM="${TERM:-xterm-256color}" \
   ${LV_RUNS_DIR:+LEVIATH_RUNS_DIR="$LV_RUNS_DIR"} \
   ${LV_MOCK_OVERSIZE_MIB:+LV_MOCK_OVERSIZE_MIB="$LV_MOCK_OVERSIZE_MIB"} \
+  ${LV_MOCK_SPLIT_UTF8:+LV_MOCK_SPLIT_UTF8="$LV_MOCK_SPLIT_UTF8"} \
   LV_MOCK_PORT="$LV_MOCK_PORT" \
   ${LV_SERVE_PORT:+LV_SERVE_PORT="$LV_SERVE_PORT"} \
   LV_BIN="$LV_BIN" \

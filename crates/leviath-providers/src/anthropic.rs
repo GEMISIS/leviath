@@ -3520,20 +3520,24 @@ mod tests {
         assert!(sse.next().await.is_none());
     }
 
+    /// A character the transport cut in two arrives whole, and bytes that
+    /// could never be UTF-8 are marked rather than dropped with their frame.
     #[tokio::test]
-    async fn sse_stream_skips_invalid_utf8_bytes_and_continues() {
+    async fn sse_stream_keeps_a_split_character_and_marks_bad_bytes() {
         use tokio_stream::StreamExt;
-        // First chunk is invalid UTF-8 → skipped without adding to buffer.
-        // Second chunk is a valid SSE event.
-        let invalid = vec![0xFF, 0xFE, 0x00]; // invalid UTF-8
-        let valid = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n".to_vec();
+        let mut first =
+            b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"o"
+                .to_vec();
+        first.extend_from_slice(&[0xFF, 0xE5, 0xAE]);
+        let mut second = vec![0x8C];
+        second.extend_from_slice(b"k\"}}\n\n");
         let stream = StaticByteStream {
-            data: vec![invalid, valid],
+            data: vec![first, second],
             idx: 0,
         };
         let mut sse = anthropic_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
-        assert_eq!(chunk.delta, "ok");
+        assert_eq!(chunk.delta, "o\u{FFFD}\u{5B8C}k");
     }
 
     #[test]

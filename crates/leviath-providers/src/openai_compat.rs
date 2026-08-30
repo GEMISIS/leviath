@@ -2383,20 +2383,24 @@ mod tests {
         assert!(sse.next().await.is_none());
     }
 
+    /// A chunk that is not UTF-8 on its own is not thrown away: a character
+    /// cut by the transport is joined back together, and bytes that could
+    /// never be UTF-8 are marked in the text rather than dropped with the
+    /// frame around them.
     #[tokio::test]
-    async fn openai_sse_stream_skips_invalid_utf8_chunk_and_continues() {
-        // covers the implicit else of `if let Ok(text) = from_utf8(&bytes)`
+    async fn openai_sse_stream_keeps_a_split_character_and_marks_bad_bytes() {
         use tokio_stream::StreamExt;
+        let mut first = b"data: {\"choices\":[{\"delta\":{\"content\":\"o".to_vec();
+        first.extend_from_slice(&[0xFF, 0xF0, 0x9F]);
+        let mut second = vec![0x8E, 0x89];
+        second.extend_from_slice(b"k\"}}]}\n\n");
         let stream = StaticByteStream {
-            data: vec![
-                vec![0xFF, 0xFE, 0x00],
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n".to_vec(),
-            ],
+            data: vec![first, second],
             idx: 0,
         };
         let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
-        assert_eq!(chunk.delta, "ok");
+        assert_eq!(chunk.delta, "o\u{FFFD}\u{1F389}k");
     }
 
     // ─── MessageContent::Blocks code paths in build_openai_request_body ────

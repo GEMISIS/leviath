@@ -7,6 +7,7 @@
 //! tests inject a fake so no socket is ever bound. Rate limiting lives in the
 //! provider (around the executor), not here - the executor is pure transport.
 
+use crate::provider::stream::Utf8Carry;
 use leviath_net::read_caps::{
     BodyReadError, JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_text_capped,
 };
@@ -465,14 +466,14 @@ pub(crate) async fn forward_sse<S, E>(
     use tokio_stream::StreamExt;
     tokio::pin!(stream);
     let mut buffer = String::new();
+    let mut carry = Utf8Carry::default();
     while let Some(item) = stream.next().await {
         match item {
             Ok(bytes) => {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    buffer.push_str(text);
-                }
+                carry.push(&bytes, &mut buffer);
                 let events_drained = drain_sse_events(&mut buffer);
-                if let Err(msg) = frame_within_cap(buffer.len(), frame_cap, peer) {
+                if let Err(msg) = frame_within_cap(buffer.len() + carry.pending(), frame_cap, peer)
+                {
                     let _ = events.send(Err(HostHttpError::Api(msg))).await;
                     return;
                 }
@@ -496,6 +497,7 @@ pub(crate) async fn forward_sse<S, E>(
         }
     }
     // Flush a trailing event that had no final blank line.
+    carry.finish(&mut buffer);
     if let Some(SseEvent::Data(payload)) = final_sse_event(&buffer) {
         let _ = events.send(Ok(payload)).await;
     }

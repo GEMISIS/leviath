@@ -117,17 +117,35 @@ async fn forward_sse_flushes_trailing_event() {
     assert_eq!(rx.recv().await.unwrap().unwrap(), "{\"tail\":1}");
 }
 
+/// A stream that ends after a complete event, with no `[DONE]` and nothing
+/// held back, flushes nothing and closes the channel.
 #[tokio::test]
-async fn forward_sse_skips_invalid_utf8_and_ends_clean() {
-    // First chunk is invalid UTF-8 (skipped); then a complete event and a
-    // clean end (no [DONE], empty buffer → no trailing flush).
-    let chunks: Vec<Result<bytes::Bytes, String>> = vec![
-        Ok(bytes::Bytes::from(vec![0xff, 0xfe])),
-        Ok(bytes::Bytes::from("data: a\n\n")),
-    ];
+async fn forward_sse_ends_clean_with_an_empty_buffer() {
+    let chunks: Vec<Result<bytes::Bytes, String>> = vec![Ok(bytes::Bytes::from("data: a\n\n"))];
     let (tx, mut rx) = mpsc::channel(16);
     forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
     assert_eq!(rx.recv().await.unwrap().unwrap(), "a");
+    assert!(rx.recv().await.is_none());
+}
+
+/// A character the transport cut in two arrives whole, bytes that could
+/// never be UTF-8 are marked rather than dropped, and a character the stream
+/// ended inside is marked in the trailing flush.
+#[tokio::test]
+async fn forward_sse_keeps_a_split_character_and_marks_bad_bytes() {
+    let mut first = b"data: a".to_vec();
+    first.extend_from_slice(&[0xff, 0xf0, 0x9f]);
+    let mut second = vec![0x8e, 0x89];
+    second.extend_from_slice(b"\n\ndata: b");
+    let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+        Ok(bytes::Bytes::from(first)),
+        Ok(bytes::Bytes::from(second)),
+        Ok(bytes::Bytes::from(vec![0xe5])),
+    ];
+    let (tx, mut rx) = mpsc::channel(16);
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
+    assert_eq!(rx.recv().await.unwrap().unwrap(), "a\u{FFFD}\u{1F389}");
+    assert_eq!(rx.recv().await.unwrap().unwrap(), "b\u{FFFD}");
     assert!(rx.recv().await.is_none());
 }
 
