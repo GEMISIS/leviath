@@ -130,12 +130,12 @@ pub(super) fn validate_tool_policy(where_: &str, tool: &str, policy: &str) -> Re
 
 /// Refuse a key the parser does not read.
 ///
-/// The manifest parser walks the TOML by hand, so every unrecognised key was
-/// accepted and ignored: a blueprint could be wrong in a way `lev validate`
-/// called good, and the only symptom was a stage behaving as though the line
-/// had not been written - which is what it was doing (#362). Region kinds and
-/// transition conditions have always been strict; this extends that to the
-/// tables holding them, with the same "valid: …" phrasing.
+/// The manifest parser walks the TOML by hand, so an unrecognised key it does
+/// not refuse is accepted and ignored: the blueprint is wrong in a way `lev
+/// validate` calls good, and the only symptom is a stage behaving as though
+/// the line had not been written. Region kinds and transition conditions are
+/// strict for the same reason; this extends that to the tables holding them,
+/// with the same "valid: …" phrasing.
 pub(super) fn reject_unknown_keys(
     where_: &str,
     table: &toml::value::Table,
@@ -162,12 +162,12 @@ pub(super) fn reject_unknown_keys(
 /// read_file = { region = "bulk", max_result_tokens = 500 }   # route and cap it
 /// ```
 ///
-/// Anything else is an error. It used to be silently skipped, which cost more
-/// than the unsupported shape did: the entry fell through, so the tool lost the
-/// region it named *as well as* the cap, and landed in `default_region`
-/// uncapped - while `lev validate` called the blueprint good. A config that
-/// reads as if two limits are in force while neither is costs real money before
-/// anyone thinks to check (#361).
+/// Anything else is an error rather than a skipped entry: skipping costs more
+/// than the unsupported shape does, because the tool loses the region it named
+/// *as well as* the cap and lands in `default_region` uncapped while `lev
+/// validate` calls the blueprint good. A config that reads as if two limits
+/// are in force while neither is costs real money before anyone thinks to
+/// check.
 fn parse_tool_override(
     stage_name: &str,
     tool_name: &str,
@@ -581,10 +581,10 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 ///
 /// `Ok(None)` when the key is absent, so the caller picks the default;
 /// `Ok(Some(n))` for a non-negative integer. Anything else is an error rather
-/// than a silent fallback: `max_workers = -1` used to wrap to the largest
-/// `usize` and so run unbounded, while `max_items = "twelve"` read as no cap at
-/// all - both of which show up as an unexpectedly wide fan-out, the wrong place
-/// to first hear about a typo. `zero_means` is what `0` does, per key.
+/// than a silent fallback: `max_workers = -1` would wrap to the largest
+/// `usize` and so run unbounded, while `max_items = "twelve"` would read as no
+/// cap at all - both of which show up as an unexpectedly wide fan-out, the
+/// wrong place to first hear about a typo. `zero_means` is what `0` does, per key.
 fn fan_out_number(
     stage_value: &toml::Value,
     stage_name: &str,
@@ -737,10 +737,10 @@ pub(super) fn apply_stage_mode(
             let on_worker_failure = match str_of(stage_value, "on_worker_failure") {
                 Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
                 Some("continue") | None => crate::blueprint::WorkerFailurePolicy::Continue,
-                // Unknown used to mean continue, so a misspelled `fail_all`
-                // let a fan-out swallow every worker failure - the opposite of
-                // what was written, and invisible in a run that then merged
-                // nothing.
+                // Refused rather than folded into continue: a misspelled
+                // `fail_all` would let a fan-out swallow every worker failure -
+                // the opposite of what was written, and invisible in a run that
+                // then merged nothing.
                 Some(other) => {
                     return Err(Error::Other(format!(
                         "stage '{stage_name}': on_worker_failure = \"{other}\" \
@@ -771,13 +771,12 @@ pub(super) fn apply_stage_mode(
         }
         "output" => stage.with_mode(StageMode::Output),
         "autonomous" => stage.with_mode(StageMode::Autonomous),
-        // A misspelled mode used to become an autonomous stage in
-        // silence, so `mode = "outupt"` produced a stage that ran
-        // normally and never asked for the output it was written to
-        // produce. Region kinds have always rejected an unknown
-        // `kind` for the same reason; this brings stage modes into
-        // line. Any manifest this refuses was already not doing what
-        // it said.
+        // Refused rather than folded into autonomous: `mode =
+        // "outupt"` would produce a stage that ran normally and
+        // never asked for the output it was written to produce.
+        // Region kinds reject an unknown `kind` for the same
+        // reason. Any manifest this refuses is not doing what it
+        // says.
         unknown => {
             return Err(Error::Other(format!(
                 "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
@@ -1008,8 +1007,8 @@ pub(super) fn parse_transition_gate(
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
     }
-    // A negative budget is a typo, not "never hold the stage", and used to
-    // fall back to the default without a word. It is refused now.
+    // A negative budget is a typo, not "never hold the stage", so it is
+    // refused rather than falling back to the default without a word.
     if let Some(max) = count_of(table, where_, "max_attempts")? {
         gate.max_attempts = Some(max);
     }
@@ -1022,7 +1021,7 @@ pub(super) fn parse_transition_gate(
 /// Zero reads as unset - mirroring `enforce_max_iterations`, where `max == 0`
 /// means "unlimited" - so `stuck_after_iterations = 0` leaves the edge unarmed
 /// and the caller rejects it, rather than the edge firing on turn zero. A
-/// negative used to read as unset too, silently; it is refused now.
+/// negative is refused rather than read as unset.
 pub(super) fn parse_stuck_config(where_: &str, edge: &toml::Value) -> Result<Option<StuckConfig>> {
     let threshold = |key: &str| count_of(edge, where_, key).map(|n| n.filter(|n| *n > 0));
     let cfg = StuckConfig {
@@ -1057,8 +1056,8 @@ pub(super) fn parse_nudge_config(
     if let Some(enabled) = bool_of(table, "enabled") {
         nudge.enabled = Some(enabled);
     }
-    // A negative count is a typo, not "never accept the text", and used to
-    // fall back to inheriting without a word. It is refused now.
+    // A negative count is a typo, not "never accept the text", so it is
+    // refused rather than inheriting without a word.
     if let Some(max) = count_of(table, where_, "max")? {
         nudge.max = Some(max);
     }

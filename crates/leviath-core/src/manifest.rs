@@ -30,7 +30,6 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
 
     let entry_stage = str_of(agent, "entry_stage").map(|s| s.to_string());
 
-    // Issue #97 escape hatch: `[agent] dynamic_tools` (default false).
     let dynamic_tools = bool_of(agent, "dynamic_tools").unwrap_or(false);
 
     let mut stages = Vec::new();

@@ -325,7 +325,7 @@ mode = "autonomous"
     );
 }
 
-// ─── stuck detection (#106) ─────────────────────────────────────────────
+// ─── stuck detection ────────────────────────────────────────────────────
 
 /// Build a two-stage manifest whose `analyze → next` edge carries `body`.
 fn stuck_edge_manifest(body: &str) -> String {
@@ -1712,8 +1712,8 @@ directives = { "Revise" = "Call ask_user_text to find out what to change." }
     assert_eq!(points[0].edit_options, vec!["Edit".to_string()]);
 }
 
-/// The unattended opt-out (issue #204): absent means the point waves itself
-/// through under `--yolo`, `"ask"` means it holds for a person.
+/// The unattended opt-out: absent means the point waves itself through under
+/// `--yolo`, `"ask"` means it holds for a person.
 #[test]
 fn parse_manifest_interaction_point_unattended_policy() {
     let toml = |line: &str| {
@@ -2453,9 +2453,9 @@ max_workers = 0
 }
 
 /// A negative or non-numeric cap is a mistake the author should hear about at
-/// parse time. `max_workers = -1` used to wrap to the largest `usize` and run
-/// unbounded, and `max_items = "twelve"` was read as no cap at all; both showed
-/// up only as a fan-out wider than the manifest appeared to allow.
+/// parse time. `max_workers = -1` would wrap to the largest `usize` and run
+/// unbounded, and `max_items = "twelve"` would read as no cap at all; both
+/// show up only as a fan-out wider than the manifest appears to allow.
 #[test]
 fn parse_manifest_fan_out_rejects_a_negative_or_non_numeric_cap() {
     for (key, value, wants) in [
@@ -2739,8 +2739,8 @@ name = "no-regions"
 
 #[test]
 fn parse_manifest_unknown_region_kind_is_a_hard_error() {
-    // A typo'd kind used to silently become Temporary - for a custom
-    // region that meant the script never ran, with no signal. The error
+    // A typo'd kind must not fold into Temporary: for a custom region
+    // that would mean the script never runs, with no signal. The error
     // names the region, the bad value, and the valid kinds.
     let toml = r#"
 [agent]
@@ -2782,9 +2782,9 @@ mode = "interactive"
     assert_eq!(default.mode, StageMode::Autonomous);
 }
 
-/// A misspelled mode used to become an autonomous stage in silence, so a
-/// stage written to produce an output ran normally and never asked for one.
-/// Region kinds have always rejected an unknown value; modes now match.
+/// A misspelled mode must not fold into an autonomous stage: a stage written
+/// to produce an output would run normally and never ask for one. Region
+/// kinds reject an unknown value for the same reason.
 #[test]
 fn parse_manifest_rejects_an_unknown_stage_mode() {
     let toml = r#"
@@ -3646,8 +3646,9 @@ provider = "anthropic"
 model = "claude-sonnet-5"
 request_timeout_secs = -5
 "#;
-    // A negative timeout used to be dropped without a word, so the stage ran
-    // on the default while the file said otherwise. It fails the load now.
+    // A negative timeout fails the load rather than being dropped without a
+    // word, which would run the stage on the default while the file said
+    // otherwise.
     let err = parse_manifest(toml).unwrap_err().to_string();
     assert!(
         err.contains("stage 'main': model: request_timeout_secs must not be negative (got -5)"),
@@ -3941,10 +3942,10 @@ compact_count = { kind = "sliding_window", max_items = 20, max_tokens = 3000, st
 
 #[test]
 fn parse_manifest_tool_routing_override_non_string_value_is_rejected() {
-    // This asserted the opposite until #361: a non-string value was skipped,
-    // so `write_file` kept neither the region named here nor any cap, and the
-    // manifest still parsed. Silently discarding the line an author wrote is
-    // the failure, not the recovery.
+    // Skipping a non-string value would leave `write_file` with neither the
+    // region named here nor any cap, and the manifest would still parse.
+    // Silently discarding the line an author wrote is the failure, not the
+    // recovery.
     let toml = r#"
 [agent]
 name = "routing-nonstring"
@@ -4101,8 +4102,7 @@ kind = "vm"
     assert!(err.contains("unknown kind 'vm'"), "got: {err}");
 }
 /// Per-tool result ceilings parse, spelled like the region overrides beside
-/// them. Without this the table is accepted and ignored, which is the shape of
-/// bug #338 was.
+/// them. Without this the table is accepted and ignored.
 #[test]
 fn parse_manifest_reads_per_tool_result_ceilings() {
     let toml = r#"
@@ -4133,11 +4133,10 @@ read_file = 20000
 
 /// A non-integer ceiling fails the manifest.
 ///
-/// This test used to assert the opposite - that the entry was skipped and the
-/// rest of the table survived - on the grounds that it matched how the region
-/// overrides beside it treated a non-string. Both were wrong for the same
-/// reason (#361, #362): the author wrote a ceiling, no ceiling was applied, and
-/// nothing said so.
+/// Skipping the entry and keeping the rest of the table would match how the
+/// region overrides beside it treat a non-string, and both readings are wrong
+/// for the same reason: the author wrote a ceiling, no ceiling would be
+/// applied, and nothing would say so.
 #[test]
 fn parse_manifest_rejects_a_non_integer_per_tool_ceiling() {
     let toml = r#"
@@ -4161,14 +4160,14 @@ grep = 500
 
 // ─── Values that quietly became a default ────────────────────────────────────
 //
-// Each of these parsed clean and resolved to something the author did not
+// Each of these would parse clean and resolve to something the author did not
 // write. Same class as the unknown keys below: a line that does nothing and
-// says nothing. The policy one is the sharp one - it resolved *looser* than
+// says nothing. The policy one is the sharp one - it resolves *looser* than
 // what was asked for.
 
-/// A misspelled `deny` used to resolve to `ask`, which is the more permissive
-/// of the two: approvable by a session grant or `--yolo`. The author wrote a
-/// refusal and got a prompt.
+/// A misspelled `deny` must not resolve to `ask`, the more permissive of the
+/// two: approvable by a session grant or `--yolo`. The author wrote a refusal
+/// and would get a prompt.
 #[test]
 fn parse_manifest_rejects_a_misspelled_stage_tool_policy() {
     let toml = r#"
@@ -4319,10 +4318,10 @@ notes = {{ kind = "sliding_window", max_items = 20, strategy = "{strategy}" }}
     }
 }
 
-// ─── Keys that do not exist (#362) ───────────────────────────────────────────
+// ─── Keys that do not exist ──────────────────────────────────────────────────
 //
-// Every one of these parsed clean before, which is what made a typo in any
-// 0.3.2 feature indistinguishable from a working config.
+// Every one of these would parse clean, which is what makes a typo in the
+// feature indistinguishable from a working config.
 
 /// The smallest manifest with a `bulk` region and one stage, for the key tests.
 fn keys_fixture(stage_extra: &str) -> String {
@@ -4356,9 +4355,9 @@ fn parse_manifest_rejects_an_unknown_stage_key() {
     assert!(err.contains("system_prompt"), "lists what is valid: {err}");
 }
 
-/// The reporter's case: a stage narrows its window by listing what it wants,
-/// so there is no `hidden` key - and guessing one used to mean the stage
-/// carried the region it meant to drop, at full cost, silently.
+/// A stage narrows its window by listing what it wants, so there is no
+/// `hidden` key - and guessing one leaves the stage carrying the region it
+/// meant to drop, at full cost, silently.
 #[test]
 fn parse_manifest_rejects_an_unknown_context_key() {
     let err = parse_manifest(&keys_fixture("[stages.work.context]\nhidden = [\"bulk\"]"))
@@ -4409,7 +4408,7 @@ fn parse_manifest_reads_a_stage_description() {
     );
 }
 
-// ─── Region names that match nothing (#362) ──────────────────────────────────
+// ─── Region names that match nothing ─────────────────────────────────────────
 
 #[test]
 fn validate_rejects_a_routing_override_naming_no_region() {
@@ -4452,7 +4451,7 @@ fn validate_allows_a_gate_on_a_region_declared_by_another_stage() {
     // A gate is evaluated by the runtime against the region's contents, not by
     // the model reading it, so a region this stage does not render is still a
     // sound thing to gate on. Routing is the opposite case and is checked
-    // per-stage; see the #370 tests.
+    // per-stage; see the routing tests.
     let toml = r#"
 [agent]
 name = "keys"
@@ -4529,9 +4528,9 @@ fn validate_allows_the_auto_added_regions() {
 
 /// The `{ region, max_result_tokens }` shape routes *and* caps.
 ///
-/// The reachable spelling of #361: this parsed clean and did nothing, and the
-/// tool lost its region as well as its cap because the entry fell through the
-/// string-only match arm entirely.
+/// Without it the entry falls through the string-only match arm entirely: it
+/// parses clean, does nothing, and the tool loses its region as well as its
+/// cap.
 #[test]
 fn parse_manifest_reads_a_tool_override_table() {
     let toml = r#"
@@ -4832,8 +4831,8 @@ mode = "autonomous"
 ///
 /// The key exists because `region` reads as though it says this and does not:
 /// it is one of several *alternative* ways to satisfy `require_modifications`,
-/// so a stage that wrote any file at all satisfied it with the named region
-/// still empty (#371).
+/// so a stage that wrote any file at all satisfies it with the named region
+/// still empty.
 #[test]
 fn parse_manifest_reads_a_required_regions_gate() {
     let toml = r#"
@@ -4918,7 +4917,7 @@ on_unavailable = "explode"
     );
 }
 
-// ─── Routing into a region the stage cannot see (#370) ───────────────────────
+// ─── Routing into a region the stage cannot see ──────────────────────────────
 
 /// The reported shape: a stage scopes its context and routes a tool into a
 /// region it left out. The result is written where the stage cannot read it,
@@ -5070,7 +5069,7 @@ read_file = "codebase"
         .expect("routing into a declared region is fine");
 }
 
-// ─── Regions an edge transform must not paraphrase (#369) ────────────────────
+// ─── Regions an edge transform must not paraphrase ───────────────────────────
 
 /// `summarizable = false` parses, and the default is on.
 ///
@@ -5289,7 +5288,7 @@ fn a_region_definition_without_the_field_deserializes_as_summarizable() {
 /// Pessimistic because a provider caches by prefix: a block that moves
 /// invalidates everything behind it, so a region nobody has classified must be
 /// assumed to move and sorted late. An optimistic default is how inferring
-/// stability from the region's kind went wrong (issue #474).
+/// stability from the region's kind went wrong.
 #[test]
 fn parse_manifest_reads_region_volatility() {
     let toml = r#"

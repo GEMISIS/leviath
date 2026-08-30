@@ -593,9 +593,9 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
 mod tests {
     use super::*;
 
-    /// Taint was not persisted at all, so every restart, resume or page-in
-    /// brought a region back `Public` while the gate reported itself armed -
-    /// silently unblocking outbound tools it had been blocking.
+    /// Without persisted taint, every restart, resume or page-in brings a
+    /// region back `Public` while the gate reports itself armed, silently
+    /// unblocking outbound tools it should be blocking.
     #[test]
     fn taint_rebuilds_from_persisted_entries_at_the_highest_level() {
         let restored = RegionTaint::from_entry_taints(vec![

@@ -34,13 +34,12 @@ pub enum StageRunStatus {
     /// The run finished without ever entering this stage.
     ///
     /// Distinct from [`Pending`](Self::Pending), which means "not yet" while a
-    /// run is live, and from [`Complete`](Self::Complete), which these used to
-    /// be recorded as: the ledger marked every stage positioned before the
-    /// cursor complete, and a graph does not visit its stages in index order,
-    /// so an error-recovery branch nothing reached was filed as having run
-    /// (#372). Its `region_tokens` is empty because nothing ever wrote it,
-    /// which made the next real stage look like it had written every region
-    /// from zero.
+    /// run is live, and from [`Complete`](Self::Complete): a graph does not
+    /// visit its stages in index order, so marking every stage positioned
+    /// before the cursor complete files an error-recovery branch nothing
+    /// reached as having run. Its `region_tokens` is empty because nothing
+    /// ever wrote it, which makes the next real stage look like it wrote
+    /// every region from zero.
     Skipped,
 }
 
@@ -212,7 +211,7 @@ pub struct StageRecord {
     /// Position cannot answer this. A graph blueprint reaches its stages in
     /// whatever order its edges describe, so "index below the cursor" includes
     /// every branch the run went past without taking - and reading it as
-    /// "finished" is what filed never-entered stages as `Complete` (#372).
+    /// "finished" files never-entered stages as `Complete`.
     /// Sticky once set, so a stage the run has left and may re-enter stays
     /// entered.
     #[serde(default)]
@@ -238,11 +237,10 @@ pub struct StageRecord {
     /// `None` means *unknown*, never free, exactly as on
     /// [`RunMeta::cost_usd`]: some call was served by a model with no reported
     /// cost and no known rates, so any total would understate by an unknown
-    /// amount. The tokens beside it were always here; this is the one
-    /// conversion that has a rule behind it, and it belongs on the side that
-    /// owns the rule. A console multiplying these tokens by a rate card of its
-    /// own would produce a fourth answer that disagrees with the other three
-    /// (#630).
+    /// amount. Pricing is the one conversion with a rule behind it, and it
+    /// belongs on the side that owns the rule: a console multiplying these
+    /// tokens by a rate card of its own would produce a fourth answer that
+    /// disagrees with the other three.
     ///
     /// Accumulated across revisits, like the token counts. For the split by
     /// visit, read [`visits`](Self::visits).

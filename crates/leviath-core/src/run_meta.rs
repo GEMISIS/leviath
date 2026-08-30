@@ -53,8 +53,8 @@ impl RunStatus {
     /// Here rather than left to each caller because a status reaches a client
     /// three ways - serialized inside a run, rendered into a `status` string by
     /// a route that builds its own response shape, and forwarded off the
-    /// engine's event stream - and those used to be three different spellings
-    /// of the same state. [`Display`](std::fmt::Display) is PascalCase and is
+    /// engine's event stream - and all three have to spell one state one way.
+    /// [`Display`](std::fmt::Display) is PascalCase and is
     /// for a person reading a terminal; this is for a client matching on it.
     pub fn wire(&self) -> &'static str {
         match self {
@@ -90,11 +90,10 @@ impl std::fmt::Display for RunStatus {
 /// `WaitingInput` alone is several unrelated situations wearing one word, and
 /// they call for opposite responses: a fan-out parent whose workers are
 /// churning is healthy and needs nothing, while a run parked on a
-/// tool-approval prompt is stopped dead until a person answers it. Issue #184
-/// is what happens when the two are indistinguishable - an operator reading
-/// `waiting` across a factory concluded it had stalled and started killing
-/// healthy runs. Issue #431 is the same conflation reaching every client that
-/// reads `meta.json`.
+/// tool-approval prompt is stopped dead until a person answers it. With the
+/// two indistinguishable, an operator reading `waiting` across a factory
+/// concludes it has stalled and starts killing healthy runs, and every client
+/// that reads `meta.json` is left guessing the same way.
 ///
 /// Derived on demand from markers the engine already sets, by
 /// [`wait_reason_from`]; nothing tracks it separately, so it cannot fall out of
@@ -139,10 +138,10 @@ pub enum WaitReason {
     /// can go on: a provider it needs is not configured, a key was rejected,
     /// an account is out of credits.
     ///
-    /// These used to end the run. They are all deterministic and all outside
-    /// the run's control, so ending it threw away everything it had done to
-    /// punish a person for a typo in `config.toml`. The run holds its place
-    /// instead, and `lev resume` picks it up once the machine is fixed.
+    /// These are all deterministic and all outside the run's control, so
+    /// ending the run would throw away everything it had done to punish a
+    /// person for a typo in `config.toml`. The run holds its place instead,
+    /// and `lev resume` picks it up once the machine is fixed.
     ///
     /// The distinction that matters is not "is there a fix" but "does the fix
     /// let *this* run continue": a broken blueprint is equally deterministic
@@ -481,7 +480,7 @@ pub struct RunMeta {
     ///
     /// `None` is the ordinary state: titling has not finished yet, or was never
     /// asked for. `Some` means it ran and could not produce a name, which is
-    /// the case a reader could not previously distinguish from either.
+    /// otherwise indistinguishable from either.
     #[serde(default)]
     pub title_error: Option<String>,
     /// Custom key-value pairs from the spawn request (API metadata).
@@ -495,8 +494,7 @@ pub struct RunMeta {
     ///
     /// Persisted, because the daemon must still be able to sign a webhook for a
     /// run it reloaded after a restart. **Never serve it** - strip it with
-    /// [`RunMeta::redacted`] before any of this struct leaves the process. See
-    /// that method for what went wrong.
+    /// [`RunMeta::redacted`] before any of this struct leaves the process.
     #[serde(default)]
     pub callback_secret: Option<String>,
     /// Links sub-agent runs to their parent run.
@@ -521,13 +519,12 @@ pub struct RunMeta {
     /// Whether the run was launched unattended (`--yolo`), so a daemon restart
     /// resumes it the way it was started.
     ///
-    /// This used to be dropped on reload, on the reasoning that forgetting a
-    /// launch override can only prompt more, never less. In practice it meant a
-    /// restart silently converted an unattended run into one parked on a prompt
-    /// nobody was watching for - the operator's own consent, given at launch,
-    /// discarded by an implementation detail they never saw. Runs written before
-    /// this field existed default to attended, so nothing is escalated
-    /// retroactively.
+    /// Persisted rather than dropped on reload. Forgetting a launch override
+    /// only ever prompts more, never less, which is why dropping it reads as
+    /// safe; what it actually does is convert an unattended run into one
+    /// parked on a prompt nobody is watching for, discarding consent the
+    /// operator gave at launch. Runs written before this field existed default
+    /// to attended, so nothing is escalated retroactively.
     #[serde(default)]
     pub yolo: bool,
     /// How much of the blueprint's `[read_paths]` the config granted, as
@@ -570,10 +567,10 @@ pub struct RunMeta {
     ///
     /// Distinct from `model`, which is what the entry stage *resolved to* and
     /// is recorded whether or not anything was overridden. A daemon restart
-    /// rebuilds the run's spawn arguments from this file, and it used to hand
-    /// `model` back as the override: a run launched with no `--model` at all
-    /// came back with every stage pinned to its first stage's provider and
-    /// model, and its failover list gone. This field is what was actually
+    /// rebuilds the run's spawn arguments from this file, and must hand back
+    /// this field rather than `model`: handing back `model` pins every stage
+    /// of a run launched with no `--model` to its first stage's provider and
+    /// model, and loses its failover list. This field is what was actually
     /// asked for, so a reload asks for the same thing - and for a run that
     /// asked for nothing, resolves each stage afresh, as the launch did.
     ///
@@ -627,8 +624,8 @@ pub struct RunFlags {
     /// Recorded because "modified no files" only diagnoses an agent that was
     /// supposed to modify files. A router that spawns sub-agents, or an agent
     /// whose answer is its text, would otherwise report itself empty on every
-    /// successful run - which is what happened in issue #192. The framework has
-    /// no basis to judge such a run, so it says nothing rather than accusing.
+    /// successful run. The framework has no basis to judge such a run, so it
+    /// says nothing rather than accusing.
     ///
     /// This mirrors the escape the runtime's `gate_blocks` already applies per
     /// stage: a `require_modifications` gate on a stage that advertises no
@@ -673,7 +670,7 @@ pub struct RunFlags {
     /// proceeds with a log line, which nothing downstream reads: a run whose
     /// agent wrote its plan and a run where we asked twice and moved on both
     /// finished `complete`, with the second silently missing the artifact every
-    /// later stage's prompt says to work from (#371). Names rather than a count
+    /// later stage's prompt says to work from. Names rather than a count
     /// because knowing *which* region was abandoned is what makes it
     /// actionable, and a run cannot abandon many.
     ///
@@ -710,12 +707,11 @@ pub struct RunFlags {
     /// fan-out because the blueprint declared no `error` and no `dead_end`
     /// escape from the stage.
     ///
-    /// A split that cannot be parsed used to end the run outright, which threw
-    /// away everything the parent had already done - a `deep-researcher` run
-    /// died that way with its workers finished and three stages still pending.
-    /// It now always moves on, and this is what says the fan-out it moved on
-    /// from produced nothing. Non-zero means the merge stage worked from less
-    /// than it was meant to.
+    /// Ending the run on a split that cannot be parsed throws away everything
+    /// the parent has already done, workers finished and later stages still
+    /// pending. The stage moves on instead, and this is what says the fan-out
+    /// it moved on from produced nothing. Non-zero means the merge stage
+    /// worked from less than it was meant to.
     #[serde(default)]
     pub splits_degraded: usize,
 
@@ -755,11 +751,11 @@ impl RunMeta {
     /// This run's metadata with the webhook signing secret removed, for anything
     /// that leaves the process.
     ///
-    /// `GET /api/agents`, `/api/agents/{id}` and `/api/agents/{id}/children` all
-    /// serialized `RunMeta` whole, so any holder of the API token could read
-    /// every run's `callback_secret` - the key that authenticates Leviath's
-    /// webhooks to their receivers. Mirrors the `RedactedConfig` pattern the
-    /// `/api/config` handler already uses correctly.
+    /// `GET /api/agents`, `/api/agents/{id}` and `/api/agents/{id}/children`
+    /// all serialize `RunMeta` whole, so without this any holder of the API
+    /// token reads every run's `callback_secret` - the key that authenticates
+    /// Leviath's webhooks to their receivers. Mirrors the `RedactedConfig`
+    /// pattern the `/api/config` handler uses.
     ///
     /// Returns an owned copy rather than mutating in place so a caller cannot
     /// accidentally redact the record the daemon still needs for signing.
@@ -864,8 +860,8 @@ impl RunMeta {
     /// was happening on its behalf. See the sibling spans on [`Self::age_secs`].
     ///
     /// A run written before the clock existed carries no spans at all, so it
-    /// falls back to the wall-clock span it used to report - a finished run that
-    /// claims to have taken no time is the worse answer of the two.
+    /// falls back to the wall-clock span - a finished run that claims to have
+    /// taken no time is the worse answer of the two.
     pub fn active_runtime_secs(&self, now: i64) -> u64 {
         match self.active {
             Some(clock) => clock.total_secs(now),
@@ -1083,8 +1079,8 @@ mod tests {
 
     #[test]
     fn active_runtime_secs_falls_back_to_the_wall_clock_span_when_unrecorded() {
-        // A run written by a build that kept no clock: the span it used to
-        // report is a better answer than "this run took no time".
+        // A run written by a build that kept no clock: the wall-clock span is
+        // a better answer than "this run took no time".
         let mut meta = sample_meta();
         meta.started_at = 1_000;
         meta.updated_at = 1_600;
@@ -1653,7 +1649,7 @@ mod tests {
 
     #[test]
     fn run_meta_flags_default_for_older_files() {
-        // meta.json written before #107 has no `flags` key at all.
+        // A meta.json written before `flags` existed has no such key at all.
         let mut meta = RunMeta::new(
             "r".to_string(),
             "a".to_string(),

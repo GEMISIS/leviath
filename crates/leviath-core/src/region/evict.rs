@@ -77,11 +77,11 @@ impl Region {
     /// Enforce the SlidingWindow max_items limit by removing oldest entries.
     ///
     /// Behaviour depends on the configured [`EvictionStrategy`]:
-    /// - **PerItem** – evict one turn group at a time (original behaviour).
-    /// - **Bulk** – only evict when `len > max_items + overflow`, then evict
+    /// - **PerItem** - evict one turn group at a time; the default.
+    /// - **Bulk** - only evict when `len > max_items + overflow`, then evict
     ///   down to `max_items`. Between bulk evictions the prefix is stable,
     ///   which preserves Anthropic prompt-cache keys.
-    /// - **Compact** – set `needs_message_compaction` when `len > max_items + compact_count`.
+    /// - **Compact** - set `needs_message_compaction` when `len > max_items + compact_count`.
     ///   If the runtime hasn't compacted and `len > max_items + compact_count * 2`,
     ///   fall back to bulk eviction to prevent unbounded growth.
     pub(super) fn enforce_sliding_window(&mut self) {

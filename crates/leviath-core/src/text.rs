@@ -49,7 +49,7 @@ pub fn floor_char_boundary(s: &str, max: usize) -> usize {
 /// That totality is the point. A scanner walking byte offsets through text it
 /// did not author - HTML from a fetch, a model's fenced output, an SSE frame -
 /// cannot be read closely enough to prove every offset correct, and the failure
-/// mode for getting one wrong used to be aborting the daemon.
+/// mode for getting one wrong is a panic that takes the daemon with it.
 pub fn substring(s: &str, start: usize, end: usize) -> &str {
     let end = floor_char_boundary(s, end);
     let start = floor_char_boundary(s, start.min(end));
@@ -188,7 +188,8 @@ mod snippet_tests {
     }
 
     /// The reason this lives here rather than at a call site: a byte offset
-    /// landing inside a multi-byte character used to abort the daemon.
+    /// landing inside a multi-byte character panics a plain slice, and that
+    /// panic takes the daemon with it.
     #[test]
     fn multi_byte_characters_are_never_split() {
         let hay = "aaa🇯🇵🎉bbb needle ccc🚀ddd";
@@ -289,7 +290,7 @@ mod tests {
     fn truncate_at_boundary_never_splits_a_character() {
         assert_eq!(truncate_at_boundary("abc", 99), "abc");
         assert_eq!(truncate_at_boundary("abcdef", 3), "abc");
-        // The exact shape that panicked in issues #109/#115.
+        // The exact shape that panics a plain `&s[..n]`.
         assert_eq!(truncate_at_boundary("abc🎉def", 5), "abc");
         assert_eq!(truncate_at_boundary("🎉abc", 2), "");
         assert_eq!(truncate_at_boundary("", 5), "");

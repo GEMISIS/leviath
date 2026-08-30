@@ -2692,9 +2692,9 @@ mod tests {
 
     /// Replaying a journal has to land on exactly the state the run was in.
     ///
-    /// Issue #455 reports evictable regions drifting - a folded `logs` region
-    /// holding entries the live agent had already lost, and elsewhere fewer
-    /// than it held. This walks a region through the mutations a temporary
+    /// Evictable regions are where a replay drifts: a folded `logs` region
+    /// holding entries the live agent had already lost, or fewer than it
+    /// held. This walks a region through the mutations a temporary
     /// region actually performs (append, evict-oldest, evict-and-append in one
     /// step, clear) and checks the digest -> delta -> apply chain reproduces
     /// every intermediate state exactly.
@@ -2807,10 +2807,10 @@ mod tests {
     }
 
     /// The forward-compatibility guarantee, and the reason it is worth having:
-    /// adding a record kind used to truncate the journal for every older
-    /// reader. The lenient reader stopped at the first unknown record and
-    /// returned the prefix, so a build predating `InferenceUsage` would have
-    /// read a 0.3.10 journal as "header, then nothing" - with no error.
+    /// a reader that stopped at the first unknown record and returned the
+    /// prefix would truncate the journal for every older reader, so a build
+    /// predating `InferenceUsage` would read a 0.3.10 journal as "header, then
+    /// nothing" - with no error.
     #[test]
     fn an_unknown_record_kind_is_stepped_over_not_treated_as_the_end() {
         let (buf, _) = archive_with_an_unknown_record();

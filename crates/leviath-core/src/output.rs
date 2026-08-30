@@ -293,9 +293,9 @@ pub fn resolve_output_spec(
 ///
 /// A constrained spec closes with a precedence sentence, because without one
 /// this text and the stage's own system prompt are two peer instructions and
-/// which wins is model-dependent (issue #282: a stage prompt saying "lead with
-/// the diagnosis" beat `--output-instructions "reply with only the integer"` on
-/// some models and lost on others). By the time this runs, [`resolve_output_spec`]
+/// which wins is model-dependent: a stage prompt saying "lead with the
+/// diagnosis" beats `--output-instructions "reply with only the integer"` on
+/// some models and loses on others. By the time this runs, [`resolve_output_spec`]
 /// has already picked one winner per field - a caller's flag replaces the
 /// blueprint's line rather than joining it - so there is exactly one shape here
 /// and it is the one that should govern. The sentence is scoped to presentation
@@ -568,9 +568,9 @@ mod tests {
         assert!(described.contains("{\"root\": {}}"));
     }
 
-    /// Issue #282. Without this the spec and the stage's own system prompt are
-    /// two peer instructions, and a strongly-shaped stage prompt wins on some
-    /// models and loses on others.
+    /// Without this the spec and the stage's own system prompt are two peer
+    /// instructions, and a strongly-shaped stage prompt wins on some models
+    /// and loses on others.
     #[test]
     fn a_constrained_spec_says_it_outranks_the_stage_prompt() {
         let described = describe_spec(&OutputSpec {

@@ -101,8 +101,8 @@ pub enum Admission {
 /// is an ordinary move, and tool routing sends read results straight into one.
 /// A compact-history region sounds settled and gains an entry every time
 /// compaction fires. Inferring stability from the kind put churn at the front of
-/// the prefix and cost a measured 456,860 cache-write tokens against zero reads
-/// (issue #474).
+/// the prefix and cost a measured 456,860 cache-write tokens against zero
+/// reads.
 ///
 /// So the blueprint says. The author knows whether a region is set once at spawn
 /// or written every turn, and nothing else does.
