@@ -204,8 +204,8 @@ pub fn tool_name_spellings(name: &str) -> impl Iterator<Item = &str> {
 
 /// Redirects shell command execution off the host into a sandbox.
 ///
-/// The default (no executor) runs the command directly on the host - the exact
-/// prior behavior. An implementor (the daemon's `SandboxManager`) returns a
+/// The default (no executor) runs the command directly on the host. An
+/// implementor (the daemon's `SandboxManager`) returns a
 /// [`tokio::process::Command`] that runs `command` inside a container or Linux
 /// namespace instead. The implementor owns any per-stage sandbox state, so the
 /// same handle is used for the agent's whole life; only shell execution is

@@ -47,8 +47,7 @@ fn directory_listing(path: &std::path::Path) -> String {
 /// `None` when a `..` would climb past the root: that request is unresolvable
 /// whatever any allowlist says. `Path::components` already drops interior
 /// `.`, and every caller passes an absolute path, so no `CurDir` survives.
-/// Shared by [`resolve_within`] and [`BuiltinTools::resolve_outside`], which
-/// used to carry the same loop each.
+/// Shared by [`resolve_within`] and [`BuiltinTools::resolve_outside`].
 fn fold_parents(raw: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in raw.components() {
@@ -101,7 +100,7 @@ pub fn resolve_within(
         // Names the workspace and what to do instead. "Denied" on its own
         // sends an agent looking for a different way out, and it spends
         // iterations - which the stage's budget is charged for - finding
-        // that there isn't one (#373).
+        // that there isn't one.
         anyhow::bail!(
             "path '{}' would escape the working directory ({}). Use a path \
              inside the workspace instead - a relative path resolves \
@@ -190,16 +189,16 @@ impl BuiltinTools {
     /// 1. **Lexical.** `..` and `.` are folded out and the result must sit under
     ///    the workdir. Cheap, and it catches the obvious `../../etc/passwd`.
     /// 2. **Symbolic.** The deepest *existing* ancestor is canonicalized and the
-    ///    result re-checked. Without this the containment was purely textual: a
-    ///    symlink at `<workdir>/link` pointing at `/` made
+    ///    result re-checked. Without it the containment is purely textual: a
+    ///    symlink at `<workdir>/link` pointing at `/` makes
     ///    `read_file("link/etc/passwd")` normalize to a path that starts with the
-    ///    workdir, pass, and then be followed by `fs::read_to_string`. The same
-    ///    hole let `write_file` overwrite `~/.ssh/authorized_keys`.
+    ///    workdir, pass, and then be followed by `fs::read_to_string`, and the
+    ///    same hole lets `write_file` overwrite `~/.ssh/authorized_keys`.
     ///
-    /// That mattered most where the containment is load-bearing. Leviath's file
+    /// That matters most where the containment is load-bearing. Leviath's file
     /// tools run **on the host over the bind-mounted workdir** even when the
-    /// stage's `shell` is confined to a container - so a symlink the agent
-    /// created inside the container escaped the container through the file
+    /// stage's `shell` is confined to a container, so a symlink the agent
+    /// creates inside the container escapes the container through the file
     /// tools. It also matters for a freshly cloned repository, which is exactly
     /// what a coding agent operates on and which can carry a checked-in symlink
     /// pointing anywhere.
@@ -308,11 +307,9 @@ impl BuiltinTools {
         match std::fs::read_to_string(&path) {
             Ok(content) => cap_file_content(&content, MAX_READ_FILE_BYTES),
             // A directory is not a malformed path, it is the wrong tool: the
-            // model wanted to see what is in there. Measured across four
-            // research runs, `read_file(".")` was the single most common failed
-            // call, and the raw OS message ("Is a directory (os error 21)")
-            // names the problem without naming the fix, so the next call was
-            // usually another guess.
+            // model wanted to see what is in there. The raw OS message ("Is a
+            // directory (os error 21)") names the problem without naming the
+            // fix, so the next call is another guess.
             //
             // The listing comes back with the error rather than a pointer to
             // `list_dir`, because 21 of the bundled agents' stages grant
@@ -517,7 +514,7 @@ impl BuiltinTools {
 
     /// Whether `path` names something on disk.
     ///
-    /// A named `fn` rather than the closure this used to be. On Windows
+    /// A named `fn` rather than a closure at the call site. On Windows
     /// [`Self::detect_shell_for`] returns before probing anything, so a closure
     /// written at the call site would be a region the Windows coverage leg
     /// never executes; a `fn` can be handed to the seam directly by a test that
@@ -560,7 +557,8 @@ impl BuiltinTools {
         {
             // Only trust `$SHELL` when it actually exists - a stale or
             // sandbox-missing `$SHELL` (e.g. `/bin/zsh` in an environment that
-            // doesn't ship it) otherwise made every shell call fail to spawn.
+            // doesn't ship it) would otherwise make every shell call fail to
+            // spawn.
             // When it's missing, fall through to the known-path fallback list.
             let shell: &'static str = Box::leak(shell.into_boxed_str());
             return (shell, "-c");
@@ -616,7 +614,7 @@ impl BuiltinTools {
 
         // When a sandbox executor is attached, it builds a command that runs
         // inside a container / namespace (still targeting `workdir`); otherwise
-        // run the shell directly on the host - the exact prior behavior.
+        // run the shell directly on the host.
         let mut cmd = match &self.shell_executor {
             Some(executor) => executor.build_command(shell, flag, command, &workdir),
             None => {
@@ -629,9 +627,9 @@ impl BuiltinTools {
         //
         // Dropping a `Command` future detaches its process by default, so a
         // cancelled agent (or an elapsed timeout, which drops the future the
-        // same way) left its shell running: the run vanished from every listing
-        // while its command carried on writing to the workspace. `kill_on_drop`
-        // fixes the shell - but only the shell. Anything the shell itself
+        // same way) would leave its shell running: the run gone from every
+        // listing while its command carries on writing to the workspace.
+        // `kill_on_drop` covers the shell and only the shell. Anything it
         // started (`sleep 400 && …`) is a *grandchild*, gets reparented to init,
         // and keeps running. Putting the shell in its own process group and
         // signalling the group on drop takes the whole tree down with it.
@@ -648,9 +646,6 @@ impl BuiltinTools {
         // inherited the daemon's environment to begin with, which makes this a
         // no-op there rather than a special case.
         self.ctx.shell_env.apply(&mut cmd);
-        // An agent runs this dozens of times per run, and on Windows each spawn
-        // would otherwise be given a console window. Applied here rather than in
-        // either branch above so it covers the sandboxed command too.
         // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
         // command's output is still captured.
         cmd.stdout(std::process::Stdio::piped())
@@ -736,10 +731,10 @@ impl BuiltinTools {
 
 /// Largest slice of one stream (stdout or stderr) a single shell call keeps.
 ///
-/// Issue #252: `wait_with_output()` buffered a child's entire output in the
-/// daemon's memory with nothing to stop it, so a command that printed for its
-/// full 60-second budget was an accidental memory exhaustion - and on a fast
-/// local pipe that is gigabytes.
+/// Unbounded capture is a memory-exhaustion hole: `wait_with_output()` holds a
+/// child's entire output in the daemon's memory with nothing to stop it, and a
+/// command that prints for its full 60-second budget runs to gigabytes on a
+/// fast local pipe.
 ///
 /// Sized just above `MAX_SCRIPT_IO_BYTES` (900 KB in `daemon::script_host`),
 /// which caps the same text when it reaches a Rhai tool script, so this one is
@@ -752,9 +747,9 @@ pub(crate) const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 ///
 /// The null device is not a location in the filesystem, so a workspace check has
 /// nothing to say about it: writing there writes nowhere, and reading there
-/// reads nothing. Refusing it produced `path '/dev/null' would escape the
+/// reads nothing. Refusing it answers `path '/dev/null' would escape the
 /// working directory`, which is both wrong and, worse, unactionable - an agent
-/// told that spends turns guessing at a path it cannot fix (#373).
+/// told that spends turns guessing at a path it cannot fix.
 ///
 /// Deliberately *only* the null device, not `/dev/stdout` or `/dev/stderr`.
 /// Those are the daemon's own streams once a tool opens them by name, and a
@@ -771,12 +766,6 @@ pub fn is_null_device(path: &str) -> bool {
 }
 
 /// Most of a file `read_file` returns.
-///
-/// `shell` has been capped since it existed; `read_file` had no bound at all,
-/// so a large file went whole into the routed region and the ladder in
-/// `tool_results` either truncated it or dropped it as `[result omitted]` -
-/// which of the two you got depended on how full the region already was. That
-/// is an all-or-nothing cliff rather than a limit.
 ///
 /// Sized below [`MAX_CAPTURE_BYTES`] on purpose: shell output is usually a
 /// filtered answer, while a file read is raw material and a 256 KiB file is
