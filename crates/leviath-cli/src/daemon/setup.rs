@@ -424,13 +424,14 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         .world_mut()
         .insert_resource(FanOutSpawnerRes(Arc::new(fanout_spawner)));
 
-    // The tool allowlist policy (`policy.toml`), for the taint gate. A malformed
-    // file falls back to an empty policy (deny-by-clearance only) rather than
-    // failing daemon startup.
-    let policy = crate::commands::policy::load_policy().unwrap_or_default();
-    host.world_mut()
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::PolicyGate(policy));
+    // The taint gate's two files: the tool allowlist (`policy.toml`) and the
+    // scripted rules (`<config>/leviath/rules/*.rhai`). Reading them is this
+    // reload's first refresh, so the boot install and every later one go
+    // through the same seam and an edit reaches the next run without a daemon
+    // restart. A malformed `policy.toml` falls back to an empty policy
+    // (deny-by-clearance only) rather than failing startup.
+    let policy_reload = crate::daemon::policy_reload::PolicyReload::for_daemon();
+    policy_reload.install(host.world_mut());
 
     // Run-title generation settings; spawn only marks a run for titling when
     // `[title]` is enabled, and the dispatch system reads provider/model here.
@@ -439,14 +440,6 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         .insert_resource(leviath_runtime::title::TitleSettings(
             parts.config.title.clone(),
         ));
-
-    // Scripted gate rules (`<parts.config>/leviath/rules/*.rhai`), consulted by the gate
-    // after the static allowlist (a no-op checker when there are none).
-    let script_checker =
-        crate::daemon::gate_rules::build_gate_script_checker(&crate::commands::policy::rules_dir());
-    host.world_mut()
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::GateScriptRules(script_checker));
 
     // Structured observability (`[observability]`): replace the world's no-op
     // telemetry sink with the configured exporter, and - for OTLP - forward
@@ -475,6 +468,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_runs = parts.runs_dir.clone();
     let reload_pool = parts.mcp_pool.clone();
     let reload_provider_reload = provider_reload.clone();
+    let reload_policy = policy_reload.clone();
     host.set_reloader(Box::new(move |world, run_id| {
         // Pages a run back in with the current on-disk parts.config, matching what a
         // real restart would restore it with.
@@ -485,6 +479,9 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // provider the config names now (issue #684).
         reload_provider_reload.refresh(&reload_config);
         reload_provider_reload.install(world);
+        // A run paged back in is rebuilt from scratch, so it gets the policy
+        // the files name now rather than the one this daemon booted with.
+        reload_policy.refresh_into(world);
         let entity = crate::daemon::recovery::reload_run(
             world,
             crate::daemon::spawn::SpawnDeps {
@@ -565,6 +562,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let spawn_runs_dir = parts.runs_dir.clone();
     let spawn_reloader = reloader.clone();
     let spawn_provider_reload = provider_reload.clone();
+    let spawn_policy = policy_reload.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -592,6 +590,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // a credential comparison when nothing changed (issue #684).
         spawn_provider_reload.refresh(&config);
         spawn_provider_reload.install(world);
+        // Same for the taint gate: `lev policy add` and an edited `.rhai` rule
+        // are in force for this run, without a daemon restart. Both are a stat
+        // of two paths when nothing changed.
+        spawn_policy.refresh_into(world);
         let built = build_agent(
             world.world_mut(),
             crate::daemon::spawn::SpawnDeps {

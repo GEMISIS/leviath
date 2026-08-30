@@ -13,20 +13,6 @@ same list.
 
 ## Unreleased
 
-### Fixed
-
-- The daemon rebuilds its provider registry when `config.toml` changes, so a provider you
-  configure, replace or remove is picked up by the next run instead of at the next daemon
-  restart. The registry was built once at boot: a user who ran out of credits on one provider,
-  switched to another with `lev setup`, and started a new run watched it go to the old provider
-  and fail, and neither restarting `lev serve` nor removing the key helped - only killing the
-  daemon did. Every write path is covered, because they all write the same file: `lev setup`,
-  `PUT /api/config`, and an editor. A run already under way keeps the provider its current stage
-  started on, so nothing is swapped mid-stage, and a run parked because its provider had no
-  credits left moves to the new one when you `lev resume` it. A provider whose credentials
-  changed also has its circuit-breaker record cleared, so a replaced key is tried at once rather
-  than serving out the old key's cooldown.
-
 ### Breaking
 
 - `lev add` refuses an agent whose manifest name is not a single safe path
@@ -123,6 +109,33 @@ same list.
 
 ### Fixed
 
+- The daemon rebuilds its provider registry when `config.toml` changes, so a provider you
+  configure, replace or remove is picked up by the next run instead of at the next daemon
+  restart. The registry was built once at boot: a user who ran out of credits on one provider,
+  switched to another with `lev setup`, and started a new run watched it go to the old provider
+  and fail, and neither restarting `lev serve` nor removing the key helped - only killing the
+  daemon did. Every write path is covered, because they all write the same file: `lev setup`,
+  `PUT /api/config`, and an editor. A run already under way keeps the provider its current stage
+  started on, so nothing is swapped mid-stage, and a run parked because its provider had no
+  credits left moves to the new one when you `lev resume` it. A provider whose credentials
+  changed also has its circuit-breaker record cleared, so a replaced key is tried at once rather
+  than serving out the old key's cooldown.
+- `[security] allow_local_network`, `[limits] script_http_timeout_secs` and
+  `[limits] script_http_max_per_host` follow `config.toml` instead of being
+  whatever the daemon booted with. All three are copied into process-wide state
+  because the shared HTTP client the script tools go through has no handle on
+  the config, and the copy was written once at start-up. The per-agent
+  `allow_local_network` check next to it already read the reloaded file, so the
+  two halves disagreed in the direction that matters: turning the switch off
+  refused the URL a script named, and went on following a redirect from a
+  permitted URL down to loopback until the daemon was restarted.
+- The taint gate re-reads `policy.toml` and the `rules/*.rhai` beside it when they change, so a
+  rule you add is in force for the next run instead of at the next daemon restart. Both were read
+  once at startup. The scripted half failed silently on top of that: the rule sources were read
+  into the compiled checker, so editing a `.rhai` file changed nothing whatever and nothing said
+  so. `lev policy add` printing the rule it just wrote while the gate went on blocking the call was
+  the whole of the feedback. A `policy.toml` that will not parse keeps the policy already in force
+  and warns once, rather than dropping an allowlist because a save landed half-written.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
@@ -329,16 +342,6 @@ same list.
   writes a timeout into a fresh config. A config with `interaction_timeout_secs
   = 0` keeps working (it means unset). The tool result for a prompt that closed
   without an answer only mentions a timeout when one is configured.
-- `[security] allow_local_network`, `[limits] script_http_timeout_secs` and
-  `[limits] script_http_max_per_host` follow `config.toml` instead of being
-  whatever the daemon booted with. All three are copied into process-wide state
-  because the shared HTTP client the script tools go through has no handle on
-  the config, and the copy was written once at start-up. The per-agent
-  `allow_local_network` check next to it already read the reloaded file, so the
-  two halves disagreed in the direction that matters: turning the switch off
-  refused the URL a script named, and went on following a redirect from a
-  permitted URL down to loopback until the daemon was restarted.
-
 - A `[model_providers.<name>]` entry with `kind = "openai-compatible"` no
   longer loads with a key the endpoint does not read; the error names the
   entry, the keys, and the ones it does read. Unrecognised keys on a script
@@ -346,27 +349,6 @@ same list.
   carried them for an endpoint, where nothing read them: a misspelled
   `models` left the endpoint with no catalogue and a misspelled `headers`
   sent none, and the unknown-key warning could not see either.
-- `lev setup` no longer offers the Claude Code transport on its provider
-  list, and with it the reasoning-effort row, the terms dialog on save, and
-  the review-screen warning are gone. The transport itself stays: the
-  `claude_code_enabled`, `claude_code_effort` and `claude_code_binary` keys,
-  the `--claude-code` and `--claude-code-effort` flags, and the MCP import
-  from Claude Code's own config all work as before, and a config that
-  already has it on comes out of the wizard with it still on.
-- A blueprint with a negative integer, or an unknown key under `[sandbox]`,
-  no longer loads; the error names the key. `max_items = -1` used to read as
-  the largest possible cap, and a few keys (a gate's `max_attempts`, a nudge
-  `max`, `request_timeout_secs`, a `stuck_after_*` threshold) dropped the
-  value without a word. A misspelled sandbox key such as `netwrok = false`
-  was ignored, so the sandbox ran looser than the file said.
-- Every read from a remote peer is capped. A provider's buffered JSON reply is
-  cut at 64 MiB, one streamed frame (SSE or NDJSON) at 8 MiB, and one line
-  from an MCP stdio server at 1 MiB; the same caps cover MCP HTTP replies and
-  their event streams. Past a cap the inference or tool call fails with a
-  message naming the cap and the peer instead of the daemon buffering until
-  it is killed. The rest of an oversized MCP line is drained, so the next
-  call to that server still works. The caps are constants in
-  `leviath_net::read_caps`, not configuration.
 - `lev models list` and `lev models show` ask the configured providers what
   they serve, by default. Each provider is asked side by side, within five
   seconds; what it says replaces the compiled-in rows for it, and one that
@@ -473,7 +455,6 @@ same list.
   detected models offered as the default. `GET /api/config` reports each gateway's `kind`,
   `header_names` and `models`, `PUT /api/config` accepts `kind`, `headers` and `models`,
   and `POST /api/models/probe` (admin) asks a server what it serves before the write.
-
 - `cargo xtask prices` refreshes the vendor price table from OpenRouter's
   public catalogue cross-checked against LiteLLM, writing a row only where
   the two agree within 5% and refusing a move it does not believe. A weekly

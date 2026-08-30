@@ -176,6 +176,12 @@ file. Two details are deliberate:
 - A provider whose key changed has its circuit-breaker record cleared, so a key you just replaced is
   tried immediately instead of sitting out the rest of the old key's cooldown.
 
+The taint gate's own two files reload as well: `policy.toml` and the `.rhai` files in the `rules/`
+directory beside it. `lev policy add` writes a rule and the next run is gated against it, with no
+restart. The scripted half needed this most, because it failed in a way no restart advice covered:
+the rule sources were read into the compiled checker at boot, so editing a `.rhai` file changed
+nothing at all and the gate went on answering from the text it started with.
+
 Some changes do still need `lev daemon restart`. They set up connections and process-wide state
 once at startup rather than per run:
 

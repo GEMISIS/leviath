@@ -1064,3 +1064,8 @@ clearance   = "internal"
 Scripted rules live as `.rhai` files in a `rules/` directory beside `policy.toml`, so
 `~/Library/Application Support/leviath/rules/` on macOS and `~/.config/leviath/rules/` on Linux. See
 [Rhai tools](/docs/rhai-tools#policy-rules) and [Security](/docs/security#taint-tracking-experimental).
+
+Both are re-read when they change: add an allowlist rule, edit a `.rhai` rule, or delete one, and
+the next run is gated against what the files say now. No daemon restart. A `policy.toml` that will
+not parse is ignored in favour of the policy already in force, so a half-typed edit never quietly
+widens or narrows the gate.

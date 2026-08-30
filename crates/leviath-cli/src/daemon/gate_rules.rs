@@ -14,8 +14,21 @@ use leviath_runtime::taint::ScriptRuleChecker;
 /// unconditionally. Each script receives a `context` map
 /// (`tool` / `target` / `taint_level`) and should evaluate to `true` to allow the
 /// call; the first script that allows wins and its file stem is the rule name.
+///
+/// The sources are read once, here, and captured by the returned closure, so a
+/// checker built from a directory is a snapshot of it. That is why the daemon
+/// holds the sources too (`policy_reload`): re-reading them is how an edited
+/// rule reaches a run without a restart.
 pub(crate) fn build_gate_script_checker(rules_dir: &Path) -> Arc<ScriptRuleChecker> {
-    let scripts: Vec<(String, String)> = std::fs::read_dir(rules_dir)
+    checker_from_scripts(read_rule_scripts(rules_dir))
+}
+
+/// The `(rule name, source)` pairs in `rules_dir`, in file-name order so two
+/// reads of an unchanged directory compare equal and the "first rule that
+/// allows wins" verdict does not depend on the order the filesystem hands
+/// entries back. A missing or unreadable directory reads as no rules.
+pub(crate) fn read_rule_scripts(rules_dir: &Path) -> Vec<(String, String)> {
+    let mut scripts: Vec<(String, String)> = std::fs::read_dir(rules_dir)
         .ok()
         .into_iter()
         .flatten() // ReadDir → Result<DirEntry>
@@ -35,6 +48,13 @@ pub(crate) fn build_gate_script_checker(rules_dir: &Path) -> Arc<ScriptRuleCheck
                 .map(|source| (name, source))
         })
         .collect();
+    scripts.sort();
+    scripts
+}
+
+/// Compile `scripts` into the checker the gate consults. Empty ⇒ a checker that
+/// never allows anything, so the daemon can install one unconditionally.
+pub(crate) fn checker_from_scripts(scripts: Vec<(String, String)>) -> Arc<ScriptRuleChecker> {
     if scripts.is_empty() {
         return Arc::new(|_tool, _target, _taint| None);
     }
@@ -103,6 +123,38 @@ mod tests {
         let checker = build_gate_script_checker(dir.path());
         assert!(checker("send_email", Some("ops@corp"), TaintLevel::Internal).is_some());
         assert!(checker("send_email", Some("ops@corp"), TaintLevel::Private).is_none());
+    }
+
+    #[test]
+    fn a_built_checker_is_a_snapshot_of_the_directory() {
+        // Why `policy_reload` exists: the sources live in the closure, so a
+        // checker built at boot answers from the file as it was at boot no
+        // matter what is written over it afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(dir.path(), "company.rhai", r#"context.tool == "shell""#);
+        let checker = build_gate_script_checker(dir.path());
+        write_rule(
+            dir.path(),
+            "company.rhai",
+            r#"context.tool == "send_email""#,
+        );
+        assert_eq!(
+            checker("send_email", None, TaintLevel::Public),
+            None,
+            "an already-built checker cannot see the edit; something has to rebuild it"
+        );
+    }
+
+    #[test]
+    fn rule_sources_come_back_in_file_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(dir.path(), "zulu.rhai", "false");
+        write_rule(dir.path(), "alpha.rhai", "true");
+        let names: Vec<String> = read_rule_scripts(dir.path())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string(), "zulu".to_string()]);
     }
 
     #[test]
