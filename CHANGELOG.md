@@ -159,6 +159,25 @@ same list.
   effect on the next load, which was true of script providers and not of MCP.
   A global server whose headers interpolate is reconnected when the list moves,
   which is what puts the new value in front of the next run.
+- The `[limits]` the daemon's world is built with, and the whole `[title]`
+  section, now follow `config.toml` while the daemon runs. That covers the
+  inference pools (`max_concurrent_inferences` and its `_by_model` and
+  `_by_provider` tables), the tool lane (`max_concurrent_tools`),
+  `stream_inference`, the stall and wedge watchdogs, the provider circuit
+  breaker, the inference retry schedule, `dead_cycles_before_relief`,
+  `notify_spend_usd`, `max_agents_per_run`, `finished_retention_secs` and
+  `interaction_timeout_secs`. Each was read once at boot and then fixed for the
+  life of the process, so editing any of them and starting a run did nothing at
+  all, with nothing to say so. Most of them reach the runs already going, since
+  the engine reads them on every pass; the ones that only apply to what starts
+  next are the ones nothing can change retroactively, such as a request already
+  on the wire or a prompt already waiting. Lowering a concurrency limit takes
+  back the slots nobody is holding and then narrows as the requests and tool
+  batches in flight finish, so no work is cancelled to make room for the new
+  number. Turning `[title]` on had been worse than doing nothing: spawn already
+  read a fresh config, so the run was marked for a title, and the part that
+  makes titles read the boot-time setting, saw titling switched off, and dropped
+  the marker in silence. Both halves read the same file now.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
