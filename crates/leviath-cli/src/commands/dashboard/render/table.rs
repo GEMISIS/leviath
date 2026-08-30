@@ -436,12 +436,19 @@ impl Dashboard {
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" back to the prompt"),
                 ]),
+                // The response box since #708: Enter breaks the line and
+                // Ctrl+Enter sends, with the Send button for a terminal
+                // that cannot tell the two apart.
                 Some(InteractionKind::FreeText) | None => Line::from(vec![
                     Span::styled(
-                        "[Enter]",
+                        "[^Enter]",
                         Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" send  "),
+                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" newline  "),
+                    Span::styled("[Tab]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Send button  "),
                     Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" scroll document  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
@@ -1205,7 +1212,11 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("send"), "{buf}");
+        // Enter is a newline in the box since #708; the bar must not say it sends.
+        assert!(buf.contains("[^Enter] send"), "{buf}");
+        assert!(buf.contains("[Enter] newline"), "{buf}");
+        assert!(buf.contains("[Tab] Send button"), "{buf}");
+        assert!(!buf.contains("[Enter] send"), "{buf}");
         assert!(buf.contains("[PgUp/PgDn] scroll document"), "{buf}");
     }
 
