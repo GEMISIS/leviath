@@ -341,6 +341,11 @@ spend: capping one provider at 1 leaves every other provider's pool untouched, w
 global number cannot do. A provider that is not named there has no pool of its own - the global
 fallback is a per-model number and is not applied a second time per provider.
 
+Pool sizes reload with `config.toml`, so a new number applies to the next request that asks for a
+slot and no daemon restart is involved. Raising a cap is immediate: the extra slots go to whoever is
+already waiting on that pool. Lowering one takes back only the slots nobody is holding, so the pool
+narrows as requests finish and nothing in flight is interrupted.
+
 The smallest a pool can be is 1. A configured `0` is read as `1`, since a pool of nothing would
 park every request on it forever under the backpressure rule below - which is exactly the shape
 nothing ever reports.
@@ -361,7 +366,8 @@ sees every model pool with room in it.
 ## The tool lane
 
 Tools have a pool of their own: `[limits] max_concurrent_tools` (8 by default) caps how many
-agents' tool batches run at once across the whole daemon.
+agents' tool batches run at once across the whole daemon. It resizes on a config reload under the
+same rule as the inference pools: wider at once, narrower as the batches in flight finish.
 
 The interesting part is waiting. Some things a batch can wait for have no time limit at all: a
 tool-approval prompt, an `ask_user`, a `wait_for_agent` that only ends when another run finishes.

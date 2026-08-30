@@ -23,9 +23,11 @@
 //! process-wide network policy, which is mirrored into atomics the shared
 //! blocking HTTP client reads (`script_host::mirror_process_policy`).
 //!
-//! What is still established once at boot is MCP connections: those hold live
-//! connections, and adding an MCP server still needs a daemon restart; see
-//! `daemon.md`.
+//! The global `[[mcp_servers]]` are reconciled against the reloaded config by
+//! the `mcp_reload` module beside this one, so a server added, edited or
+//! removed here reaches the next run too. What still comes from the config the
+//! daemon booted with is `[limits] mcp_idle_disconnect_secs`, which the MCP
+//! pool is built with; see `daemon.md`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};

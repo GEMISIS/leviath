@@ -197,6 +197,10 @@ sequenceDiagram
 
 Base path `/api`; all JSON unless noted.
 
+Every route below can answer `401` when the bearer token is missing or wrong, so a client has to
+handle that on all of them rather than on a few. The body is a line of plain text, not JSON.
+`GET /`, the fixed status page, is the only route that does not check a token.
+
 | Method · Path | Purpose |
 |---|---|
 | `GET /api/runs` · `DELETE /api/runs` | List runs: paginated, sortable, searchable · prune many at once. See [below](#listing-and-searching-runs) |
@@ -218,7 +222,7 @@ Base path `/api`; all JSON unless noted.
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
-| `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` *(admin)* · `POST /{name}/test` *(admin)* | MCP servers. Add, remove, login and test need admin: each connects to a server, opens a browser, or spawns a command |
+| `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
 | `POST /api/update` *(admin)* · `GET /api/update/jobs/{id}` | Carry that plan out, and read where it got to. See [below](#pressing-the-button) |

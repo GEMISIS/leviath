@@ -56,6 +56,11 @@ never fails or reroutes a stage. See [nudging](/docs/stages#nudging).
 **Interaction point**: a place in a blueprint where the run stops and asks a person something. Some
 older text calls these checkpoints. See [Human-in-the-loop](/docs/interaction).
 
+**Deny with feedback**: refusing a tool call and saying what the model should do instead. The text
+reaches the model inside the refused call's tool result, so its next turn is a redirect rather than
+a guess. The dashboard offers it on an approval prompt, `lev respond` takes `--feedback`, and the
+API takes `feedback`. See [Human-in-the-loop](/docs/interaction).
+
 **Seed command**: a shell command that fills a context region before the run starts.
 
 **Spawn**: starting a run. Also used for the moment it starts, as in "resolved at spawn", meaning
@@ -131,6 +136,12 @@ in order to offer its tools to agents.
 
 **Provider**: a model backend such as Anthropic, OpenAI, or Ollama. See
 [Providers](/docs/providers).
+
+**Gateway**: a server that speaks OpenAI's chat API in front of whatever models it holds, such as
+llama.cpp, LM Studio, or vLLM. You add one as a `[model_providers.<name>]` entry with
+`kind = "openai-compatible"` and a `base_url`. It is a route to models rather than a model family,
+so Leviath asks it what it serves. See
+[custom OpenAI-compatible providers](/docs/providers#custom-openai-compatible-providers).
 
 ## Safety
 

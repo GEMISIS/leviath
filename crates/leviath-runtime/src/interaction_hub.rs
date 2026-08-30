@@ -54,8 +54,10 @@ pub struct InteractionHub {
     wake: Arc<OnceLock<Arc<Notify>>>,
     /// How long an open request may go unanswered before the hub resolves it
     /// itself, in seconds. `0` (the default) waits indefinitely: it is how
-    /// [`set_timeout_secs`](Self::set_timeout_secs) stores `None`. Set once at
-    /// daemon start from `[limits] interaction_timeout_secs`.
+    /// [`set_timeout_secs`](Self::set_timeout_secs) stores `None`. Written
+    /// from `[limits] interaction_timeout_secs` on every config reload, and
+    /// read when a request opens, so one already waiting keeps the deadline it
+    /// opened with.
     timeout_secs: Arc<AtomicU64>,
 }
 

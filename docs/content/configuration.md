@@ -193,7 +193,12 @@ cerebras = 1                     # every model this provider serves, together
 | `notify_spend_usd` | empty | Dollar figures to be told about while a run is still going. See below |
 | `max_agents_per_run` | `0` | Most agents one run may create, sub-agents included. `0` is no ceiling. See below |
 
-Eleven of those need more than a table cell.
+The daemon applies this whole section when `config.toml` changes, so a new number is in force for
+the next run with no restart, and most of them reach a run already going. The exception is
+`mcp_idle_disconnect_secs`: the MCP pool is built with it at start-up. See
+[the daemon](/docs/daemon#config-changes-take-effect-on-the-next-run) for which is which.
+
+Some of these need more than a table cell.
 
 **`stream_inference`** asks a model that can stream to stream. It changes nothing an agent sees:
 the chunks are folded back into one finished turn before anything reads it, because half a sentence
@@ -945,7 +950,8 @@ model    = "claude-haiku-4-5-20251001"
 ```
 
 `enabled` defaults to `true`. `provider` and `model` fall back to the run's own first-stage
-provider and model.
+provider and model. The section reloads with the rest of the file, so turning titles on or off
+reaches the next run with no daemon restart.
 
 ## `[webhook]`
 
