@@ -692,8 +692,9 @@ mod tests {
         assert_eq!(names, ["alpha", "zeta"], "name order, no broken entry");
 
         let zeta = creds.iter().find(|c| c.name == "zeta").expect("zeta");
-        let spec =
-            leviath_runtime::provider_creds::EndpointSpec::from_creds(zeta).expect("an endpoint");
+        let spec = leviath_runtime::provider_creds::EndpointSpec::from_creds(zeta)
+            .expect("decodes")
+            .expect("an endpoint");
         assert_eq!(spec.base_url, "http://localhost:8080/v1", "trimmed");
         assert_eq!(zeta.api_key, None, "a blank key is no key");
         assert_eq!(spec.headers, vec![("X-Org".to_string(), "r".to_string())]);
