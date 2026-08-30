@@ -163,7 +163,9 @@ impl ConfigReloader {
     /// error) does not fail the caller - it records the fault and returns the
     /// last good config, so a broken file degrades to "your last saved config"
     /// rather than a broken spawn. [`health`](Self::health) is how anyone
-    /// finds out that happened.
+    /// finds out that happened. The broken file's mtime is recorded either
+    /// way, so the warning fires once per bad save rather than on every spawn,
+    /// and the next save moves the mtime again and is read.
     pub(crate) fn current(&self) -> Arc<Config> {
         self.refresh().config.clone()
     }
@@ -240,10 +242,14 @@ impl ConfigReloader {
                 }
             }
             Err(fault) => {
-                // Keep the last good config *and* its mtime, so the running
-                // config stays exactly what it was. Only the "mtime last
-                // looked at" moves, which is what stops this from re-reading
-                // and re-warning on every spawn.
+                // Keep the config already in force; only the "mtime last
+                // looked at", recorded above whichever way this went, moves.
+                // That is what makes the warning fire once per broken save
+                // rather than once per spawn: without it the file would be
+                // re-stat'd, re-read, re-parsed and re-warned on every spawn
+                // and every `lev serve` request until somebody fixed it, which
+                // is a log line per page load. The *next* save moves the mtime
+                // again, so a fixed file still reloads.
                 let summary = fault.summary();
                 let kind = fault.kind.as_str();
                 if cached.fault.is_none() {
@@ -488,6 +494,47 @@ mod tests {
         bump_mtime(&path);
         let _ = reloader.current();
         assert_eq!(recorded(), vec![true], "a broken save applies nothing");
+    }
+
+    /// A file left broken is read once, not on every spawn. It used to keep
+    /// the stale mtime, so every later `current()` re-stat'd it, re-read it,
+    /// re-parsed it and warned again - which for `lev serve` is a log line per
+    /// page load, and is the opposite of what the code's own comment claimed.
+    #[test]
+    fn a_file_left_broken_is_not_re_read_on_every_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, &config_with_grant("cto", "~/good"));
+        let reloader =
+            ConfigReloader::new(path.clone(), Config::load_from_path_public(&path).unwrap());
+        let good = reloader.current();
+
+        write(&path, "broken : :");
+        bump_mtime(&path);
+        let first = reloader.current();
+        assert!(
+            Arc::ptr_eq(&first, &good),
+            "the broken save keeps the config already in force"
+        );
+
+        // What actually stops the re-read: the mtime the reloader is now
+        // comparing against is the broken file's, so the next `current()`
+        // short-circuits on the mtime check instead of reading and parsing
+        // again. Keeping the good file's mtime here is what made every later
+        // call re-read and re-warn.
+        assert_eq!(
+            reloader
+                .cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .mtime,
+            file_mtime(&path),
+            "the broken file's mtime is recorded, which is what stops the re-read"
+        );
+        assert!(
+            Arc::ptr_eq(&reloader.current(), &good),
+            "and the config in force is still the last good one"
+        );
     }
 
     #[test]

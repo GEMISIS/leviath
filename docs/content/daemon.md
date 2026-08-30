@@ -214,7 +214,8 @@ nothing at all and the gate went on answering from the text it started with.
 
 `[observability]` reloads too. Turn export on, point it at a different collector, rename the
 service, or turn it off, and the next run emits into what the file says now. The verbosity of the
-daemon's own log is not part of that; it is one of the two things below that still need a restart.
+daemon's own log is not part of that; it is one of the three things below that still need a
+restart.
 
 ### A run in progress reads them again when it resumes
 
@@ -237,12 +238,17 @@ batch of tool calls. Nothing the run has already spent or been granted is reset 
 total, the approvals you granted for the run or the stage, and the blueprint's own per-stage
 permissions all stay as they were.
 
-Some changes do still need `lev daemon restart`, and after this release neither of them is a
-setting in `config.toml`. One is how verbose the daemon's own log is: its `tracing` subscriber is
-installed from `--verbose` on the command line before any config is read, and a process can install
-one only once. The other is a provider key you exported as an environment variable instead of
-writing it to the file: the daemon inherited its environment when it started, and an export in your
-shell afterwards never reaches it.
+Some changes do still need `lev daemon restart`. After this release the list is three items long,
+and only one of them is a setting in `config.toml`:
+
+- `[limits] mcp_idle_disconnect_secs`. It is handed to the MCP pool when the pool is built and
+  nothing re-reads the config into it, so a blueprint's per-agent servers keep the grace window the
+  daemon started with.
+- How verbose the daemon's own log is. Its `tracing` subscriber is installed from `--verbose` on the
+  command line before any config is read, and a process can install one only once.
+- A provider key you exported as an environment variable instead of writing it to the file. The
+  daemon inherited its environment when it started, and an export in your shell afterwards never
+  reaches it.
 
 `[providers] fallback_order` needs no restart either. It is per-run policy, so it reloads like
 everything else and a new fallback provider applies on the next `lev run`.
@@ -280,6 +286,8 @@ draining rather than by cancelling work you are paying for.
 because spawn already read a fresh config, and then the part that actually makes titles read the
 value from boot, saw titling switched off, and dropped the marker without a word. Both halves read
 the same file now.
+
+The list is a description of the code, not a policy. Anything not on it reloads.
 
 ## Control surface
 

@@ -194,6 +194,16 @@ same list.
   successful load. It is recorded either way now, so a broken file costs one
   `stat` per call and produces one log line per save. Loading again is logged
   too, which it never was.
+- The daemon docs' list of settings that need `lev daemon restart` had gone stale in both
+  directions: it named nine `[limits]` while ten more were boot-only and unmentioned, and it went on
+  naming settings that had since been made to reload. One entry is left on it,
+  `[limits] mcp_idle_disconnect_secs`, which is handed to the MCP pool when the pool is built and
+  never re-read. Two tests keep the page and the field doc comments in step, so the next setting
+  that changes side cannot leave the list behind.
+- `lev models list` and `GET /api/models` answer from `config.toml` as it stands when you ask, so
+  what they show is what your next run can use rather than what a running daemon can reach. The
+  docs say so, because a provider appearing in the listing while a run could not reach it was
+  reported as a bug in the listing (#684).
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
