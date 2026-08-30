@@ -24,6 +24,7 @@ fn request() -> InferenceRequest {
             role: "user".to_string(),
             content: "hi".to_string().into(),
             cache_breakpoint: false,
+            reasoning: None,
         }],
         model: "some-internal-model".to_string(),
         max_tokens: 16,

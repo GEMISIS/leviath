@@ -713,6 +713,7 @@ pub(crate) fn dispatch_tools(
                 &merged,
                 routing.map(|c| &c.routing),
                 sensitivities.map(|s| &s.0),
+                result.reasoning.clone(),
             );
             commands
                 .entity(entity)
@@ -749,6 +750,7 @@ pub(crate) fn dispatch_tools(
                 &merged,
                 routing.map(|c| &c.routing),
                 sensitivities.map(|s| &s.0),
+                result.reasoning.clone(),
             );
             commands
                 .entity(entity)

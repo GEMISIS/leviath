@@ -127,6 +127,7 @@ pub fn restore_agent(
                         metadata: e.metadata.clone(),
                         kind: e.kind.clone(),
                         key: e.key.clone(),
+                        reasoning: e.reasoning.clone(),
                     })
                     .collect();
                 // Rebuild the taint alongside the content. Assigning `content`
@@ -338,6 +339,13 @@ pub fn restore_pending_batch(
         &merged,
         routing.as_ref(),
         sensitivities.as_ref(),
+        // A recovered batch is rebuilt from journal records, which carry the
+        // calls and their results but not the turn's opaque reasoning token.
+        // Losing it costs one turn of chain-of-thought continuity after a
+        // crash; the blob is optional on the wire, so the replay stays valid.
+        // The ordinary pause and resume path goes through the context
+        // snapshot, which does carry it.
+        None,
     );
 }
 
@@ -433,6 +441,7 @@ mod tests {
                             metadata: None,
                             key: None,
                             taint: Default::default(),
+                            reasoning: None,
                         },
                         RegionEntrySnapshot {
                             content: "prior assistant".to_string(),
@@ -441,6 +450,7 @@ mod tests {
                             metadata: None,
                             key: None,
                             taint: Default::default(),
+                            reasoning: None,
                         },
                     ],
                     description: None,
@@ -458,6 +468,7 @@ mod tests {
                         metadata: None,
                         key: None,
                         taint: Default::default(),
+                        reasoning: None,
                     }],
                     description: None,
                 },

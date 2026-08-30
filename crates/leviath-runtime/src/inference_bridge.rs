@@ -499,6 +499,7 @@ mod tests {
                 reported_cost_usd: None,
             },
             finish_reason: leviath_providers::FinishReason::Complete,
+            reasoning: None,
         }
     }
 
@@ -782,6 +783,7 @@ mod tests {
             role: "user".to_string(),
             content: "x".repeat(bytes).into(),
             cache_breakpoint: false,
+            reasoning: None,
         });
         request
     }
@@ -800,6 +802,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "m".to_string(),
             max_tokens: 10,
@@ -1046,12 +1049,14 @@ mod tests {
                     tool_calls: Vec::new(),
                     tokens: None,
                     finish_reason: None,
+                    reasoning: None,
                 }),
                 Ok(leviath_providers::provider::StreamChunk {
                     delta: String::new(),
                     tool_calls: Vec::new(),
                     tokens: Some(leviath_providers::TokenUsage::new(7, 0, 0, 3)),
                     finish_reason: Some(leviath_providers::FinishReason::Complete),
+                    reasoning: None,
                 }),
             ])))
         }

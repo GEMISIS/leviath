@@ -556,6 +556,7 @@ mod tests {
                 reported_cost_usd: None,
             },
             finish_reason: FinishReason::Complete,
+            reasoning: None,
         }
     }
 

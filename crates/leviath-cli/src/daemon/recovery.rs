@@ -1058,6 +1058,7 @@ mod tests {
                     metadata: None,
                     key: None,
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],
@@ -1452,6 +1453,7 @@ mod tests {
                         metadata: None,
                         key: None,
                         taint: Default::default(),
+                        reasoning: None,
                     },
                     leviath_core::run_meta::RegionEntrySnapshot {
                         content: "Wrote it".to_string(),
@@ -1464,6 +1466,7 @@ mod tests {
                         metadata: None,
                         key: None,
                         taint: Default::default(),
+                        reasoning: None,
                     },
                 ],
                 description: None,

@@ -32,6 +32,7 @@ pub(crate) fn to_inference_result(
         tokens_used: response.tokens_used.total_tokens,
         cut_off_at: (response.finish_reason == leviath_providers::FinishReason::TokenLimit)
             .then_some(response.tokens_used.completion_tokens),
+        reasoning: response.reasoning.clone(),
     }
 }
 
@@ -784,7 +785,7 @@ pub(crate) fn handle_empty_response(
             && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
         {
             progress.cut_off_nudges += 1;
-            store_text_reply(&mut window, &infer.response);
+            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
             inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
             commands
                 .entity(entity)
@@ -801,14 +802,14 @@ pub(crate) fn handle_empty_response(
             // told "you have not written the file yet" with its own unwritten
             // draft in front of it can split it; one with nothing in front of
             // it drafts the whole thing again.
-            store_text_reply(&mut window, &infer.response);
+            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            store_text_reply(&mut window, &infer.response);
+            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
                 .and_then(|s| s.context_layout.as_ref())
@@ -858,16 +859,17 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
 /// with nothing in it (a cut-off tool call, an empty answer) leaves no entry:
 /// an empty assistant message is noise to the next request and some
 /// providers refuse it outright.
-fn store_text_reply(window: &mut ContextWindow, text: &str) {
+fn store_text_reply(window: &mut ContextWindow, text: &str, reasoning: Option<String>) {
     if text.trim().is_empty() {
         return;
     }
     let tokens = leviath_core::estimate_tokens(text);
-    let _ = window.add_typed_entry(
+    let _ = window.add_assistant_turn(
         "conversation",
         leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
         text.to_string(),
         tokens,
+        reasoning,
     );
 }
 

@@ -574,6 +574,7 @@ async fn inference_check(provider: &dyn Provider, model: &str) -> Check {
             role: "user".to_string(),
             content: PROBE_PROMPT.into(),
             cache_breakpoint: false,
+            reasoning: None,
         }],
         model: model.to_string(),
         max_tokens: PROBE_MAX_TOKENS.min(caps.max_output_tokens),

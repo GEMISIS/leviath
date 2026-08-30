@@ -292,11 +292,13 @@ pub(crate) fn compaction_request(
                 role: "system".to_string(),
                 content: config.system_prompt().to_string().into(),
                 cache_breakpoint: false,
+                reasoning: None,
             },
             leviath_providers::Message {
                 role: "user".to_string(),
                 content: config.user_prompt(content, region_name).into(),
                 cache_breakpoint: false,
+                reasoning: None,
             },
         ],
         model: config.model.clone(),

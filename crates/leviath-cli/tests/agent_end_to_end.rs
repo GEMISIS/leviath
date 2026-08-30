@@ -129,6 +129,7 @@ impl Provider for WritesThenAnswers {
                 reported_cost_usd: None,
             },
             finish_reason: FinishReason::Stop,
+            reasoning: None,
         })
     }
 

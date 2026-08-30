@@ -164,6 +164,7 @@ pub(crate) mod fixtures {
             tool_calls: vec![],
             tokens_used: token_usage(),
             finish_reason: FinishReason::Complete,
+            reasoning: None,
         }
     }
 

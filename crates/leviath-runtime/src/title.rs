@@ -314,6 +314,7 @@ fn title_request(task: &str, provider: &str, model: &str) -> InferenceRequest {
                 .to_string()
                 .into(),
             cache_breakpoint: false,
+            reasoning: None,
         }],
         model: model.to_string(),
         max_tokens: TITLE_MAX_TOKENS,
@@ -835,6 +836,7 @@ mod tests {
                         reported_cost_usd: None,
                     },
                     finish_reason: self.finish_reason.clone(),
+                    reasoning: None,
                 }),
                 Err(msg) => Err(ProviderError::Other(msg.to_string())),
             }
@@ -1167,6 +1169,7 @@ mod tests {
                     reported_cost_usd: None,
                 },
                 finish_reason: leviath_providers::FinishReason::Complete,
+                reasoning: None,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -1272,6 +1275,7 @@ mod tests {
                 tool_calls: vec![],
                 tokens_used: leviath_providers::TokenUsage::new(1, 0, 0, 1),
                 finish_reason: leviath_providers::FinishReason::Complete,
+                reasoning: None,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

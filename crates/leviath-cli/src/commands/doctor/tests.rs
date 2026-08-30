@@ -77,6 +77,7 @@ impl Provider for StubProvider {
                     reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
+                reasoning: None,
             }),
             Err(e) => Err(ProviderError::ApiError(e.to_string())),
         }

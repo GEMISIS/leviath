@@ -621,11 +621,13 @@ mod tests {
                     role: "system".to_string(),
                     content: "You are helpful.".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "gpt-5.4-mini".to_string(),
@@ -736,6 +738,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             // A model the table believes takes a temperature, so one is sent
             // and the refusal is what removes it.
@@ -1134,6 +1137,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gpt-5.4".to_string(),
             max_tokens: 100,

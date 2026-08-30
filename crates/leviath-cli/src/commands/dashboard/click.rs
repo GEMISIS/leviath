@@ -424,6 +424,7 @@ mod tests {
                     metadata: None,
                     key: None,
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],

@@ -2529,6 +2529,7 @@ mod tests {
             metadata: None,
             key: None,
             taint: Default::default(),
+            reasoning: None,
         };
         agent.context_snapshot = Some(std::sync::Arc::new(crate::runstate::ContextSnapshot {
             stage_name: "main".to_string(),

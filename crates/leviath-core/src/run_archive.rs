@@ -1138,6 +1138,7 @@ mod tests {
             metadata: None,
             key: None,
             taint: Default::default(),
+            reasoning: None,
         }
     }
 
@@ -2715,6 +2716,7 @@ mod tests {
                         kind: crate::region::EntryKind::Text,
                         metadata: None,
                         taint: crate::taint::TaintLevel::Public,
+                        reasoning: None,
                     })
                     .collect(),
                 description: None,

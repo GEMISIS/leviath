@@ -866,6 +866,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         )
         .with_reported_cost(reported_cost_usd),
         finish_reason: parse_openai_finish_reason(finish_reason),
+        reasoning: None,
     })
 }
 
@@ -967,6 +968,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                             .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
                         ),
                         finish_reason: None,
+                        reasoning: None,
                     })));
                 }
                 continue;
@@ -1048,6 +1050,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                 tool_calls: tool_call_deltas,
                 tokens,
                 finish_reason,
+                reasoning: None,
             })));
         }
     }
@@ -1256,11 +1259,13 @@ mod tests {
                     role: "system".into(),
                     content: "You are helpful".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "user".into(),
                     content: "Hello".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "gpt-4".into(),
@@ -1322,6 +1327,7 @@ mod tests {
                 role: "assistant".to_string(),
                 content: crate::provider::MessageContent::Text("still working".to_string()),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "qwen3.8".to_string(),
             max_tokens: 64,
@@ -1359,6 +1365,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "qwen3.8".to_string(),
             max_tokens: 64,
@@ -1388,6 +1395,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let result = crate::provider::Message {
             role: "user".to_string(),
@@ -1399,6 +1407,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let request = InferenceRequest {
             system: vec![crate::provider::SystemBlock {
@@ -1431,6 +1440,7 @@ mod tests {
                 role: "assistant".to_string(),
                 content: crate::provider::MessageContent::Text("still working".to_string()),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "qwen3.8".to_string(),
             max_tokens: 64,
@@ -1470,6 +1480,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let call = crate::provider::Message {
             role: "assistant".to_string(),
@@ -1484,6 +1495,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let answer = crate::provider::Message {
             role: "user".to_string(),
@@ -1495,6 +1507,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let request = InferenceRequest {
             system: vec![crate::provider::SystemBlock {
@@ -2508,6 +2521,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "user".to_string(),
@@ -2517,6 +2531,7 @@ mod tests {
                         is_error: false,
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "google/gemini-3.1-pro-preview".to_string(),
@@ -2588,6 +2603,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gemini-3.1-pro-preview".to_string(),
             max_tokens: 100,
@@ -2633,6 +2649,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gemini-3.1-pro-preview".to_string(),
             max_tokens: 100,
@@ -2674,6 +2691,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gpt-5.5".to_string(),
             max_tokens: 100,
@@ -2774,6 +2792,7 @@ mod tests {
                     role: "user".into(),
                     content: MessageContent::Text("do it".into()),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "assistant".into(),
@@ -2784,6 +2803,7 @@ mod tests {
                         thought_signature: Some("sig".into()),
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "gemini-3.5-flash".into(),
@@ -2808,6 +2828,7 @@ mod tests {
                     role: "user".into(),
                     content: MessageContent::Text("do it".into()),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "user".into(),
@@ -2817,6 +2838,7 @@ mod tests {
                         is_error: false,
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             ..call_only.clone()
@@ -2836,6 +2858,7 @@ mod tests {
                         thought_signature: Some("sig".into()),
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "user".into(),
@@ -2845,6 +2868,7 @@ mod tests {
                         is_error: false,
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             ..call_only.clone()
@@ -2887,6 +2911,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gemini-3.5-flash".into(),
             max_tokens: 64,
@@ -2913,6 +2938,7 @@ mod tests {
                 role: "user".into(),
                 content: MessageContent::Text("hello".into()),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gemini-3.5-flash".into(),
             max_tokens: 64,
@@ -2944,6 +2970,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let req = InferenceRequest {
             system: vec![],
@@ -2952,6 +2979,7 @@ mod tests {
                     role: "user".into(),
                     content: MessageContent::Text("go".into()),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 exchange(1),
                 exchange(2),
@@ -2987,11 +3015,13 @@ mod tests {
                     role: "user".into(),
                     content: MessageContent::Text("start".into()),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "assistant".into(),
                     content: MessageContent::Text("analysis so far".into()),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "assistant".into(),
@@ -3009,6 +3039,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "gemini-3.5-flash".into(),
@@ -3066,6 +3097,7 @@ mod tests {
                     },
                 ]),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gpt-4".into(),
             max_tokens: 256,
@@ -3102,6 +3134,7 @@ mod tests {
                 role: "user".into(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gpt-4".into(),
             max_tokens: 100,
@@ -3143,6 +3176,7 @@ mod tests {
                 role: "user".into(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "qwen3.8".into(),
             max_tokens: 100,
@@ -3193,6 +3227,7 @@ mod tests {
                 role: "user".into(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "m".into(),
             max_tokens: 100,
@@ -3215,6 +3250,7 @@ mod tests {
                 role: "user".into(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "m".into(),
             max_tokens: 100,
@@ -3446,6 +3482,7 @@ mod tests {
                     role: "assistant".to_string(),
                     content: one_tool_use(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 Message {
                     role: "user".to_string(),
@@ -3455,6 +3492,7 @@ mod tests {
                         is_error: false,
                     }]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             ..sample_request()

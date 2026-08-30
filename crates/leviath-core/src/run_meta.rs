@@ -911,6 +911,15 @@ pub struct RegionEntrySnapshot {
     /// than it was, and new runs are correct from their first write.
     #[serde(default)]
     pub taint: crate::taint::TaintLevel,
+    /// The opaque provider token this turn has to be replayed with.
+    ///
+    /// Persisted for the same reason `taint` is: a restore that dropped it
+    /// would silently break reasoning continuity on a stateless backend, and
+    /// the run would look fine while paying to re-derive its chain of thought
+    /// every turn. Defaults to absent for snapshots written before the field,
+    /// which is what they were being restored with anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Per-region token snapshot written by the background worker after each inference.
@@ -1592,6 +1601,7 @@ mod tests {
                     metadata: Some(serde_json::json!({"a": 1})),
                     key: Some("k".to_string()),
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],

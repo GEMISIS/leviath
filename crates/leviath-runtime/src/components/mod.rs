@@ -321,6 +321,11 @@ pub(crate) struct InferenceResult {
     /// on its own. A cut-off reply is not an answer, and treating it as one
     /// is how a stage re-sent the same oversized reply five times.
     pub cut_off_at: Option<usize>,
+
+    /// The opaque provider token this turn has to be replayed with, when the
+    /// provider issued one. Stored on the assistant turn so the next request
+    /// hands it back; see `leviath_core::RegionEntry::reasoning`.
+    pub reasoning: Option<String>,
 }
 
 /// A tool call requested by the model.
@@ -943,6 +948,7 @@ mod tests {
             }],
             tokens_used: 100,
             cut_off_at: None,
+            reasoning: None,
         };
         assert_eq!(ir.response, "Hello");
         assert_eq!(ir.tool_calls.len(), 1);

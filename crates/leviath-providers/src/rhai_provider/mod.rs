@@ -429,6 +429,7 @@ fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
             .collect(),
         tokens: Some(response.tokens_used),
         finish_reason: Some(response.finish_reason),
+        reasoning: None,
     }
 }
 
