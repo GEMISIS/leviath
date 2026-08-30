@@ -170,7 +170,8 @@ impl ModelProviderKind {
 /// Every field is optional. For a script, keys not recognized below flow into
 /// [`Self::extra`] and are forwarded to the script's `initialize(config)`
 /// alongside `base_url` and `api_key`. For an endpoint, `base_url` is required
-/// and `headers` and `models` are read; `extra` is ignored.
+/// and `headers` and `models` are read; a key that would land in `extra` is
+/// refused at load, since nothing would read it.
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ModelProviderConfig {
     /// What backs the entry. Absent means a script, so every existing config
@@ -240,6 +241,20 @@ pub struct ModelProviderConfig {
     pub extra: HashMap<String, toml::Value>,
 }
 
+/// The keys an OpenAI-compatible endpoint entry reads, for the refusal above
+/// to list. `script` is included because the struct accepts it on any entry,
+/// though an endpoint never runs one.
+const ENDPOINT_KEYS: &[&str] = &[
+    "kind",
+    "script",
+    "api_key",
+    "base_url",
+    "rate_limit",
+    "serves",
+    "headers",
+    "models",
+];
+
 impl ModelProviderConfig {
     /// The kind this entry is, with absent read as a script.
     pub fn kind(&self) -> ModelProviderKind {
@@ -269,6 +284,21 @@ impl ModelProviderConfig {
                 "[model_providers.{name}] has kind = \"openai-compatible\" but no \
                  base_url; set base_url to where the server listens, such as \
                  \"http://localhost:8080/v1\""
+            );
+        }
+        // `extra` exists to reach a script's `initialize`. An endpoint has no
+        // script, so a key landing there is one the endpoint will never read:
+        // `modles` leaves it with no catalogue and `heaeders` sends nothing,
+        // and both used to load clean. `Config::unknown_config_keys` cannot
+        // catch them either, because `flatten` writes them straight back.
+        if self.is_endpoint() && !self.extra.is_empty() {
+            let mut keys: Vec<&str> = self.extra.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            anyhow::bail!(
+                "[model_providers.{name}] has kind = \"openai-compatible\" and \
+                 unknown key(s) {}; an endpoint reads only {}",
+                keys.join(", "),
+                ENDPOINT_KEYS.join(", ")
             );
         }
         Ok(())

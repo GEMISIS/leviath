@@ -819,7 +819,10 @@ This is three providers: two llama.cpp servers under their own names, and Anthro
 reaches a model on one of them as `llama-cpp/qwen3-8b` or `llama-cpp-big/llama-3-70b`, and the
 `default_provider` above sends every stage that allows a user default to the first. `base_url` is
 required and includes the path prefix the server expects, usually `/v1`. Each entry may also carry
-`rate_limit` and `serves`, which mean what they mean for a script provider.
+`rate_limit` and `serves`, which mean what they mean for a script provider. An endpoint entry refuses
+to load with a key it does not read (a script entry forwards such keys to its `initialize`, an
+endpoint has nowhere to send them), so a misspelled `models` or `headers` is an error naming the
+entry rather than a catalogue or header that quietly never arrives.
 
 Streaming and tool calls are on. Each request carries the temperature the stage asks for, and a
 server that refuses one is asked again without it and remembered for the rest of the process.

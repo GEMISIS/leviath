@@ -186,6 +186,13 @@ same list.
 
 ### Changed
 
+- A `[model_providers.<name>]` entry with `kind = "openai-compatible"` no
+  longer loads with a key the endpoint does not read; the error names the
+  entry, the keys, and the ones it does read. Unrecognised keys on a script
+  entry are forwarded to the script's `initialize`, and the same field
+  carried them for an endpoint, where nothing read them: a misspelled
+  `models` left the endpoint with no catalogue and a misspelled `headers`
+  sent none, and the unknown-key warning could not see either.
 - `lev setup` no longer offers the Claude Code transport on its provider
   list, and with it the reasoning-effort row, the terms dialog on save, and
   the review-screen warning are gone. The transport itself stays: the
