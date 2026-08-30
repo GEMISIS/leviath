@@ -87,7 +87,7 @@ pub struct McpToolOverride {
 }
 
 /// Complete policy configuration loaded from policy.toml.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PolicyConfig {
     /// Static allowlist rules.
     #[serde(default)]
@@ -437,6 +437,19 @@ send_email = { sensitivity = "private", direction = "egress", clearance = "publi
         // `channel` operand in the "patterns set but no target" guard; with no
         // target the rule must not match.
         assert!(!rule.matches("post_message", None, TaintLevel::Public));
+    }
+
+    #[test]
+    fn two_policies_compare_by_what_they_say() {
+        // The daemon reloads this file and only swaps the gate's copy when the
+        // contents differ, so equality has to mean "says the same thing"
+        // rather than "came from the same bytes".
+        let one = PolicyConfig::from_toml("[[allowlist]]\ntool = \"shell\"\n").unwrap();
+        let same = PolicyConfig::from_toml("[[allowlist]]\ntool   =   \"shell\"\n").unwrap();
+        let other = PolicyConfig::from_toml("[[allowlist]]\ntool = \"web_fetch\"\n").unwrap();
+        assert_eq!(one, same);
+        assert_ne!(one, other);
+        assert_ne!(one, PolicyConfig::default());
     }
 
     #[test]

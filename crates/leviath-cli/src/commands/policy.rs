@@ -97,7 +97,7 @@ fn leviath_config_dir(
 }
 
 /// Get the default policy file path.
-fn policy_path() -> std::path::PathBuf {
+pub(crate) fn policy_path() -> std::path::PathBuf {
     leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("policy.toml")
 }
 
