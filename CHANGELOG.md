@@ -11,6 +11,26 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Added
+
+- `GET /api/config` reports `default_model`, the model every stage runs on
+  while it is set, and reports it as `null` rather than dropping the key when
+  nothing is pinned. A console could read `default_provider` and not this, so
+  its model picker drew an empty box over a machine that had a model pinned.
+  The key is always sent, so its absence means the server predates the field
+  rather than meaning nothing is set (#746).
+- `PUT /api/config` can write `default_model` away: `"default_model": null`
+  clears it and every stage goes back to the model its blueprint names, an
+  absent key still leaves it alone, and a string still pins it. Setting it was
+  a one-way door before, which matters because unset is usually the better
+  state - a pinned model flattens a blueprint that chose a cheap model for its
+  cheap stages onto one top-tier price. Same explicit-clear shape
+  `remove_gateways` uses for gateways. `"default_model": ""` answers 400 and
+  writes nothing: an empty string is not a model id, and a form that posts its
+  empty box should hear about it rather than lose the setting (#746).
+
 ## 0.5.6 - 2026-08-30
 
 ### Breaking

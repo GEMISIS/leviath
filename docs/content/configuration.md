@@ -46,7 +46,7 @@ update_check         = true          # ask whether a newer release exists
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `default_provider` | string | `"anthropic"` | |
-| `default_model` | string | unset | A bare model id on `default_provider`, not `provider/model`. A leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
+| `default_model` | string | unset | A bare model id on `default_provider`, not `provider/model`. A leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. Unset is usually the better state; over the API, `PUT /api/config` with `"default_model": null` writes it away. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
 | `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434` |

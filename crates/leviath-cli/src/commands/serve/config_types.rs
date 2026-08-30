@@ -6,12 +6,43 @@
 //! setup rather than a run, and it is the part that grows every time a new
 //! kind of provider becomes configurable.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
+
+/// Read a field that has to tell "absent" apart from "explicitly null".
+///
+/// A plain `Option<T>` collapses the two: serde hands back `None` both for a
+/// key the body never mentioned and for one sent as `null`, so a
+/// partial-update body can say "set this" and "leave this alone" but never
+/// "clear this". The extra layer keeps all three apart on the way in:
+///
+/// | JSON             | Rust            | What it asks for      |
+/// |------------------|-----------------|-----------------------|
+/// | key absent       | `None`          | leave the value alone |
+/// | `"key": null`    | `Some(None)`    | clear the value       |
+/// | `"key": "gpt-5"` | `Some(Some(v))` | set the value         |
+///
+/// Only useful with `#[serde(default)]` beside it: that is what supplies the
+/// outer `None`, because a missing key never reaches this function at all.
+pub(super) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
+}
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct RedactedConfig {
     pub(super) default_provider: String,
+    /// `default_model`: the one model every stage runs on while it is set.
+    ///
+    /// Always serialized, `null` when nothing is set, which is the
+    /// distinction a console needs. A daemon too old to report this omits the
+    /// key entirely, and that has to read as "cannot say" rather than as
+    /// "nothing is set" - without the field, a picker drew an empty box over
+    /// a machine that had a model pinned.
+    pub(super) default_model: Option<String>,
     pub(super) has_anthropic_key: bool,
     pub(super) has_openai_key: bool,
     pub(super) has_google_key: bool,
@@ -336,7 +367,20 @@ impl ApiLimits {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct WriteConfigReq {
     pub(super) default_provider: Option<String>,
-    pub(super) default_model: Option<String>,
+    /// Three-state, unlike every field beside it: absent leaves the setting
+    /// alone, `null` clears it, a string sets it. See [`double_option`].
+    ///
+    /// Unset is a real state here, and usually the better one: a pinned
+    /// `default_model` runs every stage of every blueprint on one model,
+    /// which puts the cheap stages on a top-tier price. A route that could
+    /// set it and never unset it was a one-way door, the same gap
+    /// `remove_gateways` exists to close for gateways.
+    ///
+    /// An empty string is refused with a 400 rather than read as a clear.
+    /// `""` is not a model id, and a console that sends one by accident
+    /// should hear about it instead of quietly losing the setting.
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) default_model: Option<Option<String>>,
     pub(super) anthropic_key: Option<String>,
     pub(super) openai_key: Option<String>,
     pub(super) google_key: Option<String>,
