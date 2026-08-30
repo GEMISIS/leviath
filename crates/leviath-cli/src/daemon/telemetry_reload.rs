@@ -27,7 +27,15 @@ use leviath_core::telemetry::NoopSink;
 /// How the OTLP log bridge reaches the process subscriber. Injected so a test
 /// can watch what a rebuild asked for without racing other tests over the
 /// process-wide reload handle, which only one of them can ever park.
-type InstallLayer = fn(Option<leviath_telemetry::LogLayer>) -> bool;
+///
+/// A boxed closure rather than a bare `fn` pointer so an injected installer can
+/// capture state a single test owns. A `fn` pointer forces the recorder to be a
+/// `static`, which every test in the module then shares, and libtest runs those
+/// tests on threads of one process: one test's reset lands between another's
+/// write and its read, and the assertion sees a value no test ever asked for.
+/// The daemon still installs exactly `logging::set_otel_layer`, on the same
+/// schedule as before.
+type InstallLayer = Box<dyn Fn(Option<leviath_telemetry::LogLayer>) -> bool + Send + Sync>;
 
 /// Keeps the telemetry pipeline in step with `[observability]`.
 pub struct TelemetryReload {
@@ -41,7 +49,9 @@ pub struct TelemetryReload {
 impl TelemetryReload {
     /// One that forwards the OTLP log bridge to the process subscriber.
     pub fn for_daemon() -> Arc<Self> {
-        Arc::new(Self::with_installer(crate::logging::set_otel_layer))
+        Arc::new(Self::with_installer(Box::new(
+            crate::logging::set_otel_layer,
+        )))
     }
 
     /// One that reports its layer changes to `install_layer` instead.
@@ -114,20 +124,29 @@ mod tests {
     use leviath_core::config::TelemetryExporterKind;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// What the last injected install call asked for: 1 for a layer, 2 for
-    /// clearing the slot. A static because the injection point is a plain `fn`
-    /// pointer (a closure would need the layer type to be nameable at the call
-    /// site), and the tests that read it run in one thread each.
-    static LAST_INSTALL: AtomicUsize = AtomicUsize::new(0);
+    /// What the injected installer was last asked for: 1 for a layer, 2 for
+    /// clearing the slot, 0 for never called.
+    ///
+    /// One counter per test, handed back by [`reload`], rather than one
+    /// `static` the whole module shares. libtest runs these tests on threads
+    /// of a single process, so a shared counter is written by every test at
+    /// once: whichever test resets it between another's install and that
+    /// test's `load` makes the reader see a value nothing asked for. That is a
+    /// real flake, not a theoretical one - it was reproduced here as
+    /// `left: 0, right: 2` after the reset landed in the middle of a passing
+    /// test. Nothing in the pipeline itself is process-wide, so there is
+    /// nothing here to serialize: the counter simply belongs to the test.
+    type Installs = Arc<AtomicUsize>;
 
-    fn record_install(layer: Option<leviath_telemetry::LogLayer>) -> bool {
-        LAST_INSTALL.store(if layer.is_some() { 1 } else { 2 }, Ordering::SeqCst);
-        true
-    }
-
-    fn reload() -> TelemetryReload {
-        LAST_INSTALL.store(0, Ordering::SeqCst);
-        TelemetryReload::with_installer(record_install)
+    /// A reload whose installs land in a counter only the calling test holds.
+    fn reload() -> (TelemetryReload, Installs) {
+        let installs: Installs = Arc::new(AtomicUsize::new(0));
+        let recorder = Arc::clone(&installs);
+        let reload = TelemetryReload::with_installer(Box::new(move |layer| {
+            recorder.store(if layer.is_some() { 1 } else { 2 }, Ordering::SeqCst);
+            true
+        }));
+        (reload, installs)
     }
 
     fn cfg(enabled: bool, exporter: TelemetryExporterKind) -> ObservabilityConfig {
@@ -166,7 +185,7 @@ mod tests {
 
     #[test]
     fn the_first_refresh_installs_and_a_repeat_of_it_does_not() {
-        let reload = reload();
+        let (reload, _installs) = reload();
         let (_rt, mut world) = world();
         let enabled = cfg(true, TelemetryExporterKind::Stdout);
         assert!(reload.refresh_into(&mut world, &enabled));
@@ -183,7 +202,7 @@ mod tests {
     /// reaches the collector rather than the no-op.
     #[test]
     fn turning_export_on_after_boot_swaps_the_sink() {
-        let reload = reload();
+        let (reload, _installs) = reload();
         let (_rt, mut world) = world();
         assert!(reload.refresh_into(&mut world, &cfg(false, TelemetryExporterKind::Stdout)));
         let off = sink_ptr(&mut world);
@@ -198,7 +217,7 @@ mod tests {
 
     #[test]
     fn turning_export_off_puts_the_noop_sink_back_and_clears_the_bridge() {
-        let reload = reload();
+        let (reload, installs) = reload();
         let (_rt, mut world) = world();
         reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::Stdout));
         let on = sink_ptr(&mut world);
@@ -206,7 +225,7 @@ mod tests {
         assert!(reload.refresh_into(&mut world, &cfg(false, TelemetryExporterKind::Stdout)));
         assert_ne!(sink_ptr(&mut world), on);
         assert_eq!(
-            LAST_INSTALL.load(Ordering::SeqCst),
+            installs.load(Ordering::SeqCst),
             2,
             "the daemon's own log lines must stop reaching a collector that was turned off"
         );
@@ -217,10 +236,10 @@ mod tests {
         // `exporter = "none"` with `enabled = true` is the config-level way to
         // say "build no pipeline"; a failed OTLP construction reaches the same
         // arm, having warned.
-        let reload = reload();
+        let (reload, installs) = reload();
         let (_rt, mut world) = world();
         assert!(reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::None)));
-        assert_eq!(LAST_INSTALL.load(Ordering::SeqCst), 2);
+        assert_eq!(installs.load(Ordering::SeqCst), 2);
         // Emitting into it is a no-op rather than a panic.
         world
             .world_mut()
@@ -235,7 +254,7 @@ mod tests {
     /// connected until an export flush, which nothing here triggers.
     #[test]
     fn the_otlp_exporter_brings_the_daemon_log_bridge_with_it() {
-        let reload = reload();
+        let (reload, installs) = reload();
         let (_rt, mut world) = world();
         let otlp = ObservabilityConfig {
             enabled: true,
@@ -245,14 +264,14 @@ mod tests {
         };
         assert!(reload.refresh_into(&mut world, &otlp));
         assert_eq!(
-            LAST_INSTALL.load(Ordering::SeqCst),
+            installs.load(Ordering::SeqCst),
             1,
             "the daemon's own log lines go to the collector the user just named"
         );
 
         assert!(reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::Stdout)));
         assert_eq!(
-            LAST_INSTALL.load(Ordering::SeqCst),
+            installs.load(Ordering::SeqCst),
             2,
             "and stop when the exporter they go through is no longer configured"
         );
@@ -260,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_changed_endpoint_is_a_change() {
-        let reload = reload();
+        let (reload, _installs) = reload();
         let (_rt, mut world) = world();
         let mut first = cfg(true, TelemetryExporterKind::Stdout);
         reload.refresh_into(&mut world, &first);
