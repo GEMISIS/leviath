@@ -33,11 +33,10 @@ pub struct McpPool {
     /// pool: where MCP OAuth grants are kept, and which credential-shaped
     /// variables a server's `${VAR}` headers may interpolate.
     ///
-    /// Behind a lock because they were boot copies, and the docs said
-    /// otherwise: naming a variable in `allow_env_vars` was supposed to take
-    /// effect on the next load, and for an MCP server it took effect on the
-    /// next daemon restart. `mcp_reload` writes them on each config reconcile,
-    /// and they are read when a server is connected.
+    /// Behind a lock rather than copied in at construction: `mcp_reload` writes
+    /// them on each config reconcile and they are read when a server is
+    /// connected, which is what makes naming a variable in `allow_env_vars`
+    /// take effect on the next load rather than the next daemon restart.
     security: StdMutex<PoolSecurity>,
     /// Per-run leases on per-agent servers (see [`Self::lease_blueprint`]).
     /// Same `std` mutex discipline as `connected`: held briefly, never across
@@ -45,9 +44,8 @@ pub struct McpPool {
     leases: StdMutex<LeaseTable>,
     /// How long a per-agent server may sit with zero leasing runs before its
     /// connection (and, for stdio servers, its child process) is torn down.
-    /// Zero disables disconnection - the pre-lease behavior, where every
-    /// server any blueprint ever declared stayed connected for the daemon's
-    /// life.
+    /// Zero disables disconnection, so every server any blueprint declares
+    /// stays connected for the daemon's life.
     idle_disconnect: std::time::Duration,
 }
 
@@ -244,13 +242,13 @@ impl McpPool {
     /// Seed every global server in `servers` with the defs it contributed to
     /// `defs`, worked out from `owners`.
     ///
-    /// The alternative is [`seed`](Self::seed)'s empty vec, which is what the
-    /// startup path used while the global servers' defs lived in a separate
-    /// list beside the pool. Filing each server's own defs under its signature
-    /// makes [`cached_defs_for`](Self::cached_defs_for) the single answer to
-    /// "what does this set of servers advertise", for the global set as much as
-    /// a blueprint's - which is what lets the global set change under a running
-    /// daemon without a second list to keep in step.
+    /// The alternative is [`seed`](Self::seed)'s empty vec, which leaves the
+    /// global defs to live in a list beside the pool. Filing each server's own
+    /// defs under its signature makes
+    /// [`cached_defs_for`](Self::cached_defs_for) the single answer to "what
+    /// does this set of servers advertise", for the global set as much as a
+    /// blueprint's - which is what lets the global set change under a running
+    /// daemon with no second list to keep in step.
     pub(crate) fn seed_all(
         &self,
         servers: &[MCPServerConfig],
@@ -431,11 +429,11 @@ impl McpPool {
     /// that one.
     ///
     /// The client is taken before any pool bookkeeping goes. The other order
-    /// (forget the lease row and the cached defs, then ask the executor) lost
-    /// the server for the daemon's life whenever the executor kept it: the
-    /// next tick found no lease row and returned early, so nothing ever asked
-    /// again, the child process never got `shutdown()`, and the tool stayed
-    /// routable for a run that no longer leased it.
+    /// (forget the lease row and the cached defs, then ask the executor) leaks
+    /// the server for the daemon's life whenever the executor keeps it: the
+    /// next tick finds no lease row and returns early, so nothing asks again,
+    /// the child process never gets `shutdown()`, and the tool stays routable
+    /// for a run that no longer leases it.
     async fn disconnect_if_still_idle(
         &self,
         sig: &str,
@@ -484,8 +482,8 @@ impl McpPool {
     }
 
     /// Whether the shared executor can still dispatch `tool`. The
-    /// advertisement and the connection are separate records, and the bug this
-    /// distinguishes is one going stale without the other.
+    /// advertisement and the connection are separate records, and this is what
+    /// tells apart one going stale without the other.
     #[cfg(test)]
     pub(crate) async fn routes(&self, tool: &str) -> bool {
         self.shared.lock().await.route(tool).is_ok()
@@ -682,8 +680,7 @@ pub(crate) fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerC
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
     // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by
-    // junk and fails. It still compiles, so the change is silent; the tests are
-    // what caught it.
+    // junk and fails. Both spellings compile, so swapping them is silent.
     let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
         return Vec::new();
     };
@@ -1062,12 +1059,10 @@ mod tests {
     }
 
     /// A call in flight when the idle tick fires keeps the server exactly as
-    /// it was: still leased, still cached, still routable. The next tick,
-    /// once the call has let go, tears it down. Before the fix the first tick
-    /// dropped the lease row and the cached defs and only then found the
-    /// executor would not give the client up, so the second tick found no
-    /// row, returned early, and the server (and its child process) lived for
-    /// the daemon's life while its tool stayed routable.
+    /// it was: still leased, still cached, still routable. The next tick, once
+    /// the call has let go, tears it down. Dropping the lease row before the
+    /// executor has given the client up is what would leak the server and its
+    /// child process for the daemon's life.
     #[tokio::test]
     async fn an_in_flight_call_postpones_the_idle_disconnect() {
         with_tracing(|| {});

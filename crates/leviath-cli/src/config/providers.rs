@@ -90,7 +90,8 @@ pub struct ProviderConfig {
     /// `provider/model` rather than a bare provider name because a failover
     /// target needs a model to send; there is no sensible default per provider.
     /// A blueprint that names one model has nowhere to go without this, which
-    /// is exactly how issue #201 took every agent down at once.
+    /// is how one provider running out of credits takes every agent down at
+    /// once.
     #[serde(default)]
     pub fallback_order: Vec<String>,
 }
@@ -203,15 +204,15 @@ pub struct ModelProviderConfig {
     /// Only needed by a script with no `list_models`: one that has it is asked
     /// directly, and its answer is preferred over this list. Without either,
     /// the provider claims no models and can only be reached by a blueprint
-    /// that pins it, which is what made a local model unreachable however the
-    /// machine set `default_provider` (issue #598).
+    /// that pins it, which leaves a local model unreachable however the machine
+    /// sets `default_provider`.
     /// `None` when the file does not mention it, `Some` when it does - including
     /// `Some(vec![])` for an explicit `serves = []`.
     ///
-    /// The two are different states and were conflated as one empty `Vec`, which
-    /// is what made the stale `serves = []` unremovable: a save-back writes
-    /// whatever the field holds, and an empty `Vec` writes as `serves = []`
-    /// however it got there. `None` writes nothing, which is what lets the
+    /// The two are different states, and collapsing them into one empty `Vec`
+    /// makes a stale `serves = []` unremovable: a save-back writes whatever the
+    /// field holds, and an empty `Vec` writes as `serves = []` however it got
+    /// there. `None` writes nothing, which is what lets the
     /// `stale-empty-serves` migration take the line out.
     ///
     /// Skipping `None` does not break the invariant `Config::unknown_config_keys`
@@ -289,8 +290,9 @@ impl ModelProviderConfig {
         // `extra` exists to reach a script's `initialize`. An endpoint has no
         // script, so a key landing there is one the endpoint will never read:
         // `modles` leaves it with no catalogue and `heaeders` sends nothing,
-        // and both used to load clean. `Config::unknown_config_keys` cannot
-        // catch them either, because `flatten` writes them straight back.
+        // and both would otherwise load clean. `Config::unknown_config_keys`
+        // cannot catch them either, because `flatten` writes them straight
+        // back.
         if self.is_endpoint() && !self.extra.is_empty() {
             let mut keys: Vec<&str> = self.extra.keys().map(String::as_str).collect();
             keys.sort_unstable();

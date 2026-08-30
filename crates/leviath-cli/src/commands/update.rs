@@ -708,8 +708,7 @@ fn decline_update_check(_: &str) -> Result<String, String> {
 ///
 /// A copy whose channel could not be worked out is not asked about: the answer
 /// would be the stable release compared against a build that may not be on that
-/// line at all, which is exactly the wrong-in-both-directions guess the console
-/// was making before any of this (issue #600).
+/// line at all, which is a guess that can be wrong in both directions.
 fn check_latest(plan: &UpdatePlan, env: &UpdateEnv, version: &str) -> latest::LatestCheck {
     match plan.method.channel() {
         Some(channel) => latest::check_with(channel, version, &env.latest, latest::now_secs()),

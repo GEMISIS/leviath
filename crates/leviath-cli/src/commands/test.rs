@@ -881,9 +881,10 @@ max_tokens = 500
     #[test]
     fn truncate_str_unicode() {
         assert_eq!(truncate_str("abcde", 3), "abc...");
-        // Issue #115: the cut lands inside a multi-byte character. This used to
-        // panic ("byte index N is not a char boundary") on the assertion-failure
-        // path, which prints raw model output. '🎉' occupies bytes 3..7.
+        // The cut lands inside a multi-byte character, where a byte-indexed
+        // slice panics ("byte index N is not a char boundary") on the
+        // assertion-failure path, which prints raw model output. '🎉' occupies
+        // bytes 3..7.
         assert_eq!(truncate_str("abc🎉def", 4), "abc...");
         assert_eq!(truncate_str("abc🎉def", 6), "abc...");
         // A boundary-aligned cut is unaffected.

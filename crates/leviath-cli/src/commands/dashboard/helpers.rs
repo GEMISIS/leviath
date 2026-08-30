@@ -38,8 +38,8 @@ pub(super) fn relative_time(ts: i64) -> String {
 /// be cut. The ellipsis is part of the budget, so the result never draws wider
 /// than `max`.
 ///
-/// Measured in display columns, not bytes: a run title full of em dashes or
-/// emoji used to be cut at a third of the room it was given, and a wide
+/// Measured in display columns, not bytes: counting bytes cuts a title full of
+/// long dashes or emoji at a third of the room it was given, and a wide
 /// character counts for the two cells it occupies.
 pub(super) fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();

@@ -169,7 +169,7 @@ fn the_offline_cell_marks_a_degraded_fan_out_too() {
 }
 
 /// A run that finished with nothing to show for it reads that way, instead of
-/// being indistinguishable from one that did the work (issue #192).
+/// being indistinguishable from one that did the work.
 #[test]
 fn status_cell_marks_a_finished_run_that_produced_nothing() {
     let mut e = entry("r", AgentStatus::Complete);
@@ -312,10 +312,10 @@ fn format_runs_handles_empty() {
     );
 }
 
-/// Issue #205: a scheduler spawns a run, the run dies on its first inference,
-/// and the daemon unloads it. Nothing is running, but "no agent runs active" is the
-/// answer that cost forty minutes of spawn-and-revert, because it reads exactly
-/// like a run that was never spawned. The row has to be there, with the reason.
+/// A scheduler spawns a run, the run dies on its first inference, and the
+/// daemon unloads it. Nothing is running, but "no agent runs active" reads
+/// exactly like a run that was never spawned, so the caller retries forever.
+/// The row has to be there, with the reason.
 #[test]
 fn format_runs_shows_a_finished_run_when_nothing_is_running() {
     let mut died = entry(
@@ -603,7 +603,7 @@ fn the_footer_and_the_answer_call_out_coexist() {
     assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
 
-// ── providers out of service (issue #201) ─────────────────────────────────
+// ── providers out of service ──────────────────────────────────────────────
 
 fn down(provider: &str, reason: leviath_providers::UnavailableReason) -> ProviderCircuitState {
     ProviderCircuitState {

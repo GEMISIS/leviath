@@ -47,7 +47,7 @@ pub(crate) struct BlueprintSummary {
     pub stages: Vec<String>,
     /// Whether `lev run <agent> --task <text>` is accepted. False means a run
     /// handing this agent a task is refused at spawn, so a harness can check
-    /// here instead of discovering it from the run-time error (issue #414).
+    /// here instead of discovering it from the run-time error.
     pub accepts_task: bool,
     /// Every caller-settable input, in declaration order: which flag seeds
     /// which region, and whether a run can start without it.
@@ -91,7 +91,7 @@ fn input_summaries(blueprint: &leviath_core::Blueprint) -> Vec<InputSummary> {
 }
 
 /// The "Inputs:" lines `print_success` shows, answering at validate time what
-/// `lev run` would otherwise only reveal by refusing at spawn (issue #414):
+/// `lev run` would otherwise only reveal by refusing at spawn:
 /// which flags this agent takes, and explicitly that `--task` is not among
 /// them when no region is seeded from the task.
 fn input_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
@@ -297,13 +297,11 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
         println!("{line}");
     }
 
-    // Check if graph mode
     let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
     if is_graph {
         let entry = blueprint.resolve_entry_stage_name();
         println!("  Graph mode: entry stage '{}'", entry);
 
-        // List stages and their transitions
         for stage in &blueprint.stages {
             let transitions_info = match &stage.transitions {
                 Some(t) if !t.is_empty() => {
@@ -864,11 +862,10 @@ fn broken_config_note(fault: &crate::config::ConfigFault) -> Vec<String> {
 
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
-    // A config that will not load used to be swallowed whole here: `.ok()`
-    // turned it into `None`, and the checks that need a config - which models
-    // an install would use, which read paths are granted - quietly stopped
-    // running. The blueprint still validates without one, so this stays a
-    // warning rather than a refusal, but it is said out loud now.
+    // A config that will not load is said out loud. `.ok()` here would turn it
+    // into `None` and quietly stop the checks that need a config - which models
+    // an install would use, which read paths are granted. The blueprint still
+    // validates without one, so this is a warning rather than a refusal.
     let config = match crate::config::Config::load_faulted() {
         Ok(config) => Some(config),
         Err(fault) => {
@@ -926,9 +923,9 @@ mod tests {
     /// against the blueprint's own order - and only when they differ, because
     /// repeating the list under a stage that got its first choice is noise.
     /// A blueprint leading with a model nothing configured serves falls through
-    /// to the next one, and the listing says so. This is the surviving reason
-    /// for a substitution: #578 removed the other one, where preferring a
-    /// provider silently changed which model ran.
+    /// to the next one, and the listing says so. That fallthrough is the only
+    /// thing that substitutes: `default_provider` chooses between routes to a
+    /// model, never between models.
     #[test]
     fn model_resolution_explains_falling_through_to_the_next_model() {
         let manifest = r#"
@@ -1091,11 +1088,10 @@ system_prompt = "hi"
             "no substitution, so nothing to explain: {lines:#?}"
         );
 
-        // Preferring openrouter no longer substitutes a different MODEL. The
+        // Preferring openrouter does not substitute a different MODEL. The
         // blueprint asked for claude-sonnet-5 first and a route to it exists,
         // so that is what runs: `default_provider` chooses between routes to a
-        // model, not between models (#578). Before this, the second-listed
-        // entry was promoted and the run silently went to deepseek.
+        // model, not between models.
         let openrouter_first = with_keys("openrouter");
         let registry = registry_for(&openrouter_first);
         let lines = model_resolution_lines(blueprint, &openrouter_first, &registry);
@@ -1372,8 +1368,8 @@ focus = { kind = "pinned", max_tokens = 500, seed = "input" }
 conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
 
-    /// The point of issue #414: validate now says what `lev run` would accept,
-    /// including that `--task` is not among the flags.
+    /// Validate says what `lev run` would accept, including that `--task` is
+    /// not among the flags.
     #[test]
     fn input_lines_name_every_flag_and_the_missing_task() {
         let lines = input_lines(&parse(NAMED_INPUTS_MANIFEST));
@@ -1569,11 +1565,10 @@ system = { kind = "pinned", max_tokens = 1000 }
             "validate-deny-warnings",
             |cfg_dir| async move {
                 // A key, so the blueprint's Anthropic entry is a reachable
-                // provider. This used to ride on Ollama registering without a
-                // credential; it now registers only when something answers at its
-                // address, so on a machine with no local Ollama the manifest also
-                // warned that nothing in its list was reachable - and the count
-                // this test is about went from one to two.
+                // provider. Ollama registers only when something answers at its
+                // address, so without this key a machine with no local Ollama
+                // draws a second warning that nothing in the list is reachable,
+                // and the count this test is about becomes two.
                 std::fs::write(
                     cfg_dir.join("config.toml"),
                     "[providers]\nanthropic_api_key = \"test-key\"\n",
@@ -1773,8 +1768,8 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert_eq!(value["findings"][0]["severity"], serde_json::json!("error"));
     }
 
-    /// The JSON half of issue #414: a harness reads the accepted inputs off
-    /// the report instead of parsing the run-time refusal.
+    /// A harness reads the accepted inputs off the JSON report instead of
+    /// parsing the run-time refusal.
     #[test]
     fn json_report_names_the_accepted_inputs() {
         let blueprint = parse(NAMED_INPUTS_MANIFEST);
@@ -2253,10 +2248,9 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         .await;
     }
 
-    /// `lev validate` used to swallow a config that would not load: `.ok()`
-    /// made it `None`, the model and read-path checks silently stopped
-    /// running, and the command reported a clean blueprint the daemon would
-    /// then refuse to run the way it described.
+    /// `lev validate` says so when a config will not load. Swallowing it with
+    /// `.ok()` would silently stop the model and read-path checks and report a
+    /// clean blueprint the daemon would then refuse to run as described.
     #[test]
     fn a_config_that_does_not_load_is_said_out_loud_rather_than_swallowed() {
         let dir = tempfile::tempdir().unwrap();

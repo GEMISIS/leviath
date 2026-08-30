@@ -38,7 +38,7 @@ use crate::tools::resolve_policy;
 /// Everything one agent needs to execute a tool call: the executors, its policy
 /// layers, and its interaction backend. All fields are cheap `Arc`s so a clone is
 /// moved into each `exec_for` closure. The stage-scoped fields
-/// One run's write ceilings and what it has spent of them (issue #252).
+/// One run's write ceilings and what it has spent of them.
 ///
 /// The count is what a *tool call reported writing*, which for a shell redirect
 /// is the target's size measured after the call. That is an approximation in
@@ -467,9 +467,9 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         mark_dirty_on_tool_write(state, tc);
         result
     } else {
-        // Route under the executor lock, call without it: the lock is what
-        // used to serialise every MCP call in a batch behind the slowest
-        // server. The client's own lock keeps calls to one server in order.
+        // Route under the executor lock, call without it: holding it across the
+        // call serialises every MCP call in a batch behind the slowest server.
+        // The client's own lock keeps calls to one server in order.
         let routed = state.mcp.lock().await.route(&tc.name);
         super::seed_tool::mcp_text(match routed {
             Ok((client, original)) => {
@@ -541,8 +541,8 @@ fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
 /// writes would both pass a 10-byte run budget. And charged only here, on
 /// the two paths that queue the call: a write refused by containment, by the
 /// budget itself, by policy, or by the user at the prompt never reaches the
-/// disk and used to be charged all the same, so a denied 8-byte write made
-/// the next allowed one fail on a limit it had never spent.
+/// disk, and charging it anyway would make a denied 8-byte write fail the next
+/// allowed one on a limit it had never spent.
 fn charge_declared(state: &AgentToolState, tc: &ToolCall) {
     if let Some(declared) = crate::tools::declared_write_bytes(&tc.name, &tc.arguments) {
         state.writes.record(declared);
@@ -564,7 +564,7 @@ fn charge_declared(state: &AgentToolState, tc: &ToolCall) {
 /// Every resolution - a pass-1 interaction answer or denial, a pass-2 execution -
 /// is reported through `progress` the moment it lands, not at batch end, so the
 /// run journal keeps each completed call's result even if the daemon dies before
-/// the batch finishes (issue #96).
+/// the batch finishes.
 pub(crate) async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
@@ -622,7 +622,7 @@ pub(crate) async fn dispatch_tools(
         }
 
         // How much this call would add to the run's disk footprint, and whether
-        // there is room for it (issue #252). Checked before the policy layers
+        // there is room for it. Checked before the policy layers
         // for the same reason containment is: a full disk is not a permission
         // question, and no `--yolo` should be able to fill one.
         if let Some(refusal) = crate::tools::write_budget_refusal(
@@ -647,10 +647,10 @@ pub(crate) async fn dispatch_tools(
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         // Policy is resolved first and unconditionally. Short-circuiting to
-        // `Allow` on a grant, as this used to, skipped `resolve_policy`
-        // entirely - so a grant made in one stage survived into a later stage
-        // that denied the tool, and the "a configured deny is terminal"
-        // guarantee did not hold across a stage boundary.
+        // `Allow` on a grant would skip `resolve_policy` entirely, letting a
+        // grant made in one stage survive into a later stage that denies the
+        // tool - and "a configured deny is terminal" has to hold across a stage
+        // boundary.
         let policy = resolve_policy(
             &tc.name,
             is_builtin,
@@ -684,10 +684,9 @@ pub(crate) async fn dispatch_tools(
 
         match policy {
             ToolPolicy::Deny => {
-                // Says what actually lifts it. The answer used to be "cancel
-                // the run and start it again", because the permission was
-                // resolved once at spawn; now the run re-reads it when it
-                // resumes, and the message has to say the thing that is true.
+                // Says what actually lifts it. The run re-reads its permissions
+                // when it resumes, so the message names an edit plus a resume
+                // rather than a cancel and a fresh run.
                 let result = format!(
                     "[denied] Tool '{}' is not permitted. To allow it, set it to \"allow\" or \
                      \"ask\" under [tool_permissions] in config.toml and resume this run \
@@ -849,7 +848,7 @@ impl ToolService for CliToolService {
         // else. `states` is the process-wide map of *every* agent's tool state,
         // and the work below reaches three more mutexes (including the sandbox
         // manager's); holding the global guard across all of that means one
-        // agent's panic poisons the map every other agent depends on (#109).
+        // agent's panic poisons the map every other agent depends on.
         let Some(state) = self
             .states
             .lock()
@@ -1268,11 +1267,9 @@ mod tests {
         )
     }
 
-    /// The bug, at the seam it lives at: a run parked on a denied tool could
-    /// not be freed by permitting the tool, because the answer was resolved
-    /// once at spawn. Cancelling and re-running was the only way out, and with
-    /// an unanswered prompt waiting for ever (#728) it is the only way out for
-    /// good.
+    /// Permitting a tool frees the run parked on it. Resolving the answer once
+    /// at spawn would leave cancelling and re-running as the only way out, and
+    /// an unanswered prompt waits for ever, so that way out is permanent.
     #[tokio::test]
     async fn a_denied_tool_runs_after_the_permission_is_broadened_and_the_run_resumes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1471,7 +1468,7 @@ mod tests {
         state.reread_config(&Config::default());
     }
 
-    // ── dynamic_tools (issue #97) ──
+    // ── dynamic_tools ──
 
     fn tool_def(name: &str) -> leviath_providers::Tool {
         leviath_providers::Tool {
@@ -1584,7 +1581,7 @@ mod tests {
     /// A `dynamic_tools` agent re-filters its advertised set mid-run. That
     /// refresh has to apply the same unattended cut spawn resolution did, or a
     /// `--yolo` run would quietly get its prompting tools back on the first
-    /// re-scan (issue #204).
+    /// re-scan.
     #[test]
     fn refresh_tools_keeps_the_unattended_cut() {
         let workdir = tempfile::tempdir().unwrap();
@@ -1620,8 +1617,8 @@ mod tests {
     fn a_poisoned_state_map_does_not_wedge_every_other_agent() {
         // `states` holds *every* agent's tool state. A panic while holding it
         // poisons it, and a bare `.lock().unwrap()` then panics for all
-        // agents - one bad agent taking the whole daemon's tool dispatch with it
-        // (issue #109). Recovering the guard keeps the map usable.
+        // agents - one bad agent taking the whole daemon's tool dispatch with
+        // it. Recovering the guard keeps the map usable.
         let svc = CliToolService::new();
         let e = Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id");
         let prev = std::panic::take_hook();
@@ -1842,8 +1839,9 @@ mod tests {
     }
 
     /// With nothing configured, a tool approval waits for a person. The clock
-    /// is paused and advanced past the hour that used to be the default, and
-    /// the prompt is still open; the answer that then arrives runs the call.
+    /// is paused and advanced past an hour - the length a default timeout would
+    /// have imposed - and the prompt is still open; the answer that then
+    /// arrives runs the call.
     #[tokio::test(start_paused = true)]
     async fn an_approval_with_no_timeout_configured_waits_past_the_old_default() {
         let hub = InteractionHub::new();
@@ -2038,7 +2036,7 @@ mod tests {
         // A host function that panics is stopped at the Rhai native-function
         // boundary and surfaced as an ordinary tool error. It must never unwind
         // through the engine: rhai's `ArgBackup` destructor asserts during
-        // unwinding, which double-panics and aborts the whole daemon (#109).
+        // unwinding, which double-panics and aborts the whole daemon.
         struct PanicHost;
         impl leviath_scripting::ScriptHost for PanicHost {
             fn http_get(
@@ -2199,8 +2197,8 @@ mod tests {
         assert_eq!(out[2], ("c3".to_string(), "BBB".to_string()));
     }
 
-    /// Issue #289, at the layer that actually decides. Everything here is
-    /// permitted - `shell` and `write_file` both `Allow`, which is what
+    /// Redirect containment at the layer that actually decides. Everything here
+    /// is permitted - `shell` and `write_file` both `Allow`, which is what
     /// `--yolo` produces - so the only thing that can stop the write is the
     /// containment check, and the control proves it is not stopping everything.
     #[tokio::test]
@@ -2283,7 +2281,7 @@ mod tests {
         assert!(wrote_inside, "{allowed}");
     }
 
-    // ─── Write ceilings (issue #252) ─────────────────────────────────────────
+    // ─── Write ceilings ──────────────────────────────────────────────────────
 
     /// The production constructor, against the machine's real filesystem.
     ///
@@ -2430,9 +2428,9 @@ mod tests {
     }
 
     /// A write the policy denies never touches the disk, so it must not spend
-    /// the run's budget either: it used to be charged its declared size before
-    /// the policy was consulted, and a denied 8-byte write then made the next
-    /// allowed one fail on a "per-run limit" it had never used.
+    /// the run's budget either. Charging the declared size before the policy is
+    /// consulted lets a denied 8-byte write fail the next allowed one on a
+    /// "per-run limit" it had never used.
     #[tokio::test]
     async fn a_denied_write_spends_nothing_of_the_run_budget() {
         let dir = tempfile::tempdir().unwrap();
@@ -2898,10 +2896,10 @@ mod tests {
         assert!(result.contains("[denied]"), "got: {result}");
     }
 
-    /// The hole this closes: a grant used to short-circuit `resolve_policy`
-    /// entirely, so a grant made under one stage survived into a later stage
-    /// that denied the tool - and "a configured deny is terminal" did not hold
-    /// across a stage boundary. Policy is now resolved first and always.
+    /// Policy is resolved first and always. Letting a grant short-circuit
+    /// `resolve_policy` would carry a grant made under one stage into a later
+    /// stage that denies the tool, and "a configured deny is terminal" has to
+    /// hold across a stage boundary.
     #[tokio::test]
     async fn a_grant_does_not_survive_into_a_stage_that_denies() {
         let hub = InteractionHub::new();
@@ -3064,10 +3062,9 @@ mod tests {
         assert!(result.contains("[denied]"), "got: {result}");
     }
 
-    /// The hole this closes: sub-agent calls took an early return that skipped
-    /// `resolve_policy`, so a user's `[tool_permissions] spawn_agent = "deny"`
-    /// was silently ignored and the "a configured deny is terminal" guarantee
-    /// did not cover these five names.
+    /// "A configured deny is terminal" covers the five sub-agent names too. An
+    /// early return past `resolve_policy` for them would silently ignore a
+    /// user's `[tool_permissions] spawn_agent = "deny"`.
     #[tokio::test]
     async fn a_configured_deny_now_covers_the_sub_agent_tools() {
         let hub = InteractionHub::new();
@@ -3300,7 +3297,7 @@ mod tests {
     async fn unattended_run_answers_ask_user_itself_instead_of_opening_a_prompt() {
         // `--yolo` sets `unattended`, so `ask_user_confirm` resolves inline. With
         // a live hub and nobody answering, the attended path would block here
-        // forever - this test finishing at all is the assertion (#107).
+        // forever - this test finishing at all is the assertion.
         let hub = InteractionHub::new();
         let mut state =
             (*state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new())).clone();
@@ -3356,7 +3353,7 @@ mod tests {
         assert!(out[0].1.contains("User declined"));
     }
 
-    // ── per-call progress reporting (#96) ──
+    // ── per-call progress reporting ──
 
     /// The shared log a recording [`ToolProgress`] writes to.
     type ProgressLog = Arc<StdMutex<Vec<(String, String)>>>;

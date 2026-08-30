@@ -36,7 +36,8 @@ use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_CODE_FG, C_DIM, C_MUTED, C_SUCCES
 
 /// Convert a markdown string to ratatui `Text` for rendering in a `Paragraph`.
 ///
-/// `width` is used to draw horizontal rules to the correct width.
+/// `width` is what the drawn blocks are laid out to: horizontal rules,
+/// tables, and mermaid diagrams.
 pub(crate) fn markdown_to_text(input: &str, width: u16) -> Text<'static> {
     let mut renderer = Renderer::new(width);
     renderer.render(input);
@@ -118,7 +119,7 @@ struct Renderer {
     /// cell events only arrive between a `Table` start and end, so an "is
     /// there a table" check on each one is a branch nothing can take.
     table: table::TableBuilder,
-    /// Terminal width (used for HR lines).
+    /// Terminal width, which rules, tables and diagrams are drawn to.
     width: u16,
 }
 

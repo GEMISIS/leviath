@@ -104,10 +104,10 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // parent for a2ui wants its workers' contributions in the same shape,
         // and the worker's answer is what the merge stage reads.
         // So does the run's `--model` override, which the docs call absolute
-        // ("overrides everything"). It used to stop at the run boundary, so a
-        // fan-out of thirty workers sent the large majority of a run's spend to
-        // whatever the worker blueprint listed - silently, and against an
-        // instruction the operator had typed for this run (issue #534).
+        // ("overrides everything"). Stopping it at the run boundary would send
+        // the large majority of a thirty-worker fan-out's spend to whatever the
+        // worker blueprint lists, silently, against an instruction the operator
+        // typed for this run.
         let (parent_path, workdir, parent_run_id, unattended, output_request, model_override) =
             world
                 .get::<RunMetadata>(parent)
@@ -149,7 +149,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // Nest the worker under its fan-out parent in the run tree.
         args.parent_run_id = Some(parent_run_id);
 
-        // Per-agent MCP (issue #97): advertise the worker blueprint's servers that
+        // Per-agent MCP: advertise the worker blueprint's servers that
         // are already connected in the shared pool (a `worker_stage` worker shares
         // the parent's - already warmed by the parent's preprocessor; the first
         // `worker_agent`/`worker_query` worker warms them here for its siblings).
@@ -550,9 +550,9 @@ mod tests {
         );
     }
 
-    /// A worker of an unattended parent is unattended. Spawning workers attended
-    /// under a `--yolo` parent left them stopping on approval prompts nobody was
-    /// watching for, with the parent parked behind them (issue #184).
+    /// A worker of an unattended parent is unattended. An attended worker under
+    /// a `--yolo` parent stops on an approval prompt nobody is watching for,
+    /// and parks the parent behind it.
     #[tokio::test]
     async fn spawn_worker_inherits_the_parents_unattended_setting() {
         for unattended in [false, true] {
@@ -583,10 +583,10 @@ mod tests {
         }
     }
 
-    /// A run-level `--model` covers the whole run, workers included. It used to
-    /// stop at the run boundary, so a fan-out of thirty workers sent the large
-    /// majority of a run's spend to whatever the worker blueprint listed -
-    /// silently, and against an instruction typed for this run (issue #534).
+    /// A run-level `--model` covers the whole run, workers included: stopping
+    /// at the run boundary would send most of a thirty-worker fan-out's spend
+    /// to whatever the worker blueprint lists, against an instruction typed for
+    /// this run.
     ///
     /// Asserts the worker's *resolved stage model*, not just the field: what
     /// matters is which model the worker actually calls.

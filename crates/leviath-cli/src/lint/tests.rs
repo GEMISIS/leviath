@@ -353,10 +353,10 @@ fn an_error_edge_also_satisfies_the_check() {
     assert!(!codes(&lint(&toml, &LintEnv::default())).contains(&"dead-end-possible"));
 }
 
-/// `max_iterations` does **not**, and the message no longer suggests it. It
-/// fires when a stage burns its iteration budget, which is a different event:
-/// on the stranding path `resolve_transition` never consults it, so counting it
-/// would silence the warning without preventing the strand.
+/// `max_iterations` does **not**, and the message must not offer it. It fires
+/// when a stage burns its iteration budget, which is a different event: on the
+/// stranding path `resolve_transition` never consults it, so counting it would
+/// silence the warning without preventing the strand.
 #[test]
 fn a_max_iterations_edge_does_not_satisfy_the_check() {
     let toml = strandable(
@@ -796,10 +796,9 @@ bash = "allow"
 }
 
 /// A permission written under either spelling reaches the tool, so neither is
-/// a mismatch to warn about. It used to be: only the name the model calls was
-/// looked up, so `bash = "ask"` against a stage granting `shell` was dead, and
-/// this check told the author so. Policy resolution now accepts both, and a
-/// warning here would send them to fix something that works.
+/// a mismatch to warn about. Policy resolution looks up both, so `bash = "ask"`
+/// against a stage granting `shell` counts, and a warning here would send the
+/// author off to fix something that works.
 #[test]
 fn either_spelling_of_a_permission_settles_the_shell() {
     for (granted, written) in [("shell", "bash"), ("bash", "shell")] {
@@ -1129,9 +1128,9 @@ max_iterations = 10
 /// the registry, and the answer was that nothing here serves the one model the
 /// stage names.
 ///
-/// This is the shape a typo makes. Before the registry's answer reached this
-/// check, a stage naming a single misspelled model produced no finding at all:
-/// the old test required every entry to pin a provider, and this one pins none.
+/// This is the shape a typo makes, and it takes the registry's answer to see:
+/// the entry pins no provider, so nothing but `unrouted_models` can say the
+/// model is unservable.
 #[test]
 fn an_open_entry_nothing_serves_is_warned_about() {
     let toml = manifest(
@@ -1434,7 +1433,7 @@ fn no_read_paths_means_no_note() {
     );
 }
 
-// ─── read_paths grant status (issue #209) ────────────────────────────────────
+// ─── read_paths grant status ─────────────────────────────────────────────────
 
 /// A blueprint declaring `entries`, plus a `LintEnv` carrying the verdict a
 /// config of `grants` would give. Absolute entries so they compile the same on
@@ -1475,8 +1474,8 @@ fn ungranted_read_paths_are_warned_about_with_the_stanza_to_add() {
     assert!(fix.contains("[agent_read_paths.lint-fixture]"), "{fix}");
 }
 
-/// A partial grant is the case the old spawn warning missed entirely: it only
-/// fired when the grant list was empty.
+/// A partial grant is reported per entry: the granted paths drop out of the
+/// message and the refused ones stay.
 #[test]
 fn a_partial_grant_names_only_what_is_still_refused() {
     let (toml, env) = read_paths_env(&["/data/runs", "glob:/docs/**"], &["/data/runs"]);
@@ -2176,9 +2175,9 @@ fn requiring_an_output_without_the_submit_tool_is_an_error() {
     assert_eq!(missing[0].severity, LintSeverity::Error);
 }
 
-// ─── compact-summarizes-deliverable (#369) ───────────────────────────────────
+// ─── compact-summarizes-deliverable ──────────────────────────────────────────
 
-/// The reported shape: a `required` region and a bare `compact` edge, which
+/// The shape that warns: a `required` region and a bare `compact` edge, which
 /// together mean the stage's own deliverable is paraphrased on the way out.
 #[test]
 fn a_bare_compact_over_a_required_region_is_warned_about() {

@@ -12,9 +12,9 @@ use std::time::Duration;
 ///
 /// Windows gets longer. Starting the daemon there has to bind a named pipe and
 /// detach into a job object, and under a supervisor opening many sessions at
-/// once those serialise: the 5s that is generous on Unix was regularly missed,
-/// leaving sessions `runtime-missing` and the control pipe reporting "All pipe
-/// instances are busy" (os error 231). The cost of the longer window is paid
+/// once those serialise: the 5s that is generous on Unix is regularly missed
+/// there, leaving sessions `runtime-missing` and the control pipe reporting
+/// "All pipe instances are busy" (os error 231). The longer window is paid for
 /// only by a start that would otherwise have failed - the poll returns as soon
 /// as the daemon answers, and a healthy one answers in ~20ms on either
 /// platform.
@@ -33,8 +33,8 @@ const MAX_DELAY: Duration = Duration::from_millis(50);
 /// 2ms and doubling to a 50ms ceiling. Returns whether it flipped in time.
 ///
 /// The backoff is the point. The daemon boots in about 20ms, so a fixed 50ms
-/// tick spent more time waiting than the daemon spent starting - it was most
-/// of the measured 97ms cold `lev run`. Doubling to the same 50ms ceiling
+/// tick spends more time waiting than the daemon spends starting: it was most
+/// of a measured 97ms cold `lev run`. Doubling to the same 50ms ceiling
 /// leaves the slow path (a daemon that genuinely takes seconds) unchanged
 /// while making the common path cost one 2ms sleep.
 ///

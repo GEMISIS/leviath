@@ -212,9 +212,9 @@ impl MarkdownEdit {
             self.apply(action);
             return MdOutcome::Edited;
         }
-        // `Ctrl-U` is underline now, and it used to be the textarea's undo.
-        // `Ctrl-Z` is what a person reaches for anyway, and it is already undo
-        // in the agent editor underneath this overlay.
+        // `Ctrl-U` is underline here, and that is the textarea's own undo key,
+        // so undo is `Ctrl-Z`: what a person reaches for anyway, and already
+        // undo in the agent editor underneath this overlay.
         match chord_char(key) {
             Some(('z', false)) => {
                 self.area.undo();
@@ -947,11 +947,11 @@ mod tests {
             .collect()
     }
 
-    // ── The bug this component exists for ──────────────────────────────────
+    // ── What this component exists for ─────────────────────────────────────
 
-    /// The regression: a task longer than the pane is wide used to scroll
-    /// sideways, so with the cursor at the end the *start* of what you had
-    /// written was off screen. Both ends have to be visible at once.
+    /// A task longer than the pane is wide wraps instead of scrolling
+    /// sideways: scrolling puts the *start* of what you had written off screen
+    /// once the cursor reaches the end. Both ends have to be visible at once.
     #[test]
     fn a_line_wider_than_the_pane_wraps_instead_of_scrolling_off_the_edge() {
         let mut md = edit("the quick brown fox jumps over the lazy dog");

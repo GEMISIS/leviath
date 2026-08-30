@@ -214,9 +214,9 @@ fn classify_write(target: &Word) -> WriteTarget {
 ///
 /// `is_valid_prefix` rejects anything starting with `>`, so there is no
 /// `[safe_commands] shell` entry that covers a write and none can be added. A
-/// write is approved by a person, per target, or not at all - which is what the
-/// safe list's own admission rule ("must not be able to write a file") has
-/// always said and could not previously enforce.
+/// write is approved by a person, per target, or not at all, which is what the
+/// safe list's own admission rule ("must not be able to write a file")
+/// demands.
 fn write_key(path: &str) -> String {
     format!(">{path}")
 }
@@ -368,12 +368,12 @@ pub(crate) enum WriteTargets {
 /// already ungrantable by [`writes_a_file`] and prompts every time, which is
 /// the containment it gets.
 ///
-/// A line that will not tokenize is different, and used to be folded into the
-/// same silence. It was "already treated as writing" by [`writes_a_file`], so
-/// it prompted - but under `--yolo` a prompt is a yes, and `cat <<EOF >
-/// /tmp/pwned` then wrote outside the tree where `write_file` on the same path
-/// is refused. Such a line is now [`WriteTargets::Unreadable`] when it holds a
-/// `>` at all, and the caller refuses it rather than guessing.
+/// A line that will not tokenize is different: it is
+/// [`WriteTargets::Unreadable`] when it holds a `>` at all, and the caller
+/// refuses it rather than guessing. Leaning on the prompt instead is not
+/// containment, because under `--yolo` a prompt is a yes, and `cat <<EOF >
+/// /tmp/pwned` would write outside the tree where `write_file` on the same
+/// path is refused.
 pub(crate) fn write_targets(command: &str) -> WriteTargets {
     let Some(segments) = tokenize(command) else {
         return match command.contains('>') {
@@ -430,8 +430,7 @@ pub(crate) fn program_of(key: &str) -> &str {
 /// A write key is refused on top of that rule rather than by it, because a bare
 /// `>out` *does* derive back to itself and would otherwise become a
 /// pre-approvable write. A write is approved by a person, per target, or not at
-/// all - which is what the safe list's own admission rule has always said and
-/// could not previously enforce.
+/// all, which is what the safe list's own admission rule demands.
 pub(crate) fn is_valid_prefix(entry: &str) -> bool {
     !entry.starts_with('>') && command_keys(entry) == [format!("{KEY_PREFIX}{entry}")]
 }

@@ -40,8 +40,8 @@ pub(crate) fn resolve_task(
 /// whitespace anywhere, and either a path separator or a `~` home prefix.
 ///
 /// This exists so a mistyped filename fails instead of silently becoming the
-/// agent's entire task, which is what `lev run coder -t ./promt.md` used to do:
-/// a real run, real tokens, and a transcript whose only instruction was an
+/// agent's entire task: `lev run coder -t ./promt.md` would otherwise be a
+/// real run, real tokens, and a transcript whose only instruction is an
 /// eleven-character string. Prompt text that happens to mention a path ("fix
 /// src/main.rs") always has spaces, so it never trips this.
 ///

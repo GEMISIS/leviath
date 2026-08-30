@@ -504,19 +504,18 @@ fn target_path(target: &str, workdir: &std::path::Path) -> std::path::PathBuf {
 /// Tools a blueprint may declare *more* permissively than the built-in default
 /// without the user opting in.
 ///
-/// A blueprint used to be able to set any tool the user had not configured, and
-/// saying nothing is the normal state: nobody writes `shell = "ask"` into their
-/// config, because that is already the default. So an `agent.leviath` from `lev
-/// add` could give itself `shell = "allow"` on a stock machine, which is the
-/// opposite of what SECURITY.md promised.
+/// Without this list any tool the user had not configured would be loosenable,
+/// and saying nothing is the normal state: nobody writes `shell = "ask"` into
+/// their config, because that is already the default. An `agent.leviath` from
+/// `lev add` could then give itself `shell = "allow"` on a stock machine,
+/// which is the opposite of what SECURITY.md promises.
 ///
-/// The justification for allowing *any* loosening is real but much narrower than
-/// the behaviour it justified: a shipped agent should be able to pre-approve the
-/// tools that are its whole point, so the researcher does not prompt for every
-/// page it reads. Checking the ten bundled agents, the only policies any of them
-/// loosens relative to the default are these two - the rest of their
-/// `[tool_permissions]` lines are `ask`, or `allow` on tools that already
-/// default to `allow`.
+/// The justification for allowing *any* loosening is real but narrow: a
+/// shipped agent should be able to pre-approve the tools that are its whole
+/// point, so the researcher does not prompt for every page it reads. Checking
+/// the ten bundled agents, the only policies any of them loosens relative to
+/// the default are these two - the rest of their `[tool_permissions]` lines
+/// are `ask`, or `allow` on tools that already default to `allow`.
 ///
 /// An allowlist rather than a denylist of dangerous tools, for the reason
 /// `secrets.rs` gives about the same choice: a denylist has to be complete to be
@@ -954,12 +953,13 @@ mod policy_tests {
         ToolPolicy::Allow
     }
 
-    // ─── Redirect confinement (issue #289) ───────────────────────────────────
+    // ─── Redirect confinement ────────────────────────────────────────────────
 
     /// The asymmetry this closes. Under `--yolo` the write policy resolves to
-    /// `Allow`, so the clamp above passes the call through - and the target was
-    /// then never checked, while `write_file` on the same path is refused by
-    /// `resolve_within`. The shell was the spelling that worked.
+    /// `Allow`, so the clamp above passes the call through; with no separate
+    /// check the target is never looked at, while `write_file` on the same path
+    /// is refused by `resolve_within`. The shell must not be the spelling that
+    /// works.
     #[test]
     fn a_redirect_outside_the_workdir_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1007,10 +1007,10 @@ mod policy_tests {
     /// A redirect the tokenizer cannot read past is refused outright.
     ///
     /// A heredoc, a backtick, an unterminated quote and an unbalanced `$(`
-    /// each stop the line being read as commands, and the old answer was
-    /// "no targets found", which let `cat <<EOF > /tmp/pwned` through under
-    /// `--yolo` while the same path in `write_file` was refused. Every
-    /// redirect operator, under every construct, against a path outside.
+    /// each stop the line being read as commands. Answering "no targets found"
+    /// there would let `cat <<EOF > /tmp/pwned` through under `--yolo` while
+    /// the same path in `write_file` is refused. Every redirect operator, under
+    /// every construct, against a path outside.
     #[test]
     fn no_unreadable_redirect_escapes_the_workdir() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1074,8 +1074,8 @@ mod policy_tests {
     /// a naive "is it absolute" test.
     ///
     /// Built from a real temp directory, so on Windows it carries real
-    /// backslashes - which is the case that used to fail, before the tokenizer
-    /// learned that `cmd.exe` does not read them as escapes.
+    /// backslashes - the case that breaks if the tokenizer reads a backslash as
+    /// an escape, which `cmd.exe` does not.
     #[test]
     fn an_absolute_path_into_the_workdir_is_allowed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1111,7 +1111,7 @@ mod policy_tests {
         );
     }
 
-    // ─── Write accounting (issue #252) ───────────────────────────────────────
+    // ─── Write accounting ────────────────────────────────────────────────────
 
     /// What each tool declares it will write, which is what lets an oversized
     /// `write_file` be stopped before a byte lands.
@@ -1364,7 +1364,7 @@ mod policy_tests {
         assert_eq!(blueprint_says("read_file", "ask", false), ToolPolicy::Ask);
     }
 
-    /// The case the old behaviour existed to serve: an agent whose whole point
+    /// The case the loosenable list exists to serve: an agent whose whole point
     /// is reading the web should not prompt for every page.
     #[test]
     fn a_blueprint_may_preapprove_the_read_only_web_tools() {
@@ -2119,10 +2119,10 @@ mod policy_tests {
 
     /// Policy is matched against the name the model calls, which is always the
     /// canonical `shell`, while a manifest, a config, or a `--allow` flag may
-    /// have written `bash`. Every one of those entries used to be dead:
-    /// `lev run --allow bash` did nothing at all, and `bash = "ask"` in the
-    /// shipped `coder` only behaved as intended because the default
-    /// for an unlisted tool is also `ask`.
+    /// have written `bash`. Without the alias fold every one of those entries
+    /// is dead: `lev run --allow bash` does nothing, and `bash = "ask"` in the
+    /// shipped `coder` looks right only because the default for an unlisted
+    /// tool is also `ask`.
     #[test]
     fn a_permission_written_as_an_alias_reaches_the_tool() {
         let policy = |layer: &str, spelling: &str, called: &str| {
@@ -2170,9 +2170,8 @@ mod policy_tests {
     }
 
     /// The context tools write the agent's own context regions, not the
-    /// filesystem, and they used to fall through to `Ask` - so a run that kept
-    /// notes paid a prompt per note, 25 of them on the run that prompted this
-    /// work.
+    /// filesystem, so they default to `Allow`. Falling through to `Ask` would
+    /// charge a run that keeps notes one prompt per note.
     #[test]
     fn the_context_tools_do_not_prompt() {
         for tool in [
@@ -2383,8 +2382,8 @@ mod policy_tests {
     ///   `[read_paths]`, so the prompt would be asking about a capability the
     ///   confinement has already decided.
     /// - **Context.** The `context_*` tools write the agent's own context
-    ///   regions, not the filesystem. They used to fall through to `Ask` and
-    ///   cost 25 prompts on one run, none of which a person could act on.
+    ///   regions, not the filesystem. A prompt per note is a prompt nobody can
+    ///   act on.
     /// - **Sub-agents.** These default to `Allow` so a fan-out does not stop on
     ///   a prompt nothing is there to answer. They are routed through policy
     ///   resolution anyway so a configured `deny` still counts.

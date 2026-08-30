@@ -20,9 +20,8 @@ pub(super) fn lint_tool_policies(
     agent_permissions: &HashMap<String, String>,
 ) -> Vec<LintFinding> {
     // Either spelling counts, because policy resolution accepts either: a stage
-    // granting `bash` is covered by a `shell` permission and the reverse. This
-    // used to warn about the mismatch, back when only the name as called was
-    // looked up and every entry written under an alias was dead.
+    // granting `bash` is covered by a `shell` permission and the reverse. A
+    // mismatch between the two is not worth a warning for that reason.
     let has_policy = |name: &str| {
         leviath_tools::tool_name_spellings(name)
             .any(|n| stage.tool_permissions.contains_key(n) || agent_permissions.contains_key(n))
@@ -276,9 +275,9 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
 /// warning for an entry so broad it amounts to "my whole home directory" or
 /// "any absolute path".
 ///
-/// The grant status is the point (issue #209). A declaration is inert on its
-/// own, and before this it took reading the config schema to find that out: the
-/// blueprint validated, the run spawned, and the first out-of-workdir read was
+/// The grant status is the point. A declaration is inert on its own, and
+/// without the status it takes reading the config schema to find that out: the
+/// blueprint validates, the run spawns, and the first out-of-workdir read is
 /// refused with nothing said earlier. When `env` has no answer - the daemon's
 /// offline lint, which has no user config to consult - the note falls back to
 /// stating the rule.

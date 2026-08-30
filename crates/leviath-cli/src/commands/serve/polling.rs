@@ -151,13 +151,12 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
 ///
 /// The engine has its own words for where a run stands - `idle` and `active`
 /// for a run that is going, `waiting` for one parked - and they arrive here on
-/// every [`WorldEvent`]. They used to go straight out on the socket, so
-/// `agent_status.status` and `GET /api/runs/{id}` described the same run in
-/// different words, and every client had to carry its own copy of the mapping
-/// between them to reconcile the two. One console's copy quietly normalized the
-/// engine's three words to nothing, which meant a status frame could never move
-/// a run: it heard a completion and a pause and nothing else, for months,
-/// because a 1.5s re-read of the run kept papering over it.
+/// every [`WorldEvent`]. Sending them straight out on the socket would make
+/// `agent_status.status` and `GET /api/runs/{id}` describe the same run in
+/// different words, leaving every client to carry its own copy of the mapping
+/// between them. A client whose copy is wrong sees status frames that never
+/// move a run - a completion and a pause and nothing else - and a periodic
+/// re-read of the run papers over it for months.
 ///
 /// So the translation happens once, here, on the way out. The engine keeps its
 /// vocabulary inside the engine; the API has one.
@@ -745,13 +744,11 @@ mod tests {
 
     /// The socket and the run have to say the same word for the same state.
     ///
-    /// The engine's `idle`, `active` and `waiting` used to go out verbatim, so
-    /// a client watching the socket saw three words no REST route ever sends
-    /// and had to carry its own copy of this mapping to reconcile them. One
-    /// console's copy normalized them to nothing, which meant a status frame
-    /// could never move a run - it heard completions and pauses and nothing
-    /// else - and that went unnoticed because a periodic re-read of the run
-    /// kept supplying the right answer.
+    /// The engine's `idle`, `active` and `waiting` must not reach a client
+    /// verbatim: they are three words no REST route sends, so a client would
+    /// have to carry its own copy of this mapping. A copy that normalizes them
+    /// to nothing leaves status frames unable to move a run - completions and
+    /// pauses and nothing else - and a periodic re-read of the run hides that.
     #[test]
     fn a_status_frame_speaks_the_run_status_vocabulary() {
         let word = |status: &str| {
@@ -806,10 +803,10 @@ mod tests {
         assert_eq!(json["status"], "complete");
     }
 
-    /// The fine-grained events used to arrive wrapped as `{"type":"world",
-    /// "event":{...}}`, so every field a client wanted sat one level down
-    /// behind a tag it had to know to unwrap. They are flat frames now, and
-    /// the fields are asserted by name because that shape is the contract.
+    /// The fine-grained events are flat frames, not `{"type":"world",
+    /// "event":{...}}` with every field a client wants one level down behind a
+    /// tag it has to know to unwrap. The fields are asserted by name because
+    /// that shape is the contract.
     #[test]
     fn stage_and_tool_frames_are_flat_and_named() {
         let json = serde_json::to_value(to_server_event(WorldEvent::StageTransition {
@@ -1208,7 +1205,7 @@ mod tests {
                     "delivery id in the header"
                 );
                 // A `complete` status alone would tell the receiver this run
-                // succeeded, when it finished with nothing to show (#192).
+                // succeeded, when it finished with nothing to show.
                 assert!(
                     requests[0].contains(r#""empty_output":true"#),
                     "the empty-run verdict travels with the completion"

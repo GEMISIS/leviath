@@ -125,7 +125,6 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
         return agents;
     }
 
-    // Check if this directory itself has an agent.leviath
     let direct_manifest = dir.join(leviath_core::files::MANIFEST_FILENAME);
     if direct_manifest.exists()
         && let Some(info) = read_agent_info(&direct_manifest, config, cwd)
@@ -133,7 +132,6 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
         agents.push((dir.to_path_buf(), info));
     }
 
-    // Check subdirectories
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();

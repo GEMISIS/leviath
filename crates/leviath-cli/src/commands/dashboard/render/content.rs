@@ -805,7 +805,7 @@ impl Dashboard {
                     if tail.is_empty() {
                         // Nothing in the stage's output.log. If this stage
                         // submitted the run's final answer, show that instead
-                        // of a permanent "No output yet" (issue #410).
+                        // of a permanent "No output yet".
                         match self.final_output_for_selected_stage(agent) {
                             Some(answer) => {
                                 showing_final_output = true;
@@ -1042,10 +1042,10 @@ mod tests {
                 },
                 runstate::RegionSnapshot {
                     name: "history".to_string(),
-                    // The word a snapshot writes now. The older `sliding` has
-                    // to draw the same letter, which is what
+                    // The word a snapshot writes. The legacy `sliding` spelling
+                    // has to draw the same letter, which
                     // `render_context_bar_regions_string_with_many_region_types`
-                    // covers with a snapshot spelled the old way.
+                    // covers.
                     kind: "sliding_window".to_string(),
                     current_tokens: 3000,
                     max_tokens: 4000,
@@ -1738,7 +1738,7 @@ mod tests {
             |_d| {
                 let run_id = "test-content-final-output-match";
                 // A `mode = "output"` stage writes nothing to output.log; its
-                // answer lives only in the final_output sidecar (issue #410).
+                // answer lives only in the final_output sidecar.
                 let mut agent = setup_run_state_agent_with_final_output(
                     run_id,
                     "present",

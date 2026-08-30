@@ -286,7 +286,6 @@ mod tests {
             make_meta("c1", "b", Some("r")),
             make_meta("c2", "c", Some("r")),
         ];
-        // Build from a specific parent
         let subtree = build_tree(&runs, Some("r"));
         assert_eq!(subtree.len(), 2);
     }

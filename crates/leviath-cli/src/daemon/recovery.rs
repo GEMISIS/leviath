@@ -23,7 +23,7 @@
 //! not persisted - they block inside the transient tool-worker turn, so on restart
 //! they take the ordinary re-inference path and the model simply re-asks.
 //!
-//! ## Tool-call delivery contract (issue #96)
+//! ## Tool-call delivery contract
 //!
 //! A tool batch in flight at the crash is **replayed, not re-executed**. Dispatch
 //! journals the batch (a `ToolBatch` record) before its side effects can start,
@@ -273,8 +273,8 @@ fn mark_crashed(run_dir: &Path, meta: RunMeta, reason: &str, now_secs: i64) {
 /// `Cancelled` is deliberately not here. A cancelled run keeps its journal, its
 /// context regions, its stage and iteration, and its parked fan-out state, so
 /// there is something to carry on from and `lev resume` should be able to reach
-/// it (#576). A `Complete` run has nothing left to do, and an `Error` one should
-/// be read before it is continued.
+/// it. A `Complete` run has nothing left to do, and an `Error` one should be
+/// read before it is continued.
 ///
 /// This governs paging a run back in on demand. Startup recovery has its own
 /// filter in `triage_restores`, which still drops cancelled runs: somebody
@@ -392,9 +392,9 @@ fn reload_one(
 
     // Put the per-stage ledger back too. `build_agent_for_reload` seeds one
     // all-zero record per blueprint stage, and the persist tick rewrites
-    // `stages.json` whole, so skipping this did not merely fail to restore the
-    // run's stage history - the next tick wrote zeros over the file that held
-    // it, while `meta.json`'s run totals went on looking correct (issue #415).
+    // `stages.json` whole, so skipping this would not merely fail to restore
+    // the run's stage history - the next tick writes zeros over the file that
+    // holds it, while `meta.json`'s run totals go on looking correct.
     // No file (a run from before the ledger, or one that stopped before its
     // first persist) leaves the seeded records as they are.
     let mut stage_records = crate::runstate::read_stages_index_from(run_dir);
@@ -436,8 +436,8 @@ fn reload_one(
     // so the run returns as a bare `Paused` and the next persist tick computes
     // `waiting_on` from markers that are no longer there and writes `null`
     // over the recorded reason - the same shape as the stage ledger above,
-    // where not restoring did not merely lose the value but erased the file
-    // that held it. The run is not re-dispatched while paused, so nothing
+    // where not restoring does not merely lose the value but erases the file
+    // that holds it. The run is not re-dispatched while paused, so nothing
     // would recompute it either.
     if let Some(leviath_core::run_meta::WaitReason::NeedsSetup { blocker, remedy }) =
         &meta.waiting_on
@@ -455,8 +455,8 @@ fn reload_one(
     // reached the window: replay what the journal recorded - real results for
     // completed calls, verify-first errors for interrupted ones - so the
     // re-issued inference sees what already ran instead of re-executing the
-    // batch's side effects (issue #96). fold() only surfaces a batch that is
-    // genuinely unapplied (same iteration, turn absent from the window).
+    // batch's side effects. fold() only surfaces a batch that is genuinely
+    // unapplied (same iteration, turn absent from the window).
     if let Some(batch) = pending_batch {
         leviath_runtime::restore::restore_pending_batch(
             world.world_mut(),
@@ -485,7 +485,7 @@ fn reload_one(
     }
 
     // Carry the run's productivity flags across the restart, so a resumed run
-    // doesn't report itself as having modified nothing (issue #107).
+    // doesn't report itself as having modified nothing.
     {
         let mut flags = world
             .world_mut()
@@ -511,8 +511,8 @@ fn reload_one(
     // If this run was parked at a stage-boundary interaction point (e.g.
     // plan_approval), re-present it in the *waiting* state rather than the default
     // `Active` + `ReadyToInfer` restore - so the open prompt survives the restart
-    // instead of being dropped and re-inferred (issue #38). A missing/malformed
-    // sidecar, or a blueprint that no longer matches, leaves the default restore.
+    // instead of being dropped and re-inferred. A missing/malformed sidecar, or
+    // a blueprint that no longer matches, leaves the default restore.
     if let Some(state) =
         std::fs::read_to_string(run_dir.join(leviath_core::files::INTERACTIONS_FILE))
             .ok()
@@ -688,14 +688,14 @@ mod tests {
             depth,
             max_child_depth,
             // Non-default on purpose: proves reload restores the run's
-            // productivity flags rather than starting them over (issue #107).
+            // productivity flags rather than starting them over.
             flags: leviath_core::run_meta::RunFlags {
                 modified_files: vec!["src/a.rs".to_string()],
                 modified_file_count: 1,
                 // Contradicts what this manifest would compute on a fresh
                 // spawn (it advertises `write_file`), which is the point: the
                 // flags describe how the run actually executed, so the
-                // persisted answer wins over a re-derived one (issue #192).
+                // persisted answer wins over a re-derived one.
                 no_output_tools: true,
                 ..Default::default()
             },
@@ -894,9 +894,9 @@ mod tests {
         (world, entity.entity())
     }
 
-    /// An unattended run comes back unattended. Dropping `--yolo` on reload was
-    /// meant as the safe side, but it converted a running unattended job into
-    /// one parked on a prompt nobody was watching for (issue #184).
+    /// An unattended run comes back unattended. Dropping `--yolo` on reload
+    /// looks like the safe side, but it converts a running unattended job into
+    /// one parked on a prompt nobody is watching for.
     #[tokio::test]
     async fn reload_keeps_an_unattended_run_unattended() {
         let agent = agent_dir();
@@ -967,12 +967,12 @@ mod tests {
     /// A reload replays the `--model` the run was launched with, and only that.
     ///
     /// `meta.model` is the label the entry stage resolved to, and it is set on
-    /// every run that has started. It used to be handed back as the override,
-    /// so a run launched with no `--model` came back with every stage pinned
-    /// to its first stage's pair. Here the label names a provider that is not
+    /// every run that has started. Handing it back as the override would bring
+    /// a run launched with no `--model` back with every stage pinned to its
+    /// first stage's pair. Here the label names a provider that is not
     /// registered any more, the way a run resolved on a since-removed key
-    /// would: as an override that refused the reload outright; as a label it
-    /// is history, and the stages resolve afresh from the blueprint.
+    /// would: as an override it refuses the reload outright; as a label it is
+    /// history, and the stages resolve afresh from the blueprint.
     #[tokio::test]
     async fn reload_replays_the_launch_override_not_the_resolved_label() {
         let agent = agent_dir();
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(flags.0.modified_files, vec!["src/a.rs".to_string()]);
         assert_eq!(flags.0.modified_file_count, 1);
         // Including the capability answer, which the blueprint on disk would
-        // now compute differently - the run is judged as it ran (issue #192).
+        // compute differently - the run is judged as it ran.
         assert!(flags.0.no_output_tools);
         // The answer the run had already given is put back on the entity. Were
         // it not, the next persist tick would write a meta.json without it and
@@ -1326,7 +1326,7 @@ mod tests {
             .clone()
     }
 
-    /// The #96 crash-resume path end to end: a batch was dispatched (journaled),
+    /// The crash-resume path end to end: a batch was dispatched (journaled),
     /// one call completed (journaled), one didn't, and the daemon died before
     /// the batch applied. Reload replays the recorded result and synthesizes a
     /// verify-first error for the lost one - and the agent re-infers from there
@@ -1573,8 +1573,8 @@ mod tests {
         assert_eq!(restored.len(), 1);
         let (run_id, entity) = &restored[0];
         assert_eq!(run_id, "run-await");
-        // Re-armed in the *waiting* state (not the default Active), so no inference
-        // re-issues and the open prompt isn't dropped - the issue #38 fix.
+        // Re-armed in the *waiting* state (not the default Active), so no
+        // inference re-issues and the open prompt isn't dropped.
         assert_eq!(world.agent_status(*entity), Some(AgentStatus::Waiting));
         assert!(
             world
@@ -1643,9 +1643,9 @@ mod tests {
         assert_eq!(order, vec!["zzz-active", "aaa-blocked"]);
     }
 
-    /// #576: cancelling stops a run, it does not end it. Everything needed to
-    /// carry on is on disk, so `lev resume` has to be able to reach it, which
-    /// means it has to page back in.
+    /// Cancelling stops a run, it does not end it. Everything needed to carry
+    /// on is on disk, so `lev resume` has to be able to reach it, which means
+    /// it has to page back in.
     #[tokio::test]
     async fn reload_run_pages_in_a_cancelled_run_but_not_a_finished_one() {
         let agent = agent_dir();
@@ -2057,11 +2057,10 @@ mod tests {
         );
     }
 
-    /// A restart used to bring every stage back at zero: nothing rebuilt the
-    /// ledger from `stages.json`, so the blueprint-seeded (all-zero) one was
-    /// written straight over the real file on the next persist tick, and the
-    /// run's whole per-stage history went with it while `meta.json` still
-    /// looked healthy (issue #415).
+    /// A restart rebuilds the stage ledger from `stages.json`. Without it the
+    /// blueprint-seeded (all-zero) ledger goes straight over the real file on
+    /// the next persist tick, taking the run's whole per-stage history with it
+    /// while `meta.json` still looks healthy.
     /// A run parked until the machine is fixed keeps its reason across a
     /// daemon restart.
     ///
@@ -2138,7 +2137,7 @@ mod tests {
         );
         // The ledger as the run left it: `analyze` ran and finished, the run
         // stopped in `implement`, `review` was never reached. The trailing
-        // record names a stage this blueprint no longer has.
+        // record names a stage this blueprint does not have.
         let mut analyze = StageRecord::new("analyze".to_string(), 0);
         analyze.status = StageRunStatus::Complete;
         analyze.entered = true;
@@ -2158,7 +2157,7 @@ mod tests {
             since: None,
         });
         // One closed stay, priced, so the money survives the reload rather than
-        // restarting from zero the way #415 restarted the tokens.
+        // restarting from zero the way the tokens would.
         analyze.begin_visit(10);
         analyze.record_call(
             &leviath_core::run_meta::StageCall {
@@ -2218,8 +2217,8 @@ mod tests {
             .world()
             .get::<StageLedger>(restored[0].1.entity())
             .expect("a reloaded agent carries a stage ledger");
-        // One record per blueprint stage, in blueprint order: the record for a
-        // stage that no longer exists is dropped rather than appended.
+        // One record per blueprint stage, in blueprint order: a record for a
+        // stage the blueprint does not have is dropped rather than appended.
         let names: Vec<&str> = ledger.0.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["analyze", "implement", "review"]);
         assert_eq!(ledger.0[0].prompt_tokens, 1_234);
@@ -2230,8 +2229,8 @@ mod tests {
         // closed at the run's `updated_at` (222), not carried on to now (999).
         assert_eq!(ledger.0[0].active_runtime_secs(999), 8);
         assert_eq!(ledger.0[1].active_runtime_secs(999), 3 + 22);
-        // The money comes back with the tokens. Restarting a stage's cost at
-        // zero on a reload is the same bug #415 was about, one column over.
+        // The money comes back with the tokens: a stage's cost restarted at
+        // zero on a reload is the same loss as its tokens, one column over.
         assert_eq!(ledger.0[0].cost_usd, Some(0.5));
         assert!(ledger.0[0].cost_is_exact);
         assert_eq!(ledger.0[0].visits.len(), 1);
@@ -2313,8 +2312,8 @@ mod tests {
         assert!(restored.is_empty()); // all skipped, none fatal
 
         // The un-reloadable run is recorded as crashed rather than left claiming
-        // it is still running (issue #109) - `lev ps` and the dashboard would
-        // otherwise show a live run that no longer exists.
+        // it is still running - `lev ps` and the dashboard would otherwise show
+        // a live run that does not exist.
         let meta: RunMeta = serde_json::from_str(
             &std::fs::read_to_string(runs.path().join("run-badpath").join("meta.json")).unwrap(),
         )
@@ -2364,8 +2363,8 @@ mod tests {
     fn is_finished_covers_all_statuses() {
         assert!(is_finished(&RunStatus::Complete));
         assert!(is_finished(&RunStatus::Error));
-        // The point of #576: a cancelled run stopped, it did not end, and
-        // everything it needs to carry on is still on disk.
+        // A cancelled run stopped, it did not end, and everything it needs to
+        // carry on is still on disk.
         assert!(!is_finished(&RunStatus::Cancelled));
         assert!(!is_finished(&RunStatus::Running));
         assert!(!is_finished(&RunStatus::WaitingInput));

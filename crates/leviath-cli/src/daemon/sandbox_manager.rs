@@ -259,7 +259,7 @@ fn real_run(argv: &[String]) -> Result<(), String> {
     };
     // `docker run`/`docker rm` are bookkeeping the operator never watches, so
     // they get no console window on Windows - which is what `child_command`
-    // arranges and a bare `Command::new` did not.
+    // arranges and a bare `Command::new` does not.
     let mut cmd = leviath_sys::child_command(program);
     cmd.args(args);
     let output = cmd.output().map_err(|e| e.to_string())?;

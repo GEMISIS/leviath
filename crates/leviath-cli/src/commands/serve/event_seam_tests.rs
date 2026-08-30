@@ -2,14 +2,13 @@
 //!
 //! # Why this file exists
 //!
-//! Every link in the event chain had a test, and none of them joined. A real
-//! `WorldHost` emitting world events was covered in `host_tests.rs`; a *fake*
-//! daemon feeding `polling.rs` was covered there; a hand-constructed
-//! `ServerEvent` reaching a real websocket was covered in `websocket.rs`. So a
+//! Every link in the event chain has a test of its own, and none of them join.
+//! A real `WorldHost` emitting world events is covered in `host_tests.rs`; a
+//! *fake* daemon feeding `polling.rs` is covered there; a hand-constructed
+//! `ServerEvent` reaching a real websocket is covered in `websocket.rs`. So a
 //! break at any seam between them - a variant the gateway forgot to map, a
 //! change-detection pass that stopped running, an event the control socket
-//! dropped - would pass the whole suite. Issue #502 was filed claiming exactly
-//! that had happened. It had not, and nothing in the tree could say so.
+//! dropped - would pass the whole suite with nothing left to catch it.
 //!
 //! This drives the production chain end to end: `build_host` builds the same
 //! host the daemon runs, `handle_connection_as` serves the same control socket,
@@ -256,9 +255,8 @@ fn last<'a>(frames: &'a [serde_json::Value], tag: &str) -> &'a serde_json::Value
 
 /// The whole chain, asserted on the frames a subscriber actually receives.
 ///
-/// This is the test issue #502 asked for. Its claim was that a run's status and
-/// token changes have no producer, so no client can see them; what settles that
-/// is a real run over a real socket, not a grep.
+/// Whether a run's status and token changes reach a client is settled by a
+/// real run over a real socket, not by a grep for a producer.
 #[tokio::test]
 async fn a_real_run_reaches_a_websocket_subscriber() {
     let agent_dir = tempfile::tempdir().expect("agent dir");
@@ -311,11 +309,10 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     assert_eq!(spawned["blueprint"], "seam");
     assert_eq!(spawned["parent_id"], serde_json::Value::Null);
 
-    // The frame issue #502 says cannot exist. Its fields are asserted, not just
-    // its tag: a status with no stage tells a console nothing. And the run
-    // moved more than once, which is the other half of the claim - a client
-    // that only ever hears one status has no more than it would have got from
-    // the spawn.
+    // The status frames. Their fields are asserted, not just the tag: a status
+    // with no stage tells a console nothing. And the run moved more than once,
+    // because a client that only ever hears one status has no more than it
+    // would have got from the spawn.
     let statuses: Vec<&serde_json::Value> = frames
         .iter()
         .filter(|f| tag_of(f) == "agent_status")

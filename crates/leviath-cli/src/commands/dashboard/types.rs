@@ -361,7 +361,7 @@ pub(crate) struct DashboardAgent {
     pub last_answered_request_id: Option<String>,
     /// Live context window snapshot from context.json (background workers only)
     /// Shared, not owned: the live snapshot comes out of the sync tick's
-    /// stat-gated cache, and cloning a full context window per tick was the
+    /// stat-gated cache, and cloning a full context window per tick is the
     /// churn that cache exists to remove.
     pub context_snapshot: Option<std::sync::Arc<runstate::ContextSnapshot>>,
     /// Per-stage records from stages.json
@@ -385,10 +385,10 @@ pub(crate) struct DashboardAgent {
     /// it: time spent inferring, calling tools, or held for its own sub-agents,
     /// and none of the time it sat paused or waiting on a person.
     ///
-    /// Recomputed each sync from the run's own clock rather than reconstructed
-    /// here from transitions the dashboard happened to observe - it used to be
-    /// the latter, so a run that was already paused when the dashboard opened,
-    /// or paused while it was closed, counted the pause as work.
+    /// Recomputed each sync from the run's own clock, never reconstructed here
+    /// from transitions the dashboard happened to observe: a run already paused
+    /// when the dashboard opened, or paused while it was closed, would
+    /// otherwise count the pause as work.
     pub runtime_secs: u64,
     /// The moment the sync above read the clock at, for the per-stage clocks the
     /// stage tabs render. Capped at the run's `updated_at` when nothing is
@@ -447,15 +447,15 @@ pub(super) struct DaemonOutcome {
 /// runs the daemon is actually holding.
 ///
 /// Carried on a channel rather than fetched by the draw loop. Both answers
-/// come from control-socket round trips, and the loop used to `await` them
-/// between the tick and the draw - so a daemon that was busy, wedged, or
-/// restarting stopped the dashboard dead. The deadline on a control request is
-/// 30 seconds and there are two of them per tick, which is a very long time to
-/// look like a frozen terminal that ignores keys.
+/// come from control-socket round trips, and `await`ing them between the tick
+/// and the draw lets a daemon that is busy, wedged, or restarting stop the
+/// dashboard dead. The deadline on a control request is 30 seconds and there
+/// are two of them per tick, which is a very long time to look like a frozen
+/// terminal that ignores keys.
 ///
 /// Each field is `None` when that request did not come back, which the
 /// dashboard reads as "no answer this round" and leaves the corresponding
-/// state alone - the same best-effort reading the two polls always had.
+/// state alone - the best-effort reading both polls take.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct DaemonPoll {
     /// The daemon's open interactions, keyed by run id.

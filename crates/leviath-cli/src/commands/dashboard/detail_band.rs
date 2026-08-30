@@ -1,8 +1,8 @@
 //! The detail view's graph band: the run's path through its blueprint, drawn
-//! in the rows the flat tab strip used to have by the same canvas as the
+//! in the rows the flat tab strip otherwise takes, by the same canvas as the
 //! explorer.
 //!
-//! The strip said "3 of 7" and which stage was selected. The band says where
+//! The strip says "3 of 7" and which stage is selected. The band says where
 //! the run has actually been: one box per stage *visit*, in order, snaking
 //! across rows so it stays compact and grows a row at a time while the run is
 //! still going (see [`crate::tui::flowgraph::path`]). Three passes through

@@ -154,10 +154,9 @@ pub fn builtin_model_windows() -> std::collections::HashMap<(String, String), us
 /// The compiled catalogue as listing rows: what is shown for a provider whose
 /// own listing could not be read.
 ///
-/// One source of truth. This used to be a second table kept by hand in this
-/// file, and its numbers had drifted from the providers' own (`gpt-5.5` was
-/// still marked as taking a temperature here after the provider table learned
-/// it refuses one).
+/// One source of truth: the compiled catalogue, never a second table kept by
+/// hand in this file. A hand-kept copy drifts from the providers' own
+/// capabilities, down to whether a model accepts a temperature.
 fn catalogue_rows() -> Vec<ModelInfo> {
     builtin_catalog()
         .into_iter()
@@ -248,17 +247,16 @@ async fn list_with_registry_within(
     });
 
     // Live by default: each provider's own listing replaces the catalogue's
-    // rows for it. The catalogue is out of date the day it ships (#568), and
-    // a person picking a model from it picked a generation behind what the
-    // gateway served. A provider that cannot be asked keeps its catalogue
+    // rows for it. The catalogue is out of date the day it ships, so a person
+    // picking a model from it alone picks a generation behind what the gateway
+    // serves. A provider that cannot be asked keeps its catalogue
     // rows, and the trailing line says which is which.
     let mut live_providers: Vec<String> = Vec::new();
     if !args.offline {
         registry.prime_capabilities(prime_within, &[]).await;
         // `resolvable_names`, not `provider_names`: a script provider is
         // reachable only through `get`, so a sweep built on the registered
-        // names alone silently omitted every one of them - the same shape as
-        // issues #523 and #531.
+        // names alone silently omits every one of them.
         for provider_name in registry.resolvable_names() {
             // If the caller filtered to a specific provider, skip others.
             if let Some(ref filter) = args.provider
@@ -271,10 +269,10 @@ async fn list_with_registry_within(
             }
 
             // A script name is a candidate until it compiles, so this cannot
-            // assume the lookup succeeds the way the old `provider_names` loop
-            // could. One that will not load is skipped here - the layer has
-            // already logged why - and is only ever fatal when the caller named
-            // it with `--provider`, which is `script_target` above.
+            // assume the lookup succeeds. One that will not load is skipped
+            // here - the layer has already logged why - and is only ever fatal
+            // when the caller named it with `--provider`, which is
+            // `script_target` above.
             let Some(provider) = registry.get(&provider_name) else {
                 continue;
             };
@@ -1918,7 +1916,7 @@ mod tests {
 
     /// The command `rhai-providers.md` prescribes as a provider script's smoke
     /// test: it has to reach the script layer, since the built-in table has no
-    /// row for a provider that names its own models at run time (issue #523).
+    /// row for a provider that names its own models at run time.
     #[tokio::test]
     async fn list_provider_reaches_a_script_provider() {
         let dir = tempfile::tempdir().expect("a temp providers dir");
@@ -1948,9 +1946,9 @@ mod tests {
         .await;
     }
 
-    /// `--remote` sweeps every provider it can resolve, script providers now
-    /// included - the sweep used to be built on `provider_names`, which names
-    /// only the natively registered ones (issues #523, #531).
+    /// `--remote` sweeps every provider it can resolve, script providers
+    /// included: a sweep built on `provider_names` would reach only the
+    /// natively registered ones.
     #[tokio::test]
     async fn list_remote_sweeps_script_providers_too() {
         let dir = tempfile::tempdir().expect("a temp providers dir");

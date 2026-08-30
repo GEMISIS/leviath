@@ -124,12 +124,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.files.workdir",
     "runs.stages",
     // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
-    // the `visits` split beneath them. The tokens were always there and the
-    // price was not, so a console drawing a run's graph could annotate a node
-    // with how long it took and not with what it cost - and the obvious
-    // workaround, multiplying tokens by a rate card of its own, produces a
-    // fourth answer that disagrees with the run's, the provider's and this
-    // one's (#630). Announced because a missing field must not read as a zero:
+    // the `visits` split beneath them. Without the price a console drawing a
+    // run's graph can annotate a node with how long it took and not with what
+    // it cost, and the obvious workaround, multiplying tokens by a rate card
+    // of its own, produces a fourth answer that disagrees with the run's, the
+    // provider's and this one's. Announced because a missing field must not
+    // read as a zero:
     // an older daemon serves stage records with no cost at all, and `null`
     // there means unknown for a different reason than it does here.
     "runs.stages.cost",
@@ -150,9 +150,9 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "events.waiting_on",
     // Stage transitions and tool call start/finish as first-class frames
     // (`stage_transition`, `tool_call_started`, `tool_call_finished`) rather
-    // than wrapped in the untyped `world` envelope they used to ride. Breaking
-    // for a client that matched on `world`, which is why it is announced at
-    // all rather than left for a client to discover.
+    // than wrapped in the untyped `world` envelope. Breaking for a client that
+    // matches on `world`, which is why it is announced at all rather than left
+    // for a client to discover.
     "events.stage_and_tool",
     // `parent_id` on `agent_spawned` names the run that spawned a sub-agent, so
     // a console can place a fan-out worker in the tree the moment it starts
@@ -165,11 +165,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // that poll where the daemon has it and keep it where it does not.
     "events.title",
     // `cost_usd` and `subtree_cost_usd` on the agent tree routes. A sub-agent's
-    // cost is on the sub-agent's own record, so answering "what did this run
-    // cost" used to mean walking every descendant and reading each one - the walk
-    // that gets skipped, and skipping it understates a fan-out badly. Announced
-    // so a console can tell a daemon that answers this from one that does not,
-    // rather than reading a missing field as a zero.
+    // cost is on the sub-agent's own record, so without these, answering "what
+    // did this run cost" means walking every descendant and reading each one -
+    // the walk that gets skipped, and skipping it understates a fan-out badly.
+    // Announced so a console can tell a daemon that answers this from one that
+    // does not, rather than reading a missing field as a zero.
     "runs.cost",
     // The `agent_spend` frame, sent while a run is still going when its spend
     // passes a figure named in `[limits] notify_spend_usd`. Additive - a client
@@ -181,8 +181,8 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `agent_completed` carry the same word a run carries - `running`,
     // `waiting_input` - instead of the engine's own `idle`/`active`/`waiting`,
     // and the three routes that rendered a status through `Display`
-    // (`GET /api/agents/{id}/result` and the two tree routes) now spell it the
-    // way every other route does.
+    // (`GET /api/agents/{id}/result` and the two tree routes) spell it the way
+    // every other route does.
     //
     // Breaking for a client matching on the old words, which is why it is
     // announced rather than left to be discovered: a console can read this and
@@ -437,7 +437,7 @@ pub(super) struct ProbeModelsResp {
     pub(super) models: Vec<String>,
 }
 
-/// Body of `POST /api/config/validate` — a format-only key check (no network,
+/// Body of `POST /api/config/validate` - a format-only key check (no network,
 /// no persistence), mirroring the `lev setup` wizard's inline validation.
 #[derive(Debug, Deserialize)]
 pub(super) struct ValidateKeyReq {

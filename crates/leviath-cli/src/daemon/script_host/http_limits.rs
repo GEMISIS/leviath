@@ -59,9 +59,9 @@ impl Drop for HostPermit {
         let mut counts = IN_FLIGHT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // `or_insert(1)` rather than `if let Some(..)`: acquire always inserted
+        // `or_insert(1)` rather than `if let Some(..)`: acquire always inserts
         // the key and this is its only remover, so the missing case cannot
-        // happen - and written as a branch it was a region no test could enter.
+        // happen - and written as a branch it is a region no test can enter.
         let remaining = counts.entry(host.clone()).or_insert(1);
         *remaining = remaining.saturating_sub(1);
         if *remaining == 0 {
@@ -134,7 +134,7 @@ pub(super) static ALLOW_LOCAL_REDIRECTS: std::sync::atomic::AtomicBool =
 /// It lives next to the atomic rather than inside one module's test block
 /// because the writers are not all in one module: `setup_daemon_host_with`
 /// mirrors the config into it at daemon start-up, so a test that stands up a
-/// host is a writer too - and that was the one with no idea it had to take this.
+/// host is a writer too, and is the one least likely to look like one.
 /// An async mutex rather than a `std` one because the writers await: standing up
 /// a daemon host is an `async fn`, so a `std` guard held across it is
 /// `clippy::await_holding_lock` - and the lint is right, the guard would be
@@ -168,10 +168,10 @@ pub(super) fn local_network_allowed() -> bool {
 ///
 /// Called at daemon start-up and again on every `config.toml` reload. The
 /// reload half is the security-relevant one. The per-agent check for
-/// `[security] allow_local_network` reads the reloaded config already, so a
-/// user who *tightened* the switch had the URL a script names refused while a
-/// redirect from a permitted URL to loopback was still followed - for as long
-/// as the daemon lived. Policy has to be able to travel down, not only up.
+/// `[security] allow_local_network` reads the reloaded config already, so
+/// without this a user who *tightened* the switch gets the URL a script names
+/// refused while a redirect from a permitted URL to loopback is still followed,
+/// for as long as the daemon lives. Policy has to travel down, not only up.
 pub(crate) fn mirror_process_policy(config: &crate::config::Config) {
     set_local_network_allowed(config.security.allow_local_network);
     set_script_http_max_per_host(config.limits.script_http_max_per_host);

@@ -114,9 +114,8 @@ pub(super) async fn spawn_agent(
         Ok(ControlResponse::Spawned { run_id }) => {
             // No `AgentSpawned` from here. The daemon's change-detection pass
             // emits one for every run the world gains, however it was
-            // launched, and this route used to emit a second for its own - so
-            // a subscriber saw the run appear twice, and only ever for the
-            // runs that came in through HTTP.
+            // launched, so a second one from here would make exactly the runs
+            // that arrived over HTTP appear twice to a subscriber.
             tracing::info!(run_id = %run_id, blueprint = %body.blueprint, "spawned agent via API");
             Ok(Json(SpawnAgentResp {
                 agent_id: run_id.clone(),
@@ -429,9 +428,9 @@ pub(super) async fn agent_file(
     }
 
     let size = match std::fs::metadata(&resolved) {
-        // A directory used to be a 400. It is the natural way to ask "what is
-        // in here", and the folder picker already answers that shape, so it
-        // lists instead. Nothing can have depended on the old error.
+        // A directory is the natural way to ask "what is in here", and the
+        // folder picker already answers that shape, so it lists instead of
+        // refusing.
         Ok(m) if m.is_dir() => {
             return list_run_files(&meta, FileSource::Workdir, Some(&resolved), query.hidden)
                 .map(Json);
@@ -1335,11 +1334,9 @@ system_prompt = "Plan the work"
                     .await
                     .unwrap();
                 let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-                // The run we created has Running status
                 let found = runs.iter().any(|r| r.run_id == run_id);
                 assert_found_running_run(found);
 
-                // Cleanup
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },
         )
@@ -1611,7 +1608,6 @@ system_prompt = "Plan the work"
                 let meta = make_run(&run_id);
                 create_run(&meta).unwrap();
 
-                // Write a context snapshot
                 let snap = runstate::ContextSnapshot {
                     stage_name: "plan".to_string(),
                     total_tokens: 5000,
@@ -1925,8 +1921,9 @@ system_prompt = "Plan the work"
                 .unwrap();
                 runstate::append_stage_output(&run_id, 0, "from the planning stage");
                 runstate::append_stage_output(&run_id, 1, "from the coding stage");
-                // The path the handler used to read. Nothing writes it in
-                // production; planting it here proves the handler stopped.
+                // A run-level `output.log` is not a log source. Nothing
+                // writes it in production; planting it here proves the
+                // handler reads only the stage files.
                 std::fs::write(
                     runstate::run_dir(&run_id).join("output.log"),
                     "the dead run-level file",
@@ -2598,9 +2595,8 @@ system_prompt = "Plan the work"
     }
 
     #[tokio::test]
-    /// A directory used to be a 400. Asking for one is the natural way to say
-    /// "what is in here", so it lists instead - the behavior change this route
-    /// deliberately makes.
+    /// Asking for a directory is the natural way to say "what is in here", so
+    /// the route lists it rather than refusing.
     async fn agent_file_directory_lists_instead_of_erroring() {
         crate::runstate::with_isolated_runs_dir_async(
             "agent_file_directory_lists",
@@ -2909,7 +2905,6 @@ system_prompt = "Plan the work"
                 meta.status = RunStatus::Complete;
                 create_run(&meta).unwrap();
 
-                // Write some output.log content
                 let log_path = runstate::run_dir(&run_id).join("output.log");
                 std::fs::write(&log_path, "task complete\n").unwrap();
 
@@ -2945,7 +2940,6 @@ system_prompt = "Plan the work"
                 let meta = make_run(&run_id);
                 create_run(&meta).unwrap();
 
-                // Write a stages index and stage output
                 let stages = vec![runstate::StageRecord::new("plan".to_string(), 0)];
                 runstate::write_stages_index(&run_id, &stages).unwrap();
                 runstate::append_stage_output(&run_id, 0, "stage output here");
@@ -3400,7 +3394,7 @@ system_prompt = "Plan the work"
         .await;
     }
 
-    // ─── GET /api/agents/{id}/stages (#388) ──────────────────────────────────
+    // ─── GET /api/agents/{id}/stages ─────────────────────────────────────────
 
     /// Build a ledger with one stage that ran, one the run stepped over, and
     /// one still ahead of it.
@@ -3479,7 +3473,7 @@ system_prompt = "Plan the work"
         .await;
     }
 
-    /// The price beside the tokens, and the split by visit beneath it (#630).
+    /// The price beside the tokens, and the split by visit beneath it.
     ///
     /// A console drawing a run's graph annotates each node with what it cost.
     /// Without these it could annotate time and nothing else, and the obvious

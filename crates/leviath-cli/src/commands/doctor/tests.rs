@@ -1121,8 +1121,7 @@ async fn run_checks_reports_a_config_that_will_not_parse() {
     assert_eq!(checks.len(), 1, "nothing runs after a broken config");
     assert_eq!(checks[0].name, "config");
     assert_eq!(checks[0].status, CheckStatus::Fail);
-    // Where in the file, and what a running daemon is doing meanwhile. The
-    // check used to be the loader's paragraph pasted into one column.
+    // Where in the file, and what a running daemon is doing meanwhile.
     let detail = &checks[0].detail;
     assert!(detail.contains("does not load"), "{detail}");
     assert!(detail.contains("line 1, column"), "{detail}");

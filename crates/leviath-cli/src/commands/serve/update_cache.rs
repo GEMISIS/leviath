@@ -4,7 +4,7 @@
 //! a network call, so the answer it gives is whatever the last lookup found. The
 //! lookup itself is [`crate::commands::update::latest`], the same code
 //! `lev update` runs, so the console and the terminal cannot come to different
-//! conclusions about the same binary (issue #600).
+//! conclusions about the same binary.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -13,10 +13,7 @@ use crate::commands::update::latest::{self, LatestCheck, ReleaseFetcher};
 /// The last answer, and how to get a new one.
 ///
 /// Carried on the app state rather than in a `static` so that two tests, or two
-/// servers in one process, cannot write into each other's answer. The first
-/// version of this was a global and the tests found it immediately: one stored a
-/// version and another read it back, which is the same failure a second `lev
-/// serve` in-process would have hit.
+/// servers in one process, cannot write into each other's answer.
 #[derive(Clone)]
 pub(super) struct UpdateCheckCache {
     last: Arc<Mutex<LatestCheck>>,

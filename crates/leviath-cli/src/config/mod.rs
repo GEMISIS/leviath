@@ -504,16 +504,16 @@ impl Config {
 
     /// Say so when the config file holds a key nothing reads.
     ///
-    /// Serde ignores unknown fields, so a misspelled or long-removed table sat
-    /// in `config.toml` doing nothing and saying nothing - `[cache] ttl` being
-    /// the reported case (#362). A warning rather than a hard error on
-    /// purpose: a blueprint is authored and validated deliberately, but this
-    /// file is long-lived and read by *every* command, so refusing to load it
-    /// over one stale key would take the whole CLI down rather than the one
-    /// thing that key was meant to affect.
+    /// Serde ignores unknown fields, so a misspelled or long-removed table
+    /// otherwise sits in `config.toml` doing nothing and saying nothing;
+    /// `[cache] ttl` is the shape people hit. A warning rather than a hard
+    /// error on purpose: a blueprint is authored and validated deliberately,
+    /// but this file is long-lived and read by *every* command, so refusing to
+    /// load it over one stale key would take the whole CLI down rather than the
+    /// one thing that key was meant to affect.
     ///
     /// Reported at every depth, so `[limits] max_concurrent_tool` is named as
-    /// readily as a whole unknown table (#365).
+    /// readily as a whole unknown table.
     fn warn_unknown_config_keys(content: &str) {
         let unknown = Self::unknown_config_keys(content);
         if !unknown.is_empty() {
@@ -943,7 +943,7 @@ impl Config {
 /// The canonical `LEVIATH_HOME`-aware resolvers live in
 /// [`leviath_core::paths`]; these re-exports keep this crate's established
 /// names pointing at that single definition instead of carrying a byte-for-
-/// byte copy of it (which is exactly how the override once diverged between
+/// byte copy of it (which is how an override drifts apart between
 /// components). `Config::config_path()` stays separate: it has its own
 /// narrower `LEVIATH_CONFIG_PATH` override above.
 pub use leviath_core::paths::home_dir as leviath_home_dir;
@@ -952,21 +952,20 @@ pub(crate) use leviath_core::paths::providers_dir;
 /// The update check is on when the key is absent.
 ///
 /// A named default rather than `#[serde(default)]`, which for a `bool` is
-/// `false` - so an existing config with no `update_check` line would have had
-/// the check switched off, which is the opposite of what leaving it out means.
+/// `false` - a config with no `update_check` line would then have the check
+/// switched off, the opposite of what leaving it out means.
 fn default_update_check() -> bool {
     true
 }
 
 /// The provider a config that names none is assumed to mean.
 ///
-/// Exists so `default_provider` can carry `#[serde(default)]`: without one,
-/// every field on [`Config`] that lacked a default made a hand-written
-/// `config.toml` a parse error. Writing three lines to point Leviath at
-/// OpenRouter used to fail with `missing field `providers``, which names a
-/// table the user has no reason to know about and says nothing about what to
-/// add. Kept in sync with [`Config::default`] by
-/// `an_empty_config_file_parses_to_the_defaults`.
+/// Exists so `default_provider` can carry `#[serde(default)]`: a field on
+/// [`Config`] with no default makes a hand-written `config.toml` a parse
+/// error. Three lines pointing Leviath at OpenRouter would fail with
+/// `missing field `providers``, which names a table the user has no reason to
+/// know about and says nothing about what to add. Kept in sync with
+/// [`Config::default`] by `an_empty_config_file_parses_to_the_defaults`.
 pub(crate) fn default_provider_name() -> String {
     "anthropic".to_string()
 }
@@ -1390,10 +1389,9 @@ mod tests {
 
     /// An unknown key is reported wherever it sits, not only at the top level.
     ///
-    /// The reported case (#365) was `[limits] max_concurrent_tool`, a
-    /// misspelling one level down, which the first version of this check could
-    /// not see: it compared top-level keys only, so a whole bogus table was
-    /// named and a bogus key inside a real table was not.
+    /// `[limits] max_concurrent_tool` is the shape: a misspelling one level
+    /// down. A check that compared top-level keys only would name a whole bogus
+    /// table and miss a bogus key inside a real one.
     #[test]
     fn an_unknown_key_is_reported_at_any_depth() {
         let content = "\
@@ -2167,7 +2165,7 @@ some_custom_thing = \"forwarded to the script\"
 
     /// The `[limits]` tables reach the engine's pools: the global fallback for
     /// an unlisted model, a per-model override, and a per-provider cap that is
-    /// deliberately *not* filled in from the global number (issue #522).
+    /// deliberately *not* filled in from the global number.
     #[test]
     fn inference_pools_carries_every_limits_table_through() {
         let mut limits = LimitsConfig {
@@ -2197,8 +2195,8 @@ some_custom_thing = \"forwarded to the script\"
     }
 
     /// A config that never mentions the field waits for a person; an explicit
-    /// `0` (how "wait for ever" used to be spelled) parses as `Some(0)`, which
-    /// the hub reads the same way; a number is a deadline.
+    /// `0` parses as `Some(0)`, which the hub reads the same way; a number is a
+    /// deadline.
     #[test]
     fn interaction_timeout_defaults_and_parses() {
         let dir = tempfile::tempdir().unwrap();
@@ -2233,7 +2231,7 @@ some_custom_thing = \"forwarded to the script\"
     }
 
     /// The retry schedule is the shipped one unless someone says otherwise, so
-    /// an existing install's behaviour does not change under it (issue #417).
+    /// an install that mentions none of these keys keeps the behaviour it has.
     #[test]
     fn the_inference_retry_schedule_defaults_and_parses() {
         let dir = tempfile::tempdir().unwrap();
@@ -3065,10 +3063,10 @@ script = \"groq.rhai\"
     }
 
     /// An endpoint has no script to forward `extra` to, so a key it does not
-    /// read is a misspelling that used to load clean and do nothing: `modles`
-    /// left the endpoint with no catalogue, `heaeders` sent no headers, and
-    /// `unknown_config_keys` could not see either because `flatten` writes
-    /// them back. The load now refuses, naming the entry, the keys, and the
+    /// read is a misspelling that would otherwise load clean and do nothing:
+    /// `modles` leaves the endpoint with no catalogue, `heaeders` sends no
+    /// headers, and `unknown_config_keys` sees neither, because `flatten`
+    /// writes them back. The load refuses, naming the entry, the keys, and the
     /// ones it does read.
     #[test]
     fn an_endpoint_entry_with_unknown_keys_fails_the_load() {
@@ -3368,8 +3366,8 @@ agent_paths = []
     #[test]
     fn the_three_lines_that_point_leviath_at_openrouter_are_enough() {
         // What a user writes by hand after reading the OpenRouter docs. Every
-        // field on Config used to be required, so this failed with `missing
-        // field `providers`` - a table they have no reason to know about, in a
+        // field on Config needs a default, or this fails with `missing field
+        // `providers`` - a table they have no reason to know about, in a
         // message that says nothing about what to add.
         let config: Config = toml::from_str(
             r#"
@@ -3480,9 +3478,9 @@ url = "https://mcp.example.com/mcp"
     #[test]
     fn config_from_toml_with_model_capabilities() {
         // A one-field entry, which is what someone correcting a wrong context
-        // window actually writes. It used to fail to deserialize and be dropped
-        // in silence (#338); now it parses and names only that field, so
-        // everything it did not mention comes from the provider.
+        // window actually writes. It parses and names only that field, so
+        // everything it did not mention comes from the provider; requiring the
+        // whole entry drops it in silence.
         let toml = r#"
 [model_capabilities."my-custom-model"]
 max_context_tokens = 1048576

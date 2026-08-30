@@ -299,9 +299,9 @@ async fn a_traversing_agent_name_is_refused() {
 }
 
 /// An agent the catalog found through `config.agent_paths` resolves to its
-/// own directory, the one `GET /api/blueprints` reports as `path`. It used to
-/// resolve to `~/.leviath/agents/<name>`, which for such an agent does not
-/// exist, so a `PUT` wrote a tool nothing would ever load (issue #643).
+/// own directory, the one `GET /api/blueprints` reports as `path`. Resolving
+/// to `~/.leviath/agents/<name>` instead would write the tool into a directory
+/// that does not exist for such an agent, where nothing would ever load it.
 #[tokio::test]
 async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
     with_home(|home| async move {
@@ -1184,8 +1184,8 @@ async fn validating_a_provider_does_not_run_initialize() {
 
 /// The whole round trip for an agent that lives in a configured path rather
 /// than the installed directory: its tools are listed, its hook opens, and a
-/// write lands beside its manifest. Every one of these went to an empty
-/// `~/.leviath/agents/<name>/` before (issue #643).
+/// write lands beside its manifest, rather than in an empty
+/// `~/.leviath/agents/<name>/`.
 #[tokio::test]
 async fn the_routes_see_an_agent_discovered_through_agent_paths() {
     with_home(|home| async move {

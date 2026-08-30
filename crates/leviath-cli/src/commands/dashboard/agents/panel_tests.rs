@@ -1881,9 +1881,10 @@ fn a_stage_that_inherits_lists_the_shared_regions_and_a_table_seed_reads_as_such
 }
 
 /// The file a prompt is handed over in is private and its name is not
-/// knowable in advance: it used to be `<temp>/leviath-dash-prompts/<stage>-
-/// system.md`, a path another local user could create first and point
-/// wherever they liked, on a directory this process did not own.
+/// knowable in advance. A fixed name like
+/// `<temp>/leviath-dash-prompts/<stage>-system.md` sits on a directory this
+/// process does not own, so another local user can create it first and point
+/// it wherever they like.
 #[test]
 fn handoff_files_are_private_and_unpredictable() {
     let (mut dash, root) = dashboard("prompts_private_handoff");

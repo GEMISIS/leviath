@@ -884,8 +884,8 @@ condition = "llm_choice"
             inside.1,
         ));
         // A kind the canvas does not route (the wheel sideways) leaves the
-        // capture alone. Plain motion no longer reaches here at all: it is
-        // taken above, to light the long-form editor's toolbar.
+        // capture alone. Plain motion does not reach here at all: it is taken
+        // above, to light the long-form editor's toolbar.
         dash.handle_mouse(mouse(MouseEventKind::ScrollLeft, inside.0, inside.1));
         assert_eq!(dash.mouse_capture, None);
 

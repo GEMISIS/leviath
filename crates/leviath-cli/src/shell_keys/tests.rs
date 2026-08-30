@@ -92,8 +92,8 @@ fn a_quoted_pipe_is_not_a_command_boundary() {
 
 // ─── Prompt-count regressions ────────────────────────────────────────────────
 
-/// Loop and conditional keywords are not programs. They produced `shell:for i`
-/// and `shell:do if` on a real run.
+/// Loop and conditional keywords are not programs. Read as one, `for` and `do`
+/// key `shell:for i` and `shell:do if`.
 #[test]
 fn loop_keywords_are_not_programs() {
     assert_eq!(
@@ -122,9 +122,9 @@ fn cd_is_keyed_without_its_path() {
 /// An environment assignment is not the program being run - but it is named,
 /// because it decides which program the rest of the line resolves to.
 ///
-/// This test used to assert that an assignment contributed nothing at all,
-/// which is the bug: `PATH=/tmp/evil ls` keyed a bare `shell:ls`, and `ls` is
-/// on the default safe list, so it ran somebody else's binary with no prompt.
+/// Dropping it is the hole: `PATH=/tmp/evil ls` would key a bare `shell:ls`,
+/// and `ls` is on the default safe list, so somebody else's binary runs with
+/// no prompt.
 #[test]
 fn an_env_assignment_is_not_the_program() {
     assert_eq!(
@@ -143,7 +143,7 @@ fn a_subshell_paren_is_a_boundary() {
     );
 }
 
-// ─── Behaviour carried over from the previous implementation ─────────────────
+// ─── What a key covers ───────────────────────────────────────────────────────
 
 #[test]
 fn a_subcommand_narrows_the_grant() {
@@ -208,10 +208,9 @@ fn a_substituted_command_gets_its_own_key() {
 
 /// A redirect target is not a command - it is a write, which is its own key.
 ///
-/// This test used to assert the target was dropped entirely, which is the bug:
-/// `cat x > ~/.ssh/authorized_keys` keyed a bare `shell:cat x`, and a
-/// `[safe_commands]` entry of `cat` widened onto it, so the shipped default
-/// configuration wrote arbitrary files with no prompt.
+/// Dropping the target is the hole: `cat x > ~/.ssh/authorized_keys` would key
+/// a bare `shell:cat x`, and a `[safe_commands]` entry of `cat` widens onto it,
+/// so the shipped default configuration writes arbitrary files with no prompt.
 #[test]
 fn a_redirect_target_is_a_write_not_a_command() {
     assert_eq!(
@@ -784,7 +783,7 @@ fn an_env_key_is_a_writable_config_entry() {
     assert!(!safe.contains_key(&format!("{KEY_PREFIX}env:PATH")));
 }
 
-// ─── Which shell's escape rule (issue #296) ──────────────────────────────────
+// ─── Which shell's escape rule ───────────────────────────────────────────────
 
 /// The keys a line produces under one shell's escape rule, for asserting both
 /// readings from either platform.
@@ -866,7 +865,7 @@ fn a_trailing_backslash_only_swallows_a_terminator_on_a_posix_shell() {
     assert_eq!(keys_under(r"echo trailing\", false), ["shell:echo"]);
 }
 
-// ─── Where a redirect may write (issue #289) ─────────────────────────────────
+// ─── Where a redirect may write ──────────────────────────────────────────────
 
 /// A discarded write is not a write, so nothing here needs confining. Pinned as
 /// hard as the dangerous cases: charging a workspace check to `2>/dev/null`

@@ -143,9 +143,9 @@ const OFFLINE_TABLE_LIMIT: usize = 20;
 /// there is no honest way to turn a persisted [`RunStatus`] back into an
 /// `AgentStatus`: `Starting` and `CompleteInteractive` have no counterpart, and
 /// `Idle`/`Active` both collapse to `Running` on the way out. Inventing a live
-/// status for a run nobody is running is the exact kind of convenient lie that
-/// made issue #202 hard to diagnose, so the two sources stay in two arrays, each
-/// honest about where it came from.
+/// status for a run nobody is running is the kind of convenient lie that makes
+/// a listing impossible to diagnose from, so the two sources stay in two
+/// arrays, each honest about where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct OfflineRun {
     /// The run id.
@@ -319,8 +319,7 @@ pub(crate) fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
 /// note that a finished run has nothing to show for itself.
 ///
 /// A run that ends having changed nothing looks identical to a successful one
-/// from the outside, which is how a whole batch of them can go unnoticed - the
-/// failure that produced issue #107 in the first place.
+/// from the outside, which is how a whole batch of them goes unnoticed.
 fn status_cell(entry: &RunListEntry) -> String {
     match (&entry.status, &entry.wait_reason) {
         (AgentStatus::Waiting, Some(reason)) => format!("waiting: {reason}"),
@@ -357,8 +356,7 @@ fn humanize_age(seconds: i64) -> String {
 ///
 /// Three spans, three columns, because they answer three questions and a run can
 /// look very different under each: AGE is how long it has existed, WORK how much
-/// of that it spent working, MOVED how long since it last got anywhere. This
-/// column used to be headed AGE and show what MOVED now shows.
+/// of that it spent working, MOVED how long since it last got anywhere.
 fn age_cell(entry: &RunListEntry, now: i64) -> String {
     match entry.started_at {
         Some(at) => humanize_age(now.saturating_sub(at)),
@@ -396,10 +394,9 @@ fn stage_cell(entry: &RunListEntry) -> String {
 
 /// The providers currently out of service, with why and when each is retried.
 ///
-/// This is the line that would have answered issue #201 on sight. Ten runs
-/// dying in a row produced ten identical error rows and nothing that said "the
-/// OpenRouter account is empty", so the shape of the problem was invisible from
-/// the listing.
+/// Without it, ten runs dying in a row are ten identical error rows with
+/// nothing saying "the OpenRouter account is empty", and the shape of the
+/// problem is invisible from the listing.
 fn providers_footer(health: &DaemonHealth) -> Option<String> {
     if health.providers_down.is_empty() {
         return None;
@@ -447,7 +444,7 @@ fn reads_cell(entry: &RunListEntry) -> String {
 /// Absent while everything is healthy, so an ordinary listing stays a table and
 /// nothing else. A lane at capacity is worth mentioning; a dead-cycle streak is
 /// worth mentioning loudly, because every row above it can look busy while the
-/// factory as a whole has not moved in hours (issue #191).
+/// factory as a whole has not moved in hours.
 fn health_footer(health: &DaemonHealth) -> Option<String> {
     let saturated = health.tools_busy >= health.tools_workers && health.tools_queued > 0;
     if !saturated && health.dead_cycles == 0 {
@@ -479,9 +476,8 @@ fn health_footer(health: &DaemonHealth) -> Option<String> {
 ///
 /// `finished` are runs the daemon has unloaded but still remembers. They are
 /// listed after the live ones rather than left out, because "the run I started
-/// died on its first inference" and "there is no such run" are the two answers
-/// issue #205's scheduler could not tell apart, and an empty table said the
-/// second when it meant the first.
+/// died on its first inference" and "there is no such run" are two different
+/// answers, and an empty table gives the second when it means the first.
 ///
 /// `now` is unix seconds, passed in rather than read here so the output is
 /// deterministic under test.
@@ -495,7 +491,7 @@ pub(crate) fn format_runs(
         // "no agent runs active" on its own is the most misleading thing this
         // command can say while a provider is down: it is what an operator sees
         // once even the finished records have aged out, and it reads as an idle
-        // daemon rather than a factory that cannot start anything (issue #201).
+        // daemon rather than a factory that cannot start anything.
         // Say why the list is empty.
         return match providers_footer(health) {
             Some(footer) => format!("no agent runs active\n\n{footer}"),
@@ -573,8 +569,8 @@ pub(crate) fn format_runs(
         .join("\n");
 
     // The rows that will not move until somebody acts. Worth calling out under
-    // the table: on a wide listing they are easy to miss among the healthy
-    // `waiting: children(n)` rows they used to be indistinguishable from.
+    // the table: on a wide listing they are easy to lose among the healthy
+    // `waiting: children(n)` rows.
     let blocked = runs
         .iter()
         .filter(|e| e.wait_reason.as_ref().is_some_and(|r| r.needs_a_person()))
@@ -708,8 +704,8 @@ fn broken_config_footer(path: &std::path::Path) -> Option<String> {
 /// polling on an interval will eventually catch the daemon restarting, and the
 /// whole point of the flag is to be the thing it reconciles against: failing
 /// there, or reporting an empty live set, would tell it every run had died at
-/// once. Without `--all` the old behavior stands, because a listing of live runs
-/// with no daemon to list them is simply an error.
+/// once. Without `--all` an unreachable daemon is fatal, because a listing of
+/// live runs with no daemon to list them is simply an error.
 pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
     match (client.list().await, args.all) {

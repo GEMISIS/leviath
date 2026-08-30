@@ -178,7 +178,7 @@ fn fields_accepts_the_optional_ones_that_only_some_runs_carry() {
 /// list exists is the struct itself. So read it: every `pub` field declared
 /// inside `RunMeta` in `run_meta.rs` must be a key the probe serializes. A
 /// field added with `skip_serializing_if` and no line in `probe_meta` fails
-/// here rather than as a 400 in a console (issue #656 was `waiting_on`).
+/// here rather than as a 400 in a console.
 #[test]
 fn every_skip_if_none_option_on_run_meta_is_filled_by_the_probe() {
     let source = std::fs::read_to_string(concat!(

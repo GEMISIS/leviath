@@ -399,7 +399,7 @@ fn the_chooser_starts_simple_or_clones_and_checks_the_name() {
     assert!(text(&mut dash).contains("Letters, digits"));
     dash.handle_key(key(KeyCode::Enter));
     assert!(dash.agents().chooser.is_some());
-    // The row no longer changes the name once typed.
+    // Moving the row does not overwrite a name once typed.
     dash.handle_key(key(KeyCode::Down));
     assert_eq!(
         dash.agents().chooser.as_ref().unwrap().name.value(),
@@ -434,7 +434,7 @@ fn the_chooser_starts_simple_or_clones_and_checks_the_name() {
     assert_eq!(editor.name, "my-coder");
     assert!(editor.doc.has_stage("discover"));
     // Save: the clone lands under the agents dir with the coder's scripts
-    // (it has none; the reviewer neither), and is no longer new.
+    // (it has none; the reviewer neither), and stops counting as new.
     dash.handle_key(ctrl('s'));
     assert!(
         root.join("agents")
@@ -698,7 +698,7 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
     );
     dash.handle_key(ctrl('z'));
     assert!(text(&mut dash).contains("Nothing to undo"));
-    // `u` is no longer a key: it is left for the canvas, which ignores it.
+    // `u` is not an undo key: it is left for the canvas, which ignores it.
     dash.handle_key(key(KeyCode::Char('u')));
     assert!(!text(&mut dash).contains("Nothing to undo"));
     // The rest of the canvas keys: rotate, fit, zoom, and a key nobody has.

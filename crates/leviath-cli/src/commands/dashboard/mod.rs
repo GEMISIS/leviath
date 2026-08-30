@@ -51,21 +51,20 @@ use types::DaemonCommand;
 
 /// How often the poller asks the daemon what it is holding.
 ///
-/// Slower than the 100ms draw tick on purpose. Two socket round trips per
-/// frame was never a rate anything needed - a run's status changes on the
-/// order of seconds - and the old loop only ran at that rate because it was
-/// doing the asking inline.
+/// Slower than the 100ms draw tick on purpose: two socket round trips per
+/// frame is not a rate anything needs, since a run's status changes on the
+/// order of seconds.
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Background task that asks the daemon what it is holding, and publishes each
 /// round for the draw loop to pick up.
 ///
-/// This exists so the dashboard never waits on the socket. The two questions -
-/// the open interactions and the live run ids - used to be `await`ed inside the
-/// tick, between advancing the frame and drawing it, so a daemon that was busy,
-/// wedged, or part-way through a restart stopped the whole UI: no redraw, no
-/// keys, nothing, until it answered. A control request's deadline is thirty
-/// seconds and there were two per tick.
+/// This exists so the dashboard never waits on the socket. Awaiting the two
+/// questions - the open interactions and the live run ids - inside the tick,
+/// between advancing the frame and drawing it, lets a daemon that is busy,
+/// wedged, or part-way through a restart stop the whole UI: no redraw, no
+/// keys, nothing, until it answers. A control request's deadline is thirty
+/// seconds, and there are two questions per tick.
 ///
 /// Every round is sent whether or not the daemon answered, because "it did not
 /// say" is itself information the run list needs: a `None` run set means the

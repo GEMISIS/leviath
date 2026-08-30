@@ -134,8 +134,8 @@ pub struct LimitsConfig {
     /// for a dead one and closes it, failing a request that was going fine.
     ///
     /// Set it to `false` if a provider's stream misbehaves; the buffered path
-    /// stays as it was. A provider that does not advertise streaming for the
-    /// model in hand is called the old way regardless.
+    /// is always there. A provider that does not advertise streaming for the
+    /// model in hand is called buffered regardless.
     ///
     /// Reloaded with `config.toml`: the next inference any run makes uses
     /// the new setting, and one already on the wire finishes the way it
@@ -175,8 +175,8 @@ pub struct LimitsConfig {
     /// This only ever fires for something the runtime cannot resolve on its own -
     /// today, a stage whose provider is not configured. Waiting for a busy
     /// model's inference pool is ordinary backpressure and is never failed, no
-    /// matter how long it takes. Defaults to `60`; `0` disables the watchdog and
-    /// restores the old behaviour of waiting indefinitely.
+    /// matter how long it takes. Defaults to `60`; `0` disables the watchdog, so
+    /// such a run waits indefinitely.
     ///
     /// Reloaded with `config.toml`, and read on every pass, so a change
     /// reaches the runs already going as well as the next one.
@@ -202,15 +202,14 @@ pub struct LimitsConfig {
     /// How long (seconds) a run keeps its place in `lev ps` after the daemon
     /// unloads it from memory.
     ///
-    /// A terminal run used to leave the listing the moment it was unloaded,
-    /// which made a run that died on its first inference look exactly like a run
-    /// that had never been spawned. A scheduler polling the listing could only
-    /// tell the two apart with a stopwatch, and issue #205 is what that cost:
-    /// forty minutes of spawning work, timing out, and spawning it again.
+    /// Without the window a terminal run leaves the listing the moment it is
+    /// unloaded, and a run that died on its first inference looks exactly like a
+    /// run that was never spawned. A scheduler polling the listing can only tell
+    /// the two apart with a stopwatch, so it spawns the work again, waits for it
+    /// to time out, and spawns it again.
     ///
-    /// Defaults to `300`. `0` drops a run as soon as it finishes, which is the
-    /// old behaviour. The record lives in memory, so a restart clears it
-    /// whatever this is set to.
+    /// Defaults to `300`. `0` drops a run as soon as it finishes. The record
+    /// lives in memory, so a restart clears it whatever this is set to.
     ///
     /// Reloaded with `config.toml`; read on every prune, so shortening the
     /// window drops the rows that have already outlived it.
@@ -220,12 +219,11 @@ pub struct LimitsConfig {
     /// leasing it before the daemon disconnects it (ending a stdio server's
     /// child process). Long enough that back-to-back runs of a blueprint reuse
     /// the warm connection; the next run that declares the server reconnects
-    /// lazily. `0` keeps every server connected for the daemon's life, which
-    /// was the old behaviour. A global `[[mcp_servers]]` entry is never
-    /// disconnected for idleness, because nothing leases one; take it out of
-    /// `config.toml` and this is how long it stays connected before
-    /// `daemon::mcp_reload` tears it down, so a stage part-way through a call
-    /// keeps the tool it was given.
+    /// lazily. `0` keeps every server connected for the daemon's life. A global
+    /// `[[mcp_servers]]` entry is never disconnected for idleness, because
+    /// nothing leases one; take it out of `config.toml` and this is how long it
+    /// stays connected before `daemon::mcp_reload` tears it down, so a stage
+    /// part-way through a call keeps the tool it was given.
     ///
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_mcp_idle_disconnect_secs")]
@@ -239,8 +237,7 @@ pub struct LimitsConfig {
     /// This only catches an agent holding *no* marker at all, which the engine's
     /// own invariants say cannot happen and which nothing will ever look at
     /// again. Such a run stays `running` in `meta.json` for the life of the
-    /// daemon and keeps whatever capacity an external scheduler assigned it,
-    /// which is issue #202.
+    /// daemon and keeps whatever capacity an external scheduler assigned it.
     ///
     /// Defaults to `0`, which is off: this fails runs, and an upgrade that
     /// starts killing work nobody asked it to kill is worse than the leak. `300`
@@ -289,8 +286,7 @@ pub struct LimitsConfig {
     /// needs you is still waiting when you get back, whether that is in ten
     /// minutes or on Monday. Nothing else in the daemon fails, reaps, or marks
     /// stuck a run that is waiting on a person; only cancelling it ends the
-    /// wait. Set this to bound the wait for a run nobody will be watching
-    /// (issue #204).
+    /// wait. Set this to bound the wait for a run nobody will be watching.
     ///
     /// Expiry resolves the prompt exactly as cancelling it would: a tool
     /// approval and a taint gate **deny**, an `ask_user_*` call is told nobody
@@ -320,8 +316,8 @@ pub struct LimitsConfig {
     /// Raising it lengthens how long a run rides out a provider **overload**
     /// (an Anthropic 529, or a 429), which is retried on its own much slower
     /// schedule of 15s, 30s, then 60s per further attempt - that case is why the
-    /// key exists (issue #417). Whatever this is set to, the retries of one
-    /// request may sleep at most five minutes in total.
+    /// key exists. Whatever this is set to, the retries of one request may sleep
+    /// at most five minutes in total.
     ///
     /// Reloaded with `config.toml`; read when a request is dispatched, so
     /// a change applies to the next attempt any run makes.
@@ -349,9 +345,8 @@ pub struct LimitsConfig {
     /// user who never opened this file - but a fresh install gets a concrete
     /// number written here, where it is visible and can be deleted outright.
     ///
-    /// The incident behind it (issue #252) was a single shell call appending in
-    /// a loop until the 60-second timeout: about 14 GB, from one call that
-    /// looked ordinary.
+    /// The shape it is here to stop: one shell call appending in a loop until
+    /// the 60-second timeout, about 14 GB from a call that looked ordinary.
     ///
     /// A shell redirect is measured *after* the call, since the bytes go from
     /// the shell to the file without passing through Leviath. So this stops the
@@ -410,7 +405,7 @@ pub struct LimitsConfig {
     ///
     /// This is the reporting half only. It does not stop a run - killing one
     /// mid-stage throws away work, which is a different decision from being told
-    /// what is happening (#573).
+    /// what is happening.
     ///
     /// A run whose models have no published price reports what it could price
     /// and says the figure is not exact, rather than reporting a confident zero.
@@ -640,11 +635,10 @@ mod restart_list_tests {
     /// Every `[limits]` field the daemon docs name as needing a restart, so the
     /// two halves of the same claim cannot drift apart.
     ///
-    /// The list in `daemon.md` had gone stale before, in both directions: it
-    /// named nine fields while ten more were boot-only and unmentioned, and it
-    /// went on naming fields after they were made to reload. Either shape is
-    /// the worst kind of list - complete enough to be trusted, wrong enough to
-    /// mislead. One field is left on it.
+    /// A hand-kept list drifts in both directions: it names fields that have
+    /// since learned to reload, and stays silent about ones that never did.
+    /// Either shape is the worst kind of list - complete enough to be trusted,
+    /// wrong enough to mislead. One field is on it.
     const RESTART_LIST: &[&str] = &["mcp_idle_disconnect_secs"];
 
     /// The restart section of the daemon docs page, read from the repo rather

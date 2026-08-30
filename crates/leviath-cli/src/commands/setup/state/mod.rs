@@ -751,11 +751,10 @@ impl Wizard {
 
     /// The model field's "no default" option.
     ///
-    /// It read "(provider default)", which is a thing that does not exist: no
-    /// provider default model is consulted anywhere at run time. A stage that
-    /// names no model of its own falls back to a model built into Leviath, not
-    /// to anything your provider chose, so the old label promised a mechanism
-    /// and delivered the opposite of what it said.
+    /// Worded as the blueprint's decision, never as a "provider default":
+    /// no provider default model is consulted anywhere at run time. A stage
+    /// that names no model of its own falls back to a model built into
+    /// Leviath, not to anything the provider chose.
     pub const NO_DEFAULT_MODEL: &'static str = "(each blueprint decides)";
 
     /// Open the chooser for the Defaults field the cursor is on.

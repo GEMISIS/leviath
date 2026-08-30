@@ -567,9 +567,9 @@ async fn session_new_opens_a_session_and_returns_its_id() {
 
 #[tokio::test]
 async fn empty_cwd_defaults_to_the_launch_directory() {
-    // Regression for #80: a `session/new` with an empty `cwd` must give the
-    // spawned agent the directory `lev agent-client` was launched from (the
-    // harness's default), not an empty workdir that runs in the daemon's dir.
+    // A `session/new` with an empty `cwd` must give the spawned agent the
+    // directory `lev agent-client` was launched from (the harness's default),
+    // not an empty workdir that runs in the daemon's dir.
     let captured = Arc::new(std::sync::Mutex::new(None));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {

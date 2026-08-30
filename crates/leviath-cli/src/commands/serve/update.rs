@@ -18,12 +18,11 @@ use crate::commands::update::{UpdateArgs, UpdateEnv, plan, plan_json};
 /// `GET /api/update`: how this copy was installed, and the command that
 /// upgrades it.
 ///
-/// Exists because the browser console had no way to ask. It printed a single
-/// hard-coded `brew upgrade leviath` at anyone whose Leviath was out of date,
-/// which is an instruction a Windows user cannot carry out and has no
-/// alternative offered for (issue #588) - while `lev update` on the very same
-/// binary already knew to say `scoop update leviath`, or to re-run
-/// `install.ps1`, or that a `cargo install` copy is theirs to rebuild.
+/// Exists so a browser console never has to guess. A hard-coded
+/// `brew upgrade leviath` is an instruction a Windows user cannot carry out
+/// and has no alternative offered for, while `lev update` on the very same
+/// binary knows to say `scoop update leviath`, or to re-run `install.ps1`, or
+/// that a `cargo install` copy is theirs to rebuild.
 ///
 /// Read-only, and so not behind `--allow-admin`: [`plan`] works out what the
 /// command *would* do and does none of it, the environment it is handed cannot
@@ -303,7 +302,7 @@ mod tests {
     /// Absent keys and `null` keys are different things to a client: `null` is
     /// "cannot tell", which it already knows how to render, while a missing key
     /// is indistinguishable from an older daemon and sends it back to guessing
-    /// from the outside, which is what issue #600 is about.
+    /// from the outside.
     #[tokio::test]
     async fn the_update_check_fields_are_always_present_even_when_unanswered() {
         let app = Router::new()

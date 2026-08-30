@@ -993,9 +993,9 @@ mod tests {
     }
 
     /// A manifest whose name walks out of the agents directory must not be
-    /// installed, and must not touch what it pointed at: the old code joined
-    /// the name onto the agents directory and, finding the target existed,
-    /// removed it before copying.
+    /// installed, and must not touch what it points at: joining the name onto
+    /// the agents directory and clearing the target before copying would
+    /// delete whatever the walk landed on.
     #[test]
     fn install_from_dir_refuses_a_name_that_escapes_the_agents_dir() {
         let root = tempfile::tempdir().unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
 
     /// The name comes from the `[agent]` table, not from the first line that
     /// happens to start with `name`: a `names = [..]` key elsewhere in the
-    /// manifest used to be read as the agent's name.
+    /// manifest is not the agent's name.
     #[test]
     fn install_from_dir_reads_the_agent_table_not_the_first_name_line() {
         let root = tempfile::tempdir().unwrap();

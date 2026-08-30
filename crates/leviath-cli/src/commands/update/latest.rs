@@ -1,22 +1,22 @@
-//! "Is there anything newer?" - the question `GET /api/update` could not answer.
+//! "Is there anything newer?" - the question `GET /api/update` cannot answer on
+//! its own.
 //!
 //! [`crate::commands::update::plan`] works out *how* this copy would update and
 //! deliberately makes no network call, so the route built on it can say what to
-//! type and not whether it is worth typing. The console was left comparing the
-//! daemon's version against a number baked into the site at deploy time, which
-//! only knows the stable channel and is as stale as the last build - so the
-//! people most likely to want an update prompt, the ones on `alpha` and `beta`,
-//! are exactly the ones it has to stay silent for (issue #600).
+//! type and not whether it is worth typing. Without this, a console is left
+//! comparing the daemon's version against a number baked into the site at
+//! deploy time, which only knows the stable channel and is as stale as the last
+//! build - so the people most likely to want an update prompt, the ones on
+//! `alpha` and `beta`, are exactly the ones it has to stay silent for.
 //!
 //! The answer comes from the GitHub releases this repo already publishes, one
 //! tag per channel, rather than from the package manager that would install it.
 //! Asking `brew` and `scoop` is the more obvious "forward to the right place",
-//! and it was the first plan here: it fails on the half of the problem that
-//! matters. Their output is a text format per tool per platform, a `cargo
-//! install` copy has nothing to ask at all, and the install script leaves no
-//! record - so Scoop and Windows would answer `null`, which is the gap that
-//! started this. One publish point answers for every channel, on every platform,
-//! for every install method.
+//! and it fails on the half of the problem that matters: their output is a text
+//! format per tool per platform, a `cargo install` copy has nothing to ask at
+//! all, and the install script leaves no record - so Scoop and Windows would
+//! answer `null`. One publish point answers for every channel, on every
+//! platform, for every install method.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

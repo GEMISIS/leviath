@@ -74,7 +74,8 @@ fn not_running_is_a_success_and_not_stopping_is_not() {
     assert!(stop_outcome(true, false).is_err());
 }
 
-/// The message used to say "5s" on every platform while Windows waits 15s.
+/// The stop message quotes the platform's real wait, which is not 5s
+/// everywhere: Windows waits 15s.
 #[test]
 fn the_shutdown_message_names_the_real_timeout() {
     let secs = super::super::readiness::READY_TIMEOUT.as_secs();

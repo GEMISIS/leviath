@@ -22,8 +22,8 @@ const STAGE_TAB_OVERHEAD: usize = 16;
 
 /// How many columns each stage name may take on a strip whose inside is
 /// `inner_width` wide and holds `tabs` tabs. Wide strips show a long name
-/// whole; a crowded one falls back to the old fixed width, which the strip
-/// clips the same way it always did.
+/// whole; a crowded one falls back to `STAGE_LABEL_MIN_W`, which the strip
+/// then clips.
 fn stage_label_width(inner_width: u16, tabs: usize) -> usize {
     let per_tab = usize::from(inner_width) / tabs.max(1);
     per_tab
@@ -595,12 +595,12 @@ mod tests {
     }
 
     /// A wide strip shows a long stage name whole; a crowded one falls back
-    /// to the old fixed width rather than to nothing.
+    /// to the minimum width rather than to nothing.
     #[test]
     fn a_stage_name_gets_the_room_the_strip_has() {
         // 118 inside columns across three tabs: 39 each, 23 for the name.
         assert_eq!(stage_label_width(118, 3), 23);
-        // Never below the width the strip always used, never above the cap.
+        // Never below the minimum, never above the cap.
         assert_eq!(stage_label_width(30, 6), STAGE_LABEL_MIN_W);
         assert_eq!(stage_label_width(0, 0), STAGE_LABEL_MIN_W);
         assert_eq!(stage_label_width(400, 1), STAGE_LABEL_MAX_W);

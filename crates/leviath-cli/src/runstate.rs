@@ -437,8 +437,8 @@ pub(crate) fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutpu
 
 /// [`read_final_output`] for a run directory the caller already resolved,
 /// with the metadata it already read. The daemon's recovery works from its
-/// configured runs directory rather than the home one, and used to carry a
-/// copy of this for that reason.
+/// configured runs directory rather than the home one, which is what this
+/// entry point is for.
 pub(crate) fn read_final_output_in(
     dir: &std::path::Path,
     meta: &RunMeta,
@@ -1063,8 +1063,8 @@ mod tests {
         ids.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// The shape issue #202 reported: disk says running, the daemon is not
-    /// hosting it, and it has not moved in a long time.
+    /// The abandoned shape: disk says running, the daemon is not hosting it,
+    /// and it has not moved in a long time.
     #[test]
     fn a_run_nothing_is_driving_looks_abandoned() {
         let meta = live_on_disk("r1");
@@ -1132,8 +1132,8 @@ mod tests {
 
     /// The progress stamp wins over the heartbeat. A wedged run keeps rewriting
     /// `updated_at` every 30 seconds, so judging on it would never age anything
-    /// out, which is the reason issue #202 could not be fixed from meta.json
-    /// before the stamp existed.
+    /// out; the stamp is the only field on meta.json that separates a run that
+    /// is working from one that is only ticking.
     #[test]
     fn a_fresh_heartbeat_does_not_rescue_a_run_that_stopped_moving() {
         let mut meta = live_on_disk("r1");
@@ -2214,7 +2214,8 @@ mod tests {
     /// The journal keeps `callback_secret` (the daemon re-signs webhooks for a
     /// run it reloads), so a replayed point carries it unless the reader strips
     /// it. `GET /api/agents/{id}/context/history` serves these points straight
-    /// out, which handed the webhook signing key to any API token holder.
+    /// out, so an unstripped one hands the webhook signing key to any API token
+    /// holder.
     ///
     /// Asserts against the *archive* as well as the history, so the test still
     /// means something if the journal ever stops storing the secret: were that
@@ -3264,7 +3265,7 @@ mod tests {
 
     /// The spawn that never became a run: the placeholder is `Starting`, which
     /// is not terminal, so it has to be rewritten or it claims to be alive for
-    /// ever (issue #190).
+    /// ever.
     #[test]
     fn force_error_records_the_failure_over_a_starting_placeholder() {
         let base = tempfile::tempdir().unwrap();
