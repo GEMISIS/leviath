@@ -167,6 +167,13 @@ impl Dashboard {
             mcp_add_input: String::new(),
             mcp_rows: Vec::new(),
             mcp_selected: 0,
+            // Watches the file the MCP screen edits and the new-run screen
+            // reads, taken from the context so a test points it at its own
+            // tempdir along with everything else.
+            config_watch: crate::daemon::config_reload::ConfigWatch::new(
+                mcp_ctx.config_path.clone(),
+            ),
+            config_fault: None,
             mcp_ctx,
             mcp_cmd_tx,
             mcp_outcome_rx,

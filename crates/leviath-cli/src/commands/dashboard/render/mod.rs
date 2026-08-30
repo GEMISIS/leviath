@@ -24,6 +24,59 @@ use super::state::Dashboard;
 use super::types::*;
 
 impl Dashboard {
+    /// Draw the config-health banner when `config.toml` will not load, and
+    /// hand back the area left for the screen under it.
+    ///
+    /// One row, full width, across every screen. It names the file, where in
+    /// it the problem is, and that runs are on the last config that loaded -
+    /// the third of those being the part a user cannot work out for
+    /// themselves, since a broken config is otherwise indistinguishable from
+    /// an edit that was never saved.
+    ///
+    /// Nothing is drawn, and the whole frame handed back, when the file loads
+    /// or when the terminal has no row to spare.
+    fn draw_config_banner(&self, frame: &mut Frame) -> ratatui::layout::Rect {
+        use crate::commands::dashboard::theme::{C_DIM, C_WARN};
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
+
+        let full = frame.area();
+        let Some(fault) = &self.config_fault else {
+            return full;
+        };
+        // Two rows is the floor: taking the only row a screen has leaves
+        // nothing for the banner to be in aid of.
+        if full.height < 2 {
+            return full;
+        }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(full);
+
+        // `!` is this dashboard's warning icon, as on a warning toast.
+        let parts = vec![
+            "! ".to_string(),
+            fault.path.display().to_string(),
+            format!(" {}", fault.summary()),
+            " · runs are on the last config that loaded".to_string(),
+        ];
+        // The path shrinks first: there is only one config file and the user
+        // is looking at it, so it is the least surprising thing to lose. The
+        // reassurance goes next, and the error itself is cut last.
+        let parts = super::helpers::fit_parts(&parts, full.width as usize, &[1, 3, 2]);
+        let warn = Style::default().fg(C_WARN);
+        let spans = vec![
+            Span::styled(parts[0].clone(), warn.add_modifier(Modifier::BOLD)),
+            Span::styled(parts[1].clone(), warn.add_modifier(Modifier::BOLD)),
+            Span::styled(parts[2].clone(), warn),
+            Span::styled(parts[3].clone(), Style::default().fg(C_DIM)),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+        chunks[1]
+    }
+
     pub(super) fn draw(&mut self, frame: &mut Frame) {
         // The whole frame accepts mouse selection, exactly like native
         // terminal selection; re-registered per frame so a resize (the one
@@ -38,8 +91,15 @@ impl Dashboard {
         // over from a previous layout is a click on the wrong thing.
         self.click_targets.clear();
 
+        // A `config.toml` that will not load takes the top row of every
+        // screen, for as long as it will not load. It has to be a banner
+        // rather than a toast: the condition persists until somebody edits the
+        // file, and a message that faded three seconds after the save cannot
+        // explain why the run started two minutes later ignored the edit.
+        let area = self.draw_config_banner(frame);
+
         if self.agent_builder.is_some() {
-            self.draw_agents_screen(frame, frame.area());
+            self.draw_agents_screen(frame, area);
             self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
             if self.show_help {
@@ -53,7 +113,7 @@ impl Dashboard {
             return;
         }
         if self.mcp_screen {
-            self.draw_mcp_screen(frame, frame.area());
+            self.draw_mcp_screen(frame, area);
             self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
             if self.show_help {
@@ -66,7 +126,7 @@ impl Dashboard {
             return;
         }
         if self.new_run_screen {
-            self.draw_new_run_screen(frame, frame.area());
+            self.draw_new_run_screen(frame, area);
             self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
             // This screen types text, so `?` is a question mark here and F1 is
@@ -85,7 +145,7 @@ impl Dashboard {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(frame.area());
+                .split(area);
             self.draw_detail_panel(frame, chunks[0]);
             self.draw_help_bar(frame, chunks[1]);
         } else {
@@ -97,7 +157,7 @@ impl Dashboard {
                     Constraint::Percentage(44),
                     Constraint::Length(1),
                 ])
-                .split(frame.area());
+                .split(area);
             self.draw_agent_table(frame, chunks[0]);
             self.draw_log_panel(frame, chunks[1]);
             self.draw_help_bar(frame, chunks[2]);
@@ -1027,5 +1087,146 @@ mod tests {
             crate::commands::dashboard::test_support::rendered_buffer(&terminal)
                 .contains("Run unattended?")
         );
+    }
+
+    /// A dashboard watching `path` for its config health.
+    fn dash_watching(path: &std::path::Path) -> Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.config_watch = crate::daemon::config_reload::ConfigWatch::new(path.to_path_buf());
+        dash
+    }
+
+    /// Write a config with an mtime strictly newer than the last write, so the
+    /// watch sees a save even inside one clock tick.
+    fn save_config(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    /// The top row of a rendered frame, which is where the banner is.
+    ///
+    /// Read as a row rather than out of the flattened screen on purpose: a
+    /// warning toast carries much the same words, so an assertion over the
+    /// whole buffer would pass on the toast alone and prove nothing about the
+    /// banner that has to outlive it.
+    fn top_row(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, 0)).expect("in the buffer").symbol())
+            .collect()
+    }
+
+    /// The banner is the whole point of this layer: a broken config used to
+    /// change nothing on screen at all.
+    #[test]
+    fn a_broken_config_raises_a_banner_that_clears_when_the_file_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, "default_provider = \"anthropic\"\n");
+        let mut dash = dash_watching(&path);
+        // Wide enough that nothing has to be cut: the fitting is the narrow
+        // terminal's test, and this one is about what the banner says.
+        let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+
+        dash.sync_config_health();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        // Bound before the assert, not passed as a lazy format argument: an
+        // argument only evaluates when the assert fails, and the 100% gate
+        // counts it as a region nothing reached.
+        let row = top_row(&terminal);
+        assert!(
+            !row.starts_with('!'),
+            "a file that loads raises nothing: {row:?}"
+        );
+
+        save_config(&path, "default_provider = \"anthropic\"\nbroken : :\n");
+        dash.sync_config_health();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let row = top_row(&terminal);
+        assert!(row.starts_with("! "), "{row:?}");
+        assert!(row.contains("config.toml"), "{row:?}");
+        assert!(
+            row.contains("line 2, column 8"),
+            "the banner points at the spot: {row:?}"
+        );
+        assert!(
+            row.contains("runs are on the last config that loaded"),
+            "{row:?}"
+        );
+
+        // Fixed, with nothing restarted and no key pressed.
+        save_config(&path, "default_provider = \"openai\"\n");
+        dash.sync_config_health();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let row = top_row(&terminal);
+        assert!(
+            !row.starts_with('!'),
+            "the banner clears by itself: {row:?}"
+        );
+    }
+
+    /// A refused value names the key rather than a position, and the banner
+    /// says so rather than showing nothing.
+    #[test]
+    fn a_refused_value_names_its_key_in_the_banner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, "default_provider = \"anthropic\"\n");
+        let mut dash = dash_watching(&path);
+
+        save_config(
+            &path,
+            "[model_providers.local]\nkind = \"openai-compatible\"\n",
+        );
+        dash.sync_config_health();
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let row = top_row(&terminal);
+        assert!(row.contains("model_providers.local"), "{row:?}");
+    }
+
+    /// Narrow terminals are the case a fixed-width banner gets wrong. The row
+    /// is fitted by column, so it never wraps and never pushes the screen off.
+    #[test]
+    fn the_banner_fits_a_narrow_terminal_and_still_leaves_the_screen_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, "default_provider = \"anthropic\"\n");
+        let mut dash = dash_watching(&path);
+        save_config(&path, "broken : :");
+        dash.sync_config_health();
+
+        for width in [40u16, 60, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| dash.draw(f)).unwrap();
+            let row = top_row(&terminal);
+            assert!(row.starts_with('!'), "width {width}: {row:?}");
+            // The screen still got its rows: the run table's border is under
+            // the banner rather than pushed off the bottom.
+            let rest: String = rendered_buffer(&terminal)
+                .chars()
+                .skip(width as usize)
+                .collect();
+            assert!(rest.contains('┌') || rest.contains('│'), "width {width}");
+        }
+    }
+
+    /// One row is all there is on a terminal a single row tall, and a banner
+    /// that took it would leave nothing to be a banner about.
+    #[test]
+    fn a_one_row_terminal_keeps_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, "default_provider = \"anthropic\"\n");
+        let mut dash = dash_watching(&path);
+        save_config(&path, "broken : :");
+        dash.sync_config_health();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let row = top_row(&terminal);
+        assert!(!row.starts_with('!'), "{row:?}");
     }
 }
