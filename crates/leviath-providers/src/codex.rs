@@ -39,6 +39,7 @@ pub mod catalog;
 pub mod claims;
 pub mod headers;
 pub mod provider;
+pub mod refresh;
 pub mod request;
 pub mod store;
 pub mod stream;
@@ -47,6 +48,7 @@ pub mod usage;
 
 pub use claims::CodexClaims;
 pub use provider::CodexProvider;
+pub use refresh::HttpRefresh;
 pub use store::{ProviderAuthStore, ProviderGrant, grant_account};
 pub use token::{
     CodexTokenSource, Credentials, RefreshError, RefreshTransport, RefreshedTokens, TokenSource,

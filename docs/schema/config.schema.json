@@ -86,6 +86,37 @@
             "max"
           ]
         },
+        "codex_enabled": {
+          "description": "Offer the Codex transport, which bills inference to a ChatGPT subscription. Sign in with `lev auth login codex`.",
+          "type": "boolean",
+          "default": false
+        },
+        "codex_originator": {
+          "description": "How Leviath identifies itself to the Codex route. Defaults to \"leviath\", which the route accepts.",
+          "type": "string"
+        },
+        "codex_reasoning_effort": {
+          "enum": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        "codex_verbosity": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "codex_replay_reasoning": {
+          "description": "Replay each turn's opaque reasoning token on the next request, which is what keeps a chain of thought alive on a backend that stores nothing.",
+          "type": "boolean",
+          "default": true
+        },
         "anthropic_cache_ttl": {
           "description": "How long a cached prompt prefix survives. \"1h\" costs more to write and sends the beta header it needs.",
           "enum": [

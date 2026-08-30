@@ -589,3 +589,43 @@ fn a_tool_call_from_a_response_maps_by_call_id() {
         "the item id must not be echoed"
     );
 }
+
+#[test]
+fn stage_parameters_reach_the_body() {
+    // `[stages.<n>.model.parameters]` beyond the two the request struct names,
+    // and the titling lane's reasoning override, both travel here.
+    let mut req = request(vec![], vec![user("go")]);
+    req.extra = json!({
+        "top_p": 0.1,
+        "reasoning": { "effort": "minimal" },
+        "text": { "verbosity": "low" },
+    });
+    let body = build_default(&req);
+    assert_eq!(body["top_p"], json!(0.1));
+    assert_eq!(body["reasoning"]["effort"], "minimal");
+    assert_eq!(body["text"]["verbosity"], "low");
+}
+
+#[test]
+fn a_stage_cannot_smuggle_a_rejected_parameter_through_its_parameters() {
+    // Both are `400 Unsupported parameter` on this route, so a stage that set
+    // one would fail every request rather than have it quietly ignored.
+    let mut req = request(vec![], vec![user("go")]);
+    req.extra = json!({
+        "temperature": 0.7,
+        "max_output_tokens": 1000,
+        "max_tokens": 1000,
+        "prompt_cache_retention": "24h",
+    });
+    let body = build_default(&req);
+    assert!(body.get("temperature").is_none(), "{body}");
+    assert!(body.get("max_output_tokens").is_none(), "{body}");
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert!(body.get("prompt_cache_retention").is_none(), "{body}");
+}
+
+#[test]
+fn a_null_extra_changes_nothing() {
+    let req = request(vec![], vec![user("go")]);
+    assert_eq!(build_default(&req)["model"], "gpt-5.6-sol");
+}

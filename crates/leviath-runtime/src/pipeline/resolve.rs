@@ -204,6 +204,16 @@ pub(crate) fn resolve_stage_candidates(
         }
         let mut routed = false;
         for (name, provider) in candidates_for_model {
+            // A provider that may only be reached by name does not win an open
+            // route. Selecting one changes what gets billed - a subscription
+            // transport spends a plan rather than an API balance - so enabling
+            // it must not silently move every bare-named stage onto it. It is
+            // still reachable by an explicit `provider/model`, a fallback
+            // entry, or being the default, which is why the default-provider
+            // case is exempt.
+            if provider.explicit_route_only() && name != defaults.provider {
+                continue;
+            }
             if let Some(id) = provider.serves_model(key) {
                 push(name.to_string(), id);
                 routed = true;
@@ -2317,5 +2327,148 @@ mod tests {
         let defs = defs_named(&["read_file"]);
         let tools = filter_tools_by_available(&defs, &["nonsense".to_string()]);
         assert!(offered(&tools).is_empty());
+    }
+
+    // ── explicit-route-only providers ───────────────────────────────────────
+
+    /// A provider serving one model, optionally only reachable by name.
+    struct Named {
+        model: String,
+        by_name_only: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for Named {
+        async fn infer(
+            &self,
+            _: &leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            unreachable!("resolution never infers")
+        }
+        async fn count_tokens(&self, _: &str, _: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "named"
+        }
+        fn capabilities(&self, _: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+        fn serves_model(&self, model_key: &str) -> Option<String> {
+            (model_key == self.model).then(|| model_key.to_string())
+        }
+        fn explicit_route_only(&self) -> bool {
+            self.by_name_only
+        }
+    }
+
+    fn two_providers(open_first: bool) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "openai".to_string(),
+            Arc::new(Named {
+                model: "gpt-5.6-sol".to_string(),
+                by_name_only: !open_first,
+            }),
+        );
+        registry.register(
+            "codex".to_string(),
+            Arc::new(Named {
+                model: "gpt-5.6-sol".to_string(),
+                by_name_only: true,
+            }),
+        );
+        registry
+    }
+
+    fn defaults_of(provider: &str) -> ModelDefaults {
+        ModelDefaults {
+            provider: provider.to_string(),
+            model: None,
+            fallback_order: Vec::new(),
+        }
+    }
+
+    /// Enabling a subscription transport must not silently move billing.
+    ///
+    /// `model_key` compares only the last path segment, so `openai` and `codex`
+    /// both answer to a bare `gpt-5.6-sol`. Without the exclusion, adding one
+    /// line of config re-routes every existing bare-named stage onto a plan.
+    #[test]
+    fn a_by_name_only_provider_never_wins_an_open_route() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_of("openai"),
+            &two_providers(true),
+        );
+        assert_eq!(picked.len(), 1, "codex joined an open route: {picked:?}");
+        assert_eq!(picked[0].provider, "openai");
+    }
+
+    /// Choosing it as the default is asking for it, so the exclusion lifts.
+    #[test]
+    fn naming_it_as_the_default_is_asking_for_it() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_of("codex"),
+            &two_providers(true),
+        );
+        assert_eq!(picked[0].provider, "codex");
+    }
+
+    /// So is naming it in the blueprint.
+    #[test]
+    fn an_explicit_provider_reaches_it() {
+        let picked = resolve_stage_candidates(
+            &model_cfg(vec![("codex", "gpt-5.6-sol")]),
+            None,
+            &defaults_of("openai"),
+            &two_providers(true),
+        );
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].provider, "codex");
+    }
+
+    /// And so is a `--model codex/...` override.
+    #[test]
+    fn a_model_override_reaches_it() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            Some("codex/gpt-5.6-sol"),
+            &defaults_of("openai"),
+            &two_providers(true),
+        );
+        assert_eq!(picked[0].provider, "codex");
+    }
+
+    /// With nothing else serving the name, an open route finds nobody rather
+    /// than falling through to the excluded provider. Silently spending a
+    /// subscription is the outcome the exclusion exists to prevent, so it has
+    /// to hold even when the alternative is no route at all.
+    #[test]
+    fn the_exclusion_holds_when_nothing_else_serves_the_name() {
+        // Neither provider is the default here, so nothing is exempt. The open
+        // route finds no one, and what is left is the unrouted entry the
+        // user-default path always appends - not a fall-through onto a
+        // provider that would have spent a subscription.
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_of("anthropic"),
+            &two_providers(false),
+        );
+        assert!(
+            picked.iter().all(|e| e.provider != "codex"),
+            "a by-name-only provider was reached anyway: {picked:?}"
+        );
+        assert!(
+            picked.iter().all(|e| e.provider != "openai"),
+            "got {picked:?}"
+        );
     }
 }

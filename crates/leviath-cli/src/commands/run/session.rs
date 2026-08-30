@@ -173,6 +173,48 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         });
     }
 
+    // Codex needs no API key either: its credential is a browser sign-in whose
+    // grant lives outside the config entirely, so `api_key` stays `None` and
+    // the provider reads the grant itself. Opt-in because registering it
+    // without a sign-in would put a provider in the registry that cannot
+    // answer, and because selecting it changes what gets billed.
+    if config.providers.codex_enabled {
+        let mut options = std::collections::HashMap::new();
+        if let Some(originator) = &config.providers.codex_originator {
+            options.insert("originator".to_string(), originator.clone());
+        }
+        if let Some(effort) = &config.providers.codex_reasoning_effort {
+            options.insert("effort".to_string(), effort.clone());
+        }
+        if let Some(verbosity) = &config.providers.codex_verbosity {
+            options.insert("verbosity".to_string(), verbosity.clone());
+        }
+        options.insert(
+            "replay_reasoning".to_string(),
+            config.providers.codex_replay_reasoning.to_string(),
+        );
+        // The runtime has no view of `[security]`, and a grant only the CLI
+        // could read would leave the keychain backend silently signing the
+        // daemon out.
+        if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
+            options.insert("credential_store".to_string(), "keychain".to_string());
+        }
+        creds.push(ProviderCreds {
+            name: leviath_providers::codex::PROVIDER_NAME.to_string(),
+            api_key: None,
+            base_url: None,
+            model_capabilities: caps.clone(),
+            // Unlike claude-code, this really is HTTP, so the host-wide
+            // request timeout applies.
+            request_timeout_secs: config.request_timeout_secs,
+            rate_limit: config
+                .rate_limits
+                .get(leviath_providers::codex::PROVIDER_NAME)
+                .cloned(),
+            options,
+        });
+    }
+
     creds
 }
 
@@ -799,6 +841,7 @@ mod tests {
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
             ollama_base_url: Some("http://custom:11434".to_string()),
@@ -1056,6 +1099,7 @@ mod tests {
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..crate::config::Config::default()
         };

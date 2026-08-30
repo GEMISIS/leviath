@@ -32,6 +32,13 @@ claude_code_enabled = false
 anthropic_cache_ttl = "5m"
 claude_code_binary = "/usr/local/bin/claude"
 claude_code_effort = "medium"
+# Bill inference to a ChatGPT subscription instead of an API balance.
+# Sign in with `lev auth login codex`; the grant is stored outside this file.
+codex_enabled = false
+codex_originator = "leviath"
+codex_reasoning_effort = "medium"
+codex_verbosity = "medium"
+codex_replay_reasoning = true
 fallback_order = ["anthropic/claude-sonnet-5", "openai/gpt-5.4-mini"]
 
 [limits]

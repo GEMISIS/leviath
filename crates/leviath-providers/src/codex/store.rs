@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +104,41 @@ pub const REFRESH_MARGIN_SECS: u64 = 120;
 /// the cost of guaranteeing that is one function.
 pub fn grant_account(provider: &str) -> String {
     format!("provider-oauth/{provider}")
+}
+
+/// A [`leviath_core::CredentialStore`] backed by the OS credential store.
+///
+/// A twin of the CLI's `KeychainStore`, and deliberately so: the registry is
+/// built in the runtime, which has no way to reach the CLI's, and a grant that
+/// only the CLI could read would leave `[security] credential_store =
+/// "keychain"` silently signing the daemon out. Both are the same handful of
+/// lines over `leviath_sys::keychain`, which owns the platform work.
+struct KeychainStore;
+
+impl leviath_core::CredentialStore for KeychainStore {
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        leviath_sys::keychain::get(leviath_core::credentials::SERVICE, account)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> Result<(), String> {
+        leviath_sys::keychain::set(leviath_core::credentials::SERVICE, account, secret)
+    }
+
+    fn delete(&self, account: &str) -> Result<bool, String> {
+        leviath_sys::keychain::delete(leviath_core::credentials::SERVICE, account)
+    }
+}
+
+/// The credential store for `kind`, or `None` when grants belong in the file.
+///
+/// `None` is the ordinary answer: `file` is the default backend.
+pub fn store_for(
+    kind: leviath_core::CredentialStoreKind,
+) -> Option<Arc<dyn leviath_core::CredentialStore>> {
+    match kind {
+        leviath_core::CredentialStoreKind::File => None,
+        leviath_core::CredentialStoreKind::Keychain => Some(Arc::new(KeychainStore)),
+    }
 }
 
 /// Every provider grant on this machine.
