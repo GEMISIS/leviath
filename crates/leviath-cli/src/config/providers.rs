@@ -9,8 +9,11 @@ use std::collections::HashMap;
 
 /// Provider configuration.
 ///
-/// `Debug` is hand-written (see below) so the keys cannot be printed.
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// `Debug` is hand-written (see below) so the keys cannot be printed, and
+/// `Default` is hand-written so it agrees with the serde defaults: a derived
+/// one would give `codex_replay_reasoning: false` while a config read from
+/// disk got `true`, and the two would disagree with nothing saying so.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Anthropic API key
     #[serde(default)]
@@ -71,6 +74,41 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub claude_code_effort: Option<String>,
 
+    /// Whether to offer the Codex transport, which bills inference to a
+    /// ChatGPT subscription rather than an API balance.
+    ///
+    /// Opt-in like the Claude Code one, and for a different reason: the
+    /// credential is a browser sign-in rather than a key, so enabling it
+    /// without one configured would register a provider that cannot answer.
+    /// `lev setup` offers it, and `lev auth login codex` does the sign-in.
+    #[serde(default)]
+    pub codex_enabled: bool,
+
+    /// How Leviath identifies itself to the Codex route.
+    ///
+    /// The route has been observed to whitelist this header. `leviath` is
+    /// accepted and is what ships; this exists so a user is not stuck waiting
+    /// for a release if that changes. Nothing secret.
+    #[serde(default)]
+    pub codex_originator: Option<String>,
+
+    /// Reasoning effort for the Codex transport: `none` | `minimal` | `low` |
+    /// `medium` | `high` | `xhigh`. `None` uses `medium`.
+    #[serde(default)]
+    pub codex_reasoning_effort: Option<String>,
+
+    /// Text verbosity for the Codex transport: `low` | `medium` | `high`.
+    #[serde(default)]
+    pub codex_verbosity: Option<String>,
+
+    /// Whether to replay a turn's opaque reasoning token on the next request.
+    ///
+    /// On by default, and measured to work in every shape that matters. The
+    /// switch exists because the route is undocumented: the day a replayed
+    /// blob starts being refused, this turns it off without a release.
+    #[serde(default = "default_true")]
+    pub codex_replay_reasoning: bool,
+
     /// Prompt-cache lifetime for Anthropic: `"5m"` (default) or `"1h"`.
     ///
     /// The longer one costs more to write and needs a beta header, which is
@@ -115,9 +153,45 @@ impl std::fmt::Debug for ProviderConfig {
             .field("claude_code_enabled", &self.claude_code_enabled)
             .field("claude_code_binary", &self.claude_code_binary)
             .field("claude_code_effort", &self.claude_code_effort)
+            // Not redacted, deliberately: none of these are secrets, and the
+            // grant they authenticate with lives outside this file entirely.
+            .field("codex_enabled", &self.codex_enabled)
+            .field("codex_originator", &self.codex_originator)
+            .field("codex_reasoning_effort", &self.codex_reasoning_effort)
+            .field("codex_verbosity", &self.codex_verbosity)
+            .field("codex_replay_reasoning", &self.codex_replay_reasoning)
             .field("anthropic_cache_ttl", &self.anthropic_cache_ttl)
             .field("fallback_order", &self.fallback_order)
             .finish()
+    }
+}
+
+/// The default for a flag that is on unless someone turns it off.
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            google_api_key: None,
+            anthropic_base_url: None,
+            openai_base_url: None,
+            google_base_url: None,
+            openrouter_base_url: None,
+            claude_code_enabled: false,
+            claude_code_binary: None,
+            claude_code_effort: None,
+            codex_enabled: false,
+            codex_originator: None,
+            codex_reasoning_effort: None,
+            codex_verbosity: None,
+            codex_replay_reasoning: default_true(),
+            anthropic_cache_ttl: None,
+            fallback_order: Vec::new(),
+        }
     }
 }
 

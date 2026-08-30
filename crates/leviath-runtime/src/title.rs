@@ -287,6 +287,14 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         // top level. This is the provider that hands reasoning back as the
         // reply when the answer is empty, so it is the one that leaked.
         "openrouter" => serde_json::json!({ "reasoning": { "enabled": false } }),
+        // Every model on the Codex route is a reasoning model, so a title
+        // call left alone spends its whole 256-token budget thinking and
+        // returns nothing. The route rejects `effort: "none"` for a model
+        // that has reasoning, so this asks for the least of it instead.
+        "codex" => serde_json::json!({
+            "reasoning": { "effort": "minimal" },
+            "text": { "verbosity": "low" }
+        }),
         _ => serde_json::Value::Null,
     }
 }

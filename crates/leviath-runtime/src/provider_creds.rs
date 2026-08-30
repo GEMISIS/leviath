@@ -515,6 +515,63 @@ pub fn build_provider_registry_probing(
                     )),
                 );
             }
+            "codex" => {
+                // Registered without probing for a grant. The alternative is a
+                // synchronous credential-store read during daemon start, which
+                // on the keychain backend can raise a GUI prompt. The cost is
+                // that a `codex/...` model fails at its first inference with
+                // "run `lev auth login codex`" rather than being skipped, and
+                // that is the better failure: a silently skipped provider is
+                // how a run quietly uses a model nobody chose.
+                let store_path = c
+                    .options
+                    .get("auth_store_path")
+                    .map(std::path::PathBuf::from)
+                    .or_else(leviath_providers::codex::ProviderAuthStore::default_path);
+                let Some(store_path) = store_path else {
+                    tracing::warn!(
+                        "no home directory, so the codex grant cannot be found; skipping it"
+                    );
+                    continue;
+                };
+                let credential_store = c
+                    .options
+                    .get("credential_store")
+                    .map(String::as_str)
+                    .and_then(|kind| match kind {
+                        "keychain" => leviath_providers::codex::store::store_for(
+                            leviath_core::CredentialStoreKind::Keychain,
+                        ),
+                        _ => None,
+                    });
+                let client = clients.get_or_build(timeout, build_client)?;
+                let tokens = leviath_providers::codex::CodexTokenSource::new(
+                    store_path,
+                    Arc::new(leviath_providers::codex::refresh::HttpRefresh::new(
+                        client.clone(),
+                    )),
+                )
+                .with_credential_store(credential_store);
+                registry.register(
+                    "codex".to_string(),
+                    Arc::new(
+                        leviath_providers::CodexProvider::new(client, Arc::new(tokens))
+                            .with_overrides(Some(caps))
+                            .with_rate_limit(c.rate_limit.as_ref())
+                            .with_request_timeout(timeout)
+                            .with_base_url(c.base_url.clone())
+                            .with_originator(c.options.get("originator").cloned())
+                            .with_reasoning(
+                                c.options.get("effort").cloned(),
+                                c.options.get("verbosity").cloned(),
+                            )
+                            .with_reasoning_replay(
+                                c.options.get("replay_reasoning").map(String::as_str)
+                                    != Some("false"),
+                            ),
+                    ),
+                );
+            }
             _ => {}
         }
     }

@@ -329,20 +329,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_provider: "anthropic".to_string(),
-            providers: ProviderConfig {
-                anthropic_api_key: None,
-                openai_api_key: None,
-                google_api_key: None,
-                anthropic_base_url: None,
-                openai_base_url: None,
-                google_base_url: None,
-                openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
-                anthropic_cache_ttl: None,
-                fallback_order: Vec::new(),
-            },
+            providers: ProviderConfig::default(),
             agent_paths: Vec::new(),
             openrouter_api_key: None,
             ollama_base_url: None,
@@ -2840,6 +2827,7 @@ google_api_key = "AIza-existing"
             claude_code_effort: None,
             anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
+            ..Default::default()
         };
         let rendered = format!("{providers:?}");
         assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
@@ -2862,6 +2850,7 @@ google_api_key = "AIza-existing"
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             }
         );
         assert!(empty.contains("<unset>"), "{empty}");
@@ -3147,6 +3136,7 @@ script = \"groq.rhai\"
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3169,6 +3159,7 @@ script = \"groq.rhai\"
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3193,6 +3184,7 @@ script = \"groq.rhai\"
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3215,6 +3207,7 @@ script = \"groq.rhai\"
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3536,6 +3529,7 @@ max_contxt_tokens = 1048576
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3577,6 +3571,7 @@ max_contxt_tokens = 1048576
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             tool_permissions: {
                 let mut m = HashMap::new();
@@ -3617,6 +3612,7 @@ max_contxt_tokens = 1048576
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3641,6 +3637,7 @@ max_contxt_tokens = 1048576
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -3847,6 +3844,7 @@ enabled = false
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
             default_model: Some("gpt-5".to_string()),
@@ -3921,6 +3919,7 @@ enabled = false
                 claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
+                ..Default::default()
             },
             agent_paths: vec![std::path::PathBuf::from("/my/agents")],
             openrouter_api_key: None,

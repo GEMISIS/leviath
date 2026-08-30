@@ -103,6 +103,27 @@ pub fn build(
     }
     body["text"] = json!({ "verbosity": verbosity });
 
+    // Per-stage `[model.parameters]`, plus the runtime's own overrides (the
+    // titling lane turns reasoning down through here). Merged last so a caller
+    // who named a field wins over the defaults above.
+    if let Some(extra) = request.extra.as_object() {
+        for (key, value) in extra {
+            body[key] = value.clone();
+        }
+    }
+
+    // Removed after the merge, not before. Both are `400 Unsupported
+    // parameter` on this route, and a stage that sets one in its parameters
+    // would otherwise fail every request rather than have it ignored. The
+    // runtime writes `temperature` into every request unconditionally, so this
+    // is not a hypothetical.
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("max_output_tokens");
+        object.remove("max_tokens");
+        object.remove("prompt_cache_retention");
+    }
+
     body
 }
 
