@@ -255,6 +255,16 @@ streams, and the OAuth exchanges behind `lev mcp login`. They are constants,
 not configuration: every well-formed reply is far below them, and a knob that
 only matters under attack would be a knob for the attacker.
 
+The update check (`lev update` and the daemon's cached `GET /api/update`)
+reads the GitHub releases answer under the same 64 MiB cap and reports the
+same message. One remote read stays bounded a different way: a Rhai script's
+`http_get` refuses a body whose `Content-Length` is over its 900 KB output
+cap before reading it, but a chunked response carries no length, so a body
+that lies about its size is buffered until the client's 30 s timeout or the
+peer's end of stream, then cut to 900 KB. Closing that needs a streaming
+decoder that keeps the charset handling scripts rely on, and it is a known
+residual rather than an oversight.
+
 ## Threat model
 
 `lev serve` runs LLM-driven tools, so treat it as trusted-network only unless hardened. See

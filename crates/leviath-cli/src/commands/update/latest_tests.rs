@@ -189,6 +189,74 @@ fn the_real_fetcher_reads_a_body_off_the_wire() {
     assert_eq!(got.as_deref(), Ok(r#"{"name": "1.2.3"}"#));
 }
 
+/// A loopback server that answers one request with `body` and the
+/// `Content-Length` to match, so the fetcher's read is exercised end to end.
+fn serve_once(body: &'static str) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    serve_once_declaring(body, body.len())
+}
+
+/// [`serve_once`] with the `Content-Length` chosen by the test, so a server
+/// that promises more than it sends can be stood up.
+fn serve_once_declaring(
+    body: &'static str,
+    declared: usize,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port is available");
+    let addr = listener
+        .local_addr()
+        .expect("a bound listener has an address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("the fetcher connects");
+        // Read just enough to let the client finish sending before answering.
+        let mut buf = [0_u8; 1024];
+        let _ = socket.read(&mut buf);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nContent-Type: application/json\r\n\r\n{body}"
+        );
+        let _ = socket.write_all(response.as_bytes());
+    });
+    (addr, server)
+}
+
+/// A connection that closes before the promised body arrives is an error
+/// from the read itself, reported like any other transport failure.
+#[test]
+fn the_real_fetcher_reports_a_body_cut_short_as_an_error() {
+    let body = r#"{"name": "1.2.3"}"#;
+    let (addr, server) = serve_once_declaring(body, body.len() + 100);
+    let got = fetch_release_capped(&format!("http://{addr}/releases/tags/latest"), 1024);
+    server.join().expect("the server thread does not panic");
+    assert!(got.is_err());
+}
+
+/// A body past the cap is an error naming the cap and the peer, in the shape
+/// every other capped read reports, rather than a body read whole. The cap
+/// is a test-sized one so the test allocates bytes, not 64 MiB.
+#[test]
+fn the_real_fetcher_stops_at_the_cap_and_names_it() {
+    let body = r#"{"name": "1.2.3", "padding": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#;
+    let (addr, server) = serve_once(body);
+    let got = fetch_release_capped(&format!("http://{addr}/releases/tags/latest"), 16);
+    server.join().expect("the server thread does not panic");
+    assert_eq!(
+        got,
+        Err("response body exceeded 16 bytes from 127.0.0.1".to_string())
+    );
+}
+
+/// A body exactly at the cap is whole: the cap is a ceiling, not a strict bound.
+#[test]
+fn the_real_fetcher_reads_a_body_exactly_at_the_cap() {
+    let body = r#"{"name": "1.2.3"}"#;
+    let (addr, server) = serve_once(body);
+    let got = fetch_release_capped(&format!("http://{addr}/releases/tags/latest"), body.len());
+    server.join().expect("the server thread does not panic");
+    assert_eq!(got.as_deref(), Ok(body));
+}
+
 /// A server that is not there is an error, not a hang and not a panic. The
 /// caller turns it into "cannot tell".
 #[test]
