@@ -284,10 +284,6 @@ pub struct HostParts {
 /// are built once at startup and reused by every agent.
 pub fn build_host(parts: HostParts) -> WorldHost {
     let hub = InteractionHub::new();
-    // A prompt waits for a person until answered unless the operator bounded
-    // the wait with `[limits] interaction_timeout_secs`, in which case the hub
-    // resolves it itself once that passes (issue #204).
-    hub.set_timeout_secs(parts.config.limits.interaction_timeout_secs);
     let tool_service = Arc::new(CliToolService::new());
     // The configured global fallback bounds concurrent inference for any model
     // without its own per-model pool entry (defaults to a small cap so a fresh
@@ -306,65 +302,23 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         Some(parts.runs_dir.clone()),
         parts.runtime,
     );
-    // Streamed inference (on by default), so a long generation keeps bytes
-    // moving instead of holding a socket that looks idle to everything between
-    // here and the provider.
-    world.set_stream_inference(parts.config.limits.stream_inference);
-    // How long a run may sit unable to dispatch before the watchdog fails it
-    // rather than leaving it "running" for ever (issue #190).
-    world
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::StallTimeout(
-            parts.config.limits.stall_timeout_secs,
-        ));
-    // How long a run may sit in a state nothing can reach at all before the
-    // watchdog fails it and releases what it was holding (issue #202). Off
-    // unless the operator sets it.
-    world
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::WedgeTimeout(
-            parts.config.limits.wedge_timeout_secs,
-        ));
-    // Take a provider out of service after it has failed this many times in a
-    // row for a reason only a person can fix, so the next run does not have to
-    // rediscover it (issue #201).
-    world
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::CircuitPolicy {
-            failures_before_open: parts.config.limits.provider_failures_before_open,
-            cooldown_secs: parts.config.limits.provider_circuit_cooldown_secs,
-        });
     world
         .world_mut()
         .init_resource::<leviath_runtime::pipeline::ProviderCircuits>();
-    // How hard a transient inference failure is retried before the agent is
-    // failed and its finished work discarded (issue #417).
-    world
-        .world_mut()
-        .insert_resource(leviath_runtime::pipeline::InferenceRetryTuning {
-            max_attempts: parts.config.limits.inference_retry_attempts,
-            base_delay_ms: parts.config.limits.inference_retry_base_ms,
-        });
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());
     let mut host = WorldHost::with_interactions(world, hub.clone());
-    // How long the daemon may sit with a full tool lane and no run moving before
-    // it widens the lane to break the jam (issue #191).
-    host.set_dead_cycles_before_relief(parts.config.limits.dead_cycles_before_relief);
-    // Told once at start, like the other limits: a run that crosses one of these
-    // says so while it is still running, which is the whole point (#573).
-    host.set_spend_notify_usd(parts.config.limits.notify_spend_usd.clone());
-    // Read at every fan-out spawn, so a run cannot widen past the operator's
-    // ceiling however many sub-questions its workers think are worth asking.
-    host.world_mut()
-        .world_mut()
-        .insert_resource(leviath_runtime::fanout::FanOutBudget(
-            parts.config.limits.max_agents_per_run,
-        ));
-    // How long a finished run keeps its place in the listing, so a scheduler
-    // polling on an interval can see how a run ended (issue #205).
-    host.set_finished_retention_secs(parts.config.limits.finished_retention_secs);
+    // Everything the world is *tuned* with - the pools and the tool lane, the
+    // stall and wedge watchdogs, the circuit breaker, the retry schedule, the
+    // fan-out ceiling, the relief threshold, the spend figures, the listing
+    // window, the prompt timeout and `[title]` - is installed from one place,
+    // and reinstalled from the same place whenever `config.toml` changes. Each
+    // of these used to be read exactly here and then fixed for the life of the
+    // process, so an edit to any of them did nothing until the daemon was
+    // restarted, with nothing to say so (issue #684).
+    let live_limits = crate::daemon::live_limits::for_daemon(hub.clone(), host.settings());
+    live_limits.apply(&parts.config, host.world_mut());
     // Handed to each agent's tool state so its sub-agent tools reach the world
     // through the host.
     let subagent_tx = host.subagent_sender();
@@ -486,6 +440,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_provider_reload = provider_reload.clone();
     let reload_policy = policy_reload.clone();
     let reload_telemetry = telemetry_reload.clone();
+    let reload_limits = live_limits.clone();
     host.set_reloader(Box::new(move |world, run_id| {
         // Pages a run back in with the current on-disk parts.config, matching what a
         // real restart would restore it with.
@@ -500,6 +455,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // the files name now rather than the one this daemon booted with.
         reload_policy.refresh_into(world);
         reload_telemetry.refresh_into(world, &reload_config.observability);
+        // Including its limits: a run being paged back in is as much a fresh
+        // start as a spawn, and it must not resume against the numbers the
+        // daemon booted with (issue #684).
+        reload_limits.apply(&reload_config, world);
         // The global MCP set as it stands now, not as it stood at boot: a run
         // paged back in is rebuilt with the tools a fresh spawn would get.
         let (reload_defs, reload_owners) = reload_global.current();
@@ -592,6 +551,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let spawn_policy = policy_reload.clone();
     let spawn_telemetry = telemetry_reload.clone();
     let spawn_global = mcp_global.clone();
+    let spawn_limits = live_limits.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -628,6 +588,11 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         spawn_policy.refresh_into(world);
         // The exporter the file names now, before this run emits anything.
         spawn_telemetry.refresh_into(world, &config.observability);
+        // Before the agent is built, not after: `build_agent` decides from this
+        // same config whether the run is marked for a title, and the system
+        // that makes titles reads the world. Applying here is what stops those
+        // two reading different documents (issue #684).
+        spawn_limits.apply(&config, world);
         let built = build_agent(
             world.world_mut(),
             crate::daemon::spawn::SpawnDeps {
@@ -2213,5 +2178,184 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             .err()
             .expect("a failing client factory should stop the daemon starting");
         assert!(err.to_string().contains("root certificate store"));
+    }
+
+    /// Write `config` to `path` with a strictly newer mtime, so a rewrite
+    /// inside one clock tick is still seen as a change (the reloader polls the
+    /// mtime, exactly as `config_reload`'s own tests do).
+    fn save_config(path: &std::path::Path, config: &Config) {
+        std::fs::write(path, toml::to_string(config).unwrap()).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    /// A host whose spawn-time config is read from `path`, the way the daemon's
+    /// is, with a stand-in for the manifest's provider so a spawn resolves.
+    fn host_watching(path: &std::path::Path, boot: Config, runs: &std::path::Path) -> WorldHost {
+        let mut providers = ProviderRegistry::new();
+        providers.register("anthropic".to_string(), Arc::new(fake_provider()));
+        build_host(HostParts {
+            config: boot.clone(),
+            providers,
+            runs_dir: runs.to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
+            runtime: Handle::current(),
+            now_secs: || 0,
+            reloader: Some(Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+                path.to_path_buf(),
+                boot,
+            ))),
+        })
+    }
+
+    /// Spawn `run_id` through the host's real spawner and assert it took.
+    async fn spawn_ok(host: &mut WorldHost, run_id: &str, manifest: &std::path::Path) {
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: run_id.to_string(),
+                blueprint_path: manifest.to_string_lossy().to_string(),
+                task: "name this run".to_string(),
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                ..Default::default()
+            }),
+            reply,
+        });
+        assert_eq!(rx.await.unwrap(), Ok(run_id.to_string()));
+    }
+
+    /// A `[limits]` edit is picked up by the next spawn, with no daemon
+    /// restart: the pools, the tool lane, the watchdogs, the breaker, the retry
+    /// schedule and the fan-out ceiling all move to what the file says now.
+    /// Every one of these was read once at boot and then fixed for the life of
+    /// the process (issue #684).
+    #[tokio::test]
+    async fn a_limits_edit_reaches_the_world_on_the_next_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut boot = config_with_anthropic_key();
+        boot.limits.max_concurrent_tools = 2;
+        boot.limits.max_concurrent_inferences = Some(1);
+        boot.limits.stall_timeout_secs = 60;
+        boot.limits.max_agents_per_run = 0;
+        boot.limits.provider_failures_before_open = 3;
+        boot.limits.inference_retry_attempts = 4;
+        boot.limits.finished_retention_secs = 300;
+        boot.limits.notify_spend_usd = Vec::new();
+        save_config(&path, &boot);
+
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = host_watching(&path, boot.clone(), runs.path());
+        assert_eq!(host.world_mut().tool_concurrency(), 2, "the boot width");
+
+        // The operator edits the file while the daemon runs.
+        let mut after = boot.clone();
+        after.limits.max_concurrent_tools = 6;
+        after.limits.max_concurrent_inferences = Some(4);
+        after.limits.stall_timeout_secs = 5;
+        after.limits.wedge_timeout_secs = 300;
+        after.limits.max_agents_per_run = 20;
+        after.limits.provider_failures_before_open = 9;
+        after.limits.provider_circuit_cooldown_secs = 42;
+        after.limits.inference_retry_attempts = 7;
+        after.limits.inference_retry_base_ms = 250;
+        after.limits.finished_retention_secs = 30;
+        after.limits.dead_cycles_before_relief = 3;
+        after.limits.notify_spend_usd = vec![5.0];
+        save_config(&path, &after);
+
+        let agent = tempfile::tempdir().unwrap();
+        let manifest = agent.path().join("agent.leviath");
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+        spawn_ok(&mut host, "limits-1234-ab12", &manifest).await;
+
+        let settings = host.settings();
+        let world = host.world_mut();
+        assert_eq!(world.tool_concurrency(), 6, "the tool lane widened");
+        assert_eq!(
+            world.inference_pool_config().limit_for("m"),
+            Some(4),
+            "the inference pool followed"
+        );
+        let ecs = world.world();
+        assert_eq!(
+            ecs.resource::<leviath_runtime::pipeline::StallTimeout>().0,
+            5
+        );
+        assert_eq!(
+            ecs.resource::<leviath_runtime::pipeline::WedgeTimeout>().0,
+            300
+        );
+        let circuit = ecs.resource::<leviath_runtime::pipeline::CircuitPolicy>();
+        assert_eq!(
+            (circuit.failures_before_open, circuit.cooldown_secs),
+            (9, 42)
+        );
+        let retry = ecs.resource::<leviath_runtime::pipeline::InferenceRetryTuning>();
+        assert_eq!((retry.max_attempts, retry.base_delay_ms), (7, 250));
+        assert_eq!(
+            ecs.resource::<leviath_runtime::fanout::FanOutBudget>().0,
+            20
+        );
+        assert_eq!(settings.dead_cycles_before_relief(), 3);
+        assert_eq!(settings.finished_retention_secs(), 30);
+        assert_eq!(*settings.spend_notify_usd(), vec![5.0]);
+    }
+
+    /// Turning `[title]` on used to leave a run marked for a title nobody would
+    /// ever make. Spawn reads a fresh config, so it marked the run
+    /// `PendingTitle`; the system that makes titles read the boot-time
+    /// `TitleSettings`, saw titling switched off, and dropped the marker
+    /// without a word. Both halves now read the same document (issue #684).
+    #[tokio::test]
+    async fn enabling_titles_reaches_the_system_that_makes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut boot = config_with_anthropic_key();
+        boot.title.enabled = false;
+        save_config(&path, &boot);
+
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = host_watching(&path, boot.clone(), runs.path());
+        assert!(
+            !host
+                .world_mut()
+                .world()
+                .resource::<leviath_runtime::title::TitleSettings>()
+                .0
+                .enabled,
+            "titling is off to begin with"
+        );
+
+        let mut after = boot.clone();
+        after.title.enabled = true;
+        save_config(&path, &after);
+
+        let agent = tempfile::tempdir().unwrap();
+        let manifest = agent.path().join("agent.leviath");
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+        spawn_ok(&mut host, "titled-1234-ab12", &manifest).await;
+
+        let world = host.world_mut().world_mut();
+        let mut pending = world.query::<&leviath_runtime::title::PendingTitle>();
+        assert_eq!(
+            pending.iter(world).count(),
+            1,
+            "spawn read the new config and marked the run for a title"
+        );
+        assert!(
+            world
+                .resource::<leviath_runtime::title::TitleSettings>()
+                .0
+                .enabled,
+            "and the dispatcher agrees, so the marker is acted on rather than dropped"
+        );
     }
 }
