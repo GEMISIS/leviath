@@ -388,3 +388,35 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
         _ => None,
     }
 }
+
+/// Every key [`parse_region_layout`] reads off a region table. The parser
+/// does not refuse a key it does not know (a misspelled one has always
+/// loaded silently), so this list has one job: the schema guard in
+/// `tests.rs` holds the published schema to it, and a key read above that is
+/// missing here, or here that is not read above, is the drift it exists to
+/// catch.
+#[cfg(test)]
+pub(super) const REGION_KEYS: &[&str] = &[
+    "admission",
+    "budget",
+    "compact_at",
+    "compact_count",
+    "describe_in_prompt",
+    "description",
+    "kind",
+    "max_entries",
+    "max_items",
+    "max_tokens",
+    "min_tokens",
+    "overflow",
+    "persistent",
+    "required",
+    "required_message",
+    "script",
+    "seed",
+    "source_region",
+    "strategy",
+    "summarizable",
+    "threshold_tokens",
+    "volatility",
+];

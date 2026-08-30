@@ -282,7 +282,7 @@ directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 > [environment variables](/docs/configuration#environment-variables).
 
 > [!IMPORTANT]
-> The key itself is different: it has to be in **the daemon's** environment, not just the shell you
+> The key itself is different: it has to be in **the daemon's** environment, not only the shell you
 > type `lev` in. A process inherits its environment when it starts, so a daemon that was already
 > running when you exported the key cannot see it, and every search falls back to Wikipedia while
 > your own shell looks correctly configured.

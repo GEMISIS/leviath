@@ -115,6 +115,16 @@ same list.
   `response body exceeded 64 MiB from api.github.com` message. The security
   page names it, and the one bounded-differently read (a chunked body on a
   script's `http_get`).
+- The published schemas had fallen behind the parsers. `config.schema.json`
+  refused `update_check`, four `[limits]` keys the daemon reads
+  (`max_agents_per_run`, `notify_spend_usd`, `script_http_timeout_secs`,
+  `script_http_max_per_host`) and the four per-model price overrides, so a
+  config the CLI loads failed schema validation; `blueprint.schema.json` refused
+  `describe_in_prompt` on a region, the key the context docs tell you to write;
+  and `openapi.json` named no `401`, `405`, `408` or `503` anywhere, listed
+  `200` on routes that answer `201`, `202` or `204`, and gave `GET /api/config`
+  no shape. Each gap now has a test that reads the parser and holds the schema
+  to it.
 - `requests_per_minute = 0` under `[rate_limits.<provider>]` hung every call
   to that provider: the limiter waited for the request count to drop under
   zero, which it never could, and the wait sat in front of any HTTP timeout.
@@ -3522,7 +3532,7 @@ same list.
 - `lev doctor` prints the provider and model it actually resolved to, not just
   "OK". A stage that names no model of its own falls back to `anthropic`, so a
   machine holding only an OpenRouter key can resolve to a provider it has no
-  credential for, spawn, and sit at iteration 0 — which is how a batch of runs
+  credential for, spawn, and sit at iteration 0, which is how a batch of runs
   once went nowhere at once. Now it says so, before anything is spawned.
 - A failing provider call is reported verbatim, status line and response body
   included, so a 402 naming the exhausted credit or a 404 naming the model

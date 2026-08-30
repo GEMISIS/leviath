@@ -70,7 +70,7 @@ call until the answer comes back, then continues with it:
 > A stage that genuinely needs a person keeps the tools it names in
 > [`required_tools`](/docs/tools#these-tools-need-someone-there).
 >
-> Unattended applies to the whole run tree, not just the agent you launched: sub-agents and
+> Unattended applies to the whole run tree, not only the agent you launched: sub-agents and
 > fan-out workers inherit it, and it survives a daemon restart. Otherwise a child could stop
 > on a prompt nobody was watching for and take its parent down with it.
 
@@ -141,7 +141,7 @@ opt in, because otherwise any agent package could pre-approve its own shell with
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
 command for `bash`/`shell`, the path for the file tools), with five options:
 
-- **Allow once**: permit just this one call.
+- **Allow once**: permit this one call and nothing more.
 - **Allow ... for this stage**: permit every later call this covers, until the run leaves the
   current stage. Re-entering the same stage keeps the grant, so a revision loop does not re-ask.
 - **Allow ... for this run**: permit every later call this covers, for the rest of the run.

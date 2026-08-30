@@ -169,6 +169,8 @@ cerebras = 1                     # every model this provider serves, together
 | `default_max_iterations` | `50` | A stage's own `max_iterations` always wins |
 | `stream_inference` | `true` | Ask a model that can stream to stream. See below |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
+| `script_http_timeout_secs` | `30` | Seconds a Rhai script tool's `http_get()` or `http_post()` may take |
+| `script_http_max_per_host` | `4` | Script-tool HTTP requests in flight to one host at a time; the rest wait their turn. `0` is unbounded |
 | `mcp_idle_disconnect_secs` | `60` | Disconnect an [MCP server](/docs/mcp) no agent has used for this long. It reconnects on next use |
 | `stall_timeout_secs` | `60` | Fail a run that can never dispatch. See below |
 | `dead_cycles_before_relief` | `10` | 30-second cycles with a full [tool lane](/docs/engine#the-tool-lane) and nothing moving before the lane widens. `0` never widens it |
@@ -286,7 +288,7 @@ outside Leviath is tracking your slots. See [External work queues](/docs/work-qu
 
 **`provider_failures_before_open`** counts failures only you can fix, such as an exhausted account
 or a rejected key, before that provider is taken out of service for every run. Three rather than one,
-because a single payment error can just be one oversized request. `0` disables it and leaves per-run
+because a single payment error can be one oversized request. `0` disables it and leaves per-run
 failover to cope alone.
 
 A provider that answered the connection and then went quiet gets four times that budget, so the
@@ -344,7 +346,7 @@ call. That stops the call after the one that overran, not the one that did.
 
 Running out of disk is separate and **not configurable**. Leviath refuses any write that would leave
 under a gigabyte free, whatever these two say and whatever `--yolo` says, because filling the disk
-harms every other process on the machine rather than just the run. A filesystem whose free space
+harms every other process on the machine, not only the run. A filesystem whose free space
 cannot be read is treated as unknown and allowed, because a guard that cannot measure has nothing to
 say. The two ceilings above still apply to it.
 

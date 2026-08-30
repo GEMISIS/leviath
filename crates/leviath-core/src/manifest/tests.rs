@@ -5568,6 +5568,30 @@ fn the_published_schema_and_the_parser_agree_on_every_key() {
             &["$defs", "sandbox"][..],
             super::sections::SANDBOX_KEYS,
         ),
+        // The tables below are read key by key with nothing refusing a
+        // stranger, so their lists are kept by hand beside each parser and
+        // this is the only thing that checks them.
+        (
+            "region",
+            &["$defs", "region"][..],
+            super::regions::REGION_KEYS,
+        ),
+        (
+            "interaction point",
+            &["$defs", "interactionPoint"][..],
+            super::stage::INTERACTION_POINT_KEYS,
+        ),
+        (
+            "stage.model",
+            &["$defs", "modelConfig"][..],
+            super::model::MODEL_KEYS,
+        ),
+        (
+            "stage.hooks",
+            &["$defs", "stageHooks"][..],
+            super::stage::HOOK_KEYS,
+        ),
+        ("agent", &["$defs", "agent"][..], super::AGENT_KEYS),
     ] {
         assert_eq!(
             keys_at(schema_path),

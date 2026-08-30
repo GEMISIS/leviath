@@ -300,7 +300,7 @@ them.
 It costs a tool call per stage entry for the life of the run, and rewrites a region that would
 otherwise sit still in the cached prefix, so leave it at the default for anything that does not
 actually change. A call that fails leaves the region as it was rather than blanking it: the
-previous value is merely stale, and stale beats absent. `lev validate` marks a refreshing seed
+previous value is stale, and stale beats absent. `lev validate` marks a refreshing seed
 "on every stage entry".
 
 Seeds do not re-run when a run is reloaded from a snapshot, whatever their `refresh` setting.
@@ -612,7 +612,7 @@ needs its own region *and* its own ceiling:
 ```toml
 [stages.analyze.tool_routing.overrides]
 read_file = { region = "codebase", max_result_tokens = 20000 }
-grep = "scratch"                     # just route it
+grep = "scratch"                     # route it, no cap
 ```
 
 Either key on its own is fine: `{ region = "codebase" }` routes without capping, and

@@ -123,8 +123,8 @@ sequenceDiagram
 
 `available_tools` is an exact-match list, so granting a server tool by tool means knowing what it
 advertises - and that is not yours to know. It is whatever the server ships today. GitHub's server
-has dozens; a house server gains one when somebody deploys. A tool added later is simply never
-offered, with nothing said, so the stage quietly cannot do a thing you believed it could.
+has dozens; a house server gains one when somebody deploys. A tool added later is never
+offered, and nothing says so, so the stage quietly cannot do a thing you believed it could.
 
 Name the server instead:
 

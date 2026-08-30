@@ -95,7 +95,7 @@ Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath)
 
 ### 2. Configure a provider
 
-One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/). No key at all? Run a local [Ollama](https://ollama.com), or opt into the [Claude Code transport](https://leviath.dev/docs/providers#claude-code-transport) to run on your Claude subscription (read its terms-of-service note first).
+One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/). No key at all? Run a local [Ollama](https://ollama.com), or turn on the [Claude Code transport](https://leviath.dev/docs/providers#claude-code-transport) with `lev setup --claude-code true` to run on your Claude subscription (the wizard does not offer it; read its terms-of-service note first).
 
 ```bash
 lev setup      # interactive wizard
@@ -285,7 +285,7 @@ Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.i
 
 ## Providers
 
-Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, and the Claude Code subscription transport, with per-stage model fallback, optional client-side rate limits enforced before each call, and custom OpenAI-compatible providers as [Rhai scripts](https://leviath.dev/docs/rhai-providers). [Provider docs →](https://leviath.dev/docs/providers)
+Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, the Claude Code subscription transport, and any OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM, an enterprise gateway) as a `kind = "openai-compatible"` entry in `[model_providers]`, with a [Rhai script](https://leviath.dev/docs/rhai-providers) for a wire format that is not OpenAI's. Per-stage model fallback and optional client-side rate limits enforced before each call. [Provider docs →](https://leviath.dev/docs/providers)
 
 ## Security
 

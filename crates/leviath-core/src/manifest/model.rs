@@ -109,3 +109,17 @@ pub(super) fn parse_stage_model(
         ))
     }
 }
+
+/// Every key [`parse_stage_model`] reads off a `[stages.<name>.model]`
+/// table, for the schema guard in `tests.rs`. Like `REGION_KEYS`, a list and
+/// not a check: the parser ignores what it does not know.
+#[cfg(test)]
+pub(super) const MODEL_KEYS: &[&str] = &[
+    "allow_user_default",
+    "fallbacks",
+    "model",
+    "models",
+    "parameters",
+    "provider",
+    "request_timeout_secs",
+];

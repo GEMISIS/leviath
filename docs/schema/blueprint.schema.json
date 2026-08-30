@@ -613,7 +613,12 @@
         },
         "description": {
           "type": "string",
-          "description": "One line on what this region is for, shown to the model above the region's contents on every turn. Optional - most regions are named well enough that a sentence would only cost tokens; use it where the contents do not explain themselves."
+          "description": "One line on what this region is for. Documentation by default: it reaches the dashboard and the API, and the model only with `describe_in_prompt`. Optional - most regions are named well enough that a sentence would only cost tokens; use it where the contents do not explain themselves."
+        },
+        "describe_in_prompt": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also show the `description` to the model, above the region's contents, on every turn. Off by default: a person reading the blueprint wants the sentence, a model re-reads it every request."
         },
         "admission": {
           "enum": [

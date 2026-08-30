@@ -183,5 +183,22 @@ use regions::*;
 use sections::*;
 use stage::*;
 
+/// Every key `parse_manifest` reads off the `[agent]` table, for the schema
+/// guard in `tests.rs`. A list and not a check: the table ignores what it
+/// does not know.
+#[cfg(test)]
+const AGENT_KEYS: &[&str] = &[
+    "batch_tool_hint",
+    "description",
+    "dynamic_tools",
+    "entry_stage",
+    "max_child_depth",
+    "name",
+    "nudge",
+    "output",
+    "shell_hint",
+    "version",
+];
+
 #[cfg(test)]
 mod tests;

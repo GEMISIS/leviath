@@ -15,7 +15,7 @@ of runs, answer their questions, and steer them.
 lev dash
 ```
 
-It reads the same [daemon](/docs/daemon) that [The Lair](https://leviath.dev/lair) does, just over
+It reads the same [daemon](/docs/daemon) that [The Lair](https://leviath.dev/lair) does, over
 the local control socket instead of HTTP:
 
 ```mermaid

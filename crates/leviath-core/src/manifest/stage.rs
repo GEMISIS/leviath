@@ -57,6 +57,19 @@ pub(super) const STAGE_KEYS: &[&str] = &[
 /// about it instead of quietly carrying the region they meant to drop.
 pub(super) const CONTEXT_KEYS: &[&str] = &["regions", "hide"];
 
+/// The hooks this build implements, in the order the refusal names them.
+/// `parse_stage_hooks` matches on each, and the schema guard in `tests.rs`
+/// holds the published schema to the same list.
+pub(super) const HOOK_KEYS: &[&str] = &[
+    "on_stage_enter",
+    "on_stage_exit",
+    "before_inference",
+    "after_inference",
+    "on_tool_call",
+    "on_completion",
+    "on_error",
+];
+
 /// Every key read off `[stages.<name>.tool_routing]`.
 pub(super) const TOOL_ROUTING_KEYS: &[&str] = &[
     "default_region",
@@ -802,9 +815,8 @@ pub(super) fn parse_stage_hooks(
             other => {
                 return Err(Error::Other(format!(
                     "stage '{stage_name}': unknown hook '{other}' \
-                     (this build implements: on_stage_enter, on_stage_exit, \
-                     before_inference, after_inference, on_tool_call, \
-                     on_completion, on_error)"
+                     (this build implements: {})",
+                    HOOK_KEYS.join(", ")
                 )));
             }
         }
@@ -1055,3 +1067,23 @@ pub(super) fn parse_nudge_config(
     }
     Ok(nudge)
 }
+
+/// Every key `parse_stage` reads off one `[[stages.<name>.interaction_points]]`
+/// entry, for the schema guard in `tests.rs`. A list and not a check, like
+/// `REGION_KEYS`: `options` and `choices` are the same setting under two
+/// names, as are `directives` and `followups`.
+#[cfg(test)]
+pub(super) const INTERACTION_POINT_KEYS: &[&str] = &[
+    "abort_options",
+    "choices",
+    "directives",
+    "document_region",
+    "edit_options",
+    "followups",
+    "name",
+    "options",
+    "prompt",
+    "required",
+    "style",
+    "unattended",
+];

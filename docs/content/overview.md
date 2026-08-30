@@ -80,7 +80,7 @@ holds its place rather than burning tokens. See [Interaction](/docs/interaction)
 
 ## Runs hand back an answer
 
-A run's result is not just its logs. A stage can require a structured **output** in a shape you
+A run's result is more than its logs. A stage can require a structured **output** in a shape you
 name, validated before the run is allowed to finish, which is what makes a run safe to call from a
 script. See [Outputs](/docs/outputs).
 

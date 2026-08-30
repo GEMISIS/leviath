@@ -101,7 +101,7 @@ The short version: **`http://` only works on loopback.** Everything else needs H
 
 A browser treats `http://localhost` and `http://127.0.0.1` as potentially trustworthy, which is the
 only reason the default setup works from a page served over HTTPS. Every other address is blocked,
-and **a LAN address is blocked exactly like a public one**. `http://192.168.1.50:3000` fails just as
+and **a LAN address is blocked exactly like a public one**. `http://192.168.1.50:3000` fails the same way
 `http://203.0.113.10:8080` does:
 
 ```
@@ -436,7 +436,7 @@ DELETE /api/runs/deep-researcher-1786839472-d908ad2d9455
 
 - **409** if the run is still going. Removing a directory out from under a running agent is a much
   larger feature than this, so cancel it first and delete it after.
-- **404** if it is already gone, so a client that lost the response to its own delete can just send
+- **404** if it is already gone, so a client that lost the response to its own delete can send
   it again instead of treating a missing run as a failure.
 
 ### Sub-agent runs go with their parent
@@ -463,7 +463,7 @@ DELETE /api/runs/{id}?force=true
 A record that cannot be read says nothing about whether the run finished, and "cannot read it" must
 not quietly read as "finished" -- that is exactly what a live run looks like to a binary whose
 `RunMeta` has moved on. Such a run is also skipped by the listing, which would leave it both
-invisible and permanent, so the escape hatch stays; it is just something you type rather than
+invisible and permanent, so the escape hatch stays; it is something you type rather than
 something that happens to you. The bulk route never forces.
 
 ### Clearing out old runs
@@ -849,7 +849,7 @@ client can answer for itself. Every entry carries a `source`:
 
 Pass `?agent=<name>` to include the fourth. Script-backed entries also carry the `path` they came
 from. A separate `skipped` list carries the `.rhai` files that were found and cannot be offered,
-with the reason each was passed over, so a file with a syntax error does not simply look like a file
+with the reason each was passed over, so a file with a syntax error is told apart from a file
 nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
 anything installed, and `/api/mcp/servers/{name}` already answers for them.
 
@@ -1061,7 +1061,7 @@ run until it has a name. `title` is absent, not null, while a run has none.
 Naming can also fail. The call retries a transient refusal and then walks the run's own model
 candidates, the same chain its stage inference fails over along, so one provider being unreachable
 no longer costs the run its name. When every candidate is spent, `title_error` on the run says what
-stopped it, and stays `null` while titling is simply unfinished. Poll that field rather than waiting
+stopped it, and stays `null` while titling is still under way. Poll that field rather than waiting
 forever on a `run_renamed` frame that is not coming.
 
 `status`, on `agent_status` and on `agent_completed`, is the word `GET /api/runs` uses for the same
@@ -1100,7 +1100,7 @@ stream sends none, so a client that ignores the type sees exactly what it always
 
 Requests keep working across a version gap as long as the two ends still understand each other. A
 request that fails because they no longer do answers **502** with the same sentence, where a
-daemon that is simply not answering is a **503**. Retrying helps the second; only restarting
+daemon that is not answering at all is a **503**. Retrying helps the second; only restarting
 `lev serve` helps the first.
 
 ## Asking for a shape

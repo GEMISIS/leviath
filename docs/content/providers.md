@@ -193,7 +193,7 @@ your default still has the blueprint's own entries to fall back to.
 > [!IMPORTANT]
 > `default_model` pins **one** model across every stage, which is usually not what you want. A
 > blueprint picks per stage on purpose: `deep-researcher` gathers on a mid-tier model and analyses
-> on a top one. Setting `default_provider` alone keeps that shape and just moves it onto your
+> on a top one. Setting `default_provider` alone keeps that shape and moves it onto your
 > provider - gathering on that provider's mid-tier entry, analysing on its top one. Setting
 > `default_model` too flattens it, and the cheap stages start paying top-tier prices while the
 > deciding stage loses the model the author chose for it.
