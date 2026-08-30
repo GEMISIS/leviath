@@ -291,6 +291,75 @@ mod tests {
         assert_eq!(out.resolution, GateResolution::AlwaysAllow);
     }
 
+    fn gated_call() -> GatedCall {
+        GatedCall {
+            entity: Entity::from_raw_u32(1)
+                .expect("a small literal index is always a valid entity id"),
+            agent_id: "run".to_string(),
+            tool_id: "c1".to_string(),
+            tool_name: "submit_output".to_string(),
+            taint: TaintLevel::Private,
+            clearance: TaintLevel::Public,
+        }
+    }
+
+    /// A gate prompt nobody answers before `[limits] interaction_timeout_secs`
+    /// resolves as a **deny**, not as an allow: the hub hands back the same
+    /// neutral response a cancel does, and a neutral response has no choice
+    /// index. Nothing over-cleared leaves the machine because a person walked
+    /// away from the terminal.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_gate_prompt_denies_when_the_timeout_elapses() {
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(Some(30));
+        let (tx, mut rx) = unbounded_channel();
+        let task = tokio::spawn(run_gate_prompt(
+            gated_call(),
+            PromptLane {
+                hub: hub.clone(),
+                outcomes: tx,
+                wake: Arc::new(Notify::new()),
+            },
+        ));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(hub.pending().len(), 1, "the prompt is open");
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        task.await.unwrap();
+        let out = rx.recv().await.unwrap();
+        assert_eq!(out.resolution, GateResolution::Deny);
+        assert!(hub.pending().is_empty(), "the expired prompt is dropped");
+    }
+
+    /// With no `interaction_timeout_secs` configured - the shipped default -
+    /// the same prompt waits indefinitely. The run stays parked rather than
+    /// resolving itself either way, which is the behaviour a deployment that
+    /// wants a bound has to opt out of.
+    #[tokio::test(start_paused = true)]
+    async fn a_gate_prompt_waits_indefinitely_with_no_timeout_configured() {
+        let hub = InteractionHub::new();
+        assert_eq!(hub.timeout_secs(), None);
+        let (tx, mut rx) = unbounded_channel();
+        let _task = tokio::spawn(run_gate_prompt(
+            gated_call(),
+            PromptLane {
+                hub: hub.clone(),
+                outcomes: tx,
+                wake: Arc::new(Notify::new()),
+            },
+        ));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(hub.pending().len(), 1, "still waiting a day later");
+        assert!(rx.try_recv().is_err(), "no resolution was invented");
+    }
+
     fn collect_world() -> (World, UnboundedSender<GatePromptOutcome>) {
         let (tx, rx) = unbounded_channel();
         let mut world = World::new();
