@@ -57,6 +57,25 @@ pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::t
     }
 }
 
+/// An `AppState` watching the real file at `path`, so a test can edit it and
+/// see the server notice. The counterpart to [`state_with_agent_paths`], whose
+/// config is fixed and watches nothing.
+pub(super) fn state_with_config_at(path: &std::path::Path) -> super::types::AppState {
+    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    super::types::AppState {
+        update_check: Default::default(),
+        update_jobs: Default::default(),
+        config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+            path.to_path_buf(),
+            crate::config::Config::load_from_path_public(path).expect("a config that loads"),
+        )),
+        event_tx,
+        control: no_daemon_client(),
+        mcp: super::mcp::McpAdmin::default(),
+        limits: Default::default(),
+    }
+}
+
 /// A control client pointing at an address with no daemon - used by tests that
 /// never exercise agent actions (read/websocket/polling/config paths).
 pub(super) fn no_daemon_client() -> ControlClient {

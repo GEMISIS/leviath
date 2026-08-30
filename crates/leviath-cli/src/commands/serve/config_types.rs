@@ -37,6 +37,49 @@ pub(super) struct RedactedConfig {
     /// and one round trip per feature.
     pub(super) capabilities: Vec<String>,
     pub(super) limits: ApiLimits,
+    /// Why the config file on disk is not the config being served, when it is
+    /// not. Absent while `config.toml` loads.
+    ///
+    /// Every other field here describes the config *in force*, which on a
+    /// broken file is the last one that loaded. Without this, a client had no
+    /// way to tell the two apart: an edit that did not parse simply did not
+    /// show up, and looked identical to an edit that was never saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) config_error: Option<ConfigErrorInfo>,
+    /// The mtime of the config actually in force, in unix seconds.
+    ///
+    /// Always present, not only under an error: it is how a client that just
+    /// wrote the file confirms the write was picked up. While
+    /// `config_error` is set this is the *last good* save rather than what is
+    /// on disk now. `null` when there is no config file, which means defaults.
+    pub(super) config_mtime: Option<i64>,
+}
+
+/// A config file that will not load, as the API reports it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ConfigErrorInfo {
+    /// Which step refused it: `parse`, `validation` or `read`.
+    pub(crate) kind: String,
+    /// The file, as this server resolved it.
+    pub(crate) path: String,
+    /// One line: what is wrong, with no caret art in it.
+    pub(crate) message: String,
+    /// 1-based position of a parse failure. Absent for a validation failure,
+    /// which names a `key` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<usize>,
+    /// 1-based column, alongside `line`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) column: Option<usize>,
+    /// The dotted config key a validation failure is about, such as
+    /// `model_providers.local`. Absent for a parse failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key: Option<String>,
+    /// When this server first saw the file in this state, in unix seconds.
+    pub(crate) since: i64,
+    /// Said in words, because a client that only renders strings should still
+    /// be able to tell somebody what is happening.
+    pub(crate) note: String,
 }
 
 /// The API contract version: this build's own version, and nothing to keep in
@@ -218,6 +261,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // without a word: a console that offered the box against one would send
     // the person's redirect nowhere.
     "interaction.feedback",
+    // `config_error` and `config_mtime` on `GET /api/config`, and the
+    // `config_health` websocket frame. Announced because the absence of
+    // `config_error` has to be readable as "this file loads" rather than as
+    // "this daemon would not tell me": a console that cannot tell the two
+    // apart has to keep showing the config as authoritative while the user's
+    // edits are quietly going nowhere.
+    "config.health",
 ];
 
 /// The server's numeric limits.

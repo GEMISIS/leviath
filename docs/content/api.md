@@ -886,6 +886,51 @@ without an `agent`, since the answer is the same either way.
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
 
+## When the config file will not load
+
+`GET /api/config` describes the config **in force**, which is not always the file on disk. A save
+that does not parse, or that sets a value Leviath refuses, leaves the last config that loaded in
+force: runs keep starting on it, and nothing about them changes. Without a way to say so, that
+looked exactly like an edit nobody had made.
+
+`config_error` is how the server says so. It is absent while the file loads, and present with the
+whole story while it does not:
+
+```json
+{
+  "default_provider": "anthropic",
+  "config_mtime": 1756000000,
+  "config_error": {
+    "kind": "parse",
+    "path": "/Users/you/.leviath/config.toml",
+    "message": "expected `.`, `=`",
+    "line": 12,
+    "column": 8,
+    "since": 1756000420,
+    "note": "The running config is the last one that loaded; edits to this file take effect only once it parses again."
+  }
+}
+```
+
+`kind` is `parse` for a syntax error or a value of the wrong type, `validation` for a value that
+parsed and was then refused, and `read` for a file that could not be read at all. A parse failure
+carries `line` and `column`, both 1-based; a validation failure carries `key` instead, the dotted
+config key it is about, such as `model_providers.local`. `message` is one line with no caret art in
+it, ready to put in a banner. `since` is when this server first saw the file in this state, in unix
+seconds.
+
+`config_mtime` is always there, error or not: it is the mtime of the config in force, so a client
+that just wrote the file can tell whether the write was picked up. While `config_error` is set it
+names the last good save rather than the file on disk.
+
+Nothing has to be restarted. Fix the file, and the next request answers with no `config_error` and
+the new values. Announced as the `config.health` capability; a server that does not announce it
+omits the field whether or not the file loads, so its absence proves nothing there.
+
+`PUT /api/config` is checked before it writes, with the same rules the loader applies, so this API
+cannot be the thing that breaks the file: a body that would produce a config this build refuses to
+read back answers **400** and the file is left byte for byte as it was.
+
 ## Gateways
 
 `gateways` on `GET /api/config` lists every `[model_providers.<name>]` entry, name-sorted, and
@@ -999,6 +1044,7 @@ than that feature, not broken.
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
 | `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
+| `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. Without it a missing `config_error` means nothing, so a console cannot tell a file that loads from a daemon that would not say. See [when the config file will not load](#when-the-config-file-will-not-load) |
 
 ## Live updates over WebSocket
 
@@ -1021,8 +1067,11 @@ sequenceDiagram
 
 ### The frames
 
-Every frame is a JSON object with a `type`, and every frame except `daemon_link` carries a
-`run_id`, which is what `/ws/agents/{id}` filters on.
+Every frame is a JSON object with a `type`. Every frame except `daemon_link` and `config_health`
+carries a `run_id`, which is what `/ws/agents/{id}` filters on. `daemon_link` reaches every
+subscription including a per-run one, because it explains why a run's frames stopped;
+`config_health` reaches only `/ws`, because a run in flight keeps going on the config it started
+with either way.
 
 | `type` | Sent when | Beyond `agent_id` and `run_id` |
 | --- | --- | --- |
@@ -1039,6 +1088,7 @@ Every frame is a JSON object with a `type`, and every frame except `daemon_link`
 | `interaction_needed` | The run is blocked on a person | `request` |
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
+| `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |
 
 `agent_spend` arrives while the run is still going, which is the point: a run that quietly spends
 far more than intended looks, from the outside, exactly like one making ordinary progress. Each

@@ -278,12 +278,41 @@ pub(crate) enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         restart_advised: Option<String>,
     },
+
+    /// Whether `config.toml` on disk loads has changed.
+    ///
+    /// About the machine rather than a run, like
+    /// [`DaemonLink`](Self::DaemonLink), and sent for much the same reason: it
+    /// is the frame that explains why something appears to have had no effect.
+    /// A save that does not parse leaves the last good config in force and
+    /// changes nothing else a client can observe, so without this the only
+    /// symptom is `GET /api/config` quietly answering with the old values.
+    ///
+    /// Sent on each edge rather than on a timer: it stopped loading, it loads
+    /// again, or it is still broken for a different reason than the frame
+    /// before said. That third case matters - a person fixing a syntax error
+    /// and landing on a refused value never leaves the broken state, and a
+    /// client holding a banner would go on showing a line and column that no
+    /// longer exists.
+    ConfigHealth {
+        /// Whether the file on disk loads right now.
+        healthy: bool,
+        /// The file this is about.
+        path: String,
+        /// Why it does not load. Absent when `healthy`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<super::config_types::ConfigErrorInfo>,
+        /// The mtime of the config in force, in unix seconds. While unhealthy
+        /// this is the last good save, not what is on disk.
+        config_mtime: Option<i64>,
+    },
 }
 
 impl ServerEvent {
     /// The run id this event belongs to, for per-run subscription filtering.
-    /// Every event names one except the three about the machine rather than a
-    /// run - [`DaemonLink`](Self::DaemonLink), and the two an update sends.
+    /// Every event names one except the four about the machine rather than a
+    /// run - [`DaemonLink`](Self::DaemonLink),
+    /// [`ConfigHealth`](Self::ConfigHealth), and the two an update sends.
     pub(crate) fn run_id(&self) -> &str {
         match self {
             ServerEvent::AgentStatus { run_id, .. }
@@ -300,18 +329,21 @@ impl ServerEvent {
             | ServerEvent::AgentSpend { run_id, .. } => run_id,
             ServerEvent::DaemonLink { .. }
             | ServerEvent::UpdateProgress { .. }
-            | ServerEvent::UpdateFinished { .. } => "",
+            | ServerEvent::UpdateFinished { .. }
+            | ServerEvent::ConfigHealth { .. } => "",
         }
     }
 
     /// Whether a subscription filtered to `run_id` should receive this event:
     /// its own run's events, and the ones about no run at all.
     ///
-    /// The update frames are deliberately not in that second group. A link
-    /// event explains why a run's events stopped arriving, which is something
-    /// a per-run subscriber has to know; an update happening on the machine is
-    /// not about the run it is watching, and `/ws` is where a console watches
-    /// for it.
+    /// The update frames are deliberately not in that second group, and
+    /// neither is [`ConfigHealth`](Self::ConfigHealth). A link event explains
+    /// why a run's events stopped arriving, which is something a per-run
+    /// subscriber has to know; an update happening on the machine is not about
+    /// the run it is watching, and neither is the config file being edited -
+    /// the run in front of it keeps going on the config it started with either
+    /// way. `/ws` is where a console watches for both.
     pub(crate) fn is_for_run(&self, run_id: &str) -> bool {
         matches!(self, ServerEvent::DaemonLink { .. }) || self.run_id() == run_id
     }

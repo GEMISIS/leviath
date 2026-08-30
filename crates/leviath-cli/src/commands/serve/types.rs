@@ -1292,6 +1292,8 @@ mod tests {
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
+            config_error: None,
+            config_mtime: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RedactedConfig = serde_json::from_str(&json).unwrap();
