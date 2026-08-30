@@ -91,9 +91,10 @@ Hosts that implement the client-side methods advertise capabilities at `initiali
 surfaces tool approvals as `session/request_permission` requests the host answers. OpenClaw's acpx
 backend answers them. Hosts that send no capabilities (Gas City sends none) cannot answer such a
 request, so instead of deadlocking, the question is surfaced as output and the turn stays in
-flight. Answer it from Leviath's own surfaces, `lev respond` or `lev dash`, and the run continues;
-unanswered, it is denied after `[limits] interaction_timeout_secs`. Use `--yolo` (or scoped
-`--allow` flags) to run unattended against such a host.
+flight. Answer it from Leviath's own surfaces, `lev respond` or `lev dash`, and the run continues.
+It waits until you do, unless `[limits] interaction_timeout_secs` is set, in which case an
+unanswered request is denied when that passes. Use `--yolo` (or scoped `--allow` flags) to run
+unattended against such a host.
 
 ## Connecting a host
 

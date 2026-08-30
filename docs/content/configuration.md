@@ -149,7 +149,7 @@ finished_retention_secs   = 300  # keep a finished run in `lev ps` this long
 wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is off
 provider_failures_before_open  = 3     # pull a provider after this many failures in a row
 provider_circuit_cooldown_secs = 300   # how long before it is tried again
-interaction_timeout_secs  = 3600 # release a prompt nobody answered
+# interaction_timeout_secs = 3600 # unset: a prompt waits for you until answered
 inference_retry_attempts  = 4    # tries per inference, the first one included
 inference_retry_base_ms   = 1000 # first retry wait for an ordinary blip; it doubles
 max_tool_call_write_bytes = 2147483648   # 2 GiB; delete the line for no limit
@@ -178,7 +178,7 @@ cerebras = 1                     # every model this provider serves, together
 | `wedge_timeout_secs` | `0` (off) | Fail a run nothing can reach any more. See below |
 | `provider_failures_before_open` | `3` | Failures in a row before a provider is pulled. See below |
 | `provider_circuit_cooldown_secs` | `300` | How long a pulled provider waits before one request tests it. A success restores it, a failure restarts the wait |
-| `interaction_timeout_secs` | `3600` | How long a prompt may go unanswered. See below |
+| `interaction_timeout_secs` | unset | Bound how long a prompt waits for a person. Unset waits until answered. See below |
 | `inference_retry_attempts` | `4` | Tries per inference, the first included. See below |
 | `inference_retry_base_ms` | `1000` | First retry wait for an ordinary blip, doubling each retry. See below |
 | `max_tool_call_write_bytes` | unset | Most one tool call may write. See below |
@@ -321,11 +321,13 @@ capacity failure about four minutes of waiting rather than about one and a half.
 the retries of a single request sleep **at most five minutes in total**, and the request itself is
 still bounded by its stage's `request_timeout_secs`, so a run can never wait indefinitely.
 
-**`interaction_timeout_secs`** puts a deadline on any prompt that waits on a person: `ask_user_*`,
-tool approvals, taint gates, and interaction points. When it expires the daemon resolves the prompt
-and lets the run continue. An expiry *denies* an approval and tells the model no answer came. It
-never counts as consent. `0` waits indefinitely. See
-[when nobody answers](/docs/interaction#when-nobody-answers).
+**`interaction_timeout_secs`** bounds how long a prompt waits on a person: `ask_user_*`, tool
+approvals, taint gates, and interaction points. Leave it unset and the run waits for you until you
+answer, whether that is in ten minutes or on Monday; nothing else in the daemon fails, reaps, or
+marks stuck a run that is waiting on a person, and only cancelling it ends the wait. Set a number
+and a prompt nobody answered in that many seconds is resolved so the run can continue. An expiry
+*denies* an approval and tells the model no answer came. It never counts as consent. `0` is read as
+unset. See [when nobody answers](/docs/interaction#when-nobody-answers).
 
 <a id="security"></a>
 

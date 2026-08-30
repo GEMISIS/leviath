@@ -296,6 +296,17 @@ same list.
 
 ### Changed
 
+- Runs now wait for you. A prompt that needs a person (a tool approval, an
+  `ask_user_*` question, a taint gate, an interaction point) waits until it is
+  answered, however long that takes; it used to be denied after an hour by
+  default, which failed the run the moment you were away for longer than
+  that. `[limits] interaction_timeout_secs` is now unset by default and is the
+  opt-in: set it to bound the wait for a run nobody will be watching. The
+  wait is not counted against a `stuck_after_minutes` edge, a run parked on a
+  prompt is still parked after a daemon restart, and `lev setup` no longer
+  writes a timeout into a fresh config. A config with `interaction_timeout_secs
+  = 0` keeps working (it means unset). The tool result for a prompt that closed
+  without an answer only mentions a timeout when one is configured.
 - A `[model_providers.<name>]` entry with `kind = "openai-compatible"` no
   longer loads with a key the endpoint does not read; the error names the
   entry, the keys, and the ones it does read. Unrecognised keys on a script

@@ -174,8 +174,9 @@ that grants one of these tools without saying it meant to. Naming the tool in `r
 settles that, and keeps the tool through an unattended run; `allow_blocking_tools = true` on the
 stage settles the warning alone, for a stage that only ever runs attended.
 
-Pair the opt-out with [`interaction_timeout_secs`](/docs/configuration#limits) so a prompt nobody
-answers still releases the run rather than parking it for good.
+The run then waits for a person however long it takes. Pair the opt-out with
+[`interaction_timeout_secs`](/docs/configuration#limits) if a prompt nobody answers should release
+the run instead.
 
 ## Sub-agents
 
@@ -404,10 +405,11 @@ may do internally, such as whether it can run a shell command or read a file. Se
 [Rhai tools](/docs/rhai-tools).
 
 > [!WARNING]
-> A tool set to `ask` in a headless context blocks until someone answers. It never auto-denies. For
-> unattended runs, either grant the tools explicitly with `--allow` or use `--yolo`, which cannot
-> override a `deny`. Set [`interaction_timeout_secs`](/docs/configuration#limits) to put a deadline
-> on any prompt that goes unanswered, whichever way it was raised.
+> A tool set to `ask` in a headless context blocks until someone answers. It never auto-denies, and
+> by default it never times out. For unattended runs, either grant the tools explicitly with
+> `--allow` or use `--yolo`, which cannot override a `deny`. Set
+> [`interaction_timeout_secs`](/docs/configuration#limits) to put a deadline on any prompt that
+> goes unanswered, whichever way it was raised.
 
 ## Argument validation
 

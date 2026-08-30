@@ -63,8 +63,8 @@ ask. Gas City sends no client capabilities, so there is nobody to ask.
 
 Leviath does not deadlock on that. It surfaces the approval as output and keeps the turn in
 flight, waiting for an answer from somewhere else: `lev respond` or `lev dash` on the same
-machine. Unanswered, the approval is denied after `[limits] interaction_timeout_secs`, an hour by
-default. A timeout is never read as consent.
+machine. It waits until answered, or until `[limits] interaction_timeout_secs` if you set one, and
+then it is denied. A timeout is never read as consent.
 
 `--yolo` approves every tool call so nothing stops to ask. If that is more trust than you want to
 extend, name the tools you are happy with instead:

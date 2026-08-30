@@ -172,8 +172,7 @@
         "interaction_timeout_secs": {
           "type": "integer",
           "minimum": 0,
-          "default": 3600,
-          "description": "How long a prompt waits for a person before resolving as cancelled. `0` waits forever. This is what releases an interaction point that holds under --yolo, so the default means such a run sits for an hour looking dead."
+          "description": "How long a prompt (a tool approval, an ask_user_* question, a taint gate, an interaction point) waits for a person before resolving as cancelled. Unset by default: the run waits until somebody answers, however long that takes, and nothing else fails or reaps it while it waits. `0` is read as unset. Set a number to bound the wait for a run nobody will be watching; an expiry denies, it never approves."
         },
         "inference_retry_attempts": {
           "type": "integer",
