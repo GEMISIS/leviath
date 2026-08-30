@@ -35,6 +35,13 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 
 Each page walks its point end to end with a complete, copy-pasteable example.
 
+A region hook, a stage hook and an output validator are all named by path in the manifest, so a file
+sitting beside the agent is invisible until something names it. If you are building an editor rather
+than writing the manifest by hand,
+[`GET /api/scripts?agent=<name>&include=candidates`](/docs/api#offering-a-file-nobody-has-named-yet)
+lists the `.rhai` files under an agent's directory that nothing declares yet, each with the
+manifest-relative path to write into `validator = "..."` or `[stages.<name>.hooks]`.
+
 ## The sandbox they all share
 
 Every script runs in a hardened engine: no `eval`, no `import`, no ambient filesystem or

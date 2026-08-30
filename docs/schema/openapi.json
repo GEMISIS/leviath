@@ -1978,7 +1978,7 @@
           "scripts"
         ],
         "summary": "Rhai scripts this scope can see",
-        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks and output validators the agent's manifest declares, and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`) and whether it compiles right now; a provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
+        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks and output validators the agent's manifest declares, and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`), a `declared` flag and whether it compiles right now; an agent-scoped entry also carries `relative_path`, where the file sits relative to the agent's own directory, which is the spelling a manifest wants. A provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
         "parameters": [
           {
             "name": "agent",
@@ -1987,11 +1987,25 @@
               "type": "string"
             },
             "description": "Scope to this agent's own directory."
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "candidates"
+              ]
+            },
+            "description": "Comma-separated extras. `candidates` also lists the `.rhai` files under the agent's directory that nothing declares, as `kind: \"unknown\"` with `declared: false` and no `compiles`, so an editor can offer a validator or a hook that no manifest names yet. Only meaningful with `agent`: both global directories are already listed file by file. The scan is bounded (four levels deep, 128 directories, 256 files) and follows no symlink out of the agent's directory. An unrecognized token is a 400."
           }
         ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2060,7 +2074,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "The file's name without its `.rhai` extension."
+            "description": "The file's name without its `.rhai` extension. May be a relative path when the manifest declared one, with the separator percent-encoded so it stays one segment: `validators%2Fa2ui`. Every part may hold only letters, digits, `.`, `_` and `-`, and the result must resolve inside the directory the route is fenced to."
           },
           {
             "name": "agent",
@@ -2115,7 +2129,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "The file's name without its `.rhai` extension."
+            "description": "The file's name without its `.rhai` extension. May be a relative path when the manifest declared one, with the separator percent-encoded so it stays one segment: `validators%2Fa2ui`. Every part may hold only letters, digits, `.`, `_` and `-`, and the result must resolve inside the directory the route is fenced to."
           },
           {
             "name": "agent",
@@ -2176,7 +2190,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "The file's name without its `.rhai` extension."
+            "description": "The file's name without its `.rhai` extension. May be a relative path when the manifest declared one, with the separator percent-encoded so it stays one segment: `validators%2Fa2ui`. Every part may hold only letters, digits, `.`, `_` and `-`, and the result must resolve inside the directory the route is fenced to."
           },
           {
             "name": "agent",

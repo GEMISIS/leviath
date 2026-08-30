@@ -236,6 +236,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // the four agent-owned kinds without serving this one, and a console that
     // offered the kind anyway would put an editor in front of a 400.
     "scripts.providers",
+    // `?include=candidates` on the script listing, plus `relative_path` and
+    // `declared` on every entry. Announced because the fallback is a picker
+    // that can only offer a validator something already names, which is the
+    // circle the parameter exists to break: without it a console cannot tell
+    // "this agent has no other scripts" from "this daemon does not look".
+    "scripts.candidates",
     "config.gateways",
     // `kind`, `header_names` and `models` on each gateway `GET /api/config`
     // reports, and `kind`, `headers` and `models` on what `PUT /api/config`

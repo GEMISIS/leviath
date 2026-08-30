@@ -348,7 +348,9 @@ fn a_path_that_cannot_be_shown_to_be_contained_is_refused() {
     let target = Target {
         kind: ScriptKind::Tool,
         dir: PathBuf::new(),
+        file_dir: PathBuf::new(),
         path: PathBuf::from("no-such-file-for-the-guard-test.rhai"),
+        name: "no-such-file-for-the-guard-test".to_string(),
         scope: "global",
         agent: None,
     };
@@ -370,7 +372,9 @@ async fn a_write_the_filesystem_refuses_is_reported() {
         let target = Target {
             kind: ScriptKind::Tool,
             dir: dir.clone(),
+            file_dir: dir.join("missing"),
             path: dir.join("missing").join("x.rhai"),
+            name: "missing/x".to_string(),
             scope: "global",
             agent: None,
         };
@@ -388,8 +392,10 @@ async fn a_delete_the_filesystem_refuses_is_reported() {
         std::fs::create_dir_all(&path).expect("the directory");
         let target = Target {
             kind: ScriptKind::Tool,
-            dir,
+            dir: dir.clone(),
+            file_dir: dir,
             path,
+            name: "adirectory".to_string(),
             scope: "global",
             agent: None,
         };
@@ -399,17 +405,57 @@ async fn a_delete_the_filesystem_refuses_is_reported() {
     .await;
 }
 
-// ─── addressable_name ───────────────────────────────────────────────────────
+// ─── addressed_path ─────────────────────────────────────────────────────────
 
+/// The `{name}` off a URL: one component or a `/`-separated path, with or
+/// without the extension, and nothing that could leave the directory.
 #[test]
-fn only_a_bare_rhai_filename_is_addressable() {
-    assert_eq!(addressable_name("hooks.rhai"), Some("hooks".to_string()));
-    // A subdirectory, a traversal, a missing extension and a name that is not a
-    // safe component are all things these routes cannot address.
-    assert_eq!(addressable_name("nested/hooks.rhai"), None);
-    assert_eq!(addressable_name("../hooks.rhai"), None);
-    assert_eq!(addressable_name("hooks.txt"), None);
-    assert_eq!(addressable_name("..rhai"), None);
+fn a_name_is_read_as_a_relative_path_of_safe_components() {
+    let one = addressed_path("hooks").expect("a bare name");
+    assert_eq!(one.name, "hooks");
+    assert_eq!(one.relative, "hooks.rhai");
+    assert_eq!(one.dirs, Vec::<String>::new());
+    assert_eq!(one.file, "hooks.rhai");
+    // The extension is optional and means the same file either way.
+    assert_eq!(addressed_path("hooks.rhai"), Some(one));
+
+    let deep = addressed_path("validators/a2ui.rhai").expect("a relative path");
+    assert_eq!(deep.name, "validators/a2ui");
+    assert_eq!(deep.relative, "validators/a2ui.rhai");
+    assert_eq!(deep.dirs, vec!["validators".to_string()]);
+    assert_eq!(deep.file, "a2ui.rhai");
+
+    // A traversal, an absolute path, an empty segment, a Windows separator and
+    // a name with nothing left after the extension are all unaddressable.
+    for bad in [
+        "../hooks",
+        "validators/../../hooks",
+        "/etc/hooks",
+        "validators//a2ui",
+        "validators\\a2ui",
+        ".rhai",
+        "",
+    ] {
+        assert_eq!(addressed_path(bad), None, "{bad}");
+    }
+}
+
+/// A declared path is read the same way, except that it must already *be* a
+/// `.rhai` file: `addressed_path` appends the extension, so a declared
+/// `notes.txt` would otherwise be reported as `notes.txt.rhai`.
+#[test]
+fn a_declared_path_must_already_name_a_rhai_file() {
+    assert_eq!(
+        declared_address("hooks.rhai").map(|a| a.name),
+        Some("hooks".to_string())
+    );
+    assert_eq!(
+        declared_address("hooks/deep.rhai").map(|a| a.relative),
+        Some("hooks/deep.rhai".to_string())
+    );
+    assert_eq!(declared_address("hooks.txt"), None);
+    assert_eq!(declared_address("..rhai"), None);
+    assert_eq!(declared_address("../hooks.rhai"), None);
 }
 
 // ─── GET /api/scripts ───────────────────────────────────────────────────────
@@ -521,10 +567,12 @@ async fn a_declared_hook_with_no_file_is_listed_as_failing() {
     .await;
 }
 
-/// A hook declared in a subdirectory is outside what these routes can address,
-/// so it is left out rather than listed under a name that fetches nothing.
+/// A hook declared in a subdirectory is listed, addressed by the relative path
+/// the manifest wrote, and the read route opens that exact file. It used to be
+/// dropped from the listing entirely, so a console could not show a validator
+/// declared the way the docs themselves declare one.
 #[tokio::test]
-async fn a_hook_declared_in_a_subdirectory_is_left_out() {
+async fn a_hook_declared_in_a_subdirectory_is_listed_and_readable() {
     with_home(|home| async move {
         let agent = agent_root(&home, "nested");
         let manifest = r#"
@@ -551,7 +599,62 @@ on_stage_enter = "hooks/deep.rhai"
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
         write(&agent.join("agent.leviath"), manifest);
+        write(
+            &agent.join("hooks").join("deep.rhai"),
+            "fn on_stage_enter(ctx) { () }",
+        );
         let (status, body) = get_json("/api/scripts?agent=nested").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let scripts = body["scripts"].as_array().expect("an array");
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0]["kind"], "stage_hook");
+        assert_eq!(scripts[0]["name"], "hooks/deep");
+        assert_eq!(scripts[0]["relative_path"], "hooks/deep.rhai");
+        assert_eq!(scripts[0]["compiles"], true);
+        assert_eq!(scripts[0]["declared"], true);
+
+        // The name the listing reports is one the read route opens, with the
+        // separator percent-encoded so it stays one path segment.
+        let (status, body) = get_json("/api/scripts/stage_hook/hooks%2Fdeep?agent=nested").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "hooks/deep");
+        assert_eq!(body["content"], "fn on_stage_enter(ctx) { () }");
+    })
+    .await;
+}
+
+/// A manifest that declares something these routes still cannot address - a
+/// path that is not a `.rhai` file, or one that climbs out of the agent's
+/// directory - is left out rather than listed under a name that would fetch a
+/// different file.
+#[tokio::test]
+async fn a_declaration_that_cannot_be_addressed_is_left_out() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "odd");
+        let manifest = r#"
+[agent]
+name = "odd"
+version = "0.1.0"
+description = "d"
+
+[agent.output]
+validator = "../outside.rhai"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 5
+
+[stages.main.hooks]
+on_stage_enter = "notes.txt"
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        write(&agent.join("agent.leviath"), manifest);
+        let (status, body) = get_json("/api/scripts?agent=odd").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body["scripts"].as_array().expect("an array").is_empty());
@@ -597,6 +700,364 @@ async fn the_listing_refuses_a_traversing_agent_name() {
     with_home(|_home| async move {
         let (status, _) = get_json("/api/scripts?agent=..%2F..%2Fetc").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    })
+    .await;
+}
+
+// ─── GET /api/scripts?include=candidates ────────────────────────────────────
+
+/// An agent whose directory holds one declared tool, one declared validator in
+/// a subdirectory, and one `.rhai` nothing names.
+fn agent_with_a_draft(home: &Path) -> PathBuf {
+    let agent = agent_root(home, "picker");
+    write(
+        &agent.join("agent.leviath"),
+        r#"
+[agent]
+name = "picker"
+version = "0.1.0"
+description = "d"
+
+[agent.output]
+validator = "validators/a2ui.rhai"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#,
+    );
+    write(&agent.join("tools").join("summarize.rhai"), GOOD_TOOL);
+    write(
+        &agent.join("validators").join("a2ui.rhai"),
+        "fn validate(content) { #{ valid: true } }",
+    );
+    write(
+        &agent.join("validators").join("draft.rhai"),
+        "fn validate(content) { #{ valid: false, reason: \"wip\" } }",
+    );
+    agent
+}
+
+/// Without the parameter the answer is the one a client already gets: the
+/// declared scripts and nothing else, whatever else is lying beside the agent.
+///
+/// Asserted as whole objects rather than field by field, because the promise
+/// being kept here is about the shape a current client parses, not about one
+/// key of it.
+#[tokio::test]
+async fn the_default_listing_holds_only_what_is_declared() {
+    with_home(|home| async move {
+        let agent = agent_with_a_draft(&home);
+        let (status, body) = get_json("/api/scripts?agent=picker").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "scripts": [
+                    {
+                        "kind": "tool",
+                        "name": "summarize",
+                        "source": "agent",
+                        "agent": "picker",
+                        "path": agent.join("tools").join("summarize.rhai").display().to_string(),
+                        "relative_path": "tools/summarize.rhai",
+                        "declared": true,
+                        "compiles": true,
+                    },
+                    {
+                        "kind": "output_validator",
+                        "name": "validators/a2ui",
+                        "source": "agent",
+                        "agent": "picker",
+                        "path": agent
+                            .join("validators")
+                            .join("a2ui.rhai")
+                            .display()
+                            .to_string(),
+                        "relative_path": "validators/a2ui.rhai",
+                        "declared": true,
+                        "compiles": true,
+                    },
+                ]
+            })
+        );
+    })
+    .await;
+}
+
+/// With it, the file nothing declares is offered too - which is the whole
+/// point: a picker cannot ask somebody to declare a validator it will only
+/// show once it has been declared.
+#[tokio::test]
+async fn include_candidates_adds_the_files_nothing_declares() {
+    with_home(|home| async move {
+        let agent = agent_with_a_draft(&home);
+        let (status, body) = get_json("/api/scripts?agent=picker&include=candidates").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let scripts = body["scripts"].as_array().expect("an array");
+        // The two declared entries are unchanged and the draft is the third.
+        assert_eq!(scripts.len(), 3);
+        assert_eq!(
+            scripts[2],
+            serde_json::json!({
+                "kind": "unknown",
+                "name": "validators/draft",
+                "source": "agent",
+                "agent": "picker",
+                "path": agent
+                    .join("validators")
+                    .join("draft.rhai")
+                    .display()
+                    .to_string(),
+                "relative_path": "validators/draft.rhai",
+                "declared": false,
+            })
+        );
+        // A declared file is not repeated as a candidate, and neither is a
+        // tool the `tools/` scan already reported.
+        let names: Vec<&str> = scripts
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names, ["summarize", "validators/a2ui", "validators/draft"]);
+
+        // `kind` is not a spelling the routes accept, so a client has to pick
+        // one - and the name the candidate carries opens the file under it.
+        let (status, _) = get_json("/api/scripts/unknown/validators%2Fdraft?agent=picker").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, body) =
+            get_json("/api/scripts/output_validator/validators%2Fdraft?agent=picker").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "validators/draft");
+        assert_eq!(body["compiles"], true);
+    })
+    .await;
+}
+
+/// Only `.rhai` files, and only ones these routes could name. A directory that
+/// ends in `.rhai` is a directory, and a file with nothing before the extension
+/// has no name left to be addressed by.
+#[tokio::test]
+async fn a_candidate_is_a_rhai_file_with_a_name_that_can_be_addressed() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "mixed");
+        write(&agent.join("notes.txt"), "not a script");
+        write(&agent.join("real.rhai"), "1");
+        write(&agent.join(".rhai"), "1");
+        write(&agent.join("has a space.rhai"), "1");
+        std::fs::create_dir_all(agent.join("looks.rhai")).expect("the directory");
+
+        let (status, body) = get_json("/api/scripts?agent=mixed&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["scripts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names, ["real"]);
+    })
+    .await;
+}
+
+/// An agent with no directory at all answers with an empty listing rather than
+/// an error: `?include=candidates` is a question about files, and "none" is a
+/// perfectly good answer to it.
+#[tokio::test]
+async fn an_agent_with_no_directory_has_no_candidates() {
+    with_home(|_home| async move {
+        let (status, body) = get_json("/api/scripts?agent=ghost&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["scripts"].as_array().expect("an array").is_empty());
+    })
+    .await;
+}
+
+/// The scan stops at [`CANDIDATE_MAX_DEPTH`], so an agent directory that
+/// happens to contain a source tree cannot be walked to the bottom by anybody
+/// holding the token.
+#[tokio::test]
+async fn the_candidate_scan_stops_at_the_depth_limit() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "deep");
+        let mut dir = agent.clone();
+        // One file at every level, including one past the limit.
+        for level in 0..=CANDIDATE_MAX_DEPTH + 1 {
+            write(&dir.join(format!("at{level}.rhai")), "1");
+            dir = dir.join(format!("d{level}"));
+        }
+
+        let (status, body) = get_json("/api/scripts?agent=deep&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["scripts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names.len(), CANDIDATE_MAX_DEPTH + 1);
+        assert!(names.contains(&"at0"), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.ends_with(&format!("at{}", CANDIDATE_MAX_DEPTH + 1)))
+        );
+    })
+    .await;
+}
+
+/// And at [`CANDIDATE_MAX_FILES`], so a directory holding thousands of scripts
+/// answers with a list rather than with all of them.
+#[tokio::test]
+async fn the_candidate_scan_stops_at_the_file_limit() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "many");
+        for n in 0..CANDIDATE_MAX_FILES + 5 {
+            write(&agent.join(format!("s{n:04}.rhai")), "1");
+        }
+
+        let (status, body) = get_json("/api/scripts?agent=many&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["scripts"].as_array().expect("an array").len(),
+            CANDIDATE_MAX_FILES
+        );
+    })
+    .await;
+}
+
+/// And at [`CANDIDATE_MAX_DIRS`], because depth alone does not bound a tree
+/// that is wide rather than deep.
+#[tokio::test]
+async fn the_candidate_scan_stops_at_the_directory_limit() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "wide");
+        // Each subdirectory holds one script, so the count of files reported is
+        // the count of directories the walk got to open.
+        for n in 0..CANDIDATE_MAX_DIRS + 5 {
+            write(&agent.join(format!("d{n:04}")).join("s.rhai"), "1");
+        }
+
+        let (status, body) = get_json("/api/scripts?agent=wide&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        // The agent's own directory is the first one opened, so one fewer of
+        // the subdirectories is reached.
+        assert_eq!(
+            body["scripts"].as_array().expect("an array").len(),
+            CANDIDATE_MAX_DIRS - 1
+        );
+    })
+    .await;
+}
+
+/// A symlink out of the agent's directory is not followed and not reported.
+/// The scan runs over a directory a config file chose, and the agents directory
+/// itself may be a symlink, so containment is asked of every entry rather than
+/// assumed from where the walk started.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_out_of_the_agent_directory_is_not_a_candidate() {
+    with_home(|home| async move {
+        let outside = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(outside.path().join("stolen.rhai"), "1").expect("the file");
+        let agent = agent_root(&home, "linked");
+        write(&agent.join("own.rhai"), "1");
+        std::os::unix::fs::symlink(outside.path(), agent.join("escape")).expect("the link");
+        std::os::unix::fs::symlink(
+            outside.path().join("stolen.rhai"),
+            agent.join("escape.rhai"),
+        )
+        .expect("the link");
+
+        let (status, body) = get_json("/api/scripts?agent=linked&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["scripts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names, ["own"]);
+    })
+    .await;
+}
+
+/// Windows twin of `a_symlink_out_of_the_agent_directory_is_not_a_candidate`.
+/// Windows spells the two links `symlink_dir` and `symlink_file`; the fence is
+/// the same one, because `resolves_within` canonicalizes before comparing.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_symlink_out_of_the_agent_directory_is_not_a_candidate_windows() {
+    with_home(|home| async move {
+        let outside = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(outside.path().join("stolen.rhai"), "1").expect("the file");
+        let agent = agent_root(&home, "linked");
+        write(&agent.join("own.rhai"), "1");
+        std::os::windows::fs::symlink_dir(outside.path(), agent.join("escape")).expect("the link");
+        std::os::windows::fs::symlink_file(
+            outside.path().join("stolen.rhai"),
+            agent.join("escape.rhai"),
+        )
+        .expect("the link");
+
+        let (status, body) = get_json("/api/scripts?agent=linked&include=candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["scripts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names, ["own"]);
+    })
+    .await;
+}
+
+/// `include` takes a comma-separated list, an empty one asks for nothing, and
+/// a token nobody serves is a 400 rather than a silently short answer.
+#[tokio::test]
+async fn include_refuses_a_token_it_does_not_serve() {
+    with_home(|home| async move {
+        agent_with_a_draft(&home);
+
+        let (status, body) = get_json("/api/scripts?agent=picker&include=candidate").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let reason = body["error"].as_str().expect("a reason");
+        assert!(reason.contains("candidate"), "{reason}");
+
+        let (status, body) = get_json("/api/scripts?agent=picker&include=").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scripts"].as_array().expect("an array").len(), 2);
+
+        let (status, body) = get_json("/api/scripts?agent=picker&include=,candidates").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scripts"].as_array().expect("an array").len(), 3);
+    })
+    .await;
+}
+
+/// Without an agent the parameter changes nothing, and says so rather than
+/// failing: every file in the two global directories is already listed from
+/// disk, so there is no undeclared half of that answer to add.
+#[tokio::test]
+async fn include_candidates_without_an_agent_changes_nothing() {
+    with_home(|home| async move {
+        write(&global_root(&home).join("shared.rhai"), GOOD_TOOL);
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
+
+        let (plain_status, plain) = get_json("/api/scripts").await;
+        let (status, body) = get_json("/api/scripts?include=candidates").await;
+        assert_eq!(plain_status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(plain, body);
+        assert_eq!(body["scripts"].as_array().expect("an array").len(), 2);
     })
     .await;
 }
@@ -786,6 +1247,119 @@ async fn a_directory_that_cannot_be_created_is_reported() {
         .await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    })
+    .await;
+}
+
+/// A name the routes cannot address is refused on the way in, so no read can
+/// be talked into opening a file outside the directory it is fenced to.
+#[tokio::test]
+async fn reading_a_name_that_cannot_be_addressed_is_refused() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "researcher");
+        write(&agent.join("hooks.rhai"), "fn on_stage_enter(ctx) { () }");
+        for name in [
+            "..%2F..%2Fevil",
+            "%2Fetc%2Fpasswd",
+            "hooks%2F..%2F..%2Fevil",
+        ] {
+            let (status, _) =
+                get_json(&format!("/api/scripts/stage_hook/{name}?agent=researcher")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        }
+    })
+    .await;
+}
+
+/// A write may address a subdirectory too, and creates it - so a console that
+/// can show a validator declared as `validators/a2ui.rhai` can also save one.
+#[tokio::test]
+async fn writing_into_a_subdirectory_creates_it() {
+    with_home(|home| async move {
+        let (status, body) = send(
+            "PUT",
+            "/api/scripts/output_validator/validators%2Fa2ui?agent=researcher",
+            serde_json::json!({ "content": "fn validate(content) { #{ valid: true } }" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["compiles"], true);
+        let written = agent_root(&home, "researcher")
+            .join("validators")
+            .join("a2ui.rhai");
+        assert!(written.exists());
+    })
+    .await;
+}
+
+/// A subdirectory that cannot be created is reported rather than swallowed,
+/// the same way the agent's own directory is. An ordinary file where the
+/// subdirectory should be is the portable way to arrange that.
+#[tokio::test]
+async fn a_subdirectory_that_cannot_be_created_is_reported() {
+    with_home(|home| async move {
+        let agent = agent_root(&home, "researcher");
+        write(&agent.join("validators"), "a file, not a directory");
+        let (status, _) = send(
+            "PUT",
+            "/api/scripts/output_validator/validators%2Fa2ui?agent=researcher",
+            serde_json::json!({ "content": "fn validate(content) { #{ valid: true } }" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    })
+    .await;
+}
+
+/// A symlink planted at a directory along the way is refused, and refused
+/// *before* anything is created through it: the containment check runs first,
+/// so the write neither lands outside the agent's directory nor leaves a new
+/// directory there.
+#[cfg(unix)]
+#[tokio::test]
+async fn writing_through_a_symlinked_subdirectory_is_refused() {
+    with_home(|home| async move {
+        let outside = tempfile::tempdir().expect("a temp dir");
+        let agent = agent_root(&home, "researcher");
+        std::fs::create_dir_all(&agent).expect("the agent directory");
+        std::os::unix::fs::symlink(outside.path(), agent.join("validators")).expect("the link");
+
+        let (status, _) = send(
+            "PUT",
+            "/api/scripts/output_validator/validators%2Fdeep%2Fa2ui?agent=researcher",
+            serde_json::json!({ "content": "fn validate(content) { #{ valid: true } }" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!outside.path().join("deep").exists());
+    })
+    .await;
+}
+
+/// Windows twin of `writing_through_a_symlinked_subdirectory_is_refused`.
+/// Windows spells a directory link `symlink_dir`; the fence is the same one.
+#[cfg(windows)]
+#[tokio::test]
+async fn writing_through_a_symlinked_subdirectory_is_refused_windows() {
+    with_home(|home| async move {
+        let outside = tempfile::tempdir().expect("a temp dir");
+        let agent = agent_root(&home, "researcher");
+        std::fs::create_dir_all(&agent).expect("the agent directory");
+        std::os::windows::fs::symlink_dir(outside.path(), agent.join("validators"))
+            .expect("the link");
+
+        let (status, _) = send(
+            "PUT",
+            "/api/scripts/output_validator/validators%2Fdeep%2Fa2ui?agent=researcher",
+            serde_json::json!({ "content": "fn validate(content) { #{ valid: true } }" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!outside.path().join("deep").exists());
     })
     .await;
 }

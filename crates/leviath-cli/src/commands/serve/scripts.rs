@@ -14,9 +14,18 @@
 //! `resolve_*_scripts` in the daemon refusing any that lands outside it. There
 //! is no `hooks/` or `validators/` directory to list, so the listing derives
 //! those three from what the manifest declares, and the read/write routes
-//! address them at `<agent>/<name>.rhai` - the path a bare declared filename
-//! already resolves to. There is likewise no global directory for them: a hook
-//! only ever loads from beside the agent that declares it.
+//! address them at `<agent>/<name>.rhai` - subdirectories included, since a
+//! manifest may declare `validators/a2ui.rhai` and a route that could not open
+//! it would be a listing entry nobody could act on. There is likewise no global
+//! directory for them: a hook only ever loads from beside the agent that
+//! declares it.
+//!
+//! What the manifest declares is not what a person is choosing between, though.
+//! An editor offering a validator picker needs the files that *could* be named,
+//! and a file is only declared once somebody has named it. `?include=candidates`
+//! is that half: the `.rhai` files under the agent's directory that nothing
+//! declares, reported as a `kind` of `unknown` and `declared: false`, under a
+//! bounded walk that never leaves the agent's own directory.
 //!
 //! A **provider** is the inverse: `~/.leviath/providers/<name>.rhai` and nothing
 //! else. No agent owns one, and a stage reaches it by name rather than by path,
@@ -31,8 +40,8 @@
 //! `lev serve --allow-admin`. The `GET` routes stay open so an editor degrades
 //! to read-only instead of disappearing.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -108,30 +117,113 @@ fn global_providers_dir() -> PathBuf {
 #[derive(Debug, Clone)]
 struct Target {
     kind: ScriptKind,
-    /// The directory the file must live in, and nothing below it.
+    /// The directory the file must resolve inside. A `{name}` may name a
+    /// subdirectory of it, and nothing above or outside it.
     dir: PathBuf,
-    /// `<dir>/<name>.rhai`.
+    /// The directory the file itself sits in: `dir`, or a subdirectory of it
+    /// when the name carries one. Kept apart from `dir` because `dir` is the
+    /// fence and this is only where a write has to create directories.
+    file_dir: PathBuf,
+    /// `<file_dir>/<file>.rhai`.
     path: PathBuf,
+    /// The `{name}` this was addressed by, normalized: `/`-separated, no
+    /// `.rhai`. Spelled back so a response never renames what it was asked for.
+    name: String,
     /// `agent` or `global`.
     scope: &'static str,
     /// The agent that owns it, absent for the global directory.
     agent: Option<String>,
 }
 
+/// A `.rhai` file addressed relative to some directory.
+///
+/// One shape for the two places a relative script path is read: a `{name}` off
+/// the URL, and a path a manifest declares. Both have to end up as the same
+/// three answers - what to call it, where it sits, and what to write into a
+/// manifest - and having them computed twice is how the two disagreed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Addressed {
+    /// The `{name}` the routes address it by: `/`-separated, `.rhai` stripped.
+    name: String,
+    /// The same file relative to the base directory, extension included, always
+    /// with `/` separators because that is what goes into a manifest.
+    relative: String,
+    /// The directory components between the base and the file, in order.
+    dirs: Vec<String>,
+    /// The file name, `.rhai` included.
+    file: String,
+}
+
+impl Addressed {
+    /// Where the file sits under `base`.
+    fn dir_in(&self, base: &Path) -> PathBuf {
+        self.dirs
+            .iter()
+            .fold(base.to_path_buf(), |acc, d| acc.join(d))
+    }
+
+    /// The file itself under `base`.
+    fn path_in(&self, base: &Path) -> PathBuf {
+        self.dir_in(base).join(&self.file)
+    }
+}
+
+/// Read a `{name}` as a path relative to a script directory, or `None` when it
+/// is not one these routes can address.
+///
+/// A name may be a single component (`check`) or a `/`-separated relative path
+/// (`validators/a2ui`), because that is the shape a manifest declares a hook or
+/// a validator in and the shape the listing has to report back. Every component
+/// goes through [`leviath_core::is_safe_path_component`], which is what keeps
+/// `..`, an absolute path, a Windows `\` separator and an empty segment out:
+/// `Path::join` normalizes none of them. Containment is still checked
+/// afterwards by [`guard`], because a component that is safe to spell can still
+/// be a symlink pointing elsewhere.
+///
+/// The `.rhai` extension is fixed here rather than taken from the caller, so no
+/// request can ask for a `.toml`, a manifest, or anything else in the agent's
+/// directory. A name that already carries the extension means the same file,
+/// since that is how a manifest and this listing both spell one.
+fn addressed_path(name: &str) -> Option<Addressed> {
+    let stem = name.strip_suffix(".rhai").unwrap_or(name);
+    let mut dirs: Vec<String> = Vec::new();
+    let mut file = String::new();
+    for part in stem.split('/') {
+        if !leviath_core::is_safe_path_component(part) {
+            return None;
+        }
+        // Which component is the file is only known once the walk ends, so
+        // whatever was holding that place becomes a directory as soon as
+        // another component arrives. An empty `file` is the first turn.
+        if !file.is_empty() {
+            dirs.push(std::mem::take(&mut file));
+        }
+        file = part.to_string();
+    }
+    Some(Addressed {
+        name: stem.to_string(),
+        relative: format!("{stem}.rhai"),
+        file: format!("{file}.rhai"),
+        dirs,
+    })
+}
+
 /// Resolve `{kind}/{name}` plus an optional `?agent=` into the one file the
 /// request may touch.
 ///
 /// Both `name` and `agent` arrive in a URL and are joined onto a directory, so
-/// both go through [`leviath_core::is_safe_path_component`] first, the way
-/// `blueprint_dir` does in `blueprints.rs`: `Path::join` neither normalizes
-/// `..` nor resists an absolute path, and the bug that check exists for was a
-/// REST route writing attacker-chosen content outside the directory it meant to
-/// and then recursively deleting whatever it had landed on.
+/// every component of both goes through
+/// [`leviath_core::is_safe_path_component`] first, the way `blueprint_dir` does
+/// in `blueprints.rs`: `Path::join` neither normalizes `..` nor resists an
+/// absolute path, and the bug that check exists for was a REST route writing
+/// attacker-chosen content outside the directory it meant to and then
+/// recursively deleting whatever it had landed on.
 ///
-/// The `.rhai` extension is fixed here rather than taken from the caller, so no
-/// request can ask for a `.toml`, a manifest, or anything else in the agent's
-/// directory. A `name` that already carries the extension is accepted and means
-/// the same file, since that is how the listing spells a path back.
+/// `name` may address a subdirectory (`validators/a2ui`, percent-encoded in the
+/// URL as `validators%2Fa2ui`), because a manifest names a hook or a validator
+/// by a path relative to the agent's directory and a route that could only
+/// address one component could not open the file the listing had just reported.
+/// [`guard`] still checks where the result lands.
 fn resolve(
     config: &crate::config::Config,
     kind: &str,
@@ -144,16 +236,15 @@ fn resolve(
             format!("Unknown script kind '{kind}': expected {KIND_LIST}"),
         ));
     };
-    let stem = name.strip_suffix(".rhai").unwrap_or(name);
-    if !leviath_core::is_safe_path_component(stem) {
+    let Some(addressed) = addressed_path(name) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
             format!(
-                "Invalid script name '{name}': names may contain only letters, digits, \
-                 '.', '_' and '-'"
+                "Invalid script name '{name}': each '/'-separated part may contain only \
+                 letters, digits, '.', '_' and '-'"
             ),
         ));
-    }
+    };
 
     let (dir, scope, owner) = match (agent, kind) {
         // A provider is machine-wide. Scoping one to an agent would write a file
@@ -190,11 +281,14 @@ fn resolve(
         }
     };
 
-    let path = dir.join(format!("{stem}.rhai"));
+    let file_dir = addressed.dir_in(&dir);
+    let path = addressed.path_in(&dir);
     Ok(Target {
         kind,
         dir,
+        file_dir,
         path,
+        name: addressed.name,
         scope,
         agent: owner,
     })
@@ -211,13 +305,15 @@ enum Presence {
 
 /// The containment gate every read and write passes through.
 ///
-/// The name is already a single safe component joined onto a fixed directory,
-/// so nothing the caller wrote can carry the path elsewhere. What is left is
-/// what the *filesystem* can do: a symlink planted at that exact name would
-/// send a read or a write straight through it, outside the directory this route
-/// is fenced to. `symlink_metadata` does not follow, so anything that is not a
-/// plain file is refused before it is opened, and the resolved path is then
-/// checked against the directory it came from.
+/// The name is already safe components joined onto a fixed directory, so
+/// nothing the caller wrote can carry the path elsewhere lexically. What is left
+/// is what the *filesystem* can do: a symlink planted at that exact name, or at
+/// a directory along the way, would send a read or a write straight through it,
+/// outside the directory this route is fenced to. `symlink_metadata` does not
+/// follow, so anything that is not a plain file is refused before it is opened,
+/// and the resolved path is then checked against the directory it came from -
+/// `resolves_within` canonicalizes, so a link at any component is caught, not
+/// only one at the last.
 ///
 /// The existence check runs first on purpose. Containment canonicalizes, and a
 /// directory that does not exist yet cannot be canonicalized, so asking that
@@ -309,6 +405,21 @@ pub(super) struct ScriptQuery {
     agent: Option<String>,
 }
 
+/// What the listing takes: an `?agent=`, and what else to put in the answer.
+///
+/// Its own type rather than an `include` bolted onto [`ScriptQuery`], so the
+/// read and write routes do not appear to take a parameter they would ignore.
+#[derive(Debug, Deserialize)]
+pub(super) struct ListScriptsQuery {
+    /// Scope to this agent's own directory.
+    agent: Option<String>,
+    /// Comma-separated extras. `candidates` adds the `.rhai` files beside the
+    /// agent that nothing declares. Only meaningful with `agent`: the global
+    /// directories are already listed file by file from disk, so there is
+    /// nothing undeclared left there to add.
+    include: Option<String>,
+}
+
 /// What a provider script's leading `// @` comments declare.
 ///
 /// Carried as one nested object rather than as six more optional fields on
@@ -366,9 +477,11 @@ fn provider_meta(kind: ScriptKind, content: &str) -> Option<ProviderScriptMeta> 
 /// One script in the listing.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ScriptItem {
-    /// `tool`, `region_hook`, `stage_hook`, `output_validator` or `provider`.
+    /// `tool`, `region_hook`, `stage_hook`, `output_validator` or `provider`,
+    /// or [`CANDIDATE_KIND`] for a file nothing has claimed yet.
     pub(super) kind: String,
-    /// The `{name}` the read and write routes address it by.
+    /// The `{name}` the read and write routes address it by, once a caller has
+    /// picked a `kind` for it. `/`-separated for a file in a subdirectory.
     pub(super) name: String,
     /// `agent` when it belongs to one agent, `global` when every agent gets it.
     pub(super) source: String,
@@ -377,8 +490,19 @@ pub(super) struct ScriptItem {
     pub(super) agent: Option<String>,
     /// The file on disk.
     pub(super) path: String,
-    /// Whether it compiles right now.
-    pub(super) compiles: bool,
+    /// The same file relative to the agent's own directory, which is the
+    /// spelling a manifest wants (`validators/a2ui.rhai`). Absent for a
+    /// machine-wide script, which no blueprint contains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) relative_path: Option<String>,
+    /// Whether something loads this file as this `kind`: a `tools/` directory
+    /// the daemon scans, or a manifest that names it. `false` for a candidate.
+    pub(super) declared: bool,
+    /// Whether it compiles right now. Absent for a candidate: nothing says
+    /// which of the five compilers such a file is for, and picking one would be
+    /// a claim about the file rather than a fact about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) compiles: Option<bool>,
     /// Why not, when it does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) error: Option<String>,
@@ -467,24 +591,17 @@ pub(super) struct ValidateScriptResp {
 
 // ─── Listing ────────────────────────────────────────────────────────────────
 
-/// The `{name}` these routes would address a declared script by, or `None` when
-/// the manifest declared something they cannot address.
+/// How a manifest-declared path is addressed, or `None` when the manifest
+/// declared something these routes cannot address.
 ///
 /// A manifest may name any path inside the agent's directory, a subdirectory
-/// included. These routes address `<agent>/<name>.rhai`: one component, one
-/// fixed extension. Anything else is left out of the listing rather than listed
-/// under a name that would fetch a different file or none at all.
-fn addressable_name(declared: &str) -> Option<String> {
-    let mut components = Path::new(declared).components();
-    let (Some(Component::Normal(only)), None) = (components.next(), components.next()) else {
-        return None;
-    };
-    let file = only.to_string_lossy();
-    let stem = file.strip_suffix(".rhai")?;
-    match leviath_core::is_safe_path_component(stem) {
-        true => Some(stem.to_string()),
-        false => None,
-    }
+/// included, and [`addressed_path`] handles those. What it does not handle is a
+/// declaration that is not a `.rhai` file at all: `addressed_path` appends the
+/// extension, so a declared `notes.txt` would be reported as `notes.txt.rhai`,
+/// a different file. Requiring the suffix here keeps the listing off it.
+fn declared_address(declared: &str) -> Option<Addressed> {
+    let stem = declared.strip_suffix(".rhai")?;
+    addressed_path(stem)
 }
 
 /// Every hook and validator the manifest declares, keyed by kind and declared
@@ -571,17 +688,18 @@ fn collect_tools(dir: &Path, scope: &'static str, agent: Option<&str>, out: &mut
             Some(reason) => (false, Some(reason.clone())),
             None => (true, None),
         };
+        let name = stem_of(&path);
         out.push(ScriptItem {
             kind: ScriptKind::Tool.as_str().to_string(),
-            name: path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
+            // A tool sits in `tools/`, so its manifest-relative path carries
+            // that directory even though the route addresses it without one.
+            relative_path: agent.map(|_| format!("tools/{name}.rhai")),
+            name,
             source: scope.to_string(),
             agent: agent.map(str::to_string),
             path: path.display().to_string(),
-            compiles,
+            declared: true,
+            compiles: Some(compiles),
             error,
             provider: None,
         });
@@ -618,7 +736,9 @@ fn collect_providers(dir: &Path, out: &mut Vec<ScriptItem>) {
             source: "global".to_string(),
             agent: None,
             path: label,
-            compiles,
+            relative_path: None,
+            declared: true,
+            compiles: Some(compiles),
             error,
             provider: meta,
         });
@@ -639,11 +759,13 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
     };
 
     for ((kind, declared), hooks) in declared_scripts(&bp) {
-        let Some(name) = addressable_name(&declared) else {
+        let Some(addressed) = declared_address(&declared) else {
             continue;
         };
-        // `name` is a single safe component, so this join cannot leave `dir`.
-        let path = dir.join(format!("{name}.rhai"));
+        // Every component is a safe one, so this join cannot leave `dir`
+        // lexically; a symlink at one of them still can, which is what the
+        // read route's `guard` is for. Nothing is opened here but the file.
+        let path = addressed.path_in(dir);
         let hook_refs: Vec<&str> = hooks.iter().map(String::as_str).collect();
         let (compiles, error) = match std::fs::read_to_string(&path) {
             Ok(content) => status_pair(compile_status(kind, &declared, &content, &hook_refs)),
@@ -654,15 +776,175 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
         };
         out.push(ScriptItem {
             kind: kind.as_str().to_string(),
-            name,
+            name: addressed.name,
             source: "agent".to_string(),
             agent: Some(agent.to_string()),
             path: path.display().to_string(),
-            compiles,
+            relative_path: Some(addressed.relative),
+            declared: true,
+            compiles: Some(compiles),
             error,
             provider: None,
         });
     }
+}
+
+// ─── Candidates ─────────────────────────────────────────────────────────────
+
+/// The `kind` a candidate is reported under.
+///
+/// Not a lie about the file: a `.rhai` beside an agent that nothing declares
+/// could be a region hook, a stage hook, a validator or a tool, and the file
+/// itself does not say which. The declaration does, which is the thing that has
+/// not happened yet. `ScriptKind::parse` rejects this spelling, so a client
+/// cannot hand it back as a kind either.
+const CANDIDATE_KIND: &str = "unknown";
+
+/// How deep below the agent's own directory the candidate scan walks.
+///
+/// The convention the docs use puts a script one level down
+/// (`validators/a2ui.rhai`), and nothing anybody writes goes past two. Four
+/// leaves room and still stops the walk from descending a whole source tree,
+/// which is what `[agent_paths]` pointed at a working checkout would be.
+const CANDIDATE_MAX_DEPTH: usize = 4;
+
+/// How many candidate files one listing reports. A picker shows a list a person
+/// reads, and past a couple of hundred the honest answer is not a longer list.
+const CANDIDATE_MAX_FILES: usize = 256;
+
+/// How many directories one scan opens. Depth alone does not bound a *wide*
+/// tree, and this walk runs on a request anybody holding the token can repeat.
+const CANDIDATE_MAX_DIRS: usize = 128;
+
+/// Every `.rhai` file under the agent's own directory that nothing already
+/// listed, so a picker can offer a validator no manifest names yet.
+///
+/// The manifest-derived listing is circular for a picker: a file appears once
+/// something declares it, and declaring it is what the picker is for. This is
+/// the other half - what *could* be named - which is why it is kept behind
+/// `?include=candidates`: a client reading the listing as "what will load"
+/// still gets exactly that.
+///
+/// Bounded three ways, by [`CANDIDATE_MAX_DEPTH`], [`CANDIDATE_MAX_DIRS`] and
+/// [`CANDIDATE_MAX_FILES`], because the directory being walked is one a config
+/// file chose and a request anybody can repeat.
+///
+/// Containment is asked per entry rather than assumed from where the walk
+/// started: the agents directory itself may be a symlink, and a link inside the
+/// agent's directory pointing out of it is followed by `read_dir` and by
+/// nothing here. A name that is not a safe path component is skipped rather
+/// than guessed at - a file this cannot spell back is one no manifest could
+/// name and no route could fetch.
+fn collect_candidates(base: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
+    let seen: HashSet<String> = out.iter().map(|item| item.path.clone()).collect();
+    let mut found = 0usize;
+    let mut opened = 0usize;
+    // Breadth first, so when a cap cuts the walk short what survives is the
+    // shallow half - `validators/` rather than `vendor/a/b/c/`.
+    let mut queue: std::collections::VecDeque<(Vec<String>, usize)> =
+        std::collections::VecDeque::from([(Vec::new(), 0usize)]);
+
+    while let Some((dirs, depth)) = queue.pop_front() {
+        if opened == CANDIDATE_MAX_DIRS {
+            return;
+        }
+        opened += 1;
+        let here = dirs.iter().fold(base.to_path_buf(), |acc, d| acc.join(d));
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        // Sorted for the same reason `rhai_files` sorts: a listing that
+        // reorders itself between two calls is one nobody can edit against.
+        let mut names: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            // Lossy on purpose: a name that is not UTF-8 comes back with a
+            // replacement character, which `is_safe_path_component` then
+            // refuses along with every other name this could not spell back.
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| leviath_core::is_safe_path_component(name))
+            .collect();
+        names.sort();
+
+        for name in names {
+            let path = here.join(&name);
+            if !leviath_core::resolves_within(&path, base) {
+                continue;
+            }
+            // `is_dir` follows symlinks, which the check above has already
+            // confined to this agent's directory. A dangling link is not a
+            // directory and is reported as the file the directory says is
+            // there; reading it is where it fails, honestly and with a reason.
+            if path.is_dir() {
+                if depth < CANDIDATE_MAX_DEPTH {
+                    let mut below = dirs.clone();
+                    below.push(name);
+                    queue.push_back((below, depth + 1));
+                }
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".rhai") else {
+                continue;
+            };
+            // A file called exactly `.rhai` has no name left to address it by.
+            if stem.is_empty() {
+                continue;
+            }
+            if seen.contains(&path.display().to_string()) {
+                continue;
+            }
+            if found == CANDIDATE_MAX_FILES {
+                return;
+            }
+            found += 1;
+            let mut parts = dirs.clone();
+            parts.push(stem.to_string());
+            let addressed = parts.join("/");
+            out.push(ScriptItem {
+                kind: CANDIDATE_KIND.to_string(),
+                name: addressed.clone(),
+                source: "agent".to_string(),
+                agent: Some(agent.to_string()),
+                path: path.display().to_string(),
+                relative_path: Some(format!("{addressed}.rhai")),
+                declared: false,
+                compiles: None,
+                error: None,
+                provider: None,
+            });
+        }
+    }
+}
+
+/// The one `?include=` token the listing recognizes.
+const INCLUDE_CANDIDATES: &str = "candidates";
+
+/// Whether `?include=` asked for candidates.
+///
+/// A comma-separated list, so a later listing can add a second thing to include
+/// without a second parameter. An unrecognized token is a 400 rather than a
+/// silent no-op: the whole point of the parameter is that its absence and its
+/// presence give different answers, so a client that misspells it would read a
+/// short listing as "this agent has no files".
+fn wants_candidates(include: Option<&str>) -> Result<bool, ApiError> {
+    let Some(raw) = include else {
+        return Ok(false);
+    };
+    let mut wanted = false;
+    for token in raw.split(',') {
+        match token.trim() {
+            // `?include=` with nothing after it asks for nothing, which is what
+            // a console sends when its checkbox is clear.
+            "" => {}
+            INCLUDE_CANDIDATES => wanted = true,
+            other => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("Unknown include '{other}': expected {INCLUDE_CANDIDATES}"),
+                ));
+            }
+        }
+    }
+    Ok(wanted)
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
@@ -677,15 +959,24 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
 /// Providers are listed either way. Nothing scopes one to an agent, so leaving
 /// them out of the agent view would only mean a console had to make a second
 /// request to draw the same page.
+///
+/// `?include=candidates` adds the `.rhai` files beside the agent that nothing
+/// declares, marked `declared: false` under [`CANDIDATE_KIND`]. Only the agent
+/// half of the answer grows: every file in the two global directories is
+/// already listed from disk, so "undeclared" describes nothing there.
 pub(super) async fn list_scripts(
     State(state): State<AppState>,
-    Query(q): Query<ScriptQuery>,
+    Query(q): Query<ListScriptsQuery>,
 ) -> Result<Json<ScriptsResp>, ApiError> {
+    let candidates = wants_candidates(q.include.as_deref())?;
     let mut scripts = Vec::new();
     if let Some(name) = q.agent.as_deref() {
         let dir = agent_dir(&state.current_config(), name)?;
         collect_tools(&dir.join("tools"), "agent", Some(name), &mut scripts);
         collect_declared(&dir, name, &mut scripts);
+        if candidates {
+            collect_candidates(&dir, name, &mut scripts);
+        }
     }
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
     collect_providers(&global_providers_dir(), &mut scripts);
@@ -726,7 +1017,7 @@ fn read_script(target: &Target) -> Result<Json<ScriptSource>, ApiError> {
     // write the redaction back over the real script.
     Ok(Json(ScriptSource {
         kind: target.kind.as_str().to_string(),
-        name: stem_of(&target.path),
+        name: target.name.clone(),
         source: target.scope.to_string(),
         agent: target.agent.clone(),
         path: label,
@@ -766,6 +1057,16 @@ pub(super) async fn put_script(
     // After the directory exists, so containment is asked of a path that can be
     // canonicalized rather than of one that merely might be.
     guard(&target, Presence::Optional)?;
+    // Only now: a name may carry a subdirectory, and creating one before the
+    // containment check would let a symlink planted at an intermediate name
+    // make this `mkdir` outside the agent's directory. `guard` has just proved
+    // the whole path resolves inside it.
+    if let Err(e) = std::fs::create_dir_all(&target.file_dir) {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot create '{}': {e}", target.file_dir.display()),
+        ));
+    }
     write_script(&target, &body.content)
 }
 
