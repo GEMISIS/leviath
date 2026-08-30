@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+### Fixed
+
+- The daemon rebuilds its provider registry when `config.toml` changes, so a provider you
+  configure, replace or remove is picked up by the next run instead of at the next daemon
+  restart. The registry was built once at boot: a user who ran out of credits on one provider,
+  switched to another with `lev setup`, and started a new run watched it go to the old provider
+  and fail, and neither restarting `lev serve` nor removing the key helped - only killing the
+  daemon did. Every write path is covered, because they all write the same file: `lev setup`,
+  `PUT /api/config`, and an editor. A run already under way keeps the provider its current stage
+  started on, so nothing is swapped mid-stage, and a run parked because its provider had no
+  credits left moves to the new one when you `lev resume` it. A provider whose credentials
+  changed also has its circuit-breaker record cleared, so a replaced key is tried at once rather
+  than serving out the old key's cooldown.
+
 ### Breaking
 
 - `lev add` refuses an agent whose manifest name is not a single safe path
