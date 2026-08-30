@@ -304,6 +304,13 @@ recorded. Your policy decides what happens: allow it, deny it, or ask. A blocked
 recorded as the run's answer, and the model is told, so the stage can submit something else. Taint
 tracking is off unless you turn it on, so this changes nothing for an install that leaves it alone.
 
+An unattended run is the exception. `--yolo` waives the gate along with everything else it stops
+asking about, so the submission goes through and the answer, private regions and all, is served from
+`GET /api/agents/{id}/result`. The waiver is recorded rather than silent: the run's
+`stages/<n>/taint_audit.json` carries the block and the `YoloAutoApprove` that overrode it. See
+[when there is nobody to ask](/docs/security#when-there-is-nobody-to-ask) for what every other
+unattended shape does, which is not the same thing.
+
 ## Large results
 
 An answer is one model response. That is a hard ceiling, not a policy. `submit_output` takes its

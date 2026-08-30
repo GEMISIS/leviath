@@ -109,6 +109,18 @@ same list.
 
 ### Fixed
 
+- A run's taint-gate audit (`stages/<n>/taint_audit.json`) keeps the decisions it
+  recorded just before the run ended. The persistence lane keeps only the newest
+  snapshot per run when several are queued together, and the sender marked the
+  audit written when it built the job rather than when the job reached disk, so a
+  coalesced-away snapshot took its gate events with it. Mid-run the next gate event
+  rewrote the whole log and healed it; the last events before the run finished had
+  no next event and were lost. What that cost in practice: a `--yolo` run waives
+  the gate and records the override as `YoloAutoApprove`, and for an inline
+  `submit_output` (the fast path, no tool lane between the block and the finish)
+  that record never reached the file, so a run that published Private context to
+  `GET /api/agents/{id}/result` left nothing behind saying so. The snapshot that
+  records a run going terminal now always carries the whole log.
 - The daemon rebuilds its provider registry when `config.toml` changes, so a provider you
   configure, replace or remove is picked up by the next run instead of at the next daemon
   restart. The registry was built once at boot: a user who ran out of credits on one provider,

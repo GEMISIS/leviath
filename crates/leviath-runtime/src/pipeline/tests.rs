@@ -3215,6 +3215,56 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
     );
 }
 
+/// ...but the snapshot that records the run going terminal carries the whole
+/// log again, unchanged or not.
+///
+/// The watermark advances when the job is built, while the lane keeps only the
+/// newest snapshot per run, so a job whose audit was coalesced away leaves the
+/// watermark claiming a write that never landed. Mid-run the next gate event
+/// heals it; the last events before the run ends have no next event. Measured
+/// live: a `--yolo` run whose waived block was a `shell` call recorded
+/// `YoloAutoApprove` on disk, and the same run submitting through the inline
+/// `submit_output` recorded nothing at all.
+#[test]
+fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
+    let (mut world, mut prx) = world_with_persistence();
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    // This is the snapshot the lane would coalesce away: it carried the audit,
+    // and it advanced the watermark past it.
+    let coalesced = snapshot_job(prx.try_recv().expect("first job"));
+    assert!(coalesced.taint_audit.is_some());
+
+    // The run finishes with no further gate events.
+    world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Complete;
+    run_dispatch_persistence(&mut world);
+
+    let terminal = snapshot_job(prx.try_recv().expect("terminal job"));
+    let (idx, json) = terminal
+        .taint_audit
+        .expect("the terminal snapshot re-sends the audit");
+    assert_eq!(idx, 0);
+    assert!(json.contains("shell"), "{json}");
+}
+
 #[test]
 fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
     let (mut world, mut prx) = world_with_persistence();
@@ -6155,6 +6205,73 @@ async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
     assert!(
         recorded_yolo_override,
         "expected a YoloAutoApprove audit entry"
+    );
+}
+
+/// The same waiver over `submit_output`, which is the one that carries the
+/// data off the machine rather than merely running a command with it: the
+/// answer is recorded and `GET /api/agents/{id}/result` serves it.
+///
+/// Pinned on its own because `submit_output` takes the inline path rather than
+/// the lane, so the `shell` test above says nothing about it - and because this
+/// is the case measured live: a `--yolo` run over a Private read published its
+/// context to the result endpoint with no prompt. `--yolo` waives enforcement
+/// deliberately; what must not drift is that the waiver is still *recorded*.
+#[tokio::test]
+async fn dispatch_tools_under_yolo_submits_over_tainted_context_and_records_it() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(crate::interaction_hub::InteractionHub::new());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o1", "the secret")]),
+            tainted_output_window(),
+            ReadyForTools,
+            enabled_gate(),
+            crate::components::GateAutoApprove,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(
+        world
+            .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+            .is_none(),
+        "unattended: nothing is asked"
+    );
+    assert!(
+        jrx.try_recv().is_err(),
+        "a submission is applied inline, never sent to the lane"
+    );
+    let recorded = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("the waived submission became the run's answer");
+    assert_eq!(recorded.0.content, "the secret");
+    let audit: Vec<_> = world
+        .get::<crate::taint::TaintGate>(e)
+        .unwrap()
+        .audit_log()
+        .iter()
+        .map(|ev| ev.decision_source.clone())
+        .collect();
+    assert!(
+        audit.contains(&leviath_core::taint::GateDecisionSource::AutoBlock),
+        "the gate is evaluated, not skipped: {audit:?}"
+    );
+    assert!(
+        audit.contains(&leviath_core::taint::GateDecisionSource::YoloAutoApprove),
+        "the waiver is recorded: {audit:?}"
     );
 }
 

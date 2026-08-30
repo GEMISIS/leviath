@@ -173,6 +173,15 @@ tool-approval. There, **Allow for this session** raises the tool's clearance for
 run, and **Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on
 what a call runs.
 
+That prompt's unanswered cases go the safe way. Left open past
+`[limits] interaction_timeout_secs`, it resolves as a deny and the model gets `[blocked]`, the same
+as if you had pressed it: the hub hands the waiting call the neutral response a cancelled prompt
+produces, and a neutral response carries no choice. With no `interaction_timeout_secs` configured,
+which is the default, it waits for as long as the daemon is up and the run stays in
+`waiting_input`. The one case that does not park and does not deny is `--yolo`, which waives the
+gate and lets the call through; [security](/docs/security#when-there-is-nobody-to-ask) has the whole
+table.
+
 ## Interaction points
 
 An interaction point is a checkpoint you write into the blueprint rather than one the agent chooses

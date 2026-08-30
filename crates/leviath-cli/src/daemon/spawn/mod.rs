@@ -1797,6 +1797,65 @@ system = { kind = "pinned", max_tokens = 1000 }
         );
     }
 
+    /// A tool the user granted outright still answers to the taint gate.
+    ///
+    /// `[tool_permissions]` and the gate are separate layers asking separate
+    /// questions - "may this agent call `shell` at all" and "may *this* data
+    /// reach it" - and only `--yolo` waives the second. Granting a tool must
+    /// not quietly grant the data too: measured live, a run with
+    /// `shell = "allow"` and a Private read still raised the leak prompt, and
+    /// denying it kept the command from running.
+    #[tokio::test]
+    async fn build_agent_tool_permission_allow_does_not_waive_the_taint_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [security]\ntaint_tracking = true\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             available_tools = [\"shell\"]\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config
+            .tool_permissions
+            .insert("shell".to_string(), crate::config::ToolPolicy::Allow);
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &spawn_args(&manifest.to_string_lossy()),
+        )
+        .expect("spawn succeeds");
+
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::TaintGate>(entity)
+                .is_some(),
+            "the gate is attached regardless of tool permissions"
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::GateAutoApprove>(entity)
+                .is_none(),
+            "only --yolo waives the gate; a tool grant does not"
+        );
+    }
+
     #[tokio::test]
     async fn build_agent_marks_root_runs_for_titling_but_not_subagents() {
         let dir = tempfile::tempdir().unwrap();

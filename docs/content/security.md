@@ -242,6 +242,33 @@ lev policy test bash --target example.com
 `lev policy add` and `lev policy test` take the tool name as a **positional** argument
 (`lev policy add <tool> …`, `lev policy test <tool> --target …`).
 
+### When there is nobody to ask
+
+The prompt above assumes a person. Most runs do not have one, and the gate does not answer the same
+way in each case. What actually happens, measured against a real daemon with a granted `[read_paths]`
+read (which is Private) flowing into `submit_output` and into `shell`:
+
+| The run | What the gate does | Does the private data leave? |
+| --- | --- | --- |
+| Attended, through `lev serve` or the dashboard | Raises the leak prompt and parks the run in `waiting_input` | Only if you pick **Allow once** or **Allow for this session** |
+| `--yolo`, or the dashboard's unattended toggle | Waives enforcement and lets the call through, with no prompt | **Yes** |
+| A tool set to `allow` in `[tool_permissions]` | Still prompts. Granting a tool is not granting the data | Only if you allow it |
+| An embedded host with no interaction hub wired | Blocks the call outright and hands the model `[blocked]` | No |
+| A prompt nobody answers before `[limits] interaction_timeout_secs` | Resolves as a deny once the deadline passes | No |
+| The same with no `interaction_timeout_secs` set, which is the default | Waits indefinitely; the run stays in `waiting_input` | No |
+
+`--yolo` is the row to read twice. It means "run unattended", and the gate's prompt is one of the
+things it stops raising, so an unattended run over private data hands that data to whatever its
+outbound tools reach, `GET /api/agents/{id}/result` included. Nothing is hidden: the gate is still
+evaluated, and the waived block is written to the run's `stages/<n>/taint_audit.json` with
+`decision_source: "YoloAutoApprove"` beside the `AutoBlock` it overrode. That file is the record to
+read after an unattended run, and `lev policy test` is how to find out beforehand what a given tool
+would have done.
+
+If you want an unattended run that cannot leak rather than one that reports having done so, keep the
+sensitive paths out of it: drop the `[read_paths]` grant, or set the outbound tool to `deny` in
+`[tool_permissions]`, which no launch flag lifts.
+
 ## Response size caps
 
 The daemon stops reading a remote peer at a fixed size rather than buffering
