@@ -391,6 +391,7 @@ mod tests {
             default_model: None,
             claude_code: None,
             claude_code_effort: None,
+            codex: None,
         };
         let result = dispatch(Commands::Setup(args), &MockRisky).await;
         assert!(result.is_ok());

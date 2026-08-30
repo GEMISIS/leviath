@@ -278,6 +278,39 @@ const SEARCH_KEY: &str = "BRAVE_API_KEY";
 ///
 /// Warns rather than fails: an install with no search key is perfectly good for
 /// everyone not running a research agent.
+/// Whether the Codex transport can actually answer.
+///
+/// `None` when it is not enabled, so the report says nothing about a provider
+/// nobody asked for. The failure this exists to name is "enabled but never
+/// signed in": without it the first inference fails with a bare HTTP 401 and
+/// nothing pointing at the one command that fixes it.
+fn codex_check(config: &Config) -> Option<Check> {
+    if !config.providers.codex_enabled {
+        return None;
+    }
+    let grant = leviath_providers::codex::ProviderAuthStore::default_path()
+        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(&path).ok())
+        .and_then(|store| store.get(leviath_providers::codex::PROVIDER_NAME).cloned());
+
+    Some(match grant {
+        None => Check::warn(
+            "codex",
+            "enabled but not signed in; run `lev auth login codex`".to_string(),
+        ),
+        Some(grant) => {
+            let claims = grant.claims();
+            let who = grant
+                .email
+                .or(claims.email)
+                .unwrap_or_else(|| "signed in".to_string());
+            match grant.plan_type.or(claims.plan_type) {
+                Some(plan) => Check::ok("codex", format!("{who} (ChatGPT {plan} plan)")),
+                None => Check::ok("codex", who),
+            }
+        }
+    })
+}
+
 fn search_check(config: &Config, daemon: Option<&DaemonIdentity>) -> Check {
     let allowlisted = leviath_core::script_env_allowed(SEARCH_KEY, &config.security.allow_env_vars);
     let grant_fix = format!(
@@ -935,6 +968,11 @@ pub(crate) async fn run_checks_with(
     // Runs early enough to be seen even when a later network check fails, and
     // only ever warns, so it never cuts the run short.
     checks.push(search_check(&config, identity.as_ref()));
+    // Same shape and the same reason: it warns rather than failing, and it
+    // runs before anything that could stop the report early.
+    if let Some(check) = codex_check(&config) {
+        checks.push(check);
+    }
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
     checks.push(check);

@@ -656,3 +656,17 @@ token counts would need rewriting every time.
 > budget - which is why raising one is cheap and capping one is not. Use `max_tokens` and
 > `threshold_tokens` when you need a limit that really is hard, and remember they override the
 > percentage rather than sitting beside it.
+
+## Regions on a provider with no cache breakpoints
+
+Not every provider takes cache markers. The Codex transport, which bills a
+ChatGPT subscription, has no `cache_control` and no TTL to choose: it caches by
+literal prefix and nothing else.
+
+Your regions still arrive whole, one block each, in the order assembly sorted
+them. What changes is what that order is worth. Elsewhere the stable-first sort
+is an optimisation on top of explicit markers; there it is the entire strategy,
+because a cache hit runs up to the first byte that moved and stops. A region
+that declares `volatility = "stable"` and is rewritten every turn costs more
+there than anywhere else, and the warning about an unstable declaration is
+worth acting on rather than noting.

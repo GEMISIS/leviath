@@ -121,6 +121,25 @@ fn env_credentials(lookup: &dyn Fn(&str) -> Option<String>) -> HashMap<&'static 
         .collect()
 }
 
+/// Who is signed in to `provider`, as a line to show, or `None`.
+///
+/// Read once when the wizard is built. A grant taken while the wizard is open
+/// is not picked up, which is the honest reflection of the flow: signing in is
+/// a separate command, and the wizard is showing what was true when it opened.
+fn signed_in_as(provider: &str) -> Option<String> {
+    let path = leviath_providers::codex::ProviderAuthStore::default_path()?;
+    let grant = leviath_providers::codex::ProviderAuthStore::load(&path)
+        .ok()?
+        .get(provider)
+        .cloned()?;
+    let claims = grant.claims();
+    let who = grant.email.or(claims.email)?;
+    Some(match grant.plan_type.or(claims.plan_type) {
+        Some(plan) => format!("{who} ({plan} plan)"),
+        None => who,
+    })
+}
+
 impl Wizard {
     /// Build the wizard from the config *file* and the surrounding environment.
     ///
@@ -148,12 +167,17 @@ impl Wizard {
                 let from_env = provider
                     .env_var
                     .filter(|v| stored.is_none() && env_only.contains_key(v));
+                let signed_in = match provider.credential {
+                    catalog::Credential::Signin => signed_in_as(provider.id),
+                    _ => None,
+                };
                 ProviderRow {
                     selected: catalog::is_configured(&base, provider.id) || from_env.is_some(),
                     value: stored.unwrap_or_default(),
                     from_env,
                     outcome: Outcome::Skipped,
                     checking: false,
+                    signed_in,
                     provider,
                 }
             })

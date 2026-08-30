@@ -97,6 +97,13 @@ pub struct SetupArgs {
     #[arg(long)]
     pub claude_code_effort: Option<String>,
 
+    /// Enable the Codex transport (runs on your ChatGPT subscription instead
+    /// of an API key). Sign in separately with `lev auth login codex`; this
+    /// flag never opens a browser, because nothing is watching one in a
+    /// non-interactive run.
+    #[arg(long)]
+    pub codex: Option<bool>,
+
     /// Install the bundled agent blueprints without asking
     #[arg(long)]
     pub install_agents: bool,
@@ -205,6 +212,9 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(enabled) = args.claude_code {
         config.providers.claude_code_enabled = enabled;
     }
+    if let Some(enabled) = args.codex {
+        config.providers.codex_enabled = enabled;
+    }
     if let Some(ref e) = args.claude_code_effort {
         config.providers.claude_code_effort = Some(e.clone());
     }
@@ -232,6 +242,14 @@ fn configured_providers(config: &Config) -> Vec<String> {
         ("google", config.providers.google_api_key.is_some()),
         ("openrouter", config.openrouter_api_key.is_some()),
         ("claude-code", config.providers.claude_code_enabled),
+        // Enabled *and* signed in. Enabled alone would let a headless
+        // `--codex true` make an unauthenticated provider the host default,
+        // and the very next run would fail on a credential nobody was asked
+        // for.
+        (
+            "codex",
+            config.providers.codex_enabled && codex_grant_exists(),
+        ),
     ]
     .into_iter()
     .filter(|(_, configured)| *configured)
@@ -240,6 +258,13 @@ fn configured_providers(config: &Config) -> Vec<String> {
     .chain(config.ollama_base_url.is_some().then_some("ollama"))
     .map(str::to_string)
     .collect()
+}
+
+/// Whether a Codex sign-in has actually been taken.
+fn codex_grant_exists() -> bool {
+    leviath_providers::codex::ProviderAuthStore::default_path()
+        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(&path).ok())
+        .is_some_and(|store| store.get(leviath_providers::codex::PROVIDER_NAME).is_some())
 }
 
 /// Point `default_provider` at a provider this config can actually reach.
@@ -457,6 +482,7 @@ mod tests {
             default_model: None,
             claude_code: None,
             claude_code_effort: None,
+            codex: None,
             install_agents: false,
         }
     }

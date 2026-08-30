@@ -175,6 +175,23 @@ input_per_mtok = 3.0
 output_per_mtok = 15.0
 ```
 
+## A subscription has no per-call price
+
+The Codex transport bills a ChatGPT plan, so a call's marginal cost really is
+zero and Leviath reports it as a known zero rather than as unknown. A run on it
+lands in the report at no cost, which is accurate and not very useful.
+
+The number that matters there is quota: a rolling five-hour window and a weekly
+one, each reported as a percentage. Leviath reads them when the route rate-limits
+without saying how long to wait, so a run sleeps until the window actually
+resets instead of backing off against a wall clock it cannot see.
+
+Two consequences worth knowing. Caching does not engage on short prefixes at
+all, so a small agent pays full price for every turn where a large one pays
+about seven percent. And the first turn of each stage is always a miss, because
+the cache key changes when the stage does, which is correct: the stage swap
+changes the prefix.
+
 ## Speed is a separate knob
 
 Wall-clock time is not cost, but a run that takes twice as long is twice as long to notice a

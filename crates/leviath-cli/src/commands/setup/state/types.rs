@@ -80,6 +80,10 @@ pub struct ProviderRow {
     pub outcome: Outcome,
     /// A verification is in flight.
     pub checking: bool,
+
+    /// For a [`Credential::Signin`] row, who is signed in, as a line to show.
+    /// `None` means nobody is. Read once when the wizard is built.
+    pub signed_in: Option<String>,
 }
 
 impl ProviderRow {
@@ -91,6 +95,9 @@ impl ProviderRow {
             // so it is always checkable. An endpoint preset checks each of
             // its entries, which decide for themselves.
             Credential::BaseUrl | Credential::Endpoint => true,
+            // A browser sign-in is checkable once it exists; whether it does is
+            // read from the grant store rather than from anything typed here.
+            Credential::Signin => self.signed_in.is_some(),
         }
     }
 }

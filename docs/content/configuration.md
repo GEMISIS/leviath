@@ -99,6 +99,10 @@ openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
+codex_enabled          = false      # bill inference to a ChatGPT subscription
+codex_reasoning_effort = "medium"   # none | minimal | low | medium | high | xhigh
+codex_verbosity        = "medium"   # low | medium | high
+codex_replay_reasoning = true       # replay each turn's reasoning on the next request
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 ```

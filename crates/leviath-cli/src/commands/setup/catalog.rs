@@ -23,6 +23,10 @@ pub enum Credential {
     /// `openai-compatible`, each with a name, an address and an optional key.
     /// The row is a preset; the entries under it are the wizard's own.
     Endpoint,
+    /// A browser sign-in. Nothing is typed and nothing lands in `config.toml`:
+    /// selecting the row turns the provider on, and the grant is taken by
+    /// `lev auth login <id>` and stored outside the config entirely.
+    Signin,
 }
 
 /// One configurable provider.
@@ -90,6 +94,17 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "sk-or-...",
             env_var: Some("OPENROUTER_API_KEY"),
             signup_url: Some("https://openrouter.ai/keys"),
+            preset_url: None,
+        },
+        Provider {
+            id: "codex",
+            display: "OpenAI Codex (ChatGPT subscription)",
+            blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \
+                    Signs in with a browser.",
+            credential: Credential::Signin,
+            hint: "",
+            env_var: None,
+            signup_url: Some("https://chatgpt.com/codex"),
             preset_url: None,
         },
         Provider {
@@ -187,6 +202,13 @@ pub(crate) fn stored_credential(config: &Config, id: &str) -> Option<String> {
         "google" => config.providers.google_api_key.clone(),
         "openrouter" => config.openrouter_api_key.clone(),
         "ollama" => config.ollama_base_url.clone(),
+        // Not a credential: the grant lives outside the config. The value is
+        // the on/off flag, so the wizard's "is this configured" and "did this
+        // change" both read the right thing.
+        "codex" => config
+            .providers
+            .codex_enabled
+            .then(|| "enabled".to_string()),
         _ => None,
     }
 }
@@ -199,6 +221,7 @@ pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String
         "google" => config.providers.google_api_key = value,
         "openrouter" => config.openrouter_api_key = value,
         "ollama" => config.ollama_base_url = value,
+        "codex" => config.providers.codex_enabled = value.is_some(),
         // An unknown id has nowhere to go.
         _ => {}
     }
@@ -362,12 +385,43 @@ mod tests {
 
     // ─── credential accessors ───────────────────────────────────────────────
 
+    /// A sign-in row carries no value, so selecting it is the whole
+    /// configuration and what round-trips is the flag.
+    #[test]
+    fn a_sign_in_row_round_trips_as_a_flag() {
+        let mut config = Config::default();
+        assert!(!is_configured(&config, "codex"));
+        assert!(stored_credential(&config, "codex").is_none());
+
+        // Whatever value the wizard passes, what is stored is the flag: the
+        // grant itself never touches the config.
+        set_credential(&mut config, "codex", Some("anything".to_string()));
+        assert!(config.providers.codex_enabled);
+        assert!(is_configured(&config, "codex"));
+        assert!(stored_credential(&config, "codex").is_some());
+
+        set_credential(&mut config, "codex", None);
+        assert!(!config.providers.codex_enabled);
+        assert!(!is_configured(&config, "codex"));
+    }
+
+    /// No token or account may reach `config.toml` through this row.
+    #[test]
+    fn a_sign_in_never_writes_a_credential_into_the_config() {
+        let mut config = Config::default();
+        set_credential(&mut config, "codex", Some("at-secret".to_string()));
+        let rendered = toml::to_string(&config).expect("serializes");
+        assert!(!rendered.contains("at-secret"), "{rendered}");
+    }
+
     #[test]
     fn every_provider_with_a_credential_round_trips_through_the_config() {
         // Catches the top-level/`[providers]` split silently dropping a field.
+        // Only the credentials that carry a value: an endpoint's live under
+        // `[model_providers]`, and a sign-in carries no value at all.
         for p in providers()
             .iter()
-            .filter(|p| p.credential != Credential::Endpoint)
+            .filter(|p| !matches!(p.credential, Credential::Endpoint | Credential::Signin))
         {
             let mut config = Config::default();
             assert!(
