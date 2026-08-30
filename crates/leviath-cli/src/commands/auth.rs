@@ -6,6 +6,8 @@
 //! checks that the OS store is actually reachable, and moves secrets between the
 //! two.
 
+pub mod codex;
+
 use crate::config::Config;
 use clap::{Args, Subcommand};
 use leviath_core::{CredentialStore, CredentialStoreKind};
@@ -21,6 +23,27 @@ pub struct AuthArgs {
 enum AuthCommand {
     /// Show which credential backend is in use and what it holds
     Status,
+
+    /// Sign in to a provider that authenticates with a browser
+    ///
+    /// Opens the provider's sign-in page, waits for the redirect, and stores
+    /// the grant outside `config.toml`. `codex` is the one provider that works
+    /// this way today; the argument is required anyway so a second one does
+    /// not change what an existing command line means.
+    Login {
+        /// Which provider to sign in to.
+        provider: String,
+    },
+
+    /// Forget a provider's stored sign-in
+    ///
+    /// Leaves `config.toml` alone: signing out is not the same as disabling
+    /// the provider, and doing both would surprise anyone meaning to sign back
+    /// in.
+    Logout {
+        /// Which provider to sign out of.
+        provider: String,
+    },
 
     /// Move stored secrets into the OS credential store
     ///
@@ -64,8 +87,89 @@ pub async fn execute(args: AuthArgs) -> anyhow::Result<()> {
             print!("{}", render_status(&status(&config, &path)));
             Ok(())
         }
+        AuthCommand::Login { provider } => {
+            let config = Config::load_from_path_public(&path)?;
+            login(&config, &provider).await
+        }
+        AuthCommand::Logout { provider } => {
+            let config = Config::load_from_path_public(&path)?;
+            logout(&config, &provider)
+        }
         AuthCommand::Migrate { to_file, dry_run } => migrate(&path, to_file, dry_run),
     }
+}
+
+/// The providers `lev auth login` knows how to sign in to.
+const OAUTH_PROVIDERS: &[&str] = &[leviath_providers::codex::PROVIDER_NAME];
+
+/// The error for a provider name that does not sign in with a browser.
+fn not_an_oauth_provider(provider: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{provider}' does not sign in with a browser. Providers that do: {}. \
+         An API key goes in `lev setup` instead.",
+        OAUTH_PROVIDERS.join(", ")
+    )
+}
+
+/// Where a provider grant lives.
+fn grant_store_path() -> anyhow::Result<std::path::PathBuf> {
+    leviath_providers::codex::ProviderAuthStore::default_path().ok_or_else(|| {
+        anyhow::anyhow!("no home directory, so there is nowhere to store the sign-in")
+    })
+}
+
+/// Run the browser sign-in for `provider`.
+async fn login(config: &Config, provider: &str) -> anyhow::Result<()> {
+    if provider != leviath_providers::codex::PROVIDER_NAME {
+        return Err(not_an_oauth_provider(provider));
+    }
+    let store = crate::credentials::store_for(config.security.credential_store)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .map(std::sync::Arc::from);
+
+    let env = codex::LoginEnv::new(
+        std::sync::Arc::new(leviath_sys::open_url),
+        grant_store_path()?,
+        store,
+        leviath_providers::build_http_client(None)?,
+        // Printed, not rendered: this path owns the terminal. The wizard
+        // supplies its own announce for the same reason.
+        std::sync::Arc::new(|url: &str| {
+            println!("\nOpen this page to sign in:\n\n  {url}\n");
+        }),
+    );
+
+    let grant = codex::login(&env).await?;
+    let who = grant.email.as_deref().unwrap_or("this account");
+    match grant.plan_type.as_deref() {
+        Some(plan) => println!("Signed in as {who} on the ChatGPT {plan} plan."),
+        None => println!("Signed in as {who}."),
+    }
+    if !config.providers.codex_enabled {
+        println!(
+            "\nThe provider is not enabled yet. Run `lev setup` and select it, or set \
+             `codex_enabled = true` under `[providers]`."
+        );
+    }
+    Ok(())
+}
+
+/// Forget a provider's stored sign-in.
+fn logout(config: &Config, provider: &str) -> anyhow::Result<()> {
+    if provider != leviath_providers::codex::PROVIDER_NAME {
+        return Err(not_an_oauth_provider(provider));
+    }
+    let store = crate::credentials::store_for(config.security.credential_store)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let removed = codex::logout(&grant_store_path()?, store.as_deref())?;
+    match removed {
+        true => println!(
+            "Signed out of {provider}. It is still enabled in config.toml, so runs will fail \
+             until you sign in again or turn it off."
+        ),
+        false => println!("Not signed in to {provider}."),
+    }
+    Ok(())
 }
 
 /// What `lev auth status` found, separated from how it is printed so the report
@@ -83,6 +187,10 @@ pub(crate) struct Status {
     pub providers: Vec<String>,
     /// MCP servers with a stored OAuth grant.
     pub mcp_servers: Vec<String>,
+    /// Providers signed in with a browser, as `(name, description)`. The
+    /// description carries the account and plan, which is the fact a person is
+    /// actually checking for.
+    pub oauth_providers: Vec<(String, String)>,
     /// Providers whose key is present in *both* the config file and the OS
     /// store. A duplicate is not an error, but it is worth saying: the file
     /// copy wins, so rotating the keychain entry would appear to do nothing.
@@ -120,16 +228,19 @@ pub(crate) fn status_with(
     // Read the file directly rather than through `Config::load`: the loader
     // already folded the keychain in, so it cannot tell the two sources apart.
     let on_disk = providers_in_file(path);
-    let (unavailable, in_store) = match resolved {
+    // The store itself is kept, not just what it held: the OAuth grants below
+    // live in the same backend and have to be read through it.
+    let (unavailable, in_store, backend) = match resolved {
         Ok(Some(store)) => {
             let accounts: Vec<String> = crate::credentials::PROVIDER_KEYS
                 .iter()
                 .map(|p| leviath_core::provider_account(p))
                 .collect();
-            (None, store.read_all(&accounts).into_keys().collect())
+            let found = store.read_all(&accounts).into_keys().collect();
+            (None, found, Some(store))
         }
-        Ok(None) => (None, Vec::new()),
-        Err(e) => (Some(e), Vec::new()),
+        Ok(None) => (None, Vec::new(), None),
+        Err(e) => (Some(e), Vec::new(), None),
     };
 
     let duplicated = on_disk
@@ -143,15 +254,55 @@ pub(crate) fn status_with(
     // command a user runs *because* something is wrong, so it has to answer.
     let mcp_servers = mcp_server_names(leviath_mcp::AuthStore::default_path().as_deref(), None);
 
+    // Same policy as the MCP grants above: a load failure reads as "none"
+    // rather than propagating, because this is the command someone runs when
+    // something is already wrong.
+    let oauth_providers = oauth_provider_summaries(backend.as_deref());
+
     Status {
         kind,
         supported,
         unavailable,
         providers,
         mcp_servers,
+        oauth_providers,
         duplicated,
         config_path: path.display().to_string(),
     }
+}
+
+/// Every provider signed in with a browser, with the account behind it.
+///
+/// `store` is the resolved credential backend, so a keychain-held grant is
+/// found rather than reported missing.
+fn oauth_provider_summaries(store: Option<&dyn CredentialStore>) -> Vec<(String, String)> {
+    let Some(path) = leviath_providers::codex::ProviderAuthStore::default_path() else {
+        return Vec::new();
+    };
+    let Ok(all) = leviath_providers::codex::ProviderAuthStore::load_with(&path, store) else {
+        return Vec::new();
+    };
+    all.names()
+        .into_iter()
+        .map(|name| {
+            let detail = all.get(&name).map_or_else(
+                || "signed in".to_string(),
+                |grant| {
+                    let claims = grant.claims();
+                    let who = grant
+                        .email
+                        .clone()
+                        .or(claims.email)
+                        .unwrap_or_else(|| "signed in".to_string());
+                    match grant.plan_type.clone().or(claims.plan_type) {
+                        Some(plan) => format!("{who} ({plan} plan)"),
+                        None => who,
+                    }
+                },
+            );
+            (name, detail)
+        })
+        .collect()
 }
 
 /// The provider accounts that have a key written in the config *file*.
@@ -215,6 +366,13 @@ pub(crate) fn render_status(s: &Status) -> String {
         out.push_str("Provider keys configured:\n");
         for p in &s.providers {
             out.push_str(&format!("  - {p}\n"));
+        }
+    }
+
+    if !s.oauth_providers.is_empty() {
+        out.push_str("\nProviders signed in with a browser:\n");
+        for (name, detail) in &s.oauth_providers {
+            out.push_str(&format!("  - {name}: {detail}\n"));
         }
     }
 
@@ -325,6 +483,7 @@ fn apply_migration(config: &Config, path: &std::path::Path, to_file: bool) -> an
         to_file,
         resolved,
         leviath_mcp::AuthStore::default_path().as_deref(),
+        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
     )
 }
 
@@ -336,6 +495,7 @@ fn apply_migration_with(
     to_file: bool,
     resolved: crate::credentials::Resolved,
     mcp_path: Option<&std::path::Path>,
+    grant_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let secrets = config.provider_secrets();
 
@@ -363,6 +523,15 @@ fn apply_migration_with(
             for name in names {
                 if let Err(e) = store.delete(&leviath_core::mcp_account(&name)) {
                     tracing::warn!("could not remove the grant for '{name}': {e}");
+                }
+            }
+            // And the provider sign-ins, which move the same direction.
+            let signed_in = provider_grant_names(grant_path, Some(store.as_ref()));
+            migrate_provider_grants(grant_path, Some(store.as_ref()), None)?;
+            for name in signed_in {
+                let account = leviath_providers::codex::grant_account(&name);
+                if let Err(e) = store.delete(&account) {
+                    tracing::warn!("could not remove the sign-in for '{name}': {e}");
                 }
             }
         }
@@ -394,7 +563,39 @@ fn apply_migration_with(
     stripped.security.credential_store = CredentialStoreKind::Keychain;
     stripped.save_to_path_public(path)?;
 
-    migrate_mcp_grants(mcp_path, None, Some(store.as_ref()))
+    migrate_mcp_grants(mcp_path, None, Some(store.as_ref()))?;
+    migrate_provider_grants(grant_path, None, Some(store.as_ref()))
+}
+
+/// Rewrite the provider grant store at `path`, moving its grants from `source`
+/// to `destination`.
+///
+/// The twin of [`migrate_mcp_grants`], and needed for the same reason: a
+/// migration that moved the API keys and left a refresh token in a plaintext
+/// file would report that the secrets had moved while one of them had not.
+fn migrate_provider_grants(
+    path: Option<&std::path::Path>,
+    source: Option<&dyn CredentialStore>,
+    destination: Option<&dyn CredentialStore>,
+) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let store = leviath_providers::codex::ProviderAuthStore::load_with(path, source)?;
+    store.save_with(path, destination)
+}
+
+/// The providers with a stored sign-in, read through `store`.
+fn provider_grant_names(
+    path: Option<&std::path::Path>,
+    store: Option<&dyn CredentialStore>,
+) -> Vec<String> {
+    path.and_then(|p| leviath_providers::codex::ProviderAuthStore::load_with(p, store).ok())
+        .map(|s| s.names())
+        .unwrap_or_default()
 }
 
 /// Rewrite the MCP auth store at `path`, moving its grants from `source` to
@@ -534,7 +735,7 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("sk-ant-secret"), "the file starts with it");
 
-        apply_migration_with(&config, &path, false, keychain(), None).unwrap();
+        apply_migration_with(&config, &path, false, keychain(), None, None).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -569,8 +770,8 @@ mod tests {
         let path = dir.path().join("config.toml");
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        apply_migration_with(&config, &path, false, keychain(), None).unwrap();
-        apply_migration_with(&config, &path, true, keychain(), None).unwrap();
+        apply_migration_with(&config, &path, false, keychain(), None, None).unwrap();
+        apply_migration_with(&config, &path, true, keychain(), None, None).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("sk-ant-secret"), "back in the file: {after}");
@@ -599,7 +800,7 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
 
         assert!(
-            apply_migration_with(&config, &path, false, no_keychain(), None).is_err(),
+            apply_migration_with(&config, &path, false, no_keychain(), None, None).is_err(),
             "no store means no migration"
         );
         assert_eq!(
@@ -626,8 +827,15 @@ mod tests {
             set: accepts_write,
             delete: refuses_delete,
         };
-        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(amnesiac))), None)
-            .expect_err("a store that does not persist must not be trusted");
+        let err = apply_migration_with(
+            &config,
+            &path,
+            false,
+            Ok(Some(Box::new(amnesiac))),
+            None,
+            None,
+        )
+        .expect_err("a store that does not persist must not be trusted");
         assert!(err.to_string().contains("did not read back"), "{err}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -648,8 +856,15 @@ mod tests {
             set: refuses_write,
             delete: refuses_delete,
         };
-        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses))), None)
-            .expect_err("a refused write is not a migration");
+        let err = apply_migration_with(
+            &config,
+            &path,
+            false,
+            Ok(Some(Box::new(refuses))),
+            None,
+            None,
+        )
+        .expect_err("a refused write is not a migration");
         assert!(err.to_string().contains("failed to store"), "{err}");
     }
 
@@ -678,6 +893,7 @@ mod tests {
             true,
             Ok(Some(Box::new(undeletable))),
             Some(&mcp),
+            None,
         )
         .expect("the keys are in the file; cleanup is best effort");
         let after = std::fs::read_to_string(&path).unwrap();
@@ -707,7 +923,15 @@ mod tests {
             )
             .unwrap();
 
-        apply_migration_with(&config, &path, true, Ok(Some(Box::new(store))), Some(&mcp)).unwrap();
+        apply_migration_with(
+            &config,
+            &path,
+            true,
+            Ok(Some(Box::new(store))),
+            Some(&mcp),
+            None,
+        )
+        .unwrap();
 
         assert!(
             std::fs::read_to_string(&mcp).unwrap().contains("rt-SECRET"),
@@ -726,8 +950,15 @@ mod tests {
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
         let store = leviath_core::MemoryStore::new();
-        let err = apply_migration_with(&config, &path, true, Ok(Some(Box::new(store))), Some(&mcp))
-            .expect_err("a corrupt MCP store is not a successful migration");
+        let err = apply_migration_with(
+            &config,
+            &path,
+            true,
+            Ok(Some(Box::new(store))),
+            Some(&mcp),
+            None,
+        )
+        .expect_err("a corrupt MCP store is not a successful migration");
         assert!(!err.to_string().is_empty());
     }
 
@@ -738,7 +969,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        apply_migration_with(&config, &path, true, no_keychain(), None).unwrap();
+        apply_migration_with(&config, &path, true, no_keychain(), None, None).unwrap();
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
@@ -758,7 +989,7 @@ mod tests {
         config.save_to_path_public(&path).unwrap();
         set_readonly(&path, true);
 
-        let err = apply_migration_with(&config, &path, false, keychain(), None)
+        let err = apply_migration_with(&config, &path, false, keychain(), None, None)
             .expect_err("an unwritable config cannot complete the move");
         assert!(!err.to_string().is_empty());
 
@@ -772,7 +1003,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        let err = apply_migration_with(&config, &path, false, Ok(None), None)
+        let err = apply_migration_with(&config, &path, false, Ok(None), None, None)
             .expect_err("there is nowhere to migrate to");
         assert!(err.to_string().contains("no OS credential store"), "{err}");
     }
@@ -884,6 +1115,7 @@ mod tests {
             unavailable: None,
             providers: vec!["provider/anthropic".into()],
             mcp_servers: Vec::new(),
+            oauth_providers: Vec::new(),
             duplicated: Vec::new(),
             config_path: "/x/config.toml".into(),
         };
@@ -1028,6 +1260,7 @@ mod tests {
             unavailable: None,
             providers: vec!["provider/anthropic".into()],
             mcp_servers: vec!["github".into(), "linear".into()],
+            oauth_providers: Vec::new(),
             duplicated: Vec::new(),
             config_path: "/x/config.toml".into(),
         };
@@ -1074,7 +1307,15 @@ mod tests {
             delete: refuses_delete,
         };
         assert!(
-            apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses))), None).is_err()
+            apply_migration_with(
+                &config,
+                &path,
+                false,
+                Ok(Some(Box::new(refuses))),
+                None,
+                None
+            )
+            .is_err()
         );
     }
 
@@ -1090,7 +1331,7 @@ mod tests {
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
         assert!(
-            apply_migration_with(&config, &path, true, no_keychain(), None).is_err(),
+            apply_migration_with(&config, &path, true, no_keychain(), None, None).is_err(),
             "an unwritable destination is not a migration"
         );
     }
@@ -1168,5 +1409,153 @@ mod tests {
         Config::default().save_to_path_public(&path).unwrap();
 
         run_auth(&path, AuthArgs::migrate_for_test(false, false)).expect("nothing to do succeeds");
+    }
+
+    // ── provider sign-ins ───────────────────────────────────────────────────
+
+    /// A grant file holding one signed-in provider.
+    fn write_grant_store(path: &std::path::Path) {
+        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+        store.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at-SECRET".to_string(),
+                refresh_token: "rt-SECRET".to_string(),
+                email: Some("someone@example.com".to_string()),
+                plan_type: Some("plus".to_string()),
+                ..Default::default()
+            },
+        );
+        store.save(path).unwrap();
+    }
+
+    /// A migration that moved the API keys and left a refresh token in a
+    /// plaintext file would report that the secrets had moved while one of them
+    /// had not.
+    #[test]
+    fn a_provider_sign_in_moves_into_the_keychain_with_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let grants = dir.path().join("provider-auth.json");
+        write_grant_store(&grants);
+
+        let config = config_with_keys(CredentialStoreKind::File);
+        config.save_to_path_public(&path).unwrap();
+        assert!(
+            std::fs::read_to_string(&grants)
+                .unwrap()
+                .contains("rt-SECRET"),
+            "the file starts with the token"
+        );
+
+        let store = leviath_core::MemoryStore::new();
+        apply_migration_with(
+            &config,
+            &path,
+            false,
+            Ok(Some(Box::new(store))),
+            None,
+            Some(&grants),
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&grants).unwrap();
+        assert!(
+            !after.contains("rt-SECRET"),
+            "the token stayed behind: {after}"
+        );
+        assert!(after.contains("codex"), "the name index went too: {after}");
+    }
+
+    /// And back out again, so the two directions are the same operation.
+    #[test]
+    fn a_provider_sign_in_comes_back_out_of_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let grants = dir.path().join("provider-auth.json");
+        let store = leviath_core::MemoryStore::new();
+
+        let mut initial = leviath_providers::codex::ProviderAuthStore::default();
+        initial.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at-SECRET".to_string(),
+                refresh_token: "rt-SECRET".to_string(),
+                ..Default::default()
+            },
+        );
+        initial.save_with(&grants, Some(&store)).unwrap();
+
+        let config = config_with_keys(CredentialStoreKind::Keychain);
+        config.save_to_path_public(&path).unwrap();
+
+        apply_migration_with(
+            &config,
+            &path,
+            true,
+            Ok(Some(Box::new(store))),
+            None,
+            Some(&grants),
+        )
+        .unwrap();
+
+        assert!(
+            std::fs::read_to_string(&grants)
+                .unwrap()
+                .contains("rt-SECRET"),
+            "the token did not come back to the file"
+        );
+    }
+
+    /// Nobody signed in is not a failed migration.
+    #[test]
+    fn a_migration_with_no_sign_in_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(migrate_provider_grants(None, None, None).is_ok());
+        assert!(migrate_provider_grants(Some(&dir.path().join("absent.json")), None, None).is_ok());
+        assert!(provider_grant_names(None, None).is_empty());
+    }
+
+    /// `lev auth status` answers the question a person asks right after
+    /// `lev auth login`: which account, and on what plan.
+    #[test]
+    fn the_report_names_the_signed_in_account_and_plan() {
+        let s = Status {
+            kind: CredentialStoreKind::File,
+            supported: true,
+            unavailable: None,
+            providers: Vec::new(),
+            mcp_servers: Vec::new(),
+            oauth_providers: vec![(
+                "codex".to_string(),
+                "someone@example.com (plus plan)".to_string(),
+            )],
+            duplicated: Vec::new(),
+            config_path: "/x/config.toml".into(),
+        };
+        let rendered = render_status(&s);
+        assert!(rendered.contains("signed in with a browser"), "{rendered}");
+        assert!(
+            rendered.contains("someone@example.com (plus plan)"),
+            "{rendered}"
+        );
+    }
+
+    /// The summary reads the grant rather than inventing one.
+    #[test]
+    fn the_summary_comes_from_the_stored_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = dir.path().join("provider-auth.json");
+        write_grant_store(&grants);
+        assert_eq!(provider_grant_names(Some(&grants), None), vec!["codex"]);
+    }
+
+    /// A provider that signs in with a key is told where to go instead.
+    #[test]
+    fn a_key_based_provider_is_refused_with_the_alternative() {
+        let err = not_an_oauth_provider("anthropic").to_string();
+        assert!(err.contains("anthropic"), "{err}");
+        assert!(err.contains("codex"), "{err}");
+        assert!(err.contains("lev setup"), "{err}");
     }
 }
