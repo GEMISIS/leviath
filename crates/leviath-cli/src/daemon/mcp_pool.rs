@@ -117,8 +117,15 @@ impl McpPool {
 
     /// How long a per-agent server may sit unleased before disconnection.
     /// `0` disables it.
-    pub(crate) fn with_idle_disconnect_secs(mut self, secs: u64) -> Self {
-        self.idle_disconnect = std::time::Duration::from_secs(secs);
+    pub(crate) fn with_idle_disconnect_secs(self, secs: u64) -> Self {
+        self.with_idle_disconnect(std::time::Duration::from_secs(secs))
+    }
+
+    /// [`Self::with_idle_disconnect_secs`] at any resolution. Config only
+    /// speaks in whole seconds; a test of the scheduled path wants a window
+    /// short enough not to wait on the wall clock.
+    pub(crate) fn with_idle_disconnect(mut self, grace: std::time::Duration) -> Self {
+        self.idle_disconnect = grace;
         self
     }
 
@@ -1039,13 +1046,19 @@ mod tests {
     /// the grace timer, and after the window the server is gone. With the
     /// grace set to zero, releasing schedules nothing and the connection
     /// stays.
+    ///
+    /// The window is milliseconds and the teardown is awaited by polling with
+    /// a generous ceiling, not by sleeping past a fixed slack: the python
+    /// subprocess is real, so a paused clock is out, and a slow runner used to
+    /// turn a 1 s timer plus 2.5 s of slack into the suite's one flake.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn release_run_schedules_the_grace_disconnect() {
         with_tracing(|| {});
         with_temp_home(|| async {
             let (_sd, stub) = stub_py();
             let (_bd, bp) = blueprint_declaring("timedserver", &stub);
-            let timed = Arc::new(pool().with_idle_disconnect_secs(1));
+            let grace = std::time::Duration::from_millis(20);
+            let timed = Arc::new(pool().with_idle_disconnect(grace));
             let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
             assert_eq!(timed.ensure(&servers[0]).await.len(), 1);
             timed.lease_blueprint(&bp, "run-a");
@@ -1053,15 +1066,23 @@ mod tests {
             // Within the grace window the connection survives...
             assert!(!timed.cached_defs_for(&servers).is_empty());
             // ...and after it, the timer has torn it down.
-            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-            assert!(timed.cached_defs_for(&servers).is_empty());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !timed.cached_defs_for(&servers).is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the grace timer never tore the server down"
+                );
+                tokio::time::sleep(grace).await;
+            }
 
-            // Grace zero: releasing disconnects nothing, ever.
+            // Grace zero: releasing disconnects nothing, ever. There is no
+            // timer to wait out; a few windows' worth is enough to catch one
+            // spawned by mistake.
             let keeper = Arc::new(pool().with_idle_disconnect_secs(0));
             assert_eq!(keeper.ensure(&servers[0]).await.len(), 1);
             keeper.lease_blueprint(&bp, "run-b");
             keeper.release_run("run-b");
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(grace * 5).await;
             assert!(!keeper.cached_defs_for(&servers).is_empty());
         })
         .await;
