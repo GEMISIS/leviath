@@ -164,6 +164,13 @@ same list.
   runs before the submission is applied: a tainted answer raises the leak
   prompt (or the policy's verdict) like a `shell` call would, and an
   approved one is applied on the re-run.
+- A per-agent MCP server whose idle-disconnect tick fired while one of its
+  tools was still mid-call was kept by the executor but forgotten by the pool:
+  the pool dropped its lease row and cached tool defs before asking for the
+  client, so no later tick ever looked again, the stdio child process never got
+  its shutdown, and the tool stayed routable for a run that no longer leased
+  it. The client is now taken first, the bookkeeping goes only once it is, and
+  a busy server gets another grace window.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

@@ -287,6 +287,16 @@ impl ToolExecutor {
         Ok(())
     }
 
+    /// Whether a server is registered under `server_name`, busy or not.
+    ///
+    /// The distinction [`remove_client`](Self::remove_client) cannot make on
+    /// its own: `None` from it means either "no such server" or "a call is in
+    /// flight, so it stayed". A caller that wants to try again later needs to
+    /// know which.
+    pub fn has_client(&self, server_name: &str) -> bool {
+        self.clients.contains_key(server_name)
+    }
+
     /// Get the number of connected servers.
     pub fn server_count(&self) -> usize {
         self.clients.len()
@@ -635,11 +645,16 @@ mod tests {
             "a busy server is kept"
         );
         assert_eq!(executor.server_count(), 1);
+        assert!(
+            executor.has_client("slow"),
+            "kept, which is how a caller tells a busy server from an unknown one"
+        );
         in_flight
             .await
             .expect("task")
             .expect("the call still completes");
         let mut taken = executor.remove_client("slow").expect("idle now, so taken");
+        assert!(!executor.has_client("slow"));
         taken.shutdown().await.expect("best-effort shutdown");
     }
 
