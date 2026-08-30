@@ -66,6 +66,7 @@ pub(super) async fn submit_interaction(
         choice_index: body.choice_index,
         approved: body.approved,
         scope,
+        feedback: body.feedback,
     };
     let reply = state
         .control

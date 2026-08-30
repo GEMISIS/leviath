@@ -1083,6 +1083,7 @@ impl Dashboard {
                         choice_index: None,
                         approved: None,
                         scope: None,
+                        feedback: None,
                     },
                     d,
                 )

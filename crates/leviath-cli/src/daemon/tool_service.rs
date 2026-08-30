@@ -199,6 +199,20 @@ pub(crate) struct AgentToolState {
     pub dynamic: Option<Arc<DynamicToolCtx>>,
 }
 
+/// The tool result a declined approval hands the model.
+///
+/// Without feedback it is the exact sentence it has always been (tests and
+/// docs quote it). With feedback the person's words follow a `Feedback:`
+/// marker on the same line, so the model reads the redirect as part of the
+/// refusal rather than as a stray user message somewhere later in the
+/// context.
+fn declined_result(tool: &str, feedback: Option<&str>) -> String {
+    match feedback {
+        Some(text) => format!("[denied] User declined tool call '{tool}'. Feedback: {text}"),
+        None => format!("[denied] User declined tool call '{tool}'."),
+    }
+}
+
 impl AgentToolState {
     /// Whether every key this call needs is already covered, by the safe list or
     /// by a grant.
@@ -541,7 +555,7 @@ pub(crate) async fn dispatch_tools(
                         queued.push((slot, is_builtin, tc));
                     }
                     Some(false) => {
-                        let result = format!("[denied] User declined tool call '{}'.", tc.name);
+                        let result = declined_result(&tc.name, response.deny_feedback());
                         progress(&tc.id, &result);
                         slots.push((tc.id.clone(), Some(result)));
                     }
@@ -1447,6 +1461,72 @@ mod tests {
                 && result.contains("interaction_timeout_secs"),
             "{result}"
         );
+    }
+
+    /// The two strings a decline can put in front of the model. The plain one
+    /// is pinned word for word: the tests above and the docs quote it. The
+    /// other carries what the person typed, verbatim after the marker, so the
+    /// next turn has a redirect rather than a refusal to guess at.
+    #[test]
+    fn a_decline_names_the_feedback_when_there_is_some() {
+        assert_eq!(
+            declined_result("bash", None),
+            "[denied] User declined tool call 'bash'."
+        );
+        assert_eq!(
+            declined_result("bash", Some("read the README first, then use git log")),
+            "[denied] User declined tool call 'bash'. Feedback: read the README first, then use git log"
+        );
+    }
+
+    /// The claim this feature makes: what the person typed at the deny reaches
+    /// the model inside the tool result for that call. Failed before the
+    /// `Some(false)` arm read `feedback` (the result was the bare decline).
+    #[tokio::test]
+    async fn a_deny_with_feedback_puts_the_text_in_the_tool_result() {
+        let hub = InteractionHub::new();
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "echo", serde_json::json!({}))],
+            |req| {
+                InteractionResponse::deny_with_feedback(&req.id, "try `ls -la` instead\nand stop")
+            },
+            hub,
+        )
+        .await;
+        assert_eq!(
+            out[0].1,
+            "[denied] User declined tool call 'echo'. Feedback: try `ls -la` instead\nand stop"
+        );
+    }
+
+    /// Feedback that arrives beside a grant is a client bug, not a redirect:
+    /// the call runs and the model never hears the word "declined".
+    #[tokio::test]
+    async fn feedback_beside_a_grant_is_ignored() {
+        let hub = InteractionHub::new();
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "echo", serde_json::json!({}))],
+            |req| InteractionResponse {
+                feedback: Some("not a redirect".to_string()),
+                ..InteractionResponse::approval(&req.id, true, ApprovalScope::Once)
+            },
+            hub,
+        )
+        .await;
+        assert!(!out[0].1.contains("declined"), "{}", out[0].1);
+        assert!(!out[0].1.contains("Feedback"), "{}", out[0].1);
     }
 
     #[tokio::test]
