@@ -216,6 +216,7 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
         // A fixed clock, so nothing here is a function of how long CI took.
         now_secs: || 1_700_000_000,
         reloader: None,
+        provider_reload: None,
     });
 
     let (reply, spawned) = oneshot::channel();

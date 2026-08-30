@@ -13,12 +13,12 @@
 //! (`leviath_runtime::script_provider`), and keeps the last good config if a
 //! reload fails so an edit saved mid-keystroke never breaks a spawn.
 //!
-//! What it deliberately does **not** reload is the infrastructure established
-//! once at boot: the provider registry, MCP connections, the outbound-network
-//! policy, and the telemetry sink. Those hold live connections and
-//! process-wide state; re-initializing them on a file write is a much larger
-//! change with its own failure modes. Adding a provider key or an MCP server
-//! still needs a daemon restart; see `daemon.md`.
+//! Provider credentials are rebuilt from the same reloaded config by the
+//! `provider_reload` module beside this one, so a key added or removed here
+//! reaches the next run too. What is still established once at boot is MCP
+//! connections, the outbound-network policy and the telemetry sink: those hold
+//! live connections and process-wide state, and adding an MCP server still
+//! needs a daemon restart; see `daemon.md`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};

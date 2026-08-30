@@ -176,6 +176,11 @@ pub(crate) async fn setup_daemon_host_with(
             &[config.default_provider.as_str()],
         )
         .await;
+    // Keeps that registry in step with `config.toml` from here on: a run
+    // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves
+    // against the providers the file names now, without a daemon restart
+    // (issue #684).
+    let provider_reload = crate::daemon::provider_reload::for_daemon(&config, providers.clone());
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
@@ -203,6 +208,7 @@ pub(crate) async fn setup_daemon_host_with(
         runtime,
         now_secs: || chrono::Utc::now().timestamp(),
         reloader: Some(reloader),
+        provider_reload: Some(provider_reload),
     }))
 }
 
@@ -257,6 +263,10 @@ pub struct HostParts {
     /// script-provider layer can follow it too (issue #533); `None` builds a
     /// fixed one from `config`, for a caller with nothing to watch.
     pub reloader: Option<Arc<crate::daemon::config_reload::ConfigReloader>>,
+    /// Keeps the provider registry in step with `config.toml`. `None` builds
+    /// one over `config` and `providers`, which is the same thing for a caller
+    /// that booted them together.
+    pub provider_reload: Option<Arc<crate::daemon::provider_reload::ProviderReload>>,
 }
 
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
@@ -388,6 +398,13 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         ))
     });
 
+    // Same fallback as the config reloader above: a caller that booted its
+    // registry and its config together is already consistent, so one built
+    // over both is the right starting point.
+    let provider_reload = parts.provider_reload.clone().unwrap_or_else(|| {
+        crate::daemon::provider_reload::for_daemon(&parts.config, pp_providers.clone())
+    });
+
     // Install the fan-out spawner as a world resource so the parts.runtime's fan-out
     // systems can start workers (it captures the same context as the spawner
     // below, cloned before those move into the closure).
@@ -457,10 +474,17 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_tx = subagent_tx.clone();
     let reload_runs = parts.runs_dir.clone();
     let reload_pool = parts.mcp_pool.clone();
+    let reload_provider_reload = provider_reload.clone();
     host.set_reloader(Box::new(move |world, run_id| {
         // Pages a run back in with the current on-disk parts.config, matching what a
         // real restart would restore it with.
         let reload_config = reload_reloader.current();
+        // A run parked on a provider that has since been replaced re-resolves
+        // its stages here, so the new set has to be in the world first: this
+        // is what lets `lev resume` move a credits-paused run onto the
+        // provider the config names now (issue #684).
+        reload_provider_reload.refresh(&reload_config);
+        reload_provider_reload.install(world);
         let entity = crate::daemon::recovery::reload_run(
             world,
             crate::daemon::spawn::SpawnDeps {
@@ -509,17 +533,28 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // A model whose real window is only knowable once it is loaded - which is
     // every Ollama model - would otherwise have every region in the run sized
     // against a guess from its name, and nothing later corrects it.
-    let pp_default_provider = parts.config.default_provider.clone();
+    let pp_reloader = reloader.clone();
+    let pp_reload = provider_reload.clone();
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
         let blueprint_path = args.blueprint_path.clone();
         let agents_dir = pp_agents_dir.clone();
-        let providers = pp_providers.clone();
-        let default_provider = pp_default_provider.clone();
+        let config = pp_reloader.current();
+        let reload = pp_reload.clone();
         Box::pin(async move {
             warm_blueprint_mcp(&pool, &blueprint_path).await;
             warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
-            warm_blueprint_models(&providers, &blueprint_path, &default_provider).await;
+            // Before the models are warmed, not after: a provider the user
+            // configured since this daemon started has to exist before anyone
+            // asks it what its models are. The sync spawner installs whatever
+            // this built (issue #684).
+            reload.refresh_and_prime(&config).await;
+            warm_blueprint_models(
+                &reload.registry(),
+                &blueprint_path,
+                &config.default_provider,
+            )
+            .await;
         })
     }));
 
@@ -529,6 +564,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let spawn_pool = parts.mcp_pool.clone();
     let spawn_runs_dir = parts.runs_dir.clone();
     let spawn_reloader = reloader.clone();
+    let spawn_provider_reload = provider_reload.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -550,6 +586,12 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // grant, a permission change) takes effect on the next `lev run`
         // without a daemon restart.
         let config = spawn_reloader.current();
+        // The registry, before the stages resolve against it. The preprocessor
+        // has usually built it already; refreshing here too covers the paths
+        // that do not run one (a sub-agent spawn, a fan-out worker) and costs
+        // a credential comparison when nothing changed (issue #684).
+        spawn_provider_reload.refresh(&config);
+        spawn_provider_reload.install(world);
         let built = build_agent(
             world.world_mut(),
             crate::daemon::spawn::SpawnDeps {
@@ -1494,6 +1536,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 0,
             reloader: None,
+            provider_reload: None,
         });
     }
 
@@ -1524,6 +1567,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 0,
             reloader: None,
+            provider_reload: None,
         });
         assert!(
             host.world_mut()
@@ -1564,6 +1608,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 0,
             reloader: None,
+            provider_reload: None,
         });
         assert!(
             host.world_mut()
@@ -1599,6 +1644,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 0,
             reloader: None,
+            provider_reload: None,
         });
         let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
         let (reply, reply_rx) = oneshot::channel();
@@ -1628,6 +1674,168 @@ system_prompt = "x"
         drop(ctl_tx);
         host.serve(ctl_rx).await;
         assert_eq!(reply_rx.await.unwrap(), Ok("run-mcp".to_string()));
+    }
+
+    /// A config that names one endpoint provider, written to `path`.
+    fn config_naming(path: &std::path::Path, providers: &[(&str, &str)], default: &str) -> Config {
+        let mut config = Config {
+            default_provider: default.to_string(),
+            default_model: Some("m".to_string()),
+            ..Config::default()
+        };
+        for (name, url) in providers {
+            config.model_providers.insert(
+                (*name).to_string(),
+                crate::config::ModelProviderConfig {
+                    kind: Some(crate::config::ModelProviderKind::OpenaiCompatible),
+                    base_url: Some((*url).to_string()),
+                    api_key: Some(format!("key-{name}")),
+                    models: Some(vec!["m".to_string()]),
+                    ..Default::default()
+                },
+            );
+        }
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+        // Strictly newer, so a rewrite inside one clock tick is still seen.
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        config
+    }
+
+    /// A one-stage blueprint pinned to `provider`, with the user default
+    /// refused: the only way it can run is if that provider is registered.
+    fn blueprint_pinned_to(dir: &std::path::Path, provider: &str) -> std::path::PathBuf {
+        let manifest = dir.join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"
+[agent]
+name = "pinned"
+entry_stage = "work"
+
+[stages.work]
+mode = "autonomous"
+model = {{ models = [{{ provider = "{provider}", model = "m" }}], allow_user_default = false }}
+available_tools = []
+system_prompt = "reply"
+
+[context.regions]
+task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
+"#
+            ),
+        )
+        .unwrap();
+        manifest
+    }
+
+    fn spawn_op(
+        run_id: &str,
+        manifest: &std::path::Path,
+    ) -> (ControlOp, oneshot::Receiver<Result<String, String>>) {
+        let (reply, reply_rx) = oneshot::channel();
+        let op = ControlOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: run_id.to_string(),
+                blueprint_path: manifest.to_string_lossy().to_string(),
+                task: "t".to_string(),
+                regions: Default::default(),
+                model: None,
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                metadata: Default::default(),
+                callback_url: None,
+                callback_secret: None,
+                yolo: false,
+                no_seed_commands: false,
+                allow: Vec::new(),
+                max_depth: None,
+                parent_run_id: None,
+                output: None,
+            }),
+            reply,
+        };
+        (op, reply_rx)
+    }
+
+    /// The bug this whole file's provider reload exists for: the daemon boots
+    /// with one provider configured, the user configures another (`lev setup`,
+    /// `PUT /api/config`, an editor - they all write this file), and the very
+    /// next run has to be able to use it. Before the registry was rebuilt, the
+    /// second spawn was refused with "no usable provider" until the daemon was
+    /// killed and restarted (issue #684).
+    #[tokio::test]
+    async fn a_provider_configured_after_boot_is_usable_on_the_next_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = config_naming(&config_path, &[("alpha", "http://127.0.0.1:9/v1")], "alpha");
+        let manifest = blueprint_pinned_to(dir.path(), "beta");
+        let runs = tempfile::tempdir().unwrap();
+        let providers = leviath_runtime::provider_creds::build_provider_registry_probing(
+            &crate::commands::run::session::provider_creds_from_config(&config),
+            &leviath_providers::provider::build_http_client,
+            &|_| false,
+        )
+        .unwrap();
+        let mut host = build_host(HostParts {
+            config: config.clone(),
+            providers: providers.clone(),
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
+            mcp_pool: Arc::new(empty_pool()),
+            runtime: Handle::current(),
+            now_secs: || 0,
+            reloader: Some(Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+                config_path.clone(),
+                config.clone(),
+            ))),
+            provider_reload: Some(crate::daemon::provider_reload::for_daemon(
+                &config, providers,
+            )),
+        });
+
+        // Both spawns go through one `serve()`: it flushes the persistence
+        // lane on the way out, so a host only ever serves once. The driver
+        // task rewrites the config between the two, which is the whole point.
+        let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (first, first_reply) = spawn_op("run-before", &manifest);
+        ctl_tx.send(first).unwrap();
+        let driver_tx = ctl_tx.clone();
+        let driver_config = config_path.clone();
+        let driver_manifest = manifest.clone();
+        let driver = tokio::spawn(async move {
+            let before = first_reply.await.unwrap();
+            // What `lev setup` (or `PUT /api/config`) does: rewrite the file.
+            config_naming(&driver_config, &[("beta", "http://127.0.0.1:9/v1")], "beta");
+            let (second, second_reply) = spawn_op("run-after", &driver_manifest);
+            driver_tx.send(second).unwrap();
+            let after = second_reply.await.unwrap();
+            drop(driver_tx);
+            (before, after)
+        });
+        drop(ctl_tx);
+        host.serve(ctl_rx).await;
+        let (before, after) = driver.await.unwrap();
+
+        assert!(
+            before.is_err(),
+            "beta is not configured yet, so the spawn has nowhere to go: {before:?}"
+        );
+        assert_eq!(
+            after,
+            Ok("run-after".to_string()),
+            "the provider the user just configured has to work without a daemon restart"
+        );
+        assert!(
+            host.world_mut().providers().has("beta"),
+            "the rebuilt registry is the one the world resolves against"
+        );
+        assert!(
+            !host.world_mut().providers().has("alpha"),
+            "and the provider they removed is no longer a route"
+        );
     }
 
     #[tokio::test]
@@ -1666,6 +1874,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 100,
             reloader: None,
+            provider_reload: None,
         });
 
         // Drive a Spawn control op through the host.
@@ -1779,6 +1988,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 100,
             reloader: None,
+            provider_reload: None,
         });
 
         // The reloaded run is registered → Status resolves it.
@@ -1817,6 +2027,7 @@ system_prompt = "x"
             runtime: Handle::current(),
             now_secs: || 100,
             reloader: None,
+            provider_reload: None,
         });
 
         // Persist a running run only now - build_host's startup reload already ran,
