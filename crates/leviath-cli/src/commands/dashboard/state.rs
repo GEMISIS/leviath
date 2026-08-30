@@ -295,6 +295,16 @@ pub(crate) struct Dashboard {
         mpsc::UnboundedReceiver<McpCommand>,
         mpsc::UnboundedSender<McpOutcome>,
     )>,
+    /// Watches `config.toml`, so the header can say when it stopped loading.
+    ///
+    /// The dashboard reads the config on two screens and swallowed a broken
+    /// file whole on one of them (`unwrap_or_default()` on the new-run
+    /// screen), which is how a typo turned into an empty agent list with
+    /// nothing said. mtime-gated, so asking on every tick costs one `stat`.
+    pub(super) config_watch: crate::daemon::config_reload::ConfigWatch,
+    /// Why `config.toml` does not load, as of this tick. Held beside the watch
+    /// so the renderer, which has only `&self`, can draw it.
+    pub(super) config_fault: Option<crate::config::ConfigFault>,
 }
 
 mod sync;
@@ -620,6 +630,46 @@ impl Dashboard {
         if toasts.len() > 4 {
             toasts.remove(0);
         }
+    }
+
+    /// Notice whether `config.toml` still loads, and say so once each way.
+    ///
+    /// A toast is not enough on its own here: the condition persists until
+    /// somebody edits the file, and a message that has already faded cannot
+    /// explain why the run they start two minutes later ignored their edit.
+    /// So the toast announces the change and [`config_fault`] holds the banner
+    /// up for as long as it is true.
+    ///
+    /// [`config_fault`]: Self::config_fault
+    pub(super) fn sync_config_health(&mut self) {
+        let fault = self.config_watch.poll().cloned();
+        if fault == self.config_fault {
+            return;
+        }
+        match &fault {
+            Some(fault) => {
+                let file = fault.path.display();
+                self.add_log(format!("{file} no longer loads: {}", fault.summary()));
+                Self::push_toast(
+                    &mut self.toasts,
+                    format!("config.toml: {}", fault.summary()),
+                    ToastLevel::Warning,
+                    50,
+                );
+            }
+            // The only way here is from a fault to none: an unchanged answer
+            // returned above, so `None` means it was `Some` a tick ago.
+            None => {
+                self.add_log("config.toml parses again.".to_string());
+                Self::push_toast(
+                    &mut self.toasts,
+                    "config.toml loads again",
+                    ToastLevel::Info,
+                    30,
+                );
+            }
+        }
+        self.config_fault = fault;
     }
 
     pub(super) fn tick_toasts(&mut self) {

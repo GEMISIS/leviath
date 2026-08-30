@@ -250,6 +250,10 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         // …and whether those polls reached a daemon at all, and which one.
         dashboard.sync_daemon_link(control);
 
+        // …and whether the config file on disk still loads. One `stat` unless
+        // it has been saved since the last tick.
+        dashboard.sync_config_health();
+
         // Sync background runs from on-disk run-state dir (the daemon persists
         // meta/context/stages there).
         dashboard.sync_from_run_state();

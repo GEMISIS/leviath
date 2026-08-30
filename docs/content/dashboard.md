@@ -57,6 +57,14 @@ panel and answer. `lev respond` does the same from the shell.
   daemon stops answering and again when it is back. While the daemon is unreachable, or came back
   on a different build than this dashboard, the run list wears a chip beside the sort chip. The
   second case is the one that asks something of you: restart `lev dash` so both run the same code.
+- **The config banner**: when `~/.leviath/config.toml` stops loading, a warning takes the top row of
+  every screen and stays there. It names the file, where in it the problem is - a line and column
+  for a syntax error, the key for a value that was refused - and says that runs are on the last
+  config that loaded, which is the part a broken file otherwise hides. It is a banner rather than a
+  toast because the condition lasts until somebody edits the file, and a message that faded three
+  seconds after the save cannot explain the run you start two minutes later. Fix the file and it
+  clears itself, with nothing restarted. On a narrow terminal the path gives way first, then the
+  reassurance; the error itself is the last thing cut.
 
 ## Keys
 
