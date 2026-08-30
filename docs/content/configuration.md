@@ -18,9 +18,13 @@ where you look up the exact name, type, and default. The same contract ships mac
 
 > [!NOTE]
 > The daemon watches this file and reloads it when it changes, so an edit takes effect on the
-> **next** `lev run` with no restart. `lev serve` reads it per request, so an edit - through
-> `PUT /api/config` or from anywhere else - is on the next page load. Boot-time wiring (native
-> provider keys, MCP connections, telemetry exporters) still needs `lev daemon restart`. See
+> **next** `lev run` with no restart. That includes providers: a key you add, replace or remove,
+> a changed `default_provider`, and a `[model_providers]` entry you add or delete are all picked
+> up by the next run started, whether it came from `lev run`, the API or the dashboard, and it
+> makes no difference whether the edit came from `lev setup`, `PUT /api/config` or an editor. A
+> run already under way keeps the provider its current stage started on. `lev serve` reads the
+> file per request, so an edit is on the next page load. MCP connections and telemetry exporters
+> are still boot-time wiring and need `lev daemon restart`. See
 > [the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run).
 
 ## Top level

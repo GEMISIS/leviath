@@ -213,7 +213,7 @@ Base path `/api`; all JSON unless noted.
 | `POST /api/agents/{id}/message` | Steer a running agent |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
-| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
+| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway or `default_provider` applies to the next run spawned, with no daemon restart |
 | `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |

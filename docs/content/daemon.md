@@ -163,13 +163,22 @@ one feature disagree in silence - setting a `base_url` and watching it do nothin
 like having typed the key wrong. Both halves are now live: edit the script, the table, or
 `[security] allow_env_vars`, and the next provider load uses it.
 
-Some changes do still need `lev daemon restart`. They set up connections and process-wide state
-once at startup rather than per run:
+Provider credentials reload as well. Add a key, replace one, remove one by untoggling it in
+`lev setup`, point a provider at another base URL, or change `default_provider`: the daemon
+compares the file's credentials against the ones its registry was built from, and rebuilds the
+registry when they differ, before the next run resolves its stages. It makes no difference whether
+the write came from `lev setup`, `PUT /api/config` or an editor, because all three write the same
+file. Two details are deliberate:
 
-- **Native** provider keys (`[providers]`, `openrouter_api_key`, `ollama_base_url`), which build the
-  provider registry at boot.
-- `[[mcp_servers]]` (live MCP connections), `[observability]` (the telemetry pipeline), and
-  `[security] allow_local_network` (the outbound-network policy).
+- A run **already under way** keeps calling the provider its current stage started on, even one you
+  removed, so a config edit never pulls a provider out from under a stage mid-flight. New runs, new
+  stages, and a parked run you `lev resume` all resolve against the new set.
+- A provider whose key changed has its circuit-breaker record cleared, so a key you just replaced is
+  tried immediately instead of sitting out the rest of the old key's cooldown.
+
+Some changes do still need `lev daemon restart`. They set up connections and process-wide state
+once at startup rather than per run: `[[mcp_servers]]` (live MCP connections), `[observability]`
+(the telemetry pipeline), and `[security] allow_local_network` (the outbound-network policy).
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
   `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
   `provider_failures_before_open`, `provider_circuit_cooldown_secs`,

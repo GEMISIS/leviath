@@ -114,7 +114,10 @@ on its next start.
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you
 haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried.
-Configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
+Configure one with `lev setup`, or add it to `config.toml`. Either way the next run you start
+uses it: the daemon rebuilds its providers from the file, so there is nothing to restart. A run
+that parked because its provider ran out of credits moves to whatever the file names now when you
+`lev resume` it.
 
 A run that gets past that and still can't dispatch (say you removed a provider key after it
 started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
