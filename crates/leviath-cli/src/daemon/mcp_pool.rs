@@ -61,6 +61,19 @@ struct LeaseTable {
     global: HashSet<String>,
 }
 
+/// What an idle-disconnect tick found.
+#[derive(Debug, PartialEq, Eq)]
+enum IdleOutcome {
+    /// The server was idle: its client is taken and shut down.
+    Disconnected,
+    /// Something leased or released the server since the tick was scheduled,
+    /// or there was no client to take. Nothing to do, now or later.
+    Stale,
+    /// A call still held the client, so the server was kept as it was; worth
+    /// asking again after another grace window.
+    Busy,
+}
+
 /// One per-agent server's lease state.
 struct ServerLease {
     /// The server's name - the key the executor stores its client under.
@@ -234,11 +247,31 @@ impl McpPool {
             return; // no runtime (a sync test): bookkeeping only
         };
         for (sig, name, generation) in zeroed {
-            let pool = Arc::clone(self);
-            handle.spawn(async move {
-                tokio::time::sleep(pool.idle_disconnect).await;
-                pool.disconnect_if_still_idle(&sig, &name, generation).await;
-            });
+            handle.spawn(Arc::clone(self).grace_disconnect(
+                self.idle_disconnect,
+                sig,
+                name,
+                generation,
+            ));
+        }
+    }
+
+    /// The grace timer: wait `grace`, then tear the server down if it is still
+    /// idle. A server with a call in flight when the timer fires is left alone
+    /// and the wait starts over, so an idle disconnect that loses the race to a
+    /// late call is postponed, not forgotten.
+    async fn grace_disconnect(
+        self: Arc<Self>,
+        grace: std::time::Duration,
+        sig: String,
+        name: String,
+        generation: u64,
+    ) {
+        loop {
+            tokio::time::sleep(grace).await;
+            if self.disconnect_if_still_idle(&sig, &name, generation).await != IdleOutcome::Busy {
+                return;
+            }
         }
     }
 
@@ -264,39 +297,63 @@ impl McpPool {
         zeroed
     }
 
-    /// Tear a server down if nothing touched it since `generation`: forget its
-    /// cached defs (so the next spawn reconnects lazily), take its client out
-    /// of the shared executor, and shut it down - which is what actually ends
-    /// a stdio server's child process. Returns whether it disconnected.
-    pub(crate) async fn disconnect_if_still_idle(
+    /// Tear a server down if nothing touched it since `generation`: take its
+    /// client out of the shared executor, forget its cached defs (so the next
+    /// spawn reconnects lazily), and shut it down - which is what actually
+    /// ends a stdio server's child process. A server kept because a call is
+    /// in flight is [`IdleOutcome::Busy`], and the grace timer waits again for
+    /// that one.
+    ///
+    /// The client is taken before any pool bookkeeping goes. The other order
+    /// (forget the lease row and the cached defs, then ask the executor) lost
+    /// the server for the daemon's life whenever the executor kept it: the
+    /// next tick found no lease row and returned early, so nothing ever asked
+    /// again, the child process never got `shutdown()`, and the tool stayed
+    /// routable for a run that no longer leased it.
+    async fn disconnect_if_still_idle(
         &self,
         sig: &str,
         name: &str,
         generation: u64,
-    ) -> bool {
-        {
+    ) -> IdleOutcome {
+        // The executor lock first, so a lease taken while waiting for it is
+        // seen by the idle check below rather than after the client is gone.
+        let mut executor = self.shared.lock().await;
+        let client = {
             let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
             let still_idle = table
                 .servers
                 .get(sig)
                 .is_some_and(|e| e.holders.is_empty() && e.generation == generation);
             if !still_idle {
-                return false;
+                return IdleOutcome::Stale;
+            }
+            let client = executor.remove_client(name);
+            if client.is_none() && executor.has_client(name) {
+                // A call still holds the client: keep the lease row and the
+                // cached defs so the next tick finds the server and retries.
+                return IdleOutcome::Busy;
             }
             table.servers.remove(sig);
-        }
+            client
+        };
+        // Still under the executor lock: `ensure` inserts into the cache only
+        // while holding that lock, so a spawn racing this tick sees either the
+        // old connection whole or nothing, never cached defs with no client.
         self.connected
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(sig);
-        let client = self.shared.lock().await.remove_client(name);
+        drop(executor);
         match client {
             Some(mut client) => {
                 let _ = client.shutdown().await;
                 tracing::info!(server = %name, "disconnected idle per-agent MCP server");
-                true
+                IdleOutcome::Disconnected
             }
-            None => false,
+            // Leased but never connected (or its connect failed): nothing to
+            // shut down, and nothing left to retry.
+            None => IdleOutcome::Stale,
         }
     }
 
@@ -821,11 +878,17 @@ mod tests {
             let zeroed = pool.release_run_bookkeeping("run-b");
             assert_eq!(zeroed.len(), 1);
             let (sig, name, generation) = zeroed[0].clone();
-            assert!(pool.disconnect_if_still_idle(&sig, &name, generation).await);
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Disconnected
+            );
             // Defs are forgotten, so the next spawn reconnects lazily...
             assert!(pool.cached_defs_for(&servers).is_empty());
             // ...and a replayed disconnect finds nothing to do.
-            assert!(!pool.disconnect_if_still_idle(&sig, &name, generation).await);
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Stale
+            );
         })
         .await;
     }
@@ -848,12 +911,117 @@ mod tests {
             let (sig, name, generation) = zeroed[0].clone();
             // A new run leases before the timer would have fired.
             pool.lease_blueprint(&bp, "run-b");
-            assert!(
-                !pool.disconnect_if_still_idle(&sig, &name, generation).await,
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Stale,
                 "a stale generation must not tear down a re-leased server"
             );
             assert_eq!(pool.leased_holders(cfg), 1);
             assert!(!pool.cached_defs_for(&servers).is_empty());
+        })
+        .await;
+    }
+
+    /// A call in flight when the idle tick fires keeps the server exactly as
+    /// it was: still leased, still cached, still routable. The next tick,
+    /// once the call has let go, tears it down. Before the fix the first tick
+    /// dropped the lease row and the cached defs and only then found the
+    /// executor would not give the client up, so the second tick found no
+    /// row, returned early, and the server (and its child process) lived for
+    /// the daemon's life while its tool stayed routable.
+    #[tokio::test]
+    async fn an_in_flight_call_postpones_the_idle_disconnect() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("busyserver", &stub);
+            let pool = Arc::new(pool());
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            assert_eq!(pool.ensure(&servers[0]).await.len(), 1);
+            pool.lease_blueprint(&bp, "run-a");
+            let zeroed = pool.release_run_bookkeeping("run-a");
+            let (sig, name, generation) = zeroed[0].clone();
+
+            // A call holds the client the way `ToolExecutor::execute` does:
+            // a clone of the shared `Arc`, taken by `route` and kept for the
+            // duration of the call.
+            let held = pool.shared.lock().await.route("busyserver__echo");
+            let (held, _) = held.expect("the tool routes while connected");
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Busy,
+                "a server with a call in flight is kept"
+            );
+            assert!(
+                !pool.cached_defs_for(&servers).is_empty(),
+                "the cached defs survive a refused disconnect"
+            );
+            assert!(
+                pool.shared.lock().await.has_client(&name),
+                "the executor still has the server"
+            );
+            assert!(
+                pool.leases
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .servers
+                    .contains_key(&sig),
+                "the lease row survives, so a later tick can find the server"
+            );
+
+            drop(held);
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Disconnected,
+                "once the call lets go, the next tick disconnects"
+            );
+            assert!(pool.cached_defs_for(&servers).is_empty());
+            assert!(!pool.shared.lock().await.has_client(&name));
+            assert!(
+                pool.shared.lock().await.route("busyserver__echo").is_err(),
+                "a disconnected server's tool no longer routes"
+            );
+        })
+        .await;
+    }
+
+    /// The grace timer itself: finding the server busy, it waits another
+    /// window and asks again, and disconnects once the call has let go.
+    #[tokio::test]
+    async fn the_grace_timer_waits_again_for_a_busy_server() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("retryserver", &stub);
+            let pool = Arc::new(pool());
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            assert_eq!(pool.ensure(&servers[0]).await.len(), 1);
+            pool.lease_blueprint(&bp, "run-a");
+            let zeroed = pool.release_run_bookkeeping("run-a");
+            let (sig, name, generation) = zeroed[0].clone();
+
+            let held = pool.shared.lock().await.route("retryserver__echo");
+            let (held, _) = held.expect("routes");
+            let grace = std::time::Duration::from_millis(20);
+            let timer = tokio::spawn(Arc::clone(&pool).grace_disconnect(
+                grace,
+                sig,
+                name.clone(),
+                generation,
+            ));
+            // Several windows pass with the call in flight: the server stays.
+            tokio::time::sleep(grace * 6).await;
+            assert!(!pool.cached_defs_for(&servers).is_empty());
+            assert!(pool.shared.lock().await.has_client(&name));
+
+            // The call ends; the next window tears the server down and the
+            // timer task finishes.
+            drop(held);
+            timer
+                .await
+                .expect("the timer task ends once it disconnected");
+            assert!(pool.cached_defs_for(&servers).is_empty());
+            assert!(!pool.shared.lock().await.has_client(&name));
         })
         .await;
     }
@@ -913,8 +1081,9 @@ mod tests {
             pool.lease_blueprint(&bp, "run-a");
             let zeroed = pool.release_run_bookkeeping("run-a");
             let (sig, name, generation) = zeroed[0].clone();
-            assert!(
-                !pool.disconnect_if_still_idle(&sig, &name, generation).await,
+            assert_eq!(
+                pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                IdleOutcome::Stale,
                 "no client to remove is a no-op, not an error"
             );
 
