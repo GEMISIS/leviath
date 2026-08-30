@@ -509,13 +509,27 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
             ToolDirection::Internal,
             TaintLevel::Public,
         ),
-        // The context, todo and submit tools write the run's own state: the
-        // agent's regions, its checklist, the answer the caller gets back.
-        // Nothing leaves the machine, so none is a channel the gate watches.
+        // The context and todo tools write the run's own state: the agent's
+        // regions and its checklist. Nothing leaves the machine, so none is a
+        // channel the gate watches.
         "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
-        | "todo_add" | "todo_done" | "todo_note" | "submit_output" => ToolClassification::new(
+        | "todo_add" | "todo_done" | "todo_note" => ToolClassification::new(
             TaintLevel::Internal,
             ToolDirection::Internal,
+            TaintLevel::Public,
+        ),
+        // `submit_output` records the answer the caller gets back, and the
+        // caller is not always on this machine: `lev serve` hands it to any
+        // reader of `GET /api/agents/{id}/result`, and the dashboard shows
+        // it. It is the run's one deliberate channel out, so it takes the
+        // shape `shell` has, outbound with Public clearance, and a Private
+        // region in a submitted answer raises the leak prompt (or the
+        // policy's verdict) rather than leaving quietly. It sat with the
+        // context tools as internal before, which let Private context reach
+        // a remote reader with no prompt at all.
+        "submit_output" => ToolClassification::new(
+            TaintLevel::Public,
+            ToolDirection::Outbound,
             TaintLevel::Public,
         ),
         "list_dir" => ToolClassification::new(
@@ -1133,7 +1147,6 @@ mod tests {
             "todo_add",
             "todo_done",
             "todo_note",
-            "submit_output",
         ] {
             let tc = classified_builtin(name);
             assert!(tc.is_some(), "{name} has no arm");
@@ -1142,6 +1155,19 @@ mod tests {
             assert_eq!(tc.sensitivity, TaintLevel::Internal, "{name}");
             assert_eq!(tc.clearance, TaintLevel::Public, "{name}");
         }
+    }
+
+    /// The submitted answer is the one thing a run hands to whoever asked
+    /// for it, and over `lev serve` that reader is not on this machine. So
+    /// `submit_output` is an outbound channel with Public clearance, the
+    /// shape `shell` has, not the internal one the context tools share.
+    #[test]
+    fn submit_output_is_an_outbound_channel() {
+        assert_eq!(
+            classified_builtin("submit_output"),
+            classified_builtin("shell"),
+            "submit_output"
+        );
     }
 
     /// The split exists so a caller can tell an arm from the default.

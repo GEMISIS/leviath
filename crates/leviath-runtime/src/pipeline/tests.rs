@@ -5994,6 +5994,112 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
     assert!(world.get::<AwaitingTools>(e).is_none());
 }
 
+/// A taint-tracking output window over Internal data: what a stage that read
+/// a workdir file holds when it comes to answer.
+fn tainted_output_window() -> ContextWindow {
+    let mut w = tainted_conv_window();
+    w.add_region(Region::new(
+        crate::output_tool::FINAL_OUTPUT_REGION.to_string(),
+        RegionKind::Pinned,
+        crate::output_tool::FINAL_OUTPUT_REGION_TOKENS,
+    ));
+    w
+}
+
+/// `submit_output` was applied inline before the gate ran, so its
+/// classification was never consulted in a live run: reclassifying it as
+/// outbound gated nothing. The gate now runs first. Headless, the block is
+/// the model's tool result and no answer is recorded.
+#[tokio::test]
+async fn dispatch_tools_gates_a_submission_over_tainted_context() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o1", "the secret")]),
+            tainted_output_window(),
+            ReadyForTools,
+            enabled_gate(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(jrx.try_recv().is_err(), "nothing reaches the lane");
+    assert!(
+        world.get::<crate::persistence::FinalOutput>(e).is_none(),
+        "a blocked submission is not the run's answer"
+    );
+    // A batch with nothing for the lane is applied straight to the window,
+    // and the model goes back to work with the block as its tool result.
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let text = conversation_text(&world, e);
+    assert!(text.contains("[blocked]"), "{text}");
+    assert!(text.contains("submit_output"), "{text}");
+}
+
+/// With the daemon's prompt lane wired, the same submission is held for the
+/// leak prompt like any other outbound call, and once the user approves it
+/// the re-run applies it inline: the tool lane cannot handle `submit_output`,
+/// so an approved one must not be sent there.
+#[tokio::test]
+async fn dispatch_tools_prompts_for_a_tainted_submission_and_applies_it_once_approved() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(crate::interaction_hub::InteractionHub::new());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o1", "the secret")]),
+            tainted_output_window(),
+            ReadyForTools,
+            enabled_gate(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+            .unwrap()
+            .0,
+        1
+    );
+    assert!(world.get::<crate::persistence::FinalOutput>(e).is_none());
+
+    // The user allowed it. The re-run applies the submission inline.
+    let mut resolved = crate::gate_prompt::GateResolved::default();
+    resolved.approved.insert("o1".to_string());
+    world
+        .entity_mut(e)
+        .remove::<crate::gate_prompt::AwaitingGatePrompt>()
+        .insert((resolved, ReadyForTools));
+    s.run(&mut world);
+
+    assert!(
+        jrx.try_recv().is_err(),
+        "an approved submission never reaches the lane"
+    );
+    let recorded = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("the approved submission became the run's answer");
+    assert_eq!(recorded.0.content, "the secret");
+    assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_none());
+}
+
 #[tokio::test]
 async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
     // Same blocked + interactive scenario as above, but the agent carries

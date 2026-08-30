@@ -428,12 +428,39 @@ mod tests {
             "edit_document",
             "context_append",
             "todo_add",
-            "submit_output",
             "fan_out",
         ] {
             let decision = gate.check_traditional("agent-1", name, &window);
             assert!(decision.is_allowed(), "{name}: {decision:?}");
         }
+    }
+
+    /// `submit_output` was classed with the context tools as internal, but
+    /// the answer it records is served off-host by `GET
+    /// /api/agents/{id}/result` and shown in the dashboard, so with taint
+    /// tracking on a Private region could reach a remote reader with no
+    /// prompt. It is outbound with Public clearance now: the same block
+    /// `shell` gets over the same window.
+    #[test]
+    fn gate_blocks_submit_output_over_private_context() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Private);
+        let decision = gate.check_traditional("agent-1", "submit_output", &window);
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Private,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["conv".to_string()],
+                tool_name: "submit_output".to_string(),
+            }
+        );
+        // A clean window submits without a prompt, as before.
+        let clean = make_window_with_taint(TaintLevel::Public);
+        assert!(
+            gate.check_traditional("agent-1", "submit_output", &clean)
+                .is_allowed()
+        );
     }
 
     #[test]
