@@ -57,6 +57,16 @@ impl BuiltinTools {
         }
     }
 
+    /// Replace the `[read_paths]` policy these tools resolve reads against.
+    ///
+    /// Takes `&self` because the executor is shared behind an `Arc` for the
+    /// life of a run: the daemon calls this when a run resumes, so a grant the
+    /// person added to `config.toml` after watching a read be refused applies
+    /// to the run that was refused rather than only to a new one.
+    pub fn set_read_paths(&self, policy: leviath_core::ReadPathPolicy) {
+        self.ctx.set_read_paths(policy);
+    }
+
     /// The directory every path these tools resolve is confined to, already
     /// canonicalized.
     ///
@@ -642,6 +652,43 @@ mod tests {
             .await;
         assert!(out.contains("inside contents"), "got: {out}");
         assert!(out.contains("outside contents"), "got: {out}");
+    }
+
+    /// A grant added after these tools were built reaches them. The daemon
+    /// calls this when a run resumes, so someone who watches a read be refused
+    /// and then grants the path gets the run they were watching rather than a
+    /// new one.
+    #[tokio::test]
+    async fn a_policy_installed_after_construction_governs_the_next_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "outside contents").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        // Declared, granted by nothing: refused.
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[], false);
+        let target = outside.path().join("doc.md");
+        let target = target.to_str().unwrap();
+        assert!(
+            tools
+                .read_file(&json!({ "path": target }))
+                .await
+                .contains("[error]"),
+            "nothing grants it yet"
+        );
+
+        let raw = vec![entry.to_string()];
+        let compiled = leviath_core::ReadPathSet::compile(&raw, dir.path(), None, false).unwrap();
+        tools.set_read_paths(leviath_core::ReadPathPolicy {
+            agent: "tester".into(),
+            blueprint: compiled.clone(),
+            grants: compiled,
+            allow_blueprint: false,
+        });
+        assert_eq!(
+            tools.read_file(&json!({ "path": target })).await,
+            "outside contents",
+            "the grant the person just made has to reach the tools already in service"
+        );
     }
 
     /// `[read_paths]` grants reads and nothing else: the same fully granted

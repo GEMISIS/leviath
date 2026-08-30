@@ -45,7 +45,7 @@ pub(crate) use policy::*;
 mod scripts;
 pub(crate) use scripts::*;
 mod seeds;
-use seeds::*;
+pub(crate) use seeds::*;
 mod tool_state;
 use tool_state::*;
 
@@ -804,6 +804,9 @@ fn build_agent_inner(
     // Taken here for the same reason: the tool state is built after the
     // blueprint has been handed to the world, and this list cannot change.
     let blueprint_safe = blueprint.safe_commands.clone();
+    // And this one, so a resume can recompile the read-path grants against the
+    // config as it stands then.
+    let blueprint_read_paths = blueprint.read_paths.clone();
 
     // 6. Spawn the agent.
     let entity = spawn_agent_seeded(
@@ -924,6 +927,8 @@ fn build_agent_inner(
         dynamic,
         unattended: args.yolo,
         blueprint_safe: blueprint_safe.as_ref(),
+        blueprint_read_paths: blueprint_read_paths.as_ref(),
+        workdir: std::path::PathBuf::from(&args.workdir),
     });
     deps.tool_service.register(entity, state);
 

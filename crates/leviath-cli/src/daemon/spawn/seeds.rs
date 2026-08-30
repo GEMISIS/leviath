@@ -351,18 +351,33 @@ pub(super) fn build_read_path_policy(
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
-    let Some(rp) = blueprint
-        .read_paths
-        .as_ref()
-        .filter(|rp| !rp.allow.is_empty())
-    else {
+    compile_read_path_policy(
+        &blueprint.name,
+        blueprint.read_paths.as_ref(),
+        config,
+        workdir,
+    )
+}
+
+/// The same resolution over its parts rather than a whole [`Blueprint`], so a
+/// run that has already spawned can redo it: [`AgentToolState::reread_config`]
+/// keeps only the blueprint half on the run, not the manifest.
+///
+/// [`AgentToolState::reread_config`]: crate::daemon::tool_service::AgentToolState::reread_config
+pub(crate) fn compile_read_path_policy(
+    agent_name: &str,
+    declared: Option<&leviath_core::blueprint::ReadPathsConfig>,
+    config: &crate::config::Config,
+    workdir: &std::path::Path,
+) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
+    let Some(rp) = declared.filter(|rp| !rp.allow.is_empty()) else {
         return Ok((leviath_core::ReadPathPolicy::inactive(), None));
     };
     let home = leviath_core::home_dir();
     let declared =
         leviath_core::ReadPathSet::compile(&rp.allow, workdir, home.as_deref(), cfg!(windows))
-            .map_err(|e| format!("agent '{}' [read_paths]: {e}", blueprint.name))?;
-    let grant_entries = config.read_path_grants_for_agent(&blueprint.name);
+            .map_err(|e| format!("agent '{agent_name}' [read_paths]: {e}"))?;
+    let grant_entries = config.read_path_grants_for_agent(agent_name);
     let grants =
         leviath_core::ReadPathSet::compile(&grant_entries, workdir, home.as_deref(), cfg!(windows))
             .map_err(|e| format!("read_paths grant in your config.toml: {e}"))?;
@@ -379,18 +394,51 @@ pub(super) fn build_read_path_policy(
              the workdir will be refused. To grant them, add to your config.toml either:\n\
              [security]\nallow_blueprint_read_paths = true\n\
              or the specific paths:\n[agent_read_paths.{name}]\nallow = [{entries}]",
-            name = blueprint.name,
+            name = agent_name,
         )
     });
     Ok((
         leviath_core::ReadPathPolicy {
-            agent: blueprint.name.clone(),
+            agent: agent_name.to_string(),
             blueprint: declared,
             grants,
             allow_blueprint,
         },
         warning,
     ))
+}
+
+/// The policy a resuming run should enforce, or `None` when the entries no
+/// longer compile.
+///
+/// A resume has nowhere to report a bad entry to: the run is already going and
+/// the person is watching it, not a spawn. Refusing loudly at spawn and keeping
+/// the working policy at resume is the same posture the config reloader takes
+/// with a half-saved file, and it fails in the safe direction - a run keeps the
+/// grants it had rather than losing them to a typo.
+pub(crate) fn read_path_policy_for(
+    agent_name: &str,
+    declared: Option<&leviath_core::blueprint::ReadPathsConfig>,
+    config: &crate::config::Config,
+    workdir: &std::path::Path,
+) -> Option<leviath_core::ReadPathPolicy> {
+    match compile_read_path_policy(agent_name, declared, config, workdir) {
+        Ok((policy, _warning)) => Some(policy),
+        Err(error) => {
+            // Pre-bound rather than left as lazy `%` fields: a method call or a
+            // borrow inside a structured field only runs when the callsite is
+            // enabled, and tracing caches that interest process-wide, so under
+            // a coverage run the region can be unreachable.
+            let agent = agent_name;
+            let reason = error;
+            tracing::warn!(
+                agent = %agent,
+                error = %reason,
+                "the [read_paths] in config.toml would not compile; the run keeps the ones it had"
+            );
+            None
+        }
+    }
 }
 
 /// How many of a blueprint's `[read_paths]` entries the config grants, for the

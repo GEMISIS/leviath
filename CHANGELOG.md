@@ -178,6 +178,16 @@ same list.
   read a fresh config, so the run was marked for a title, and the part that
   makes titles read the boot-time setting, saw titling switched off, and dropped
   the marker in silence. Both halves read the same file now.
+- A run re-reads `[tool_permissions]`, `[safe_commands]`, `[security] read_paths` and the write
+  ceilings when it resumes, so a run stopped on a tool it may not call, a path it may not read, or
+  a ceiling it has hit can be freed by editing `config.toml` and running `lev resume`. Those were
+  resolved once when the agent spawned, so the only way out was to cancel the run and start it
+  again, losing everything it had done, and the file you were told to edit did nothing until you
+  did. Resuming counts three ways: `lev resume`, answering an approval prompt (whoever answers may
+  equally have changed the permission it was about), and the daemon paging a run back in from disk.
+  A stage that is running keeps the snapshot it started on, and nothing the run has already spent
+  or been granted is reset. The refusal a denied tool hands the model now says which setting lifts
+  it and that resuming is enough.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
