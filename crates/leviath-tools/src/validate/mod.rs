@@ -2,11 +2,10 @@
 //!
 //! Every tool advertises a JSON Schema for its parameters (built-ins in
 //! `defs.rs`, Rhai script tools via their compiled `@param` annotations, MCP
-//! tools via the server's `inputSchema`). Until issue #155 nothing checked a
-//! model's arguments against that schema: handlers did ad-hoc presence checks
-//! that could not tell `{"path": 42}` from a missing `path`, and extra or
-//! misspelled properties passed through silently. This module is the one
-//! validator dispatch consults before a call is executed.
+//! tools via the server's `inputSchema`). This module is the one validator
+//! dispatch consults before a call is executed. Without it a handler is left
+//! with ad-hoc presence checks that cannot tell `{"path": 42}` from a missing
+//! `path`, and extra or misspelled properties pass through silently.
 //!
 //! Two properties are load-bearing:
 //!

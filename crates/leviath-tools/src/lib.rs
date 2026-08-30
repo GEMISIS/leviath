@@ -149,7 +149,7 @@ mod tests {
     fn the_shell_tool_advertises_the_shell_this_host_resolved() {
         // Whichever shell the host has, the description has to name *it*: a
         // model that reads "cmd" and gets zsh (or the reverse) writes the wrong
-        // commands, which is exactly the failure this replaced.
+        // commands.
         let dir = tempfile::tempdir().unwrap();
         let defs = make_tools(dir.path()).tool_defs();
         let shell = defs
@@ -458,7 +458,7 @@ mod tests {
     /// taint-tracking run with anything Private in context, and nothing says
     /// why. This holds every name the registry advertises, and every
     /// sub-agent tool, to an arm of its own, so a tool added later cannot
-    /// slip through the way `read_files` and the context tools did.
+    /// slip through.
     #[test]
     fn every_builtin_tool_has_its_own_taint_arm() {
         let dir = std::env::temp_dir();
@@ -519,12 +519,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// The escape a lexical check cannot see. `<workdir>/link -> /` makes
-    /// `link/etc/passwd` textually contained the whole way, and the old
-    /// `starts_with` containment let `fs::read_to_string` follow it straight out.
-    ///
-    /// This matters most where the containment is load-bearing: Leviath's file
-    /// tools run on the *host* over the bind-mounted workdir even when the
     /// The containment refusal itself, driven through the injected predicate so
     /// it is exercised on every platform. The `#[cfg(unix)]` tests below prove
     /// the same refusal against a real symlink; this one proves the arm exists
@@ -550,10 +544,12 @@ mod tests {
         assert!(resolved.ends_with("notes.txt"));
     }
 
-    /// stage's `shell` is confined to a container, so a symlink the agent made
-    /// inside the container escaped the container through these tools. It is also
-    /// reachable from a checked-in symlink in a freshly cloned repository, which
-    /// is exactly what a coding agent is pointed at.
+    /// The escape a lexical check cannot see: `<workdir>/link -> /` makes
+    /// `link/etc/hosts` textually contained the whole way, so a `starts_with`
+    /// containment lets `fs::read_to_string` follow it straight out. The file
+    /// tools run on the *host* over the bind-mounted workdir even when the
+    /// stage's `shell` is confined to a container, and a freshly cloned
+    /// repository can carry a checked-in symlink pointing anywhere.
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_rejects_symlink_escape() {
@@ -578,8 +574,8 @@ mod tests {
         assert!(out.contains("[error]"), "got: {out}");
     }
 
-    /// A write through an escaping symlink is refused too - this was the path
-    /// that could overwrite `~/.ssh/authorized_keys`.
+    /// A write through an escaping symlink is refused too: otherwise
+    /// `link/...` reaches `~/.ssh/authorized_keys`.
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_rejects_symlink_escape() {
@@ -884,9 +880,8 @@ mod tests {
         assert!(!out.contains("PRIVATE KEY"), "content must not leak");
     }
 
-    /// The same attack against a glob entry - the variant the original PR
-    /// missed entirely. The pattern is matched against the symlink-resolved
-    /// real path, and the real target does not match it.
+    /// The same attack against a glob entry. The pattern is matched against
+    /// the symlink-resolved real path, and the real target does not match it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_glob_grant_is_symlink_safe() {
@@ -1024,7 +1019,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_tools_refuse_to_resurrect_a_deleted_workspace() {
-        // Issue #107: an external harness deletes the workspace mid-run.
+        // An external harness can delete the workspace mid-run.
         // `create_dir_all` would happily recreate it and let the agent write
         // into an empty tree that no longer resembles the checkout it reasoned
         // about - and the runtime's health check, which just stats the workdir,
@@ -1082,8 +1077,7 @@ mod tests {
         //
         // (An empty "" workdir is not portable here: on Windows `canonicalize("")`
         // can succeed and yield an absolute cwd whose Prefix/RootDir components
-        // absorb the `..`, so `pop()` never fails and this bail is never hit --
-        // which is exactly why this branch was Windows-uncovered before.)
+        // absorb the `..`, so `pop()` never fails and this bail is never hit.)
         let tools = BuiltinTools::new(ToolContext::new(PathBuf::from(
             "leviath-nonexistent-relative-workdir",
         )));
@@ -1431,9 +1425,8 @@ mod tests {
     }
 
     /// A directory is the wrong tool, not a malformed path, so the refusal names
-    /// the right one. `read_file(".")` was the most common failed call across
-    /// four research runs, and the raw OS message ("Is a directory (os error
-    /// 21)") named the problem without naming the fix.
+    /// the right one. The raw OS message ("Is a directory (os error 21)") names
+    /// the problem without naming the fix.
     #[tokio::test]
     async fn read_file_on_a_directory_answers_with_what_is_in_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1610,8 +1603,7 @@ mod tests {
     // `format_command_output` (below) rather than via a real shell command:
     // producing stdout, stderr, and a non-zero exit in a single command needs
     // shell-specific syntax (`;`/`1>&2` on `sh`, `&`/redirection on `cmd.exe`)
-    // that isn't portable, and this session already hit real Windows CI
-    // failures from insufficiently-verified platform-specific test commands.
+    // that isn't portable.
     #[test]
     fn format_command_output_non_zero_exit_reports_stdout_and_stderr() {
         let result = BuiltinTools::format_command_output(b"out-line\n", b"err-line\n", false, 1);
@@ -1642,7 +1634,7 @@ mod tests {
         assert_eq!(result, "(command succeeded with no output)");
     }
 
-    // ─── Bounded shell capture (issue #252) ──────────────────────────────────
+    // ─── Bounded shell capture ──────────────────────────────────────────────
 
     use crate::exec::{
         Captured, MAX_CAPTURE_BYTES, MAX_READ_FILE_BYTES, cap_file_content, capture_capped,
@@ -1760,10 +1752,6 @@ mod tests {
 
     #[test]
     fn a_file_over_the_cap_is_truncated_and_says_so() {
-        // The old behaviour was an all-or-nothing cliff: the whole file went
-        // into the routed region, and the ladder in `tool_results` either
-        // truncated it or dropped it as `[result omitted]` depending on how
-        // full the region already was.
         let content = "x".repeat(5000);
         let capped = cap_file_content(&content, 1000);
         assert!(capped.starts_with(&"x".repeat(1000)));
@@ -1933,7 +1921,6 @@ mod tests {
     fn tool_context_new_canonicalizes() {
         let dir = std::env::temp_dir();
         let ctx = ToolContext::new(dir.clone());
-        // Canonicalized path should be absolute
         assert!(ctx.workdir.is_absolute());
     }
 
@@ -2042,10 +2029,10 @@ mod tests {
 
     #[test]
     fn detect_shell_for_falls_back_when_env_shell_is_missing() {
-        // Regression for #79: `$SHELL` is a recognized shell name but does not
-        // exist on disk (a stale or sandbox-missing `/bin/zsh`). It must NOT be
-        // returned - fall through to an available fallback instead of failing
-        // every shell call with "No such file or directory".
+        // `$SHELL` can name a recognized shell that does not exist on disk
+        // (a stale or sandbox-missing `/bin/zsh`). It must NOT be returned -
+        // fall through to an available fallback instead of failing every
+        // shell call with "No such file or directory".
         let (shell, flag) =
             BuiltinTools::detect_shell_for("linux", Some("/bin/zsh".to_string()), &|s| {
                 s == "/bin/sh"
@@ -2223,7 +2210,7 @@ mod tests {
         let tools = make_mobile_tools(&dir);
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
-        // The other 17 built-ins remain.
+        // The rest remain.
         assert_eq!(tools.tool_defs().len(), 26);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"context_write".to_string()));
@@ -2284,10 +2271,10 @@ mod tests {
         );
     }
 
-    // ─── The null device is not an escape (#373) ─────────────────────────────────
+    // ─── The null device is not an escape ───────────────────────────────────
 
     /// Writing to the null device writes nowhere, so containment has nothing to
-    /// refuse. It used to answer `path '/dev/null' would escape the working
+    /// refuse. Refusing it answers `path '/dev/null' would escape the working
     /// directory`, which is both wrong and unfixable from the agent's side: there
     /// is no path inside the workspace that means "discard this".
     #[tokio::test]
