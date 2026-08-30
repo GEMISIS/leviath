@@ -183,16 +183,23 @@ fn api_router() -> Router<AppState> {
 /// The same technique `xtask/src/docs.rs` uses on the docs.
 #[cfg(test)]
 fn declared_routes() -> Vec<(String, String)> {
-    routes_in(production_source())
+    routes_in(&production_source())
 }
 
 /// This file above its test module. The tests below declare routes of their
 /// own as fixtures for the reader, and those are not served by anything;
 /// reading the whole file counted them as production routes.
 #[cfg(test)]
-fn production_source() -> &'static str {
+fn production_source() -> String {
     const SOURCE: &str = include_str!("mod.rs");
-    SOURCE.split("\nmod tests {").next().unwrap_or(SOURCE)
+    // `\n` line ends whatever the checkout gave it, so a Windows clone with
+    // `core.autocrlf` finds the same boundaries as the others.
+    let source = SOURCE.replace("\r\n", "\n");
+    source
+        .split("\nmod tests {")
+        .next()
+        .unwrap_or(&source)
+        .to_string()
 }
 
 /// [`routes_in`] with the handler each method names: every
@@ -829,7 +836,17 @@ mod tests {
             .iter()
             .find(|(name, _)| *name == module)
             .expect("a handler module with a source entry");
-        let production = source.split("\nmod tests {").next().unwrap_or(source);
+        status_codes_in(source, function)
+    }
+
+    /// [`handler_status_codes`] over source text a test can write. The text
+    /// is read with `\n` line ends whatever the checkout gave it: a Windows
+    /// clone with `core.autocrlf` carries `\r\n`, and the `\n}\n` that ends a
+    /// handler is then never found, so the scan ran on to the end of the
+    /// file and charged every handler with every code below it.
+    fn status_codes_in(source: &str, function: &str) -> Vec<u16> {
+        let source = source.replace("\r\n", "\n");
+        let production = source.split("\nmod tests {").next().unwrap_or(&source);
         let (_, rest) = production
             .split_once(&format!("async fn {function}("))
             .expect("the handler is declared in its module");
@@ -865,7 +882,8 @@ mod tests {
     #[test]
     fn the_openapi_spec_documents_every_status_a_handler_can_answer() {
         let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
-        let (open, admin) = production_source()
+        let production = production_source();
+        let (open, admin) = production
             .split_once("match args.allow_admin")
             .expect("the admin routes are mounted on allow_admin");
         let open_routes = handlers_in(open);
@@ -905,6 +923,29 @@ mod tests {
             .filter(|(_, undocumented)| !undocumented.is_empty())
             .collect();
         assert_eq!(problems, Vec::new());
+    }
+
+    /// The same source with Windows line ends scans the same: a handler's
+    /// closing brace is found, so the next handler's codes stay its own.
+    #[test]
+    fn the_status_code_scan_reads_a_crlf_checkout_the_same() {
+        let unix = concat!(
+            "pub(super) async fn first() -> StatusCode {\n",
+            "    StatusCode::NO_CONTENT\n",
+            "}\n",
+            "\n",
+            "pub(super) async fn second() -> StatusCode {\n",
+            "    StatusCode::NOT_FOUND\n",
+            "}\n",
+            "\n",
+            "mod tests {\n",
+            "    StatusCode::BAD_GATEWAY\n",
+            "}\n"
+        );
+        let crlf = unix.replace('\n', "\r\n");
+        assert_eq!(status_codes_in(unix, "first"), vec![204]);
+        assert_eq!(status_codes_in(&crlf, "first"), vec![204]);
+        assert_eq!(status_codes_in(&crlf, "second"), vec![404]);
     }
 
     #[test]
