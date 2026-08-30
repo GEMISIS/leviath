@@ -1,11 +1,10 @@
-//! One parameterised Python stdio MCP server, in place of the near-identical
-//! JSON-RPC stub scripts that were pasted into each test module that needed a
-//! server to talk to.
+//! One parameterised Python stdio MCP server, shared by every test module that
+//! needs a server to talk to.
 //!
 //! The server reads one JSON-RPC request per line from stdin and answers
 //! `initialize`, `tools/list` and `tools/call`; notifications (requests with
 //! no `id`) are ignored and any other method gets a `-32601` error. Every
-//! knob a copy differed on is a builder method here, so a test that needs a
+//! knob is a builder method here, so a test that needs a
 //! server which fails `tools/list`, or one whose tool echoes the name it was
 //! called with, says so in Rust rather than in a second Python template.
 

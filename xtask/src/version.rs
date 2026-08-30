@@ -48,10 +48,9 @@ const CHANGELOG: &str = "CHANGELOG.md";
 /// Path of the published OpenAPI spec, whose `info.version` names the API this
 /// build serves.
 ///
-/// Bumped here because `API_VERSION` is now the crate version, and a test holds
-/// that equal to this document. Leave the spec behind and the next bump lands
-/// red - which is the point, but it should be this command's job to keep them
-/// together rather than the releaser's.
+/// Bumped here because `API_VERSION` is the crate version and a test holds it
+/// equal to this document. Keeping the two together is this command's job, not
+/// the releaser's.
 const SPEC: &str = "docs/schema/openapi.json";
 
 // ── CLI argument parsing ─────────────────────────────────────────────────────
@@ -349,12 +348,11 @@ pub fn set_spec_version(spec: &str, new: &str) -> Result<String> {
 /// The entries themselves are left untouched: what was accumulating under
 /// `## Unreleased` is exactly what this version ships.
 ///
-/// No fresh `## Unreleased` is opened behind it. leviath.dev reads this file to
-/// build its release notes and rejects a section with no entries, so a bump
-/// that left an empty heading failed the docs check on its own release PR - and
-/// the failure landed on whoever cut the release, for a heading they did not
-/// write. The next person to write an entry adds the heading back, which the
-/// error below asks for by name.
+/// No fresh `## Unreleased` is opened behind it: leviath.dev builds its release
+/// notes from this file and rejects a section with no entries, so an empty
+/// heading fails the docs check on the release PR itself. The next person to
+/// write an entry adds the heading back, which the error below asks for by
+/// name.
 pub fn roll_changelog(changelog: &str, version: &str, date: &str) -> Result<String> {
     anyhow::ensure!(
         changelog.contains("\n## Unreleased\n"),
@@ -396,8 +394,6 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     (year, month, day)
 }
-
-// ── Entry points ─────────────────────────────────────────────────────────────
 
 // ── Release lists that must track the workspace ──────────────────────────────
 
@@ -465,12 +461,12 @@ fn names_present<'a>(text: &str, candidates: &'a [String]) -> Vec<&'a String> {
 
 /// Every member that must appear in a release list but does not.
 ///
-/// These lists are written out by hand in two workflows, and nothing tied them
-/// to the workspace. Both had already drifted: `leviath-alloc` was added after
-/// the last crates.io publish and reached neither list, so the next stable
-/// release would have failed at `cargo publish -p leviath-cli` - its allocator
-/// dependency carries a version and is enabled by default, so the registry has
-/// to have it. A release is the worst place to discover a list is stale.
+/// The publish list and the coverage matrix are written out by hand in two
+/// workflows, so nothing but this check ties them to the member list. A
+/// publishable crate left off the publish list fails the release at `cargo
+/// publish`, because a dependency carrying a version has to be on the registry
+/// before the crate that names it. A release is the worst place to discover a
+/// list is stale.
 fn missing_from_release_lists(manifest: &str, prod: &str, ci: &str) -> Vec<String> {
     let members = workspace_members(manifest);
     let mut missing = Vec::new();
@@ -916,8 +912,8 @@ mod tests {
 
     #[test]
     fn a_setting_missing_from_the_copy_is_reported() {
-        // The failure that motivated this: `cargo install leviath-cli` silently
-        // building without overflow checks.
+        // A setting only the workspace manifest carries means `cargo install
+        // leviath-cli` silently builds without overflow checks.
         let cli = MANIFEST_WITH_PROFILE.replace("overflow-checks = true\n", "");
         let drift = release_profile_drift(MANIFEST_WITH_PROFILE, &cli);
         assert_eq!(drift.len(), 1, "{drift:?}");
@@ -1090,11 +1086,9 @@ members = [
         );
     }
 
-    /// The case this exists for: a crate added to the workspace and to neither
-    /// list. `leviath-alloc` was exactly this - added after the last publish,
-    /// depended on by `leviath-cli` with a version under a default feature, and in
-    /// neither workflow. The next stable release would have failed at
-    /// `cargo publish -p leviath-cli`.
+    /// A member in neither workflow is reported once per list, so the message
+    /// names the publish list and the coverage matrix separately rather than
+    /// stopping at the first.
     #[test]
     fn a_member_missing_from_both_lists_is_reported_twice() {
         let missing =

@@ -18,16 +18,13 @@
 //! An *indented* `#[cfg(test)]` still counts as production: it sits on a field
 //! or a method, and brace-matching arbitrary nesting is a parser this rule has
 //! no business being. That over-reports a handful of files, which is the safe
-//! direction for a ratchet. The rule used to stop at the *first* column-zero
-//! attribute instead, and a `#[cfg(test)] use` near the top of a file hid
-//! everything after it - `runstate.rs` measured 46 lines for a real 1,015.
+//! direction for a ratchet.
 //!
 //! # One number, no exemptions
 //!
-//! The cap started at 800 with a table of files already above it, because a cap
-//! the tree does not meet cannot go green and turns into an allowlist that only
-//! grows. That table is gone: the files it named were split, and the cap is now
-//! a number every file actually meets.
+//! The cap applies to every file, with no allowlist. A cap the tree does not
+//! meet cannot go green, and an exemption table only ever grows, so the number
+//! is one every file actually meets.
 //!
 //! It is a **ratchet**. 1,200 is where the tree sits today, not where it should
 //! end up - the next rungs are 1,000 and 800, each earned by splitting the files
@@ -132,8 +129,8 @@ fn past_test_item(lines: &[&str], at: usize) -> usize {
 /// `}` closes a block, `];` a `static` slice and `);` a tuple struct. Only the
 /// exact two-character forms are accepted for the latter: a raw string inside a
 /// test module can put a bare `)` or `]` at column zero, and matching on the
-/// first character alone counted the rest of `validate.rs`'s tests as
-/// production.
+/// first character alone ends the item there, counting the rest of the test
+/// module as production.
 fn closes_item(line: &str) -> bool {
     line.starts_with('}') || line == "];" || line == ");"
 }
@@ -178,10 +175,10 @@ pub fn measure(paths: &[String], read: &dyn Fn(&str) -> Result<String>) -> Resul
 /// the single lint each may drop.
 ///
 /// Cargo rejects inheriting and overriding in one manifest, so a crate that must
-/// escape one lint has to copy the whole table - and `leviath-alloc` escaping
-/// `unsafe_code` is how it ended up inheriting *nothing*, silently losing
-/// `missing_docs` and `clippy::string_slice` too. Anything on this list is
-/// checked against the root table so that cannot happen quietly again.
+/// escape one lint has to copy the whole table, and a copied table silently
+/// drops every lint the root gains afterwards. Anything on this list is checked
+/// against the root table, so the lint named here is the only difference
+/// allowed.
 const LINT_OPT_OUTS: &[(&str, &str)] = &[("leviath-alloc", "unsafe_code")];
 
 /// The lint names a manifest declares under `[<prefix>.rust]` / `[<prefix>.clippy]`.

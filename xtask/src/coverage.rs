@@ -366,8 +366,6 @@ mod tests {
         assert!(parse_uncovered(&serde_json::json!({"data": []})).is_empty());
     }
 
-    /// A filename with no `/src/` segment is reported whole rather than
-    /// silently dropped.
     /// llvm-cov reports Windows paths with backslashes, and a one-platform gap
     /// is exactly the case this output exists for - so the shortening has to
     /// handle both separators.

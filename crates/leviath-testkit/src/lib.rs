@@ -5,9 +5,8 @@
 //! inside other packages' gated test suites, and self-gating test scaffolding
 //! forces tests-of-test-helpers with no defect-finding power.
 //!
-//! Shared here so each helper has exactly one definition: copy-pasted
-//! per-package `test_support.rs` versions drift silently (`AlwaysOnSubscriber`
-//! reached five copies in two divergent designs, the raw-TCP mock server nine).
+//! Shared here so each helper has exactly one definition: a per-package
+//! `test_support.rs` copy drifts from the others silently.
 
 pub mod mcp_stub;
 
@@ -208,8 +207,8 @@ pub async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> Stri
 
 /// Poll `ready` until it answers true, or fail `context` after 30 seconds.
 ///
-/// The shape this replaces was open-coded at four call sites, and it kept
-/// costing the 100% coverage gate a rerun. The loop
+/// Open-coding this at a call site costs the 100% coverage gate a rerun. The
+/// loop
 ///
 /// ```ignore
 /// while !ready() {
@@ -219,10 +218,9 @@ pub async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> Stri
 ///
 /// never executes its body when the thing being waited for is already done by
 /// the first poll - which, on a multi-threaded runtime, is a coin flip. The
-/// sleep line then reports as uncovered with every test passing, and the fix
-/// was always "run the job again". Reordering the loop was tried and measured:
-/// it moves the hole rather than closing it, because whichever line the body
-/// starts with inherits the same race.
+/// sleep line then reports as uncovered with every test passing, and
+/// reordering the loop moves the hole rather than closing it: whichever line
+/// the body starts with inherits the same race.
 ///
 /// Living here is what settles it. `leviath-testkit` is dev-dependency-only
 /// scaffolding and is excluded from the gate for exactly this reason - its
@@ -230,10 +228,9 @@ pub async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> Stri
 /// tests of test helpers with no defect-finding power. One copy here means one
 /// racy line, in the one crate where a racy line is not a gate failure.
 ///
-/// The timeout is the other half. Two of the four sites had one and two did
-/// not, so a condition that never came true hung the suite until CI killed the
-/// job with no indication of which wait was stuck. `context` is what that
-/// failure says.
+/// The timeout is the other half: without it a condition that never comes true
+/// hangs the suite until CI kills the job, with no indication of which wait was
+/// stuck. `context` is what the failure says instead.
 pub async fn wait_until(context: &str, mut ready: impl FnMut() -> bool) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while !ready() {

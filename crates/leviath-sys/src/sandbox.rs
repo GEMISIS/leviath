@@ -76,8 +76,8 @@ pub struct ContainerRunSpec<'a> {
 
 /// Host paths that must never be bind-mounted into an agent's container.
 ///
-/// `mounts` comes from the blueprint - a file the user downloaded - and was
-/// interpolated straight into `-v {m}:{m}`. `mounts = ["/var/run/docker.sock"]`
+/// `mounts` comes from the blueprint - a file the user downloaded - and reaches
+/// `-v {m}:{m}`. `mounts = ["/var/run/docker.sock"]`
 /// is a one-line container escape (the container can then create a *privileged*
 /// container on the host), and `mounts = ["/"]` makes the isolation decorative.
 ///
@@ -109,11 +109,9 @@ pub(crate) fn mount_allowed(path: &str) -> bool {
     // POSIX semantics spelled out rather than `std::path::Path`, because these
     // are paths *inside a Linux container* - the host's rules do not apply to
     // them. On Windows `Path::new("/data").is_absolute()` is false (an absolute
-    // path there needs a drive letter), so routing this through `Path` refused
-    // every legitimate container mount on Windows while behaving correctly on
-    // Unix. Fail-closed, so not a hole - but containers were unusable, and no
-    // test caught it because the host and the container agreed on every
-    // platform the tests ran on.
+    // path there needs a drive letter), so routing this through `Path` would
+    // refuse every legitimate container mount on Windows while behaving
+    // correctly on Unix.
     let absolute = path.starts_with('/');
     let traverses = path.split('/').any(|segment| segment == "..");
     if !absolute || traverses {
@@ -137,10 +135,10 @@ pub(crate) fn mount_allowed(path: &str) -> bool {
 ///
 /// Hardened beyond plain `run`: the container drops every capability, cannot
 /// regain privileges via setuid binaries, and is bounded in processes and
-/// memory. Without these it ran as **root inside** with the default capability
-/// set - so "sandboxed" bought isolation of the filesystem view and nothing
-/// else, and anything written to the bind-mounted workdir came back root-owned
-/// on the host.
+/// memory. Without them the container runs as **root inside** with the default
+/// capability set, so "sandboxed" buys isolation of the filesystem view and
+/// nothing else, and anything written to the bind-mounted workdir comes back
+/// root-owned on the host.
 ///
 /// `mounts` entries are filtered through `mount_allowed`; a refused entry is
 /// dropped rather than silently honored.
@@ -337,10 +335,10 @@ mod tests {
 
     /// Ordinary project directories still mount - the denylist is about host
     /// infrastructure, not about making the feature unusable.
+    ///
     /// The rule is POSIX, not host-native: a container path is a Linux path
-    /// wherever the daemon happens to be running. Routing it through
-    /// `std::path::Path` made every mount fail on Windows, where `/data` is not
-    /// an absolute path.
+    /// wherever the daemon happens to be running, so `/data` is absolute here
+    /// even on Windows, where `std::path::Path` says otherwise.
     #[test]
     fn mount_rules_do_not_depend_on_the_host_platform() {
         // Absolute in POSIX terms, on every host.
@@ -408,8 +406,8 @@ mod tests {
                 "--name",
                 "lev-abc",
                 // Hardening flags: no capabilities, no privilege regain, and
-                // bounded processes/memory. Without them the container ran as
-                // root inside with the default capability set.
+                // bounded processes/memory. Without them the container runs
+                // as root inside with the default capability set.
                 "--cap-drop",
                 "ALL",
                 "--security-opt",

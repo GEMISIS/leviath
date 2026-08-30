@@ -42,8 +42,8 @@ pub fn dispatch(args: &[String]) -> Result<()> {
 
 /// Route the CLI arguments to the provided handler closures.
 ///
-/// `run_cov`, `run_ver`, and `run_docs` replace the real handlers in unit
-/// tests, making every match arm reachable without invoking external tooling.
+/// The handlers replace the real ones in unit tests, making every match arm
+/// reachable without invoking external tooling.
 pub fn dispatch_with(
     args: &[String],
     run_cov: impl FnOnce(coverage::CoverageMode) -> Result<()>,
@@ -116,8 +116,7 @@ mod tests {
         Ok(())
     }
 
-    /// A `run_docs` stub matching `impl FnOnce(DocsMode) -> Result<()>`.
-    /// Structure-handler stub: records nothing, succeeds.
+    /// A `run_struct` stub matching `impl FnOnce(StructureMode) -> Result<()>`.
     fn struct_ok(_m: structure::StructureMode) -> anyhow::Result<()> {
         Ok(())
     }
@@ -184,7 +183,6 @@ mod tests {
 
     #[test]
     fn dispatch_uses_help_as_default_when_no_args() {
-        // Empty args slice → args.first() is None → defaults to "help".
         assert!(dispatch(&[]).is_ok());
     }
 
@@ -228,7 +226,6 @@ mod tests {
 
     #[test]
     fn dispatch_with_coverage_bad_arg_returns_err_without_calling_run_cov() {
-        // Mode parsing fails before run_cov is ever invoked.
         let result = dispatch_with(
             &args(&["coverage", "--bogus"]),
             cov_ok, // never called; covered by stub_returns_ok

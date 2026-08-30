@@ -1,13 +1,13 @@
 //! How much the daemon will buffer from a remote peer before giving up.
 //!
-//! Every reader of a provider body, a streamed frame or an MCP line used to
-//! accumulate until the peer stopped sending. A peer that never stops (a
-//! misbehaving gateway, a compromised MCP server, a proxy replaying a file)
-//! therefore grew the daemon's heap until the kernel killed it, and it took
-//! every run down with it. The caps here are fixed numbers, not config keys:
-//! each is far above anything a well-formed reply needs, so a user has no
-//! reason to raise one, and a knob that only ever matters under attack is a
-//! knob an attacker gets to reason about.
+//! A reader of a provider body, a streamed frame or an MCP line accumulates
+//! until the peer stops sending. A peer that never stops (a misbehaving
+//! gateway, a compromised MCP server, a proxy replaying a file) would grow the
+//! daemon's heap until the kernel kills it, taking every run with it. The caps
+//! here are fixed numbers, not config keys: each is far above anything a
+//! well-formed reply needs, so a user has no reason to raise one, and a knob
+//! that only ever matters under attack is a knob an attacker gets to reason
+//! about.
 //!
 //! Over a cap is an error to the caller, never a hang and never a panic. The
 //! message names the cap and the peer, so a log line says which endpoint

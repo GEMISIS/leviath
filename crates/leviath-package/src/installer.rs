@@ -95,8 +95,8 @@ pub struct AgentInstaller {
 
 /// The version and description an `agent.leviath` declares, with the
 /// defaults the catalogue shows when the file is missing, unreadable or not
-/// TOML: `0.0.0` and an empty description. Three listings used to read and
-/// parse the file each with these same two lookups inline.
+/// TOML: `0.0.0` and an empty description. Every listing reads the manifest
+/// through here, so they cannot disagree about what a broken one means.
 fn manifest_meta(manifest_path: &Path) -> (String, String) {
     let content = fs::read_to_string(manifest_path).unwrap_or_default();
     let parsed: toml::Value =
@@ -141,7 +141,6 @@ impl AgentInstaller {
             anyhow::anyhow!("Failed to read package '{}': {}", package_path.display(), e)
         })?;
 
-        // Derive name from filename (strip .leviath-bundle extension)
         let name = package_path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -240,12 +239,11 @@ impl AgentInstaller {
         // Unpack into a staging directory and swap it in only once the contents
         // have passed every check.
         //
-        // Extracting straight into `agent_dir` meant a bundle that failed
-        // validation still left its files there - including the symlinks
-        // `reject_symlinks_with` had just refused, which `discover_blueprints`
-        // would then list as a runnable agent. And because this path
-        // `create_dir_all`s over an existing install, a failed *re-install*
-        // would leave a working agent half-overwritten.
+        // Extracting straight into `agent_dir` leaves a failed bundle's files
+        // there - including the symlinks `reject_symlinks_with` refuses, which
+        // `discover_blueprints` then lists as a runnable agent. And because
+        // this path `create_dir_all`s over an existing install, a failed
+        // *re-install* would leave a working agent half-overwritten.
         //
         // Staged *beside* the agents directory, not inside it, and still on the
         // same filesystem so the swap is a rename rather than a copy.
@@ -268,9 +266,9 @@ impl AgentInstaller {
         let mut staging = self.install_dir.clone().into_os_string();
         staging.push(format!(".staging-{name}-{}", std::process::id()));
         let staging = PathBuf::from(staging);
-        // The agents directory itself may not exist on a first install. The
-        // previous shape created it implicitly by unpacking into it; now that
-        // staging happens beside it, the rename needs it to be there already.
+        // The agents directory itself may not exist on a first install, and
+        // staging happens beside it rather than inside, so nothing else creates
+        // it: the rename needs it there already.
         // One fallible step and one error arm: staging is a sibling of the
         // agents directory, so if that directory could be created this one can
         // too - a second message would describe a failure nothing can reach.
@@ -371,17 +369,13 @@ impl AgentInstaller {
     /// Get information about a specific installed agent, or `None` if it is not
     /// installed.
     ///
-    /// Infallible on purpose, and the signature now says so. A manifest that
+    /// Infallible on purpose, and the signature says so. A manifest that
     /// cannot be read or parsed still means *installed* - the directory and the
     /// file are both there - so it reports the agent with whatever metadata it
     /// could recover rather than failing. That is the state you would run
     /// `lev remove` to fix, and an error here would be the one thing standing
-    /// between the user and the fix.
-    ///
-    /// It previously returned `anyhow::Result` and never once returned `Err`,
-    /// which left its only production caller `.unwrap()`-ing an infallible
-    /// result inside a function that returns `Result` - a panic waiting for
-    /// whoever made this propagate.
+    /// between the user and the fix. Returning a `Result` no arm ever fills
+    /// with `Err` only invites a caller to `.unwrap()` it.
     pub fn get_installed(&self, name: &str) -> Option<InstalledAgent> {
         let agent_dir = self.install_dir.join(name);
 
@@ -447,7 +441,7 @@ description = "{}"
 
     /// `install_from_bytes` is `pub` and joins `name` onto the install dir.
     /// `Path::join` does not normalize `..` and an absolute name replaces the
-    /// base entirely, so an unvalidated name reached anywhere on the filesystem.
+    /// base entirely, so an unvalidated name reaches anywhere on the filesystem.
     #[test]
     fn install_from_bytes_rejects_traversing_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -901,10 +895,9 @@ description = "{}"
         );
     }
 
-    /// A bundle that fails validation must leave nothing on disk. Extracting
-    /// straight into the destination meant the symlinks `reject_symlinks_with`
-    /// had just refused stayed there, and `discover_blueprints` would list the
-    /// half-extracted tree as a runnable agent.
+    /// A bundle that fails validation must leave nothing on disk: anything left
+    /// behind is pre-validation content, and `discover_blueprints` would list
+    /// the half-extracted tree as a runnable agent.
     #[test]
     fn a_rejected_bundle_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
@@ -992,8 +985,8 @@ description = "{}"
     }
 
     /// A failed re-install must not destroy the agent that was already there.
-    /// This is why the fix is a staged swap and not a `remove_dir_all` on the
-    /// error path - that would have introduced exactly this bug.
+    /// A staged swap keeps that true; a `remove_dir_all` on the error path
+    /// would not.
     #[test]
     fn a_failed_reinstall_keeps_the_previous_install() {
         let dir = tempfile::tempdir().unwrap();

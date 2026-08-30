@@ -1,4 +1,4 @@
-//! Script-backed stage lifecycle hooks (`[stages.<name>.hooks]`, issue #260).
+//! Script-backed stage lifecycle hooks (`[stages.<name>.hooks]`).
 //!
 //! Where a custom region's script owns one region's behaviour, these let a
 //! blueprint observe and steer the agent's own lifecycle: what the context
@@ -68,7 +68,7 @@ pub(crate) const HOOK_NAMES: &[&str] = &[
 /// Deliberately not `Option<Value>`: "proceed unchanged" and "proceed with
 /// this" are different answers, and so is "do not proceed". Collapsing them
 /// would make a cancelling hook indistinguishable from one that returned
-/// nothing, which is the failure mode the taint gate's own history warns about.
+/// nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookOutcome {
     /// Proceed unchanged.

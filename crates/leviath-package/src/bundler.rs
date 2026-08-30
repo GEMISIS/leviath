@@ -30,21 +30,18 @@ impl AgentBundler {
     /// Create a new bundler.
     pub fn new() -> Self {
         Self {
-            // A publishing denylist has to be exhaustive to be correct, and this
-            // one was not: it named `.env`, `.env.local` and `.env.production`
-            // but matched exact names and `*.suffix` only, so `.env.staging`,
-            // `.env.test`, `id_rsa`, `.netrc`, `.npmrc`, `credentials.json` and
-            // `service-account.json` were all bundled and shipped.
+            // A publishing denylist has to be exhaustive to be correct, so the
+            // patterns match whole families (`.env*`, `id_rsa*`) rather than
+            // the two or three spellings someone thought of, and the
+            // exact-name entries are the credential files that actually turn
+            // up in project directories.
             //
-            // Still a denylist - an allowlist would break every agent that ships
-            // an unanticipated data file - but a `.env*` prefix rule now covers
-            // the whole family, and the exact-name entries are the credential
-            // files that actually turn up in project directories.
+            // Still a denylist: an allowlist would break every agent that
+            // ships an unanticipated data file.
             exclude_patterns: vec![
                 ".git".to_string(),
                 ".DS_Store".to_string(),
                 "target".to_string(),
-                // Every `.env` variant, not three of them.
                 ".env*".to_string(),
                 "*.key".to_string(),
                 "*.pem".to_string(),
@@ -172,10 +169,6 @@ impl AgentBundler {
         Ok(output)
     }
 
-    /// Check if a filename should be excluded based on patterns.
-    ///
-    /// Supports wildcard patterns like `*.key` (matches any file ending in `.key`)
-    /// and exact filename matches like `.env`.
     /// Whether `filename` matches any exclusion pattern.
     ///
     /// Three shapes, which is all the patterns here need:
@@ -183,9 +176,8 @@ impl AgentBundler {
     /// - `*.ext` - matches by extension (`server.key`).
     /// - `prefix*` - matches by leading text (`.env*` covers `.env`,
     ///   `.env.staging`, `.env.test`; `id_rsa*` covers `id_rsa` and
-    ///   `id_rsa.pub`). Added because the exact-name-only matcher shipped
-    ///   `.env.staging` while excluding `.env.production`, which is precisely
-    ///   the kind of gap a hand-listed denylist accumulates.
+    ///   `id_rsa.pub`). A family is one pattern rather than a hand-listed set
+    ///   that accumulates gaps.
     /// - anything else: matched exactly.
     pub fn should_exclude(&self, filename: &str) -> bool {
         self.exclude_patterns.iter().any(|pattern| {
@@ -285,8 +277,7 @@ mod tests {
         }
     }
 
-    /// Credential files that turn up in real project directories and were all
-    /// bundled and shipped.
+    /// Credential files that turn up in real project directories.
     #[test]
     fn excludes_common_credential_files() {
         let bundler = AgentBundler::new();
@@ -888,8 +879,8 @@ mod tests {
     // a sink whose `flush` always errors but whose `write` always succeeds
     // makes `write_bundle` succeed) - so these `flush` impls are
     // unreachable via `write_bundle` no matter how the sink is configured.
-    // Test them directly, matching `always_on_subscriber_span_methods_are_all_no_ops`'s
-    // precedent elsewhere in this file for otherwise-unreachable trait-impl methods.
+    // Test them directly, as the workspace does elsewhere for otherwise
+    // unreachable trait-impl methods.
     #[test]
     fn always_failing_writer_flush_returns_error() {
         assert!(AlwaysFailingWriter.flush().is_err());

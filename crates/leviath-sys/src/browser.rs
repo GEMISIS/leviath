@@ -114,10 +114,9 @@ mod tests {
     }
 
     /// The failure arm logs, and `tracing::warn!` evaluates its field values
-    /// only when a subscriber is interested. Without one installed the `%e`
-    /// field closure never runs - so this test exercised the branch while
-    /// leaving the logging inside it unexecuted. `with_tracing` is the same
-    /// always-on-subscriber shim `leviath-cli` uses for exactly this.
+    /// only when a subscriber is interested. Without one the `%e` field closure
+    /// never runs, so the branch counts as exercised while the logging inside it
+    /// does not. `with_tracing` installs the subscriber that makes it run.
     #[test]
     fn open_url_via_reports_spawn_failure() {
         fn boom(_: &mut Command) -> std::io::Result<()> {

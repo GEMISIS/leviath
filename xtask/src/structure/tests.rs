@@ -58,8 +58,8 @@ fn a_sibling_test_module_declaration_is_one_item() {
     assert_eq!(production_lines(src), 2);
 }
 
-/// A `#[cfg(test)] use` at the top of a file used to end the count there and
-/// report a 1,000-line file as a handful of lines.
+/// A `#[cfg(test)] use` is one skipped item, not the end of the count:
+/// everything after it is still production.
 #[test]
 fn a_test_only_import_does_not_end_the_count() {
     let src = "use a::B;\n#[cfg(test)]\nuse c::D;\nfn one() {}\nfn two() {}\n";

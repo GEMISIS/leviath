@@ -281,7 +281,7 @@ mod tests {
             ),
             (
                 // Same tallies, but the run changed nothing: the line has to
-                // say so, or it reads as a success (issue #192).
+                // say so, or it reads as a success.
                 TelemetryEvent::RunCompleted {
                     run_id: "r1".to_string(),
                     status: "complete".to_string(),

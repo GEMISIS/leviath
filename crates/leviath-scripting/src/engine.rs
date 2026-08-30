@@ -19,7 +19,6 @@ impl ScriptEngine {
         let mut engine = Engine::new();
         crate::harden(&mut engine, TRANSFORM_MAX_OPERATIONS);
 
-        // Register Leviath functions and types
         crate::functions::register_functions(&mut engine);
         crate::types::register_types(&mut engine);
 
@@ -45,8 +44,10 @@ impl ScriptEngine {
 
     /// Evaluate a taint gate check script.
     ///
-    /// The script should define a `check(context)` function that returns bool.
-    /// Context map contains: tool, target, taint_level.
+    /// The script is evaluated with `context` in scope and must produce a
+    /// bool: an expression over `context`, or a body that ends by calling a
+    /// `check(context)` it defines. `context` holds `tool`, `target` and
+    /// `taint_level`.
     pub fn check_gate_rule(
         &self,
         script: &str,
@@ -68,8 +69,6 @@ impl ScriptEngine {
         let mut scope = Scope::new();
         scope.push("context", context);
 
-        // The script should end with a call to check(context) or
-        // be a simple expression that uses the 'context' variable.
         self.engine
             .eval_with_scope::<bool>(&mut scope, script)
             .map_err(|e| Error::ExecutionFailed(e.to_string()))
@@ -97,7 +96,6 @@ mod tests {
     #[test]
     fn test_engine_creation() {
         let engine = ScriptEngine::new();
-        // Just verify the engine was created successfully
         assert!(engine.engine.max_operations() > 0);
     }
 

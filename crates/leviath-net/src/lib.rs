@@ -30,11 +30,10 @@ use std::time::Duration;
 
 /// The floor every outbound HTTP client in the workspace gets.
 ///
-/// Two clients were built with a bare `reqwest::Client::new()` and therefore had
-/// **no timeouts at all**: webhook delivery (so an endpoint that accepts a
-/// connection and never answers hung that delivery forever) and the package
-/// registry. `Client::new()` is an easy default to reach for and a bad one for
-/// anything talking to a host we do not control.
+/// A bare `reqwest::Client::new()` carries **no timeouts at all**, so an
+/// endpoint that accepts a connection and never answers holds a webhook
+/// delivery or a registry fetch open forever. It is an easy default to reach
+/// for and a bad one for anything talking to a host we do not control.
 ///
 /// Values are deliberately generous - this is a floor to stop a hang, not a
 /// performance budget. A caller with a real reason for different numbers builds
@@ -444,8 +443,8 @@ mod tests {
         url::Url::parse(s).expect("test URL parses")
     }
 
-    /// The floor exists because two clients were built with a bare
-    /// `Client::new()` and had no timeouts at all.
+    /// The floor exists because a bare `Client::new()` carries no timeouts at
+    /// all.
     #[test]
     fn the_default_timeouts_are_a_real_floor() {
         let t = ClientTimeouts::default();

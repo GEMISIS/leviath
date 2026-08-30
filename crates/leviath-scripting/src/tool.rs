@@ -417,9 +417,9 @@ impl ScriptToolSet {
 ///
 /// [`ScriptToolSet::discover`] asks the same two questions of files already on
 /// disk: are the annotations parseable, and does Rhai accept the script. An
-/// editor has to be able to ask before saving, and the only alternative was
-/// writing the candidate into a directory every agent executes from and reading
-/// the answer back out of the skipped list.
+/// editor has to be able to ask before saving, and the alternative is writing
+/// the candidate into a directory every agent executes from and reading the
+/// answer back out of the skipped list.
 ///
 /// `label` is what the error message names the source as, since there is no
 /// path to name. A sibling `tool.toml` cannot apply here for the same reason:
@@ -740,7 +740,7 @@ pub fn decode_base64(input: &str) -> HostRes<String> {
 /// byte becomes `%XX`.
 ///
 /// Public because the script *provider* engine registers the same `encode_uri`
-/// host function and had a byte-identical copy of this. Two encoders that
+/// host function and calls into this one. Two encoders that
 /// scripts reach by the same name is a difference waiting to be discovered by
 /// whoever writes a `.rhai` that works in one and not the other.
 pub fn percent_encode(input: &str) -> String {
@@ -1394,8 +1394,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     }
 
     /// Exercises the registered bindings rather than the free functions: a
-    /// script calls both by name and gets its own text back. This is the part
-    /// that was missing - the tool engine offered neither.
+    /// script calls both by name and gets its own text back.
     #[test]
     fn execute_base64_round_trip_via_script() {
         let tool = tool_from("// @tool t\ndecode_base64(encode_base64(\"round trip · 🐙\"))");
@@ -1416,7 +1415,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
 
     #[test]
     fn execute_missing_optional_param_reads_as_unit() {
-        // Mirrors the issue's `params.count == ()` idiom.
+        // An unsupplied optional param reads as `()` in the script.
         let tool = tool_from("// @tool t\nif params.count == () { \"default\" } else { \"set\" }");
         let out = execute(&tool, serde_json::json!({"query": "x"}), FakeHost::arc());
         assert_eq!(out, "default");
@@ -1519,8 +1518,8 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         // A panicking host function must NEVER unwind into Rhai: rhai's
         // `exec_native_fn_call` holds an `ArgBackup` whose destructor asserts,
         // so unwinding through it is a double panic → `abort()` → the whole
-        // daemon dies (issue #109). Each of these would have aborted the test
-        // process before the guards existed.
+        // daemon dies. Without the guards every one of these aborts the test
+        // process.
         for (host_fn, tool_name, script) in [
             ("http_get", "t", "// @tool t\nhttp_get(\"http://x\")"),
             (
@@ -1762,10 +1761,11 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     /// `Debug`-escaped lookalike.
     ///
     /// Rhai's `map_basic` package registers `to_json(&mut Map)`, a more
-    /// specific signature than the `Dynamic` one this engine registers, so an
-    /// object map used to reach `format_map_as_json`. That writes strings with
-    /// `Debug`, which spells a narrow no-break space `\u{202f}`: not a JSON
-    /// escape, so whatever consumed the tool's output got something unparseable.
+    /// specific signature than the `Dynamic` one this engine registers, so
+    /// without a `Map` registration of its own an object map reaches
+    /// `format_map_as_json`. That writes strings with `Debug`, which spells a
+    /// narrow no-break space `\u{202f}`: not a JSON escape, so whatever
+    /// consumes the tool's output gets something unparseable.
     #[test]
     fn to_json_on_a_map_is_valid_json_for_non_printable_characters() {
         let text = "a\u{202f}b\u{200b}c\u{2011}d";
@@ -1937,11 +1937,10 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
 
     #[test]
     fn decode_entities_survives_multibyte_after_an_ampersand() {
-        // Regression for issue #109: the entity-scan window is a byte count, so
-        // a bare '&' followed by multi-byte text can slice mid-character and
-        // panic ("byte index 12 is not a char boundary") - inside a Rhai native
-        // fn, which aborts the daemon. Every one of these is a real shape from
-        // fetched HTML.
+        // Bounding the scan by bytes rather than characters slices
+        // mid-character on a bare '&' followed by multi-byte text ("byte index
+        // 12 is not a char boundary"), inside a Rhai native fn, which aborts
+        // the daemon. Every one of these is a real shape from fetched HTML.
         assert_eq!(decode_entities("&日本語日本"), "&日本語日本");
         assert_eq!(decode_entities("R&D 日本語です"), "R&D 日本語です");
         assert_eq!(decode_entities("&🎉🎉🎉🎉"), "&🎉🎉🎉🎉");
@@ -1953,10 +1952,10 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("&amp;日本語"), "&日本語");
         // Trailing '&' at the very end of the string (window == 1).
         assert_eq!(decode_entities("tail&"), "tail&");
-        // Issue #115 re-reported the same crash with a flag emoji. '&' plus nine
-        // ASCII bytes puts the four-byte regional indicator at bytes 10..14, so
-        // a fixed byte-12 window cuts straight through it. Pinned verbatim so
-        // the reported input, not just an equivalent one, stays covered.
+        // '&' plus nine ASCII bytes puts a four-byte regional indicator at
+        // bytes 10..14, the offset a byte-counted window would cut through.
+        // Pinned verbatim so this exact offset, not just an equivalent one,
+        // stays covered.
         assert_eq!(decode_entities("&abcdefghi🇸"), "&abcdefghi🇸");
     }
 

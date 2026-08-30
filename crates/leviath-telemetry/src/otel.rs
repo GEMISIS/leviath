@@ -196,7 +196,7 @@ impl LaneInstruments {
     }
 }
 
-/// Providers taken out of service by their circuit breaker (issue #201).
+/// Providers taken out of service by their circuit breaker.
 ///
 /// Per-provider levels rather than one total, because "which provider is down"
 /// is the whole question an operator has; a bare count answers none of it.
@@ -1133,7 +1133,7 @@ mod tests {
 
     /// The empty-run counter has to survive a completion whose span this
     /// process never opened, or a daemon restart would silently under-count
-    /// exactly the runs the metric exists to find (issue #192).
+    /// exactly the runs the metric exists to find.
     #[test]
     fn a_completion_counts_even_without_an_open_span() {
         let h = harness();
