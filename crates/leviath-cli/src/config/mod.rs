@@ -2774,6 +2774,43 @@ script = \"groq.rhai\"
         assert!(loaded.model_providers["mock"].is_endpoint());
     }
 
+    /// An endpoint has no script to forward `extra` to, so a key it does not
+    /// read is a misspelling that used to load clean and do nothing: `modles`
+    /// left the endpoint with no catalogue, `heaeders` sent no headers, and
+    /// `unknown_config_keys` could not see either because `flatten` writes
+    /// them back. The load now refuses, naming the entry, the keys, and the
+    /// ones it does read.
+    #[test]
+    fn an_endpoint_entry_with_unknown_keys_fails_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            "[model_providers.llama]\nkind = \"openai-compatible\"\n\
+             base_url = \"http://localhost:8080/v1\"\nmodles = [\"qwen3-8b\"]\n\
+             heaeders = { X-Org = \"research\" }\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("[model_providers.llama]"), "{err}");
+        assert!(err.contains("heaeders, modles"), "{err}");
+        assert!(err.contains("headers"), "{err}");
+        assert!(err.contains("models"), "{err}");
+
+        // A script entry keeps forwarding whatever it is given to `initialize`.
+        std::fs::write(
+            &path,
+            "[model_providers.groq]\nscript = \"groq.rhai\"\norg = \"research\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load_from_path(&path).expect("a script entry forwards extra keys");
+        assert_eq!(
+            loaded.model_providers["groq"].extra["org"],
+            toml::Value::String("research".into())
+        );
+    }
+
     /// Unix-only: the assertion is about POSIX mode bits, which Windows does
     /// not have. `write_private`'s Windows path is a plain write, exercised by
     /// every other `save_to_path` test.
