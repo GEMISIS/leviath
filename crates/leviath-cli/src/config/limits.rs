@@ -221,8 +221,11 @@ pub struct LimitsConfig {
     /// child process). Long enough that back-to-back runs of a blueprint reuse
     /// the warm connection; the next run that declares the server reconnects
     /// lazily. `0` keeps every server connected for the daemon's life, which
-    /// was the old behaviour. Global `[[mcp_servers]]` from config.toml are
-    /// never disconnected regardless.
+    /// was the old behaviour. A global `[[mcp_servers]]` entry is never
+    /// disconnected for idleness, because nothing leases one; take it out of
+    /// `config.toml` and this is how long it stays connected before
+    /// `daemon::mcp_reload` tears it down, so a stage part-way through a call
+    /// keeps the tool it was given.
     ///
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_mcp_idle_disconnect_secs")]

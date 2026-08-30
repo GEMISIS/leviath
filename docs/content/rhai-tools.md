@@ -152,6 +152,10 @@ context.tool == "send_email"
     && context.taint_level == "internal"
 ```
 
+Rules are re-read when they change. Add a file, edit one, or delete it, and the next run is gated
+against what the directory holds now, with no daemon restart. `policy.toml` beside it reloads the
+same way. A run already going keeps the rules it started under.
+
 A script that errors or does not evaluate to a boolean is treated as no match, so a broken rule can
 never accidentally open the gate. Inspect and dry-run rules with the CLI:
 

@@ -153,7 +153,9 @@ Present work to the user for approval or direct editing.
 
 Every tool in the two tables above does the same thing: it opens a prompt and waits. That is fine
 when you are watching the run. When nobody is, the wait has no end. The agent sits in
-`WaitingInput`, holding a concurrency slot, until the daemon restarts.
+`WaitingInput` until somebody answers or you cancel the run. It hands its
+[tool-lane](/docs/engine#the-tool-lane) slot back while it waits, and a daemon restart does not free
+it either: the open prompt is written to disk, and the run comes back still parked on it.
 
 So an unattended run does not get them. A run launched with `--yolo` (and every sub-agent and
 fan-out worker under it) has these five tools removed from the set advertised to the model, per

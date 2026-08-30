@@ -91,13 +91,14 @@ way). When a deadline passes, the prompt resolves exactly as cancelling it would
 | Tool approval | Denied. A timeout is never read as consent. |
 | Taint gate | Denied. |
 | `ask_user_*` | The model is told no answer came, and carries on. |
-| Interaction point | Proceeds with no user text, as a cancelled checkpoint does. See below. |
+| Interaction point | Proceeds with no user text, unless it declared `unattended = "ask"`. See below. |
 
 An interaction point that declared `unattended = "ask"` behaves differently on a timeout: the run
 **stops with an error**, rather than approving a checkpoint nobody made.
 
-The deadline is read once when the daemon starts, so changing it needs a daemon restart. Neither
-`lev setup` nor any bundled agent sets one for you.
+The deadline is read from `config.toml` every time it reloads, so setting one or clearing it needs
+no daemon restart. It is read when a prompt opens, so a prompt already waiting keeps the deadline it
+opened with. Neither `lev setup` nor any bundled agent sets one for you.
 
 ## Tool approval
 

@@ -293,6 +293,17 @@ catch an agent that was supposed to write something and did not.
 A submitted answer clears it. A researcher, a reviewer, or a router produces its answer and nothing
 else, and reporting those runs as empty was wrong.
 
+## Taint tracking gates the submission
+
+With [taint tracking](/docs/security#taint-tracking-experimental) on, `submit_output` counts as a
+way off the machine, the same as `shell` or `web_fetch`. The answer is what `lev serve` hands to
+anyone who reads `GET /api/agents/{id}/result`, and what the dashboard shows.
+
+So a stage that read a Private region and then submits it meets the gate before the answer is
+recorded. Your policy decides what happens: allow, deny, or ask. A run with nobody watching is
+blocked rather than asked. Taint tracking is off unless you turn it on, so this changes nothing for
+an install that leaves it alone.
+
 ## Large results
 
 An answer is one model response. That is a hard ceiling, not a policy. `submit_output` takes its

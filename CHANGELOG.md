@@ -396,6 +396,16 @@ same list.
   `FnPtr::new` no longer accepts a name starting with an underscore. The chunk
   sink is `leviath_emit_chunk`; scripts are unaffected, they call
   `on_chunk.call(...)` (#677).
+- The docs no longer tell you to restart the daemon for things that now reload.
+  The config schema's `[limits]` description, the `mcp_idle_disconnect_secs`
+  field doc, the tool-lane advice in troubleshooting, and the interaction
+  deadline all said the daemon reads them once at start-up. `tools.md` said a
+  parked agent holds a lane slot until a restart, when it hands the slot back
+  and comes back parked. The pages that never mentioned what changed now do:
+  provider keys, `rules/*.rhai`, pool and lane resizing, the taint gate on
+  `submit_output`, and a run that waits for a person with no timer. The
+  glossary gained gateways and deny-with-feedback, and the API reference says
+  that every route can answer 401 and lists the two MCP write routes.
 
 ### Changed
 

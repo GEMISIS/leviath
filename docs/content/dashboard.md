@@ -174,8 +174,9 @@ along its top does.
 
 `Ctrl-Y` warns every time you turn it on (turning it off never asks), and the warning is worth
 reading: an unattended run approves its own file edits and shell commands, but it does **not** skip
-a checkpoint the blueprint asks a person for. Those still stop, and one nobody answers ends the run
-when the interaction timeout expires. The setting is off again every time the screen opens.
+a checkpoint the blueprint asks a person for. Those still stop, and by default one nobody answers
+waits for as long as it takes. `[limits] interaction_timeout_secs` is how you bound that wait. The
+setting is off again every time the screen opens.
 
 ### Detail view
 

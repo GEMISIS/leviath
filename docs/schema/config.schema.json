@@ -104,7 +104,7 @@
     },
     "limits": {
       "type": "object",
-      "description": "The daemon reads these once at startup, so a change needs `lev daemon restart`.",
+      "description": "Reloaded with config.toml, so a new value is in force for the next run with no daemon restart, and most of these reach a run already going. `mcp_idle_disconnect_secs` is the exception: the MCP pool is built with it at start-up.",
       "additionalProperties": false,
       "properties": {
         "max_concurrent_inferences": {
@@ -136,7 +136,7 @@
           "type": "integer",
           "minimum": 0,
           "default": 60,
-          "description": "Disconnect an MCP server no agent has used for this long. It reconnects on next use."
+          "description": "Disconnect a per-agent MCP server no run has leased for this long. It reconnects on next use. A global [[mcp_servers]] entry is never disconnected for idleness; take one out of config.toml and this is how long it stays up before the daemon tears it down. Read once at daemon start."
         },
         "stall_timeout_secs": {
           "type": "integer",

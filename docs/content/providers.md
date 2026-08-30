@@ -379,6 +379,18 @@ lev auth migrate --to-file      # move them back to config.toml
 lev auth migrate --dry-run      # preview without moving anything
 ```
 
+A key you add, replace, or remove is in force for the next run you start. The daemon watches
+`config.toml` and rebuilds its provider registry when the credentials in it change, so no restart is
+involved, and it makes no difference whether the write came from `lev setup`, `PUT /api/config`, or
+an editor. A run already under way keeps calling the provider its current stage started on. A
+provider whose key changed also has its circuit-breaker record cleared, so a replaced key is tried
+at once rather than sitting out the old key's cooldown.
+
+The exception is a key you export as an environment variable instead of writing it to the file. The
+daemon inherited its environment when it started, so an `export` in your shell afterwards never
+reaches it. Write the key to `config.toml`, or run `lev daemon restart` from the shell that exports
+it.
+
 ## Rate limits
 
 Optional per-provider client-side rate limits, enforced before each call:

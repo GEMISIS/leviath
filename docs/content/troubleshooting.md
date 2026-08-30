@@ -279,7 +279,8 @@ and not one run moved. `parked` is not part of the problem: a batch waiting on a
 another run holds no capacity. `busy` with a `queued` figure that never falls is.
 
 The usual cause is too little tool capacity for the shape of the workload. Raise
-`[limits] max_concurrent_tools` and restart the daemon.
+`[limits] max_concurrent_tools` and save the file. The daemon picks the new width up on its own,
+and a raised lane is usable at once, so nothing needs restarting.
 
 Left alone, the daemon widens the lane itself after `[limits] dead_cycles_before_relief` cycles, 10
 by default, and logs it at `error` level. It never cancels anything, and it stops after granting one

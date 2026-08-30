@@ -78,6 +78,22 @@ In the third row, `updated_at` tells you when it ended, and `status` and `error`
 `finished` and `not_running` never overlap, so a run appears exactly once and you cannot close the
 same work item twice.
 
+## A run waiting on a person waits indefinitely
+
+A prompt that needs a person waits until somebody answers it, with no timer on it by default. The
+run stays in `runs` with status `Waiting`, and your queue keeps its slot busy for as long as that
+takes. `lev ps` says what each run is waiting on.
+
+That is the right default for somebody at a keyboard and the wrong one for a queue. Two ways to
+bound it:
+
+- Start the run unattended: `--yolo` on `lev run`, or `"yolo": true` on the API spawn. The tools
+  that wait for a person are never offered to the model.
+- Set `[limits] interaction_timeout_secs`. A prompt nobody answers within that resolves the way
+  cancelling it would, so a tool approval and a taint gate are denied.
+
+See [when nobody answers](/docs/interaction#when-nobody-answers).
+
 ## When the daemon does not answer
 
 If `daemon_reachable` is false, act on nothing at all.

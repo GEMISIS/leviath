@@ -84,5 +84,8 @@ Provider scripts are recompiled when the file's mtime changes, so an edit takes 
 run with no daemon restart. Region scripts are read and compile-checked once, at spawn, so an edit
 applies to the next run rather than an in-flight one.
 
+Policy rules reload as well. The daemon stats `policy.toml` and every `rules/*.rhai` beside it, so a
+rule you add, edit, or delete gates the next run. Nothing is restarted for that either.
+
 Neither is scanned or executed until something actually references it, so dropping a file into a
 directory does not by itself run it.
