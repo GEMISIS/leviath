@@ -727,6 +727,8 @@ impl PipelineWorld {
         // Dispatch anything that settled between the last park and now (e.g. an
         // inference result that woke the loop the same instant shutdown fired).
         self.run_to_fixed_point();
+        // Drop every in-flight job, which is what makes the line below finish.
+        self.abort_in_flight_work();
         // Drop the *only* `PersistJob` sender so the worker's `recv()` loop drains
         // its queue and then ends.
         self.world.remove_resource::<PersistenceStage>();
@@ -741,6 +743,29 @@ impl PipelineWorld {
             .resource::<crate::telemetry::Telemetry>()
             .0
             .force_flush();
+    }
+
+    /// Cancel every job still in flight, so shutdown does not wait on one.
+    ///
+    /// `remove_resource::<PersistenceStage>` drops the world's sender, but a
+    /// dispatched tool batch carries its own clone (the progress callback that
+    /// journals each call as it finishes). While that batch is alive the channel
+    /// stays open, so awaiting the persistence worker waits on the batch - and a
+    /// batch parked on an approval prompt is waiting on a person. `lev daemon
+    /// stop` then hung until somebody answered, which with no interaction
+    /// timeout is for ever.
+    ///
+    /// Cancelling drops the batch instead. Its calls are not marked done and its
+    /// assistant turn is already journalled with the batch pending, so the run
+    /// reloads on the next daemon start exactly where it was: parked, and asking
+    /// again.
+    fn abort_in_flight_work(&mut self) {
+        let mut agents = self.world.query::<&crate::pipeline::InFlightWork>();
+        for in_flight in agents.iter(&self.world) {
+            for token in &in_flight.0 {
+                token.cancel();
+            }
+        }
     }
 
     /// A point-in-time read of what the world is holding and what it is waiting
@@ -2463,6 +2488,43 @@ mod tests {
         assert_eq!(s.cursor, 0);
         assert_eq!(s.round, 0);
         assert_eq!(s.body, "## Plan\n1. do it");
+    }
+
+    /// A daemon must be able to stop while a run is parked on a person.
+    ///
+    /// The batch on the tool lane carries a clone of the persistence sender (it
+    /// journals each call as it finishes), so awaiting the persistence worker
+    /// waits on the batch - and a batch parked on an approval prompt waits on a
+    /// person, which with no interaction timeout is for ever. `lev daemon stop`
+    /// hung for exactly that reason. Shutdown now cancels in-flight work first.
+    #[tokio::test]
+    async fn flush_and_stop_does_not_wait_on_a_batch_parked_on_a_person() {
+        let mut world = build_world(registry_with(vec![]));
+        let entity = spawn(&mut world).entity();
+
+        // Stand in for the dispatched batch: something that holds a clone of
+        // the persistence sender until its cancel token fires, which is what a
+        // batch on the lane does (the lane drops a cancelled batch, and its
+        // progress callback goes with it).
+        let persist = world.world.resource::<PersistenceStage>().0.clone();
+        let cancel = crate::cancel::CancelToken::new();
+        let holder = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                cancel.cancelled().await;
+                drop(persist);
+            }
+        });
+        world
+            .world
+            .entity_mut(entity)
+            .insert(crate::pipeline::InFlightWork(vec![cancel.clone()]));
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), world.flush_and_stop())
+            .await
+            .expect("shutdown must not wait for the person to answer");
+        assert!(cancel.is_cancelled(), "the parked batch was dropped");
+        holder.await.expect("the holder ended with its batch");
     }
 
     #[tokio::test]
