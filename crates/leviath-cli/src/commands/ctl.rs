@@ -65,6 +65,10 @@ pub struct RespondArgs {
     /// Deny a tool-approval / confirm interaction.
     #[arg(long)]
     pub deny: bool,
+    /// With `--deny`, tell the model what to do instead. Reaches it as part of
+    /// the tool result, so its next turn is a redirect rather than a guess.
+    #[arg(long, requires = "deny", value_name = "TEXT")]
+    pub feedback: Option<String>,
     /// With `--approve`, allow what this call runs for the rest of the run.
     #[arg(long, visible_alias = "run")]
     pub session: bool,
@@ -264,12 +268,27 @@ fn build_response(request_id: &str, args: &RespondArgs) -> InteractionResponse {
             (_, true) => ApprovalScope::Stage,
             _ => ApprovalScope::Once,
         };
-        InteractionResponse::approval(request_id, args.approve, scope)
+        match args.feedback.as_deref() {
+            // `requires = "deny"` keeps this off the approve path, so a
+            // feedback here is always a deny.
+            Some(feedback) => InteractionResponse::deny_with_feedback(request_id, feedback),
+            None => InteractionResponse::approval(request_id, args.approve, scope),
+        }
     } else if let Some(index) = args.choice {
         InteractionResponse::choice(request_id, index)
     } else {
         InteractionResponse::text(request_id, args.value.clone().unwrap_or_default())
     }
+}
+
+/// `--feedback` is a deny's message and nothing else. clap's `requires`
+/// catches it on its own; beside `--approve` the parser lets it through, and
+/// a redirect silently dropped on a grant is the one outcome nobody asked for.
+fn check_feedback_flag(args: &RespondArgs) -> anyhow::Result<()> {
+    if args.feedback.is_some() && !args.deny {
+        bail!("--feedback goes with --deny: it tells the model what to do instead of the call");
+    }
+    Ok(())
 }
 
 /// List the interactions the daemon is currently holding.
@@ -306,6 +325,7 @@ async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result
 /// `lev respond`: answer a pending interaction, or list open ones when no
 /// `request_id` is given.
 pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Result<()> {
+    check_feedback_flag(args)?;
     match &args.request_id {
         None => list_interactions(client, args.json).await,
         Some(request_id) => {
@@ -683,10 +703,87 @@ mod tests {
             choice: None,
             approve: false,
             deny: false,
+            feedback: None,
             session: false,
             stage: false,
             json: false,
         }
+    }
+
+    /// `lev respond <id> --deny --feedback TEXT` is a deny carrying the text;
+    /// blank text is the plain deny, the same rule every other client follows.
+    #[test]
+    fn build_response_deny_with_feedback() {
+        let r = build_response(
+            "q1",
+            &RespondArgs {
+                deny: true,
+                feedback: Some("use git log, not git show".to_string()),
+                ..respond_args()
+            },
+        );
+        assert_eq!(
+            r,
+            InteractionResponse::deny_with_feedback("q1", "use git log, not git show")
+        );
+        let blank = build_response(
+            "q1",
+            &RespondArgs {
+                deny: true,
+                feedback: Some("  ".to_string()),
+                ..respond_args()
+            },
+        );
+        assert_eq!(
+            blank,
+            InteractionResponse::approval("q1", false, ApprovalScope::Once)
+        );
+    }
+
+    /// `--feedback` without `--deny` is refused at the parser, with `--deny`
+    /// named in the message, and it never combines with `--approve`.
+    #[test]
+    fn feedback_flag_is_only_valid_with_deny() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Cli {
+            #[command(flatten)]
+            respond: RespondArgs,
+        }
+        let ok = Cli::try_parse_from(["lev", "q1", "--deny", "--feedback", "why"]).unwrap();
+        assert!(ok.respond.deny);
+        assert_eq!(ok.respond.feedback.as_deref(), Some("why"));
+
+        let alone = Cli::try_parse_from(["lev", "q1", "--feedback", "why"]).unwrap_err();
+        assert!(alone.to_string().contains("--deny"), "{alone}");
+
+        // clap lets `--approve --feedback` through, so the command checks.
+        let with_approve =
+            Cli::try_parse_from(["lev", "q1", "--approve", "--feedback", "why"]).unwrap();
+        let err = check_feedback_flag(&with_approve.respond).unwrap_err();
+        assert!(err.to_string().contains("--deny"), "{err}");
+        assert!(check_feedback_flag(&ok.respond).is_ok());
+        assert!(check_feedback_flag(&respond_args()).is_ok());
+    }
+
+    /// The check runs before anything is sent: a bad flag combination is an
+    /// error with no daemon involved.
+    #[tokio::test]
+    async fn respond_refuses_feedback_without_deny_before_contacting_the_daemon() {
+        let client = ControlClient::new(leviath_runtime::control_socket::control_id(
+            std::path::Path::new("/no/such/daemon"),
+        ));
+        let err = respond(
+            &client,
+            &RespondArgs {
+                approve: true,
+                feedback: Some("why".to_string()),
+                ..respond_args()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--deny"), "{err}");
     }
 
     #[test]

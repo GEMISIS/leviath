@@ -139,13 +139,19 @@ opt in, because otherwise any agent package could pre-approve its own shell with
 ### The prompt
 
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
-command for `bash`/`shell`, the path for the file tools), with four options:
+command for `bash`/`shell`, the path for the file tools), with five options:
 
 - **Allow once**: permit just this one call.
 - **Allow ... for this stage**: permit every later call this covers, until the run leaves the
   current stage. Re-entering the same stage keeps the grant, so a revision loop does not re-ask.
 - **Allow ... for this run**: permit every later call this covers, for the rest of the run.
-- **Deny**: reject the call.
+- **Deny**: reject the call. The model sees `[denied] User declined tool call 'bash'.` and
+  decides for itself what to try next.
+- **Deny with feedback**: reject the call and say what to do instead. The dashboard opens the
+  response box for the text; `lev respond` takes it as `--feedback`; the API takes `feedback`.
+  The model sees `[denied] User declined tool call 'bash'. Feedback: <your text>` as the tool
+  result, so its next turn starts from your redirect rather than from a guess. The text is in the
+  run's journal with the rest of the tool result.
 
 The two scoped options name what they grant, because a grant is not keyed on the tool. Approving
 `ls && git status` for the run grants `ls` and `git status`, not "the shell": a later
@@ -267,6 +273,7 @@ lev respond <request-id> --approve       # tool-approval / confirm
 lev respond <request-id> --approve --stage     # and every later call this covers, this stage
 lev respond <request-id> --approve --session   # and every later call this covers, this run
 lev respond <request-id> --deny          # reject
+lev respond <request-id> --deny --feedback "use git log, not git show"   # reject and redirect
 ```
 
 You don't have to use the CLI. The same open questions can be answered interactively from the

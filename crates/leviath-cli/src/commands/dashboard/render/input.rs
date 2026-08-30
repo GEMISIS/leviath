@@ -104,17 +104,20 @@ impl Dashboard {
         use interaction::InteractionKind;
 
         if self.input_mode
-            && matches!(
-                kind,
-                Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None
-            )
+            && (self.deny_feedback_open
+                || matches!(
+                    kind,
+                    Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None
+                ))
         {
             // ── FreeText / EditText: render the multi-line tui-textarea widget ──
             // No pending interaction request/prompt means this is a mid-run
             // message to a still-running agent rather than a response to a
             // specific question - label it accordingly for consistent UX.
             let is_message_mode = pending_req.is_none() && agent.waiting_prompt.is_none();
-            let hint = if is_message_mode {
+            let hint = if self.deny_feedback_open {
+                " Deny with feedback: what should it do instead?  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] back "
+            } else if is_message_mode {
                 " Provide input while this is running  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             } else {
                 " Response  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "

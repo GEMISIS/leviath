@@ -250,6 +250,13 @@ same list.
   regions never run for a run started over the API. `lev run` on the host is
   as it was; `[security] allow_seed_commands = false` remains the
   machine-wide switch.
+- A tool approval can be denied with feedback. The prompt's fifth option, "Deny with feedback",
+  opens the dashboard's response box; `lev respond <id> --deny --feedback "..."` and `feedback`
+  beside `approved: false` on `POST /api/agents/{id}/interaction` send the same thing. The text
+  reaches the model inside the refused call's tool result, as
+  `[denied] User declined tool call 'bash'. Feedback: <text>`, so its next turn is a redirect
+  rather than a guess; it is in the run's journal and on the `tool_call_finished` event with the
+  rest of the result. A deny without feedback is unchanged. Announced as `interaction.feedback`.
 - `[model_providers.<name>] kind = "openai-compatible"` reaches any server that speaks
   OpenAI's chat API (llama.cpp, LM Studio, vLLM, BionicGPT, a gateway) natively, with no
   Rhai script: `base_url`, an optional `api_key`, `headers` and a `models` fallback for a

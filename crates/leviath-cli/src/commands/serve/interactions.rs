@@ -59,6 +59,13 @@ pub(super) async fn submit_interaction(
     AxumPath(_id): AxumPath<String>,
     Json(body): Json<SubmitInteractionReq>,
 ) -> Result<StatusCode, ApiError> {
+    if body.approved == Some(true) && body.feedback.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "feedback goes with a deny: send it with \"approved\": false, or drop it to approve"
+                .to_string(),
+        ));
+    }
     let scope = body.scope.as_deref().map(approval_scope_from_wire);
     let response = InteractionResponse {
         request_id: body.request_id,
@@ -295,6 +302,73 @@ mod tests {
             .await,
             StatusCode::ACCEPTED
         );
+    }
+
+    /// Post `body` to a fresh one-request daemon: the status, and the answer
+    /// the daemon saw (None when the server refused it first).
+    async fn answered_with(body: &'static str) -> (StatusCode, Option<InteractionResponse>) {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Option<InteractionResponse>>> = Arc::default();
+        let sink = seen.clone();
+        let (control, _dir, _srv) = fake_daemon(move |req| {
+            if let ControlRequest::AnswerInteraction { response } = req {
+                *sink.lock().unwrap() = Some(response);
+            }
+            ControlResponse::Ok { ok: true }
+        });
+        let status = status_of(
+            app_with(control),
+            "POST",
+            "/api/agents/a/interaction",
+            Body::from(body),
+        )
+        .await;
+        let seen = seen.lock().unwrap().take();
+        (status, seen)
+    }
+
+    /// The three body shapes on a deny: bare, with feedback, and feedback on a
+    /// grant. The first two reach the daemon as the response they name; the
+    /// third is refused before the daemon sees it.
+    #[tokio::test]
+    async fn submit_interaction_feedback_shapes() {
+        let (status, seen) = answered_with(r#"{"request_id":"q1","approved":false}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seen = seen.expect("reached the daemon");
+        assert_eq!((seen.approved, seen.feedback), (Some(false), None));
+
+        let (status, seen) = answered_with(
+            r#"{"request_id":"q1","approved":false,"feedback":"use the API instead"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seen = seen.expect("reached the daemon");
+        assert_eq!(seen.approved, Some(false));
+        assert_eq!(seen.feedback.as_deref(), Some("use the API instead"));
+
+        let (status, seen) =
+            answered_with(r#"{"request_id":"q1","approved":true,"feedback":"why"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(seen.is_none(), "the 400 never reached the daemon");
+    }
+
+    /// The 400 says what to change.
+    #[tokio::test]
+    async fn feedback_on_a_grant_names_the_fix() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents/a/interaction")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"request_id":"q1","approved":true,"feedback":"why"}"#,
+            ))
+            .unwrap();
+        let resp = app_with(control).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("feedback goes with a deny"), "{text}");
     }
 
     #[tokio::test]

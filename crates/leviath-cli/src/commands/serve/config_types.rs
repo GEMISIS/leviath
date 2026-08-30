@@ -212,6 +212,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // 404s. The `GET` half is deliberately not announced: it shipped
     // unannounced, so its absence from this list proves nothing.
     "fs.mkdir",
+    // `feedback` on `POST /api/agents/{id}/interaction` beside
+    // `approved: false`, and the "Deny with feedback" option on a tool
+    // approval request. Announced because an older daemon drops the field
+    // without a word: a console that offered the box against one would send
+    // the person's redirect nowhere.
+    "interaction.feedback",
 ];
 
 /// The server's numeric limits.
