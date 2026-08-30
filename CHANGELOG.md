@@ -496,6 +496,22 @@ same list.
 
 ### Added
 
+- `GET /api/scripts?agent=<name>&include=candidates` also lists the `.rhai`
+  files under that agent's directory that nothing declares, as
+  `kind: "unknown"` with `declared: false`, so an editor can offer a picker for
+  `[stages.*.output].validator` and the hooks. Without the parameter the
+  listing holds exactly what it held before: a file appears once something
+  names it, which is circular for a picker but right for "what will load".
+  Every entry now carries `declared`, and an agent-scoped one carries
+  `relative_path`, the spelling that goes into a manifest. The scan is bounded
+  (four levels, 128 directories, 256 files), reports `.rhai` files only, and
+  follows no symlink out of the agent's own directory. A hook or validator
+  declared in a subdirectory is listed rather than dropped, and
+  `GET/PUT/DELETE /api/scripts/{kind}/{name}` opens it under the relative name
+  the listing reports, with the separator percent-encoded
+  (`output_validator/validators%2Fa2ui`); every part of the name is still a
+  safe path component and the result still has to resolve inside the agent's
+  directory. Announced as `scripts.candidates` (#738).
 - `POST /api/update` carries out the update `GET /api/update` describes,
   behind `--allow-admin`: the same plan, run in the background. It answers
   202 with a job id, sends every step as `update_progress` on `/ws` with

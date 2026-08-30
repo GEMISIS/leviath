@@ -221,7 +221,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
-| `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
+| `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
@@ -862,13 +862,60 @@ can carry: `tool`, `region_hook`, `stage_hook`, `output_validator` and `provider
 directory an agent owns (`<agent>/tools/`, plus the global one); the hooks and the validator are
 named by path in the manifest and resolved against the agent's own directory, so the listing derives
 them from what the manifest declares and the read and write routes address them at
-`<agent>/<name>.rhai`. A hook a manifest declares inside a subdirectory is outside what `{name}` can
-address, and is left out rather than listed under a name that would fetch nothing.
+`<agent>/<name>.rhai`.
+
+Every entry carries a `declared` flag, and an agent-scoped one also carries `relative_path`: where
+the file sits relative to the agent's own directory, `validators/a2ui.rhai`, which is the spelling
+that goes into a manifest. A machine-wide script has no `relative_path`, since no blueprint contains
+it.
 
 `GET/PUT/DELETE /api/scripts/{kind}/{name}` reads and writes one file, scoped by `?agent=<name>` or,
-with no `agent`, the machine's own directory for that kind. `POST /api/scripts/validate` takes `kind`
+with no `agent`, the machine's own directory for that kind. `{name}` is the file without its `.rhai`
+extension, and it may be a relative path when the manifest declared one: percent-encode the
+separator, so `validators/a2ui.rhai` is `output_validator/validators%2Fa2ui`. Every part of it may
+hold only letters, digits, `.`, `_` and `-`, and the result has to land inside the directory the
+route is fenced to once symlinks are followed, so a declaration that climbs out of the agent's
+directory or names something that is not a `.rhai` file is left out of the listing rather than
+reported under a name that would fetch a different file. `POST /api/scripts/validate` takes `kind`
 and `content` and compiles without writing, so an editor can check before saving instead of saving
 and waiting for a run to fail.
+
+### Offering a file nobody has named yet
+
+The listing above answers "what will load", which is circular for a picker: a hook or a validator
+appears once the manifest declares it, and declaring it is the thing the picker exists to do. So
+`GET /api/scripts?agent=<name>&include=candidates` adds the other half, the `.rhai` files under that
+agent's directory that nothing declares:
+
+```json
+{
+  "kind": "unknown",
+  "name": "validators/draft",
+  "source": "agent",
+  "agent": "picker",
+  "path": "/home/you/.leviath/agents/picker/validators/draft.rhai",
+  "relative_path": "validators/draft.rhai",
+  "declared": false
+}
+```
+
+`kind` is `unknown` because nothing about the file says which of the four agent-owned kinds it is;
+the declaration says that, and it has not happened yet. `unknown` is not a `{kind}` the read and
+write routes accept, so a client picks a real one to open the file with, and `compiles` is absent
+for the same reason: which compiler would have to accept it is not yet decided. Write
+`relative_path` into `validator = "..."` or a `[stages.<name>.hooks]` entry and the next listing
+reports the same file as declared.
+
+Without the parameter the listing is exactly what it was, so a client that reads it as "what will
+load" keeps getting that. `include` takes a comma-separated list and refuses a token it does not
+serve, rather than answering a misspelling with a short list. With no `?agent=` it changes nothing:
+both global directories are already listed file by file, so nothing there is undeclared. Check
+`scripts.candidates` in the `capabilities` list before offering the picker.
+
+The scan is bounded and stays inside the agent's directory: four levels deep, 128 directories and
+256 files per request, `.rhai` files only, and no symlink is followed out of the agent's own
+directory. A file whose name could not be written into a manifest, because of a space or a character
+that is not a safe path component, is left out rather than guessed at.
 
 > [!WARNING]
 > `PUT` and `DELETE` are **not mounted at all** without `lev serve --allow-admin`, exactly like the
@@ -1043,6 +1090,7 @@ than that feature, not broken.
 | `scripts.read` | The `GET` half of the scripts routes |
 | `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
+| `scripts.candidates` | `?include=candidates` on the script listing, plus `relative_path` and `declared` on every entry |
 | `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config`: a gateway can be an OpenAI-compatible endpoint rather than a script |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
