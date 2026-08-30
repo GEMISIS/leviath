@@ -2371,6 +2371,7 @@ mod tests {
                     choice_index: None,
                     approved: None,
                     scope: None,
+                    feedback: None,
                 },
             },
             ControlRequest::CancelInteraction { request_id: run() },

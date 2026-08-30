@@ -1114,6 +1114,10 @@ pub(super) struct SubmitInteractionReq {
     pub(super) choice_index: Option<usize>,
     pub(super) approved: Option<bool>,
     pub(super) scope: Option<String>,
+    /// On a deny, what the model should do instead. Optional, and absent is
+    /// the plain deny every existing caller sends.
+    #[serde(default)]
+    pub(super) feedback: Option<String>,
 }
 
 #[derive(Deserialize)]

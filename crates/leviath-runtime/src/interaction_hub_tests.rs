@@ -329,3 +329,62 @@ fn the_timeout_reads_back_through_the_hub_and_its_backends() {
     assert_eq!(hub.timeout_secs(), 7);
     assert_eq!(hub.backend_for("agent-a").timeout_secs(), 7);
 }
+
+/// A deny that carries feedback comes out of `ask` exactly as it went into
+/// `answer`: the hub is a channel, and the text is part of the answer.
+#[tokio::test]
+async fn a_deny_with_feedback_round_trips_through_the_hub() {
+    let hub = InteractionHub::new();
+    let backend = hub.backend_for("agent-a");
+    let asking = tokio::spawn(async move {
+        backend
+            .ask(InteractionRequest::tool_approval(
+                "q1",
+                "bash",
+                serde_json::json!({"command": "rm -rf build"}),
+                "stage",
+                &[],
+            ))
+            .await
+    });
+    settle().await;
+    let sent = InteractionResponse::deny_with_feedback("q1", "keep build/, clean only dist/");
+    assert!(hub.answer(sent.clone()));
+    let got = asking.await.unwrap();
+    assert_eq!(got, sent);
+    assert_eq!(got.deny_feedback(), Some("keep build/, clean only dist/"));
+    assert!(hub.pending().is_empty());
+}
+
+/// The same answer over the control socket's wire shape and through the
+/// run journal: what `lev respond` or the API sends is what the daemon reads,
+/// and the tool result it becomes survives the archive a resumed run replays.
+#[test]
+fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
+    use leviath_core::run_archive::{
+        RUN_ARCHIVE_VERSION, RunRecord, read_archive, write_archive_start, write_record,
+    };
+    let wire = r#"{"request_id":"q1","value":null,"choice_index":null,"approved":false,"scope":"once","feedback":"use the API"}"#;
+    let parsed: InteractionResponse = serde_json::from_str(wire).unwrap();
+    assert_eq!(
+        parsed,
+        InteractionResponse::deny_with_feedback("q1", "use the API")
+    );
+    let mut buf = Vec::new();
+    write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+    write_record(
+        &mut buf,
+        &RunRecord::ToolCallDone {
+            iteration: 1,
+            call_id: "c1".to_string(),
+            result: "[denied] User declined tool call 'bash'. Feedback: use the API".to_string(),
+            at: 0,
+        },
+    )
+    .unwrap();
+    let (_, records) = read_archive(&mut buf.as_slice()).unwrap();
+    assert!(matches!(
+        &records[0],
+        RunRecord::ToolCallDone { result, .. } if result.ends_with("Feedback: use the API")
+    ));
+}

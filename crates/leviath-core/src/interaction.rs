@@ -302,6 +302,7 @@ impl InteractionRequest {
                 stage_label,
                 run_label,
                 "Deny".to_string(),
+                DENY_WITH_FEEDBACK.to_string(),
             ],
             tool_name: Some(tool),
             tool_arguments: Some(arguments),
@@ -311,7 +312,29 @@ impl InteractionRequest {
             body_format: BodyFormat::Plain,
         }
     }
+
+    /// Whether option `index` of this request is the deny that takes a
+    /// message for the model.
+    ///
+    /// A client that offers it has to open a text box before answering, so it
+    /// needs to know which row that is. Keyed on the label rather than a fixed
+    /// position because the taint gate's approval has no such row, and a
+    /// client that assumed index four on every approval would open the box on
+    /// a request that cannot carry the text.
+    pub fn is_deny_with_feedback(&self, index: usize) -> bool {
+        self.kind == InteractionKind::ToolApproval
+            && self.options.get(index).map(String::as_str) == Some(DENY_WITH_FEEDBACK)
+    }
 }
+
+/// The label of the tool-approval option that denies and tells the model why.
+///
+/// The plain "Deny" hands the model nothing but the refusal, and its next turn
+/// is a guess at what it should have done instead. This one carries a line
+/// from the person into the tool result, so the next turn is a redirect. Every
+/// client renders it from the request's `options`, so this is where the words
+/// live.
+pub const DENY_WITH_FEEDBACK: &str = "Deny with feedback";
 
 /// The scope a tool-approval option index means, or `None` for deny.
 ///
@@ -369,6 +392,15 @@ pub struct InteractionResponse {
     pub approved: Option<bool>,
     /// Scope of a tool approval decision.
     pub scope: Option<ApprovalScope>,
+    /// What the person wants the model to do instead, on a denied tool
+    /// approval. Reaches the model as part of the tool result.
+    ///
+    /// Absent (the default) is the plain deny every existing client sends, so
+    /// an answer written before this field existed still means what it meant.
+    /// Only ever read alongside `approved: Some(false)`: a grant has nothing to
+    /// redirect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
 }
 
 impl InteractionResponse {
@@ -380,6 +412,7 @@ impl InteractionResponse {
             choice_index: None,
             approved: None,
             scope: None,
+            feedback: None,
         }
     }
 
@@ -391,6 +424,7 @@ impl InteractionResponse {
             choice_index: Some(index),
             approved: None,
             scope: None,
+            feedback: None,
         }
     }
 
@@ -402,6 +436,40 @@ impl InteractionResponse {
             choice_index: None,
             approved: Some(approved),
             scope: Some(scope),
+            feedback: None,
+        }
+    }
+
+    /// Build a deny that tells the model what to do instead.
+    ///
+    /// The text is trimmed, and an answer that is all whitespace is the plain
+    /// deny: the tool result must not carry an empty "Feedback:" for the model
+    /// to puzzle over.
+    pub fn deny_with_feedback(request_id: impl Into<String>, feedback: &str) -> Self {
+        let feedback = feedback.trim();
+        Self {
+            request_id: request_id.into(),
+            value: None,
+            choice_index: None,
+            approved: Some(false),
+            scope: Some(ApprovalScope::Once),
+            feedback: (!feedback.is_empty()).then(|| feedback.to_string()),
+        }
+    }
+
+    /// The redirect a denied tool approval carries, if the person wrote one.
+    ///
+    /// `None` on a grant, whatever the field says: feedback beside
+    /// `approved: true` is a client bug, and the model must not be told the
+    /// call it just ran was refused.
+    pub fn deny_feedback(&self) -> Option<&str> {
+        match self.approved {
+            Some(false) => self
+                .feedback
+                .as_deref()
+                .map(str::trim)
+                .filter(|f| !f.is_empty()),
+            _ => None,
         }
     }
 }
@@ -593,6 +661,8 @@ mod tests {
         assert_eq!(approval_choice(2), Some(ApprovalScope::Run));
         assert_eq!(req.options[3], "Deny");
         assert_eq!(approval_choice(3), None);
+        assert_eq!(req.options[4], DENY_WITH_FEEDBACK);
+        assert_eq!(approval_choice(4), None, "feedback is still a deny");
         assert_eq!(
             approval_choice(99),
             None,
@@ -654,7 +724,7 @@ mod tests {
             &[],
         );
         assert_eq!(r.kind, InteractionKind::ToolApproval);
-        assert_eq!(r.options.len(), 4);
+        assert_eq!(r.options.len(), 5);
     }
 
     #[test]
@@ -700,6 +770,7 @@ mod tests {
             choice_index: None,
             approved: None,
             scope: None,
+            feedback: None,
         };
         assert_eq!(response_as_text(&empty), "");
     }
@@ -763,7 +834,7 @@ mod tests {
         assert_eq!(r.kind, InteractionKind::ToolApproval);
         assert_eq!(r.tool_name.as_deref(), Some("write_file"));
         assert!(r.tool_arguments.is_some());
-        assert_eq!(r.options.len(), 4);
+        assert_eq!(r.options.len(), 5);
         assert!(r.prompt.contains("write_file"));
     }
 
@@ -1062,5 +1133,81 @@ mod tests {
         }"#;
         let req: InteractionRequest = serde_json::from_str(json).unwrap();
         assert!(req.required);
+    }
+    // ─── deny with feedback ──────────────────────────────────────────────────
+
+    /// The wire shape every existing client sends has no `feedback` key, and
+    /// the shape a new one sends adds exactly that key and nothing else.
+    #[test]
+    fn feedback_is_absent_from_the_wire_unless_given() {
+        let plain = InteractionResponse::approval("q1", false, ApprovalScope::Once);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("feedback").is_none(), "{json}");
+        let old_wire: InteractionResponse =
+            serde_json::from_str(r#"{"request_id":"q1","value":null,"choice_index":null,"approved":false,"scope":"once"}"#)
+                .unwrap();
+        assert_eq!(old_wire, plain);
+
+        let with = InteractionResponse::deny_with_feedback("q1", "  use git log instead \n");
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["feedback"], "use git log instead");
+        assert_eq!(json["approved"], false);
+        let back: InteractionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, with);
+        assert_eq!(back.deny_feedback(), Some("use git log instead"));
+    }
+
+    /// Whitespace is not a message: the constructor and the reader both turn
+    /// it into the plain deny.
+    #[test]
+    fn blank_feedback_is_the_plain_deny() {
+        let blank = InteractionResponse::deny_with_feedback("q1", "   \n\t");
+        assert_eq!(blank.feedback, None);
+        assert_eq!(blank.approved, Some(false));
+        assert_eq!(blank.deny_feedback(), None);
+        let padded = InteractionResponse {
+            feedback: Some("  \n ".to_string()),
+            ..InteractionResponse::approval("q1", false, ApprovalScope::Once)
+        };
+        assert_eq!(padded.deny_feedback(), None);
+    }
+
+    /// Feedback beside a grant, or beside no decision at all, is never read.
+    #[test]
+    fn feedback_is_only_read_on_a_deny() {
+        let granted = InteractionResponse {
+            feedback: Some("why".to_string()),
+            ..InteractionResponse::approval("q1", true, ApprovalScope::Run)
+        };
+        assert_eq!(granted.deny_feedback(), None);
+        let undecided = InteractionResponse {
+            feedback: Some("why".to_string()),
+            ..InteractionResponse::text("q1", "")
+        };
+        assert_eq!(undecided.deny_feedback(), None);
+    }
+
+    /// Only a tool approval has the feedback row, and only at the position
+    /// the label sits at.
+    #[test]
+    fn the_feedback_row_is_found_by_label_on_tool_approvals_only() {
+        let tool =
+            InteractionRequest::tool_approval("id", "shell", serde_json::json!({}), "s", &[]);
+        assert!(tool.is_deny_with_feedback(4));
+        assert!(!tool.is_deny_with_feedback(3));
+        assert!(!tool.is_deny_with_feedback(99));
+        let gate = InteractionRequest::gate_approval("id", "web_fetch", serde_json::json!({}), "s");
+        assert!(!gate.is_deny_with_feedback(2));
+        assert!(!gate.is_deny_with_feedback(4));
+        let choice = InteractionRequest::multiple_choice(
+            "id",
+            "?",
+            vec![DENY_WITH_FEEDBACK.to_string()],
+            "s",
+        );
+        assert!(
+            !choice.is_deny_with_feedback(0),
+            "the label alone is not the row"
+        );
     }
 }

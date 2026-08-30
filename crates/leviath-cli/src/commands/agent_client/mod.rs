@@ -705,6 +705,9 @@ impl Server {
             choice_index: None,
             approved: Some(approved),
             scope: Some(scope),
+            // The protocol's permission outcome is an option id and nothing
+            // else, so a host cannot say why it refused.
+            feedback: None,
         };
         let _ = self
             .control
