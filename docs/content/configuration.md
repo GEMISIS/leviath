@@ -634,11 +634,11 @@ tokens_per_minute   = 40000
 
 Both are enforced before every call. `requests_per_minute` counts calls made in
 the last minute; `tokens_per_minute` counts the tokens those calls reported
-back, so it lags the request window by one call and errs on the provider's
-side. When either window is full the call waits for the oldest entry to leave
-it. A `0` on either key means no limit on that side: `requests_per_minute = 0`
-leaves only the token window in force, and `tokens_per_minute = 0` only the
-request window.
+back, streamed or not, so it lags the request window by one call and errs on
+the provider's side. When either window is full the call waits for the oldest
+entry to leave it. A `0` on either key means no limit on that side:
+`requests_per_minute = 0` leaves only the token window in force, and
+`tokens_per_minute = 0` only the request window.
 
 This shapes request *rate*. `[limits] max_concurrent_inferences` and
 `[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers

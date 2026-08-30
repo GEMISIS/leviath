@@ -114,6 +114,11 @@ same list.
   zero, which it never could, and the wait sat in front of any HTTP timeout.
   A zero on either key now means no limit on that side, as
   `tokens_per_minute = 0` already did, and the config schema accepts it.
+- `tokens_per_minute` never held a streamed call back. Every provider booked
+  a call's tokens on the buffered path only, and the daemon streams by
+  default, so the token window stayed empty and the limit did nothing in
+  practice. A streamed call now books the total its usage frames name once
+  the stream is done, for the built-in providers and script providers alike.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

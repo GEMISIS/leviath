@@ -331,7 +331,7 @@ impl Provider for EndpointProvider {
         let result = parse_openai_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
-            limiter.record_tokens(result.tokens_used.total_tokens).await;
+            limiter.record_tokens(result.tokens_used.total_tokens);
         }
 
         Ok(result)
@@ -352,8 +352,9 @@ impl Provider for EndpointProvider {
         let response = self.post_chat(request, body).await?;
 
         let peer = leviath_net::read_caps::peer_of(&response);
-        Ok(Box::pin(
-            openai_sse_stream(response.bytes_stream()).sent_by(peer),
+        Ok(crate::rate_limit::meter_stream(
+            self.rate_limiter.as_ref(),
+            Box::pin(openai_sse_stream(response.bytes_stream()).sent_by(peer)),
         ))
     }
 
@@ -789,6 +790,33 @@ mod tests {
         use tokio_stream::StreamExt;
         let first = stream.next().await.expect("a chunk").expect("ok");
         assert_eq!(first.delta, "hi");
+    }
+
+    /// A streamed call spends the token window the way a buffered one does.
+    /// The usage arrives on the stream's last frame, so it is only known once
+    /// the stream has been folded; before this was recorded the window stayed
+    /// empty on the daemon's default path and `tokens_per_minute` never held
+    /// anything back.
+    #[tokio::test]
+    async fn a_streamed_call_fills_the_token_window() {
+        let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150}}\n\ndata: [DONE]\n\n";
+        let url = spawn_mock_server(200, "OK", sse).await;
+        let provider = provider_at(&url).with_rate_limit(Some(&crate::provider::RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100,
+        }));
+        let stream = provider
+            .infer_stream(&request("m"))
+            .await
+            .expect("streaming");
+        let response = crate::collect_stream(stream).await.expect("a whole turn");
+        assert_eq!(response.tokens_used.total_tokens, 150);
+        // 150 tokens against a window of 100: the next request has to wait for
+        // the window to turn over, which a bounded acquire reports as elapsed.
+        let limiter = provider.rate_limiter.as_ref().expect("a limiter");
+        let held =
+            tokio::time::timeout(std::time::Duration::from_millis(300), limiter.acquire()).await;
+        assert!(held.is_err(), "the streamed tokens were not counted");
     }
 
     #[tokio::test]
