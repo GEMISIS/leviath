@@ -666,9 +666,9 @@ mod tests {
         assert!(provider.warned_unknown.is_empty());
     }
 
-    /// The entry's timeout bounds the listing. It used to stamp the 30 s
-    /// side-call default on the request, which beats any client-level timeout,
-    /// so a 1 s entry against a server that never answers waited 30 s.
+    /// The entry's timeout bounds the listing. Stamping the 30 s side-call
+    /// default on the request beats any client-level timeout, so a 1 s entry
+    /// against a server that never answers would wait 30 s.
     #[tokio::test]
     async fn the_listing_is_bounded_by_the_entry_timeout_not_the_side_call_default() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -108,10 +108,10 @@ pub fn inspect_source(label: &str, src: &str) -> Result<SourceReport> {
 
 /// Check that a compiled script defines `initialize` and `inference`.
 ///
-/// Both are required, but only `initialize` used to be caught at load, because
-/// loading calls it. A script with no `inference` compiled, initialized and
-/// cached, then failed at the first real inference - by which point a run had
-/// started and the failure looked like a provider outage rather than a typo.
+/// Both are required, but only `initialize` is caught by loading, because
+/// loading calls it. A script with no `inference` compiles, initializes and
+/// caches, then fails at the first real inference - by which point a run has
+/// started and the failure looks like a provider outage rather than a typo.
 /// Reading it off the AST moves that to the moment the script is read.
 fn require_entry_points(label: &str, ast: &AST) -> Result<()> {
     for (name, params, signature) in REQUIRED_FNS {
@@ -582,10 +582,10 @@ impl Provider for RhaiProvider {
     ///
     /// The default implementation reads the compiled-in capability table, which
     /// a script provider does not have: [`Self::capabilities`] answers the same
-    /// `base` for every model it has no override for, so the default said "no"
-    /// to everything. A local box serving one fast model could therefore never
-    /// win a blueprint entry that named that model, however the machine set
-    /// `default_provider` (issue #598).
+    /// `base` for every model it has no override for, so the default says "no"
+    /// to everything and a local box serving one fast model can never win a
+    /// blueprint entry that names that model, however the machine sets
+    /// `default_provider`.
     ///
     /// Three sources, cheapest evidence last:
     ///

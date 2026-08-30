@@ -12,11 +12,12 @@ use crate::provider::ProviderError;
 /// What actually went wrong when a provider call failed, at the granularity a
 /// person debugging it needs.
 ///
-/// The remedy differs per variant and nothing else in the error carries it. A
-/// failed call used to arrive as one of two strings - a transport failure or an
-/// HTTP status - and "could not reach the provider" covered a wrong base URL, a
-/// firewall, an expired certificate and a laptop that had gone to sleep. Each
-/// wants a different thing done about it, and the message was the same.
+/// The remedy differs per variant and nothing else in the error carries it.
+/// Without this a failed call arrives as one of two strings - a transport
+/// failure or an HTTP status - and "could not reach the provider" covers a
+/// wrong base URL, a firewall, an expired certificate and a laptop that has
+/// gone to sleep. Each wants a different thing done about it, and the message
+/// is the same.
 ///
 /// Recorded on the error, logged as a field, and reported by the API, so the
 /// question "was that my key, my URL, or their outage" has an answer that does
@@ -217,11 +218,11 @@ fn io_error_kind(e: &(dyn std::error::Error + 'static)) -> Option<std::io::Error
 /// The kind is tried first because it is portable. Text is the fallback, and it
 /// carries the cases the standard library has no kind for - a name that did not
 /// resolve and a handshake that failed both arrive as `Uncategorized` or as no
-/// `io::Error` at all. Those phrases are ones these libraries really emit, taken
-/// from measured failures: an earlier version looked for "tls" and "certificate"
-/// and caught neither, because rustls answers a plaintext port with "received
-/// corrupt message of type invalidcontenttype", which contains no word anyone
-/// would think to search for.
+/// `io::Error` at all. Those phrases are ones these libraries really emit,
+/// taken from measured failures: the obvious "tls" and "certificate" catch
+/// neither, because rustls answers a plaintext port with "received corrupt
+/// message of type invalidcontenttype", which contains no word anyone would
+/// think to search for.
 fn connect_failure(io: Option<std::io::ErrorKind>, chain: &str) -> FailureKind {
     use std::io::ErrorKind;
 
@@ -285,7 +286,7 @@ fn error_chain_text(e: &dyn std::error::Error) -> String {
 impl ProviderError {
     /// A transport failure, with what `reqwest` knew about it kept.
     ///
-    /// Every one of these used to be `RequestFailed(e.to_string())`, and
+    /// As a bare `RequestFailed(e.to_string())` these are indistinguishable:
     /// `Display` on a `reqwest::Error` says the same sentence for a hostname
     /// that does not resolve, a port with nothing behind it, and a certificate
     /// nobody trusts. The kind is worked out here, where the typed error still

@@ -54,16 +54,15 @@ pub struct OpenRouterProvider {
     ///
     /// OpenRouter fronts hundreds of models and this build's table names a few
     /// dozen, so the table is out of date the day it ships and an unlisted
-    /// model silently got a conservative 128 000 tokens. Region budgets are
-    /// percentages of the window, so that sized a `budget = "30%"` region on a
-    /// 1M-token model at 38 400 instead of 314 572 (#337, #360). The same
-    /// listing says whether a model takes a temperature or tools, what it
-    /// charges, and whether its upstream bills a cache write (#568); all of it
-    /// is kept now, and [`Self::capabilities`] answers from it.
+    /// model falls back to a conservative 128 000 tokens. Region budgets are
+    /// percentages of the window, so that sizes a `budget = "30%"` region on a
+    /// 1M-token model at 38 400 instead of 314 572. The same listing says
+    /// whether a model takes a temperature or tools, what it charges, and
+    /// whether its upstream bills a cache write; all of it is kept, and
+    /// [`Self::capabilities`] answers from it.
     ///
     /// Empty until primed, and empty forever if the endpoint could not be
-    /// reached - both mean "fall back to the built-in table", which is what
-    /// happened before this existed.
+    /// reached - both mean "fall back to the built-in table".
     learned: LearnedModels,
 }
 
@@ -74,9 +73,9 @@ impl OpenRouterProvider {
     /// upstream that bills a write expects a marker, and one that quotes only
     /// a read price caches by prefix on its own and may charge extra for the
     /// marker (see [`crate::learned::LearnedModel::explicit_cache_control`]).
-    /// Before priming, or for a model the listing omits, the old rule stands:
-    /// Anthropic and Google read markers and everyone else is sent plain
-    /// text so an unknown field cannot be refused.
+    /// Before priming, or for a model the listing omits, the fallback rule
+    /// stands: Anthropic and Google read markers and everyone else is sent
+    /// plain text so an unknown field cannot be refused.
     fn explicit_cache_control(&self, model: &str) -> bool {
         self.learned
             .get(model)
@@ -488,18 +487,6 @@ impl OpenRouterProvider {
         self.temperature_unsupported.insert(model);
     }
 
-    /// Say so when a model fell through to [`FALLBACK_CAPABILITIES`].
-    ///
-    /// OpenRouter fronts hundreds of models and this build's table names a few
-    /// dozen, so an unlisted model is ordinary rather than exceptional - and it
-    /// silently got a 128 000-token window. Region budgets are percentages of
-    /// that window, so a `budget = "30%"` region on a model that really has
-    /// 1M tokens was being sized at 38 400 instead of 314 572: no error, no
-    /// warning, just an agent that evicts working material early and looks like
-    /// a worse model.
-    ///
-    /// Reported once per model rather than per inference, and it names the
-    /// stanza that fixes it, which is now a partial entry (#338).
     /// GET `/models`, shared by [`Provider::list_models`] and
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
@@ -531,6 +518,18 @@ impl OpenRouterProvider {
         crate::provider::decode_json(response).await
     }
 
+    /// Say so when a model falls through to [`FALLBACK_CAPABILITIES`].
+    ///
+    /// OpenRouter fronts hundreds of models and this build's table names a few
+    /// dozen, so an unlisted model is ordinary rather than exceptional - and
+    /// it gets a 128 000-token window. Region budgets are percentages of that
+    /// window, so a `budget = "30%"` region on a model that really has 1M
+    /// tokens is sized at 38 400 instead of 314 572: no error, no warning,
+    /// just an agent that evicts working material early and looks like a
+    /// worse model.
+    ///
+    /// Reported once per model rather than per inference, and it names the
+    /// stanza that fixes it, which may be a partial entry.
     fn warn_if_unknown(&self, model: &str, resolved: &ModelCapabilities) {
         if resolved.max_context_tokens != FALLBACK_CAPABILITIES.max_context_tokens {
             return;
@@ -1049,7 +1048,7 @@ mod tests {
         assert!(provider.max_context_tokens("meta-llama/llama-4-scout") > 128_000);
     }
 
-    // ─── The conservative fallback is no longer silent ──────────────────────
+    // ─── The conservative fallback is not silent ────────────────────────────
 
     #[test]
     fn a_known_model_keeps_its_own_window() {
@@ -1367,10 +1366,10 @@ mod tests {
     /// A stable system block carries a marker, so an Anthropic model reached
     /// through the gateway can cache its prefix at all.
     ///
-    /// System blocks used to be pushed as plain strings whatever the model, so
-    /// nothing marked the one part of the request worth caching - the stage
-    /// prompt and the pinned regions. Two research runs read zero tokens from
-    /// cache across 2.9M and 5.9M input tokens because of it.
+    /// Pushing system blocks as plain strings whatever the model leaves
+    /// nothing marking the one part of the request worth caching - the stage
+    /// prompt and the pinned regions. Two research runs measured zero cache
+    /// reads across 2.9M and 5.9M input tokens that way.
     #[test]
     fn a_stable_system_block_is_marked_for_an_anthropic_model() {
         let provider = OpenRouterProvider::new(
@@ -1830,12 +1829,12 @@ mod tests {
         assert_eq!(chunk.delta, "hi");
     }
 
-    // ─── Windows come from the API, not the compiled table (#360) ────────────
+    // ─── Windows come from the API, not the compiled table ───────────────────
 
-    /// The reported case, end to end: a model this build's table does not name,
-    /// which OpenRouter says has a 1M-token window. Before priming it resolved
-    /// to the 128 000-token fallback, and every percentage region budget was
-    /// sized against that.
+    /// End to end: a model this build's table does not name, which OpenRouter
+    /// says has a 1M-token window. Without priming it resolves to the 128 000
+    /// token fallback, and every percentage region budget is sized against
+    /// that.
     #[tokio::test]
     async fn priming_takes_the_window_from_the_models_api() {
         let body = br#"{"data":[{"id":"moonshotai/kimi-k3","context_length":1048576,"top_provider":{"max_completion_tokens":32768}}]}"#;

@@ -4,10 +4,9 @@
 //! table is out of date the day it ships: `gpt-5.5` refused a temperature the
 //! table said it took, the OpenRouter section had no `claude-*-5` rows while
 //! the gateway plainly served them, and a comparison set picked from the table
-//! was a generation behind what the gateway had (#568). Each provider already
-//! calls the one endpoint that knows better and kept a private map of a
-//! different shape for what it chose to keep: sizes here, prices there, ids
-//! somewhere else. This is the one shape they all fill now.
+//! was a generation behind what the gateway had. Each provider already calls
+//! the one endpoint that knows better; this is the one shape they all fill, so
+//! sizes, prices and ids do not each end up in a private map of their own.
 //!
 //! The rule for a field is: `None` means "this provider's listing has no such
 //! field", never "no". OpenAI's `/v1/models` says nothing about size, so an

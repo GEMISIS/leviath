@@ -217,8 +217,9 @@ fn print_and_debug_are_silenced() {
 /// Rhai's `Debug`-escaped lookalike.
 ///
 /// Rhai's `map_basic` package registers `to_json(&mut Map)`, and that
-/// signature used to beat ours, so every request body a provider script built
-/// went through `format_map_as_json`. That writes strings with `Debug`, which
+/// signature beats ours unless the same one is registered over it, sending
+/// every request body a provider script builds through `format_map_as_json`.
+/// That writes strings with `Debug`, which
 /// spells a narrow no-break space `\u{202f}`. JSON has no such escape, so the
 /// API refused the whole request and named the offset it choked on.
 ///

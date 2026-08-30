@@ -1202,7 +1202,7 @@ mod tests {
 
     // ─── Tools refused over a reasoning effort ──────────────────────────────
 
-    /// Verbatim from `api.openai.com`, captured while reproducing #333.
+    /// Verbatim from `api.openai.com`.
     const TOOLS_REFUSED: &[u8] = br#"{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-5.6-terra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error","param":"reasoning_effort","code":null}}"#;
 
     const OK_BODY: &[u8] = br#"{"choices":[{"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;

@@ -110,10 +110,8 @@ impl Utf8Carry {
 
 /// A byte stream cut into [`StreamChunk`]s by a provider-specific framer.
 ///
-/// One `poll_next` for every provider. Three of them used to carry a copy of
-/// this loop each - the same buffer, the same UTF-8 handling, the same
-/// transport-error mapping - with only the framing call differing, and the
-/// same eight-line comment about why the inner stream is boxed, three times.
+/// One `poll_next` for every provider: one buffer, one UTF-8 handling, one
+/// transport-error mapping, with only the framing call differing per provider.
 pub struct FramedStream {
     inner: ByteStream,
     buffer: String,
@@ -425,8 +423,8 @@ mod tests {
     /// The transport cuts wherever it likes, including through a character.
     /// reqwest's `bytes_stream()` hands over whatever the socket had, so a
     /// four-byte emoji is routinely two bytes in one chunk and two in the
-    /// next; both halves used to be thrown away, and the run lost the whole
-    /// chunk around them with no error.
+    /// next. Both halves have to be joined, or the run loses the whole chunk
+    /// around them with no error.
     #[tokio::test]
     async fn a_character_split_across_two_chunks_arrives_whole() {
         let text = "done 🎉\n".as_bytes();
