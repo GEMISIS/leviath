@@ -84,7 +84,7 @@ impl WorldHost {
     /// Capped at one extra lane's worth over the daemon's life. If that is not
     /// enough, the problem is not capacity and more of it will not help.
     pub(super) fn relieve_if_wedged(&mut self, snapshot: &LaneSnapshot) -> usize {
-        let threshold = self.dead_cycles_before_relief;
+        let threshold = self.settings.dead_cycles_before_relief();
         if threshold == 0 || self.dead_cycles < threshold || !snapshot.tools_saturated {
             return 0;
         }
@@ -115,7 +115,7 @@ impl WorldHost {
     /// `0` disables relief; detection and reporting are unaffected. Served from
     /// `[limits] dead_cycles_before_relief`.
     pub fn set_dead_cycles_before_relief(&mut self, cycles: u32) {
-        self.dead_cycles_before_relief = cycles;
+        self.settings.set_dead_cycles_before_relief(cycles);
     }
 
     /// Hand one daemon-wide health sample to the telemetry sink.

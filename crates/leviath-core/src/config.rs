@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// provider = "anthropic"
 /// model = "claude-haiku-4-5-20251001"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleConfig {
     /// Whether to generate titles at all (default: true).
     #[serde(default = "crate::default_true")]

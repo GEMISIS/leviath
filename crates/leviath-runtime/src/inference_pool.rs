@@ -130,26 +130,83 @@ impl InferencePoolConfig {
 /// `Arc`; semaphores are created lazily the first time a model is seen.
 #[derive(Debug)]
 pub struct InferencePools {
-    config: InferencePoolConfig,
-    semaphores: Mutex<HashMap<String, Arc<Semaphore>>>,
-    /// Per-provider semaphores and their caps, created lazily and only for a
-    /// provider that has a configured cap. A provider absent from here is
-    /// unbounded, and its models are bounded by their own pools alone.
-    ///
-    /// The cap is stored beside the semaphore rather than looked up again when
-    /// occupancy is read: an entry only exists because a cap did, so carrying
-    /// it removes an `Option` nothing could ever make `None`.
-    provider_semaphores: Mutex<HashMap<String, (usize, Arc<Semaphore>)>>,
+    /// The limits in force. Behind a lock rather than owned outright because
+    /// `[limits]` is re-read whenever `config.toml` changes, and a pool that
+    /// went on serving the number the daemon booted with would make the edit
+    /// look like it did nothing.
+    config: Mutex<InferencePoolConfig>,
+    semaphores: Mutex<HashMap<String, Pool>>,
+    /// Per-provider pools, created lazily and only for a provider that has a
+    /// configured cap. A provider absent from here is unbounded, and its
+    /// models are bounded by their own pools alone.
+    provider_semaphores: Mutex<HashMap<String, Pool>>,
     /// The tick-loop wake handle, handed to every permit so that releasing one
     /// re-drives dispatch. See [`InferencePools::with_wake`].
     wake: Option<Arc<Notify>>,
+}
+
+/// One pool: its semaphore, the ceiling it is meant to have, and how many
+/// permits it actually has right now.
+///
+/// The last two stop being the same number the moment an operator lowers a
+/// limit on a busy daemon. A semaphore can only give back permits nobody is
+/// holding, so a shrink takes what is idle now and leaves the rest to be taken
+/// as the requests in flight finish. Nothing in flight is cancelled and no
+/// slot is pulled out from under it: the pool narrows as it drains. The
+/// leftover is collected the next time this pool is touched, which is the next
+/// acquire against it.
+#[derive(Debug)]
+struct Pool {
+    semaphore: Arc<Semaphore>,
+    /// The ceiling asked for. `None` is unbounded.
+    cap: Option<usize>,
+    /// Permits the semaphore holds, held and free together.
+    granted: usize,
+}
+
+impl Pool {
+    /// A pool sized to `cap`, unbounded when that is `None`.
+    fn new(cap: Option<usize>) -> Self {
+        let granted = cap.unwrap_or(UNBOUNDED_PERMITS);
+        Self {
+            semaphore: Arc::new(Semaphore::new(granted)),
+            cap,
+            granted,
+        }
+    }
+
+    /// Aim the pool at `cap` and move it as far that way as it can go without
+    /// disturbing anything in flight.
+    fn retarget(&mut self, cap: Option<usize>) {
+        self.cap = cap;
+        let target = cap.unwrap_or(UNBOUNDED_PERMITS);
+        match target.cmp(&self.granted) {
+            std::cmp::Ordering::Greater => {
+                let extra = target - self.granted;
+                self.semaphore.add_permits(extra);
+                self.granted = target;
+            }
+            // `forget_permits` only ever takes *available* permits, so what it
+            // returns is how much of the shrink actually landed.
+            std::cmp::Ordering::Less => {
+                self.granted -= self.semaphore.forget_permits(self.granted - target);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
+    /// Slots handed out and not yet returned.
+    fn in_use(&self) -> usize {
+        self.granted
+            .saturating_sub(self.semaphore.available_permits())
+    }
 }
 
 impl InferencePools {
     /// Build the pools from a configuration.
     pub(crate) fn new(config: InferencePoolConfig) -> Self {
         Self {
-            config,
+            config: Mutex::new(config),
             semaphores: Mutex::new(HashMap::new()),
             provider_semaphores: Mutex::new(HashMap::new()),
             wake: None,
@@ -252,16 +309,13 @@ impl InferencePools {
         let map = leviath_core::sync::lock(&self.semaphores);
         let mut out: Vec<PoolOccupancy> = map
             .iter()
-            .map(|(model, semaphore)| {
-                let cap = self.config.limit_for(model);
-                let free = semaphore.available_permits();
-                PoolOccupancy {
-                    model: model.clone(),
-                    // An unbounded pool starts at `UNBOUNDED_PERMITS`, so its
-                    // in-use count is the shortfall from that, not from a cap.
-                    in_use: cap.unwrap_or(UNBOUNDED_PERMITS).saturating_sub(free),
-                    cap,
-                }
+            .map(|(model, pool)| PoolOccupancy {
+                model: model.clone(),
+                // Counted against what the pool actually holds rather than
+                // against the cap: mid-shrink those differ, and the shortfall
+                // from the cap would read as slots nobody ever took.
+                in_use: pool.in_use(),
+                cap: pool.cap,
             })
             .collect();
         out.sort_by(|a, b| a.model.cmp(&b.model)); // stable output for logs and tests
@@ -280,10 +334,11 @@ impl InferencePools {
         let map = leviath_core::sync::lock(&self.provider_semaphores);
         let mut out: Vec<ProviderPoolOccupancy> = map
             .iter()
-            .map(|(provider, (cap, semaphore))| ProviderPoolOccupancy {
+            .map(|(provider, pool)| ProviderPoolOccupancy {
                 provider: provider.clone(),
-                in_use: cap.saturating_sub(semaphore.available_permits()),
-                cap: *cap,
+                in_use: pool.in_use(),
+                // A provider is only in this map because it has a cap.
+                cap: pool.cap.unwrap_or(UNBOUNDED_PERMITS),
             })
             .collect();
         out.sort_by(|a, b| a.provider.cmp(&b.provider)); // stable output
@@ -293,26 +348,67 @@ impl InferencePools {
     /// Fetch (or lazily create) the semaphore bounding `provider` as a whole,
     /// or `None` when that provider has no configured cap.
     fn provider_semaphore_for(&self, provider: &str) -> Option<Arc<Semaphore>> {
-        let permits = self.config.provider_limit_for(provider)?;
+        // Config first, then the map, in every path here: one lock order, so
+        // two of these running at once can never wait on each other.
+        // A provider whose cap has been taken out of the config has already had
+        // its pool released and dropped by `reconfigure`, so there is nothing
+        // to look up here.
+        let cap = leviath_core::sync::lock(&self.config).provider_limit_for(provider)?;
         let mut map = leviath_core::sync::lock(&self.provider_semaphores);
-        if let Some((_, existing)) = map.get(provider) {
-            return Some(existing.clone());
-        }
-        let semaphore = Arc::new(Semaphore::new(permits));
-        map.insert(provider.to_string(), (permits, semaphore.clone()));
-        Some(semaphore)
+        let pool = map
+            .entry(provider.to_string())
+            .or_insert_with(|| Pool::new(Some(cap)));
+        pool.retarget(Some(cap));
+        Some(pool.semaphore.clone())
     }
 
-    /// Fetch (or lazily create) the semaphore for `model`.
+    /// Fetch (or lazily create) the semaphore for `model`, sized to whatever
+    /// the config says now.
     fn semaphore_for(&self, model: &str) -> Arc<Semaphore> {
+        let cap = leviath_core::sync::lock(&self.config).limit_for(model);
         let mut map = leviath_core::sync::lock(&self.semaphores);
-        if let Some(existing) = map.get(model) {
-            return existing.clone();
+        let pool = map
+            .entry(model.to_string())
+            .or_insert_with(|| Pool::new(cap));
+        pool.retarget(cap);
+        pool.semaphore.clone()
+    }
+
+    /// The limits in force, as a copy. The reader beside
+    /// [`reconfigure`](Self::reconfigure), so a caller can ask what a model or
+    /// a provider is capped at without reaching into the pools.
+    pub(crate) fn config(&self) -> InferencePoolConfig {
+        leviath_core::sync::lock(&self.config).clone()
+    }
+
+    /// Serve `config` from here on: every pool already created moves to its new
+    /// ceiling, and every one created later starts at it.
+    ///
+    /// This is what lets `[limits] max_concurrent_inferences` and its per-model
+    /// and per-provider tables take effect on a running daemon. A raised limit
+    /// is available at once. A lowered one takes back the slots nobody is using
+    /// and then narrows as the rest come back, so an inference already in
+    /// flight runs to its end.
+    pub(crate) fn reconfigure(&self, config: InferencePoolConfig) {
+        let mut current = leviath_core::sync::lock(&self.config);
+        *current = config;
+        let mut models = leviath_core::sync::lock(&self.semaphores);
+        for (model, pool) in models.iter_mut() {
+            pool.retarget(current.limit_for(model));
         }
-        let permits = self.config.limit_for(model).unwrap_or(UNBOUNDED_PERMITS);
-        let semaphore = Arc::new(Semaphore::new(permits));
-        map.insert(model.to_string(), semaphore.clone());
-        semaphore
+        let mut providers = leviath_core::sync::lock(&self.provider_semaphores);
+        providers.retain(
+            |provider, pool| match current.provider_limit_for(provider) {
+                Some(cap) => {
+                    pool.retarget(Some(cap));
+                    true
+                }
+                None => {
+                    pool.retarget(None);
+                    false
+                }
+            },
+        );
     }
 }
 
@@ -808,5 +904,149 @@ mod tests {
         assert!(pools.occupancy()[0].is_full(), "2 of 2 is full");
         drop(held);
         assert!(!pools.occupancy()[0].is_full(), "and not full once freed");
+    }
+
+    /// Raising `[limits] max_concurrent_inferences` under a running daemon
+    /// widens a pool that is already in use, rather than waiting for a restart.
+    #[tokio::test]
+    async fn a_raised_limit_widens_a_pool_already_in_use() {
+        let pools = InferencePools::new(InferencePoolConfig::new().with_default(Some(1)));
+        let held = pools.try_acquire("p", "m").expect("the one slot");
+        assert!(pools.try_acquire("p", "m").is_none(), "one wide");
+
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(3)));
+        let _b = pools
+            .try_acquire("p", "m")
+            .expect("the widened pool has room");
+        let _c = pools.try_acquire("p", "m").expect("and again");
+        assert!(pools.try_acquire("p", "m").is_none(), "three wide now");
+        drop(held);
+    }
+
+    /// Lowering it takes back the slots nobody is using and then narrows as the
+    /// requests in flight finish. Nothing is cancelled and no request loses the
+    /// slot it is holding.
+    #[tokio::test]
+    async fn a_lowered_limit_drains_rather_than_cancelling() {
+        let pools = InferencePools::new(InferencePoolConfig::new().with_default(Some(3)));
+        let a = pools.try_acquire("p", "m").expect("a slot");
+        let b = pools.try_acquire("p", "m").expect("another");
+
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(1)));
+        assert!(
+            pools.try_acquire("p", "m").is_none(),
+            "the third, idle slot is taken back at once"
+        );
+        drop(a);
+        assert!(
+            pools.try_acquire("p", "m").is_none(),
+            "the slot the first request gave back goes to the shrink, not to a new request"
+        );
+        drop(b);
+        let _last = pools.try_acquire("p", "m").expect("one slot is left");
+        assert!(pools.try_acquire("p", "m").is_none(), "and one is all");
+    }
+
+    /// A pool with no limit at all can be given one, and have it taken away.
+    #[tokio::test]
+    async fn an_unbounded_pool_can_be_capped_and_uncapped() {
+        let pools = InferencePools::new(InferencePoolConfig::new());
+        let _a = pools.try_acquire("p", "m").expect("unbounded");
+        let _b = pools.try_acquire("p", "m").expect("still unbounded");
+
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(1)));
+        assert!(
+            pools.try_acquire("p", "m").is_none(),
+            "the new cap is already exceeded, so nothing more gets in"
+        );
+
+        pools.reconfigure(InferencePoolConfig::new());
+        assert!(
+            pools.try_acquire("p", "m").is_some(),
+            "and removing the cap makes room again"
+        );
+    }
+
+    /// The same for a per-provider cap, which is the pool that only exists
+    /// while the config names it.
+    #[tokio::test]
+    async fn a_provider_cap_can_be_added_and_taken_away() {
+        let pools = InferencePools::new(InferencePoolConfig::new().with_default(Some(4)));
+        let _warm = pools.try_acquire("slow", "m").expect("no provider cap yet");
+
+        let mut capped = InferencePoolConfig::new().with_default(Some(4));
+        capped.set_provider_limit("slow", 1);
+        pools.reconfigure(capped);
+        let held = pools
+            .try_acquire("slow", "m")
+            .expect("the provider's one slot");
+        assert!(
+            pools.try_acquire("slow", "other").is_none(),
+            "the provider cap bounds every model it serves"
+        );
+
+        // Raised, with the pool now in existence and one slot of it held: the
+        // arm that keeps a pool it already has rather than making a new one.
+        let mut wider = InferencePoolConfig::new().with_default(Some(4));
+        wider.set_provider_limit("slow", 2);
+        pools.reconfigure(wider);
+        let second = pools
+            .try_acquire("slow", "other")
+            .expect("the raised provider cap has room");
+        assert!(
+            pools.try_acquire("slow", "third").is_none(),
+            "and two is all it has"
+        );
+        drop(held);
+        drop(second);
+
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(4)));
+        assert!(
+            pools.try_acquire("slow", "other").is_some(),
+            "with the cap deleted the provider is unbounded again"
+        );
+        assert!(
+            pools.provider_occupancy().is_empty(),
+            "and it is no longer reported as a pool"
+        );
+    }
+
+    /// Reconfiguring with the same numbers is a no-op, so a config save that
+    /// changed something else entirely cannot disturb a pool.
+    #[tokio::test]
+    async fn reconfiguring_with_the_same_limits_changes_nothing() {
+        let pools = InferencePools::new(InferencePoolConfig::new().with_default(Some(2)));
+        let _held = pools.try_acquire("p", "m").expect("a slot");
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(2)));
+        assert_eq!(
+            pools.occupancy(),
+            vec![PoolOccupancy {
+                model: "m".to_string(),
+                in_use: 1,
+                cap: Some(2),
+            }]
+        );
+        assert!(
+            pools.try_acquire("p", "m").is_some(),
+            "the free slot is untouched"
+        );
+    }
+
+    /// Occupancy reports the cap the operator set most recently, not the one
+    /// the daemon started with.
+    #[tokio::test]
+    async fn occupancy_reports_the_cap_in_force_now() {
+        let pools = InferencePools::new(InferencePoolConfig::new().with_default(Some(2)));
+        let _held = pools.try_acquire("p", "m").expect("a slot");
+        pools.reconfigure(InferencePoolConfig::new().with_default(Some(5)));
+        assert_eq!(
+            pools.occupancy(),
+            vec![PoolOccupancy {
+                model: "m".to_string(),
+                in_use: 1,
+                cap: Some(5),
+            }]
+        );
+        assert_eq!(pools.config().limit_for("m"), Some(5));
     }
 }

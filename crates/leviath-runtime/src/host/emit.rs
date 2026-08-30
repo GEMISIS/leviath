@@ -39,6 +39,10 @@ impl WorldHost {
         let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let mut to_park: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let now = chrono::Utc::now().timestamp();
+        // Read once for the whole pass: the operator can change these while
+        // the daemon runs, and a pass that used two different lists partway
+        // through would announce one run's threshold and not another's.
+        let spend_notify = self.settings.spend_notify_usd();
         for (run_id, agent) in pairs {
             // Unwrapped once: everything below reaches into this world's ECS,
             // where same-world is true by construction.
@@ -174,7 +178,7 @@ impl WorldHost {
             // "highest seen", so a threshold is announced once and a run that
             // jumps several in one pass announces each of them.
             let spent_before = prev.as_ref().map(|e| e.cost_micros).unwrap_or(0);
-            for threshold in &self.spend_notify_usd {
+            for threshold in spend_notify.iter() {
                 let crossing = super::events::usd_to_micros(*threshold);
                 if spent_before < crossing && cur.cost_micros >= crossing {
                     let _ = self.events.send(WorldEvent::Spend {
