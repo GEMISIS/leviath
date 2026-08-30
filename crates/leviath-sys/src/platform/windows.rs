@@ -1,11 +1,10 @@
 //! Windows implementations.
 //!
 //! Windows has no POSIX mode bits; access control is an ACL on each object. The
-//! hardening this crate applies on Unix - "owner only, nobody else" - has a
-//! direct Windows equivalent, and until now it simply was not applied: every
-//! `secure_file_perms` call was a silent no-op, so `config.toml` (every provider
-//! API key) and `mcp-auth.json` (OAuth access *and refresh* tokens) carried
-//! whatever ACL they inherited from their parent.
+//! hardening this crate applies on Unix - "owner only, nobody else" - is
+//! applied here through an ACL, so `config.toml` (every provider API key) and
+//! `mcp-auth.json` (OAuth access *and refresh* tokens) do not simply carry
+//! whatever their parent granted.
 //!
 //! # Why `icacls` rather than the Win32 API
 //!
@@ -61,9 +60,9 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::R
 ///
 /// **The restriction is best-effort, unlike [`write_with_mode`]'s.** That one
 /// guards secrets - an API key written unprotected is worse than not written at
-/// all, so its failure propagates. These two are for a run's own files, which
-/// until now were created at the default and never restricted. Failing the
-/// create on a failed `icacls` would trade "less protected than intended" for
+/// all, so its failure propagates. These two are for a run's own files, and
+/// failing the create on a failed `icacls` would trade "less protected than
+/// intended" for
 /// "the run cannot record anything", which is the worse of the two, and it
 /// would make persistence depend on spawning a process.
 pub(crate) fn open_append_with_mode(path: &Path, _mode: u32) -> io::Result<std::fs::File> {
@@ -125,7 +124,7 @@ pub(crate) fn configure_detached(cmd: &mut std::process::Command) {
 /// from Explorer, a service, or a UI console - the OS allocates a fresh window
 /// and shows it on the interactive desktop. An agent calling the `shell` tool
 /// runs `cmd.exe` dozens of times per run, so that is a flood of flashing
-/// windows, and concurrent agents make it worse (issue #228).
+/// windows, and concurrent agents make it worse.
 ///
 /// `CREATE_NO_WINDOW` says "this is a console application, run it without a
 /// console window". It is right only for a child whose stdio is already piped
@@ -223,15 +222,13 @@ fn interpret_icacls(success: bool, stderr: &[u8], path: &Path) -> io::Result<()>
 ///
 /// Some tests mutate those variables process-wide to prove errors propagate;
 /// others spawn the real `icacls`, which reads both. `cargo test` runs them in
-/// parallel threads of one process, so an unguarded spawner can catch a
-/// mutator's environment mid-flight. On CI that surfaced as `ensure_private`
-/// failing with "The system cannot find the path specified": `SystemRoot`
-/// momentarily pointed at `C:\definitely-not-windows` while another test was
-/// proving that a missing `icacls` is reported.
+/// parallel threads of one process, so an unguarded spawner catches a
+/// mutator's environment mid-flight and `ensure_private` fails with "The
+/// system cannot find the path specified".
 ///
 /// `temp_env` locks against its own calls, not against a test that reads the
-/// variable directly, so both sides have to take *this* guard. Same shape as
-/// the credential-store lesson: two guards are not a guard.
+/// variable directly, so both sides have to take *this* guard. Two guards are
+/// not a guard.
 ///
 /// `pub(crate)` because the `perms` tests reach the same spawn through the
 /// public API and race identically.

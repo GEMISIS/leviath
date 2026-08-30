@@ -1,8 +1,8 @@
 //! How much room is left on the filesystem a path lives on.
 //!
 //! Leviath asks this before letting an agent write, because the failure it
-//! guards against is not a bad write but a full disk: a run that filled `C:`
-//! took the machine down with it, and every other process on it (issue #252).
+//! guards against is not a bad write but a full disk: a run that fills `C:`
+//! takes the machine down with it, and every other process on it.
 //!
 //! There is no free-space API in `std`, and this workspace forbids `unsafe`, so
 //! the syscall is delegated to `fs4` - the same arrangement `nix` has here for
@@ -110,9 +110,8 @@ mod tests {
     /// The empty path rather than a missing one, and that distinction is the
     /// whole reason this comment exists. A *missing* path is unmeasurable on
     /// Unix and perfectly measurable on Windows, where `fs4` resolves to the
-    /// volume first - so asserting `None` for one passed on three CI legs and
-    /// failed on the fourth, and left this branch unreachable there. An empty
-    /// path has no volume to resolve to on either.
+    /// volume first, so asserting `None` for one leaves this branch unreachable
+    /// there. An empty path has no volume to resolve to on either.
     #[test]
     fn an_unmeasurable_path_answers_none() {
         assert_eq!(available_bytes(Path::new("")), None);

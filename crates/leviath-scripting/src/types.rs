@@ -60,7 +60,7 @@ pub fn register_types(engine: &mut Engine) {
 
     // Token budget helpers. The operands come from a script (ultimately from
     // model output), so plain `-` would panic on overflow in a debug build -
-    // and a panic inside a Rhai native fn aborts the process (#109).
+    // and a panic inside a Rhai native fn aborts the process.
     engine.register_fn(
         "tokens_remaining",
         |max_tokens: i64, current_tokens: i64| -> i64 { max_tokens.saturating_sub(current_tokens) },
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn tokens_remaining_saturates_instead_of_overflowing() {
         // The operands come from a script, so extreme values must not panic -
-        // a panic in a Rhai native fn aborts the daemon (issue #109).
+        // a panic in a Rhai native fn aborts the daemon.
         let e = engine();
         let low: i64 = e.eval("tokens_remaining(-9223372036854775808, 1)").unwrap();
         assert_eq!(low, i64::MIN);

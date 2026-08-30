@@ -19,7 +19,7 @@ pub fn configure_detached(cmd: &mut Command) {
 /// none, such as the daemon started from Explorer, from a service, or from a UI
 /// console, gets a brand new window on the interactive desktop. Agent tooling
 /// spawns `cmd.exe` many times per run, so without this the desktop fills with
-/// flashing consoles (issue #228). Elsewhere this is a no-op: no other platform
+/// flashing consoles. Elsewhere this is a no-op: no other platform
 /// hands a child a window.
 ///
 /// Apply it to a child whose stdout/stderr are already piped or nulled, which
@@ -38,11 +38,10 @@ pub fn hide_console_window(cmd: &mut Command) {
 
 /// A [`Command`] for a child that must not take a console window.
 ///
-/// **This is where the decision is made.** Hiding used to be a second call the
-/// caller made after building the command, at seven sites across five crates,
-/// and a new spawn site that forgot it looked exactly like one that did not
-/// need it. Making it part of construction means the only way to get a child
-/// process is to have already answered the question.
+/// **This is where the decision is made.** Hiding as a separate call after the
+/// command is built leaves a spawn site that forgot it looking exactly like one
+/// that does not need it. Making it part of construction means the only way to
+/// get a child process is to have already answered the question.
 ///
 /// The counterpart is [`terminal_command`], for the single child that is meant
 /// to be seen. There is no third option on purpose: a `Command::new` outside

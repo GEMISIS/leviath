@@ -217,7 +217,6 @@ mod imp {
             );
         }
 
-        /// Accounts do not leak into each other.
         /// The public shims at the crate root - the path every caller actually
         /// takes - driven against the mock store under the lock.
         #[test]

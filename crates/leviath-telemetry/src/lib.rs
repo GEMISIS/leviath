@@ -1,4 +1,4 @@
-//! OpenTelemetry export for Leviath's telemetry event stream (issue #73).
+//! OpenTelemetry export for Leviath's telemetry event stream.
 //!
 //! The runtime emits pure-data [`TelemetryEvent`](leviath_core::telemetry::TelemetryEvent)s
 //! into whatever [`TelemetrySink`] the host installs; this crate provides the
@@ -103,8 +103,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn otlp_exporter_builds_from_a_runtime_thread_with_a_log_layer() {
-        // The regression this guards: blocking-client construction panics on a
-        // tokio thread unless it's hopped to a plain one.
+        // Blocking-client construction panics on a tokio thread unless it is
+        // hopped to a plain one.
         let built = build_sink(&config(true, TelemetryExporterKind::Otlp)).unwrap();
         assert!(built.log_layer.is_some());
     }

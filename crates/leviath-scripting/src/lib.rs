@@ -16,12 +16,9 @@ pub mod types;
 
 /// Apply the sandbox limits every Leviath Rhai engine shares.
 ///
-/// One function rather than a block copied into each engine constructor. There
-/// were three such copies - `ScriptEngine::new`, `build_tool_engine` (whose
-/// comment read "Same hardening as `ScriptEngine::new`", which it was not
-/// entirely), and the provider engine - with divergent limits and no way to add
-/// a control to all of them at once. This is a security control; it should have
-/// exactly one definition.
+/// One function rather than a block copied into each engine constructor. This
+/// is a security control: copies drift into divergent limits, and there is then
+/// no way to add a control to all of them at once.
 ///
 /// `max_operations` stays a parameter because it is a genuine policy difference:
 /// a provider script driving a streaming HTTP response legitimately runs longer

@@ -29,10 +29,9 @@ pub fn ensure_file_private(path: &Path) -> io::Result<Option<u32>> {
 ///
 /// `fs::write` followed by a `chmod` is the obvious shape and has a window: the
 /// file is created at `0o666 & ~umask` - typically `0o644` - and is
-/// world-readable until the `chmod` lands. Both files that hold Leviath's
-/// secrets were written that way, so `config.toml` (every provider API key) and
-/// `mcp-auth.json` (OAuth access and refresh tokens) each had a moment of being
-/// readable by any local user, on every save.
+/// world-readable until the `chmod` lands. That is a moment on every save where
+/// `config.toml` (every provider API key) and `mcp-auth.json` (OAuth access and
+/// refresh tokens) are readable by any local user.
 ///
 /// Creating the file with the mode already set closes that. On non-Unix this is
 /// a plain write - the mode argument has no meaning there, and Windows ACL
@@ -51,11 +50,11 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// owner-only. A symlink at `path` is followed: the file it points at is what
 /// is replaced, not the link.
 ///
-/// `fs::write` truncated the target first and then wrote into it, which is
-/// the shape that left `config.toml`, a blueprint or the dashboard's memory
-/// empty when the process died between the two. The inode changes on every
-/// save now, which is what atomic replacement means; anything holding the
-/// old file open keeps the old bytes.
+/// Use this rather than `fs::write`, which truncates the target and then
+/// writes into it: a process that dies between the two leaves `config.toml`,
+/// a blueprint or the dashboard's memory empty. The inode changes on every
+/// save, which is what atomic replacement means; anything holding the old
+/// file open keeps the old bytes.
 pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> io::Result<()> {
     write_atomic_with(path, contents, mode, persist)
 }
@@ -115,19 +114,19 @@ pub fn write_atomic_with(
 ///
 /// [`write_private`] covers a file written in one shot. A file that is appended
 /// to over time cannot use it, and opening one plainly creates it at the umask
-/// default. That is how a run's archive (`run.lvr`) and its stage logs ended up
-/// world-readable: nobody chose `0o644` for them, they inherited it, while the
-/// answer sidecar written beside them through `write_private` was owner-only.
+/// default, so a run's archive (`run.lvr`) and its stage logs inherit `0o644`
+/// rather than anyone choosing it.
 ///
-/// The containing run directory is `0o700`, so those files were not reachable in
+/// The containing run directory is `0o700`, so those files are not reachable in
 /// place. Directory permissions do not survive a copy though, and `tar`, `rsync`
 /// or a backup tool preserves the per-file mode while dropping the protection
 /// the directory was providing.
+///
 /// On Windows the restriction is best-effort: a failed ACL call still yields an
 /// open file. [`write_private`] guards secrets and fails instead, but these are
-/// a run's own files, which until now were created at the default and never
-/// restricted at all. Refusing to open one because `icacls` did not run would
-/// trade "less protected than intended" for "the run cannot record anything".
+/// a run's own files, and refusing to open one because `icacls` did not run
+/// would trade "less protected than intended" for "the run cannot record
+/// anything".
 pub fn open_private_append(path: &Path) -> io::Result<std::fs::File> {
     crate::platform::open_append_with_mode(path, 0o600)
 }
@@ -221,9 +220,8 @@ mod tests {
         assert!(write_private(&path, b"x").is_err());
     }
 
-    /// The gap this closes: a file opened plainly for append is created at the
-    /// umask default, typically `0o644`. `run.lvr` and the stage logs were
-    /// created that way while the answer sidecar beside them was owner-only.
+    /// A file opened plainly for append is created at the umask default,
+    /// typically `0o644`; `run.lvr` and the stage logs must not be.
     #[test]
     fn open_private_append_creates_an_owner_only_file() {
         #[cfg(windows)]
@@ -261,8 +259,7 @@ mod tests {
     }
 
     /// The mode passed to `open(2)` applies only on creation, so a file that
-    /// already exists at looser permissions has to be tightened. A run started
-    /// before this change has exactly that shape.
+    /// already exists at looser permissions has to be tightened.
     #[test]
     fn open_private_append_retightens_an_existing_permissive_file() {
         #[cfg(windows)]
@@ -388,8 +385,6 @@ mod tests {
         assert_eq!(mode_of(&nested), 0o700);
     }
 
-    /// Called on every stage line, so it has to be idempotent rather than
-    /// failing once the directory is there.
     /// A failed create has to be reported, not swallowed. The caller decides
     /// whether it can carry on without the directory; it cannot decide that if
     /// it was told the directory is there.
@@ -408,6 +403,8 @@ mod tests {
         assert!(create_private_dir_all(&blocker).is_err());
     }
 
+    /// Called on every stage line, so it has to be idempotent rather than
+    /// failing once the directory is there.
     #[test]
     fn create_private_dir_all_is_idempotent() {
         #[cfg(windows)]

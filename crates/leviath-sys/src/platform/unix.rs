@@ -55,9 +55,8 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> io::Re
 ///
 /// A run's archive and its stage logs are appended to over the life of the run,
 /// so they cannot go through `write_with_mode`. Opened plainly they are created
-/// at the umask default, which is how `run.lvr` - every context snapshot, the
-/// whole conversation, every tool result - ended up world-readable while the far
-/// smaller answer sidecar beside it was owner-only.
+/// at the umask default, which would leave `run.lvr` - every context snapshot,
+/// the whole conversation, every tool result - world-readable.
 ///
 /// As with `write_with_mode` the mode applies only on creation, so `set_mode`
 /// covers a file that already exists at looser permissions. Appending is the

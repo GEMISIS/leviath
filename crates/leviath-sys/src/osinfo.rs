@@ -152,9 +152,8 @@ mod tests {
         assert_eq!(display_name_for("solaris"), "solaris");
     }
 
-    /// All three quoting styles occur across distributions, and the whole line
-    /// must match the key - `VERSION_ID` must not be answered by
-    /// `IMAGE_VERSION_ID`.
+    /// `PRETTY_NAME` already reads as an answer, so it wins over `VERSION_ID`
+    /// when a release file carries both.
     #[test]
     fn os_release_prefers_pretty_name_over_version_id() {
         let text = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n";

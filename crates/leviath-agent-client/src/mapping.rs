@@ -66,8 +66,8 @@ pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
 /// block; its content runs until the next `---region:...---` marker, an
 /// `---end-regions---` line, or the end of the text. Any text before the first
 /// marker becomes the `task` region. With **no** markers at all, the whole text
-/// is returned as `{ "task": text }` - the exact pre-feature behavior, so hosts
-/// that don't use markers are unaffected.
+/// is returned as `{ "task": text }`, so a host that sends a plain prompt gets
+/// a plain task.
 ///
 /// Region bodies are trimmed; empty blocks are dropped. Pure - no I/O.
 pub fn parse_region_markers(text: &str) -> std::collections::HashMap<String, String> {
@@ -120,7 +120,7 @@ pub fn parse_region_markers(text: &str) -> std::collections::HashMap<String, Str
     }
 
     if !saw_marker {
-        // No markers: preserve exact legacy behavior (whole text → task).
+        // No markers anywhere: the whole text is the task.
         let mut out = HashMap::new();
         let trimmed = text.trim();
         if !trimmed.is_empty() {
