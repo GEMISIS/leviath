@@ -304,16 +304,15 @@ mod tests {
         );
     }
 
-    /// Post `body` to a fresh one-request daemon: the status, and the answer
-    /// the daemon saw (None when the server refused it first).
-    async fn answered_with(body: &'static str) -> (StatusCode, Option<InteractionResponse>) {
+    /// Post `body` to a fresh one-request daemon: the status, and the control
+    /// request the daemon saw, as JSON text (empty when the server refused the
+    /// body before asking).
+    async fn answered_with(body: &'static str) -> (StatusCode, String) {
         use std::sync::{Arc, Mutex};
-        let seen: Arc<Mutex<Option<InteractionResponse>>> = Arc::default();
+        let seen: Arc<Mutex<String>> = Arc::default();
         let sink = seen.clone();
         let (control, _dir, _srv) = fake_daemon(move |req| {
-            if let ControlRequest::AnswerInteraction { response } = req {
-                *sink.lock().unwrap() = Some(response);
-            }
+            *sink.lock().unwrap() = serde_json::to_string(&req).unwrap();
             ControlResponse::Ok { ok: true }
         });
         let status = status_of(
@@ -323,7 +322,7 @@ mod tests {
             Body::from(body),
         )
         .await;
-        let seen = seen.lock().unwrap().take();
+        let seen = std::mem::take(&mut *seen.lock().unwrap());
         (status, seen)
     }
 
@@ -334,28 +333,30 @@ mod tests {
     async fn submit_interaction_feedback_shapes() {
         let (status, seen) = answered_with(r#"{"request_id":"q1","approved":false}"#).await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        let seen = seen.expect("reached the daemon");
-        assert_eq!((seen.approved, seen.feedback), (Some(false), None));
+        assert!(seen.contains(r#""approved":false"#), "{seen}");
+        assert!(!seen.contains("feedback"), "absent stays absent: {seen}");
 
         let (status, seen) = answered_with(
             r#"{"request_id":"q1","approved":false,"feedback":"use the API instead"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        let seen = seen.expect("reached the daemon");
-        assert_eq!(seen.approved, Some(false));
-        assert_eq!(seen.feedback.as_deref(), Some("use the API instead"));
+        assert!(seen.contains(r#""approved":false"#), "{seen}");
+        assert!(
+            seen.contains(r#""feedback":"use the API instead""#),
+            "{seen}"
+        );
 
         let (status, seen) =
             answered_with(r#"{"request_id":"q1","approved":true,"feedback":"why"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(seen.is_none(), "the 400 never reached the daemon");
+        assert!(seen.is_empty(), "the 400 never reached the daemon: {seen}");
     }
 
     /// The 400 says what to change.
     #[tokio::test]
     async fn feedback_on_a_grant_names_the_fix() {
-        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+        // No daemon: the refusal happens before one would be asked.
         let req = Request::builder()
             .method("POST")
             .uri("/api/agents/a/interaction")
@@ -364,7 +365,7 @@ mod tests {
                 r#"{"request_id":"q1","approved":true,"feedback":"why"}"#,
             ))
             .unwrap();
-        let resp = app_with(control).oneshot(req).await.unwrap();
+        let resp = app_with(no_daemon()).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let text = String::from_utf8_lossy(&bytes);

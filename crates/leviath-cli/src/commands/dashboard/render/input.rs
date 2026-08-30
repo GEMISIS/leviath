@@ -116,7 +116,7 @@ impl Dashboard {
             // specific question - label it accordingly for consistent UX.
             let is_message_mode = pending_req.is_none() && agent.waiting_prompt.is_none();
             let hint = if self.deny_feedback_open {
-                " Deny with feedback: what should it do instead?  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] back "
+                " Deny with feedback: what should it do instead?  [^Enter] send  [Enter] newline  [Tab] Send  [Esc] back "
             } else if is_message_mode {
                 " Provide input while this is running  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             } else {
@@ -392,6 +392,35 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Review content"), "{buf}");
+    }
+
+    /// With the feedback box open under a tool approval, the pane is the
+    /// response box labelled for the deny, not the choice list.
+    #[test]
+    fn render_input_pane_deny_feedback_box() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        dash.deny_feedback_open = true;
+        let agent = make_test_agent("run-df", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(interaction::InteractionKind::ToolApproval));
+        let kind = Some(interaction::InteractionKind::ToolApproval);
+        let options = vec!["Allow once".to_string(), "Deny with feedback".to_string()];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 110, 11);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Deny with feedback"), "{buf}");
+        assert!(buf.contains("[Esc] back"), "{buf}");
+        assert!(buf.contains("Send"), "{buf}");
+        assert!(
+            !buf.contains("[1] Allow once"),
+            "the choice list is gone: {buf}"
+        );
     }
 
     #[test]
