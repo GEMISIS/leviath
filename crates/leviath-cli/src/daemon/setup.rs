@@ -384,9 +384,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // Config hot-reload: after boot, spawn-time parts.config (permissions,
     // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
     // when `parts.config.toml` changes on disk. The boot infrastructure that
-    // holds live connections - the MCP pool, the network policy, the telemetry
-    // sink - keeps the boot snapshot and needs a restart, so the reloader takes
-    // a clone and the boot snapshot stays usable below.
+    // holds live connections - the MCP pool, the network policy - keeps the
+    // boot snapshot and needs a restart, so the reloader takes a clone and the
+    // boot snapshot stays usable below. The telemetry sink follows the
+    // reloaded config too, through `telemetry_reload` below.
     //
     // Normally handed in: `setup_daemon_host_with` builds it before the
     // provider registry so the script-provider layer can follow it as well
@@ -446,14 +447,12 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // the daemon's own tracing events through the same pipeline. A pipeline
     // that fails to build logs a warning and leaves the no-op in place -
     // observability must never stop the work it observes.
-    if let Some(built) = leviath_telemetry::build_sink(&parts.config.observability) {
-        host.world_mut()
-            .world_mut()
-            .insert_resource(leviath_runtime::telemetry::Telemetry(built.sink));
-        if let Some(layer) = built.log_layer {
-            crate::logging::install_otel_layer(layer);
-        }
-    }
+    //
+    // Boot is this reload's first refresh, so turning export on, moving it to
+    // another collector, or turning it off reaches the next run without a
+    // daemon restart.
+    let telemetry_reload = crate::daemon::telemetry_reload::TelemetryReload::for_daemon();
+    telemetry_reload.refresh_into(host.world_mut(), &parts.config.observability);
 
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
     // disk. Capture the shared context (cloned before the spawner moves the
@@ -469,6 +468,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_pool = parts.mcp_pool.clone();
     let reload_provider_reload = provider_reload.clone();
     let reload_policy = policy_reload.clone();
+    let reload_telemetry = telemetry_reload.clone();
     host.set_reloader(Box::new(move |world, run_id| {
         // Pages a run back in with the current on-disk parts.config, matching what a
         // real restart would restore it with.
@@ -482,6 +482,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // A run paged back in is rebuilt from scratch, so it gets the policy
         // the files name now rather than the one this daemon booted with.
         reload_policy.refresh_into(world);
+        reload_telemetry.refresh_into(world, &reload_config.observability);
         let entity = crate::daemon::recovery::reload_run(
             world,
             crate::daemon::spawn::SpawnDeps {
@@ -563,6 +564,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let spawn_reloader = reloader.clone();
     let spawn_provider_reload = provider_reload.clone();
     let spawn_policy = policy_reload.clone();
+    let spawn_telemetry = telemetry_reload.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -594,6 +596,8 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // are in force for this run, without a daemon restart. Both are a stat
         // of two paths when nothing changed.
         spawn_policy.refresh_into(world);
+        // The exporter the file names now, before this run emits anything.
+        spawn_telemetry.refresh_into(world, &config.observability);
         let built = build_agent(
             world.world_mut(),
             crate::daemon::spawn::SpawnDeps {

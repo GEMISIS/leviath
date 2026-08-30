@@ -1,0 +1,284 @@
+//! Rebuilding the telemetry pipeline when `[observability]` changes.
+//!
+//! The sink was built once at daemon startup and installed as the world's
+//! `Telemetry` resource, and for OTLP a `tracing` layer went into the CLI's
+//! reload slot beside it. Both were then fixed for the life of the process, so
+//! turning export on, pointing it at a different collector, or turning it off
+//! again all needed `lev daemon restart` - and the failure mode for the first
+//! one is the worst kind: you set `enabled = true`, start a run to watch it,
+//! and nothing arrives at the collector. Nothing distinguishes that from a
+//! collector that is not listening.
+//!
+//! Both halves turn out to be swappable. The sink is a world resource like any
+//! other, and the OTLP log bridge already lives in a `tracing_subscriber`
+//! reload layer, which is what `set_otel_layer` fills at boot and what
+//! this refills (or empties) afterwards.
+//!
+//! What does **not** move is the base subscriber `logging::init` installs
+//! before any config is read: the fmt layer, its stderr writer, and its
+//! `info`/`debug` filter. Those come from `--verbose` on the process's own
+//! command line, not from `[observability]`, and a `tracing` subscriber can
+//! only be set once per process. Changing how verbose the daemon's own log is
+//! still means restarting it.
+
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use leviath_core::config::ObservabilityConfig;
+use leviath_core::telemetry::NoopSink;
+
+/// How the OTLP log bridge reaches the process subscriber. Injected so a test
+/// can watch what a rebuild asked for without racing other tests over the
+/// process-wide reload handle, which only one of them can ever park.
+type InstallLayer = fn(Option<leviath_telemetry::LogLayer>) -> bool;
+
+/// Keeps the telemetry pipeline in step with `[observability]`.
+pub struct TelemetryReload {
+    /// The config the installed pipeline was built from. `None` before the
+    /// first refresh, which is what makes the boot install go through the same
+    /// path as every later change.
+    applied: Mutex<Option<ObservabilityConfig>>,
+    install_layer: InstallLayer,
+}
+
+impl TelemetryReload {
+    /// One that forwards the OTLP log bridge to the process subscriber.
+    pub fn for_daemon() -> Arc<Self> {
+        Arc::new(Self::with_installer(crate::logging::set_otel_layer))
+    }
+
+    /// One that reports its layer changes to `install_layer` instead.
+    fn with_installer(install_layer: InstallLayer) -> Self {
+        Self {
+            applied: Mutex::new(None),
+            install_layer,
+        }
+    }
+
+    /// Rebuild and install the pipeline when `cfg` differs from the one in
+    /// service. Returns whether anything was swapped.
+    ///
+    /// The outgoing sink is flushed before it is dropped, so spans and metrics
+    /// already recorded reach the old collector rather than dying with it.
+    ///
+    /// A pipeline that cannot be built (an OTLP exporter that will not
+    /// construct) leaves the no-op sink in place and warns, which is what boot
+    /// did too: observability must never stop the work it observes. The config
+    /// is recorded as applied either way, so a setting that cannot work is not
+    /// retried on every spawn.
+    pub fn refresh_into(
+        &self,
+        world: &mut leviath_runtime::PipelineWorld,
+        cfg: &ObservabilityConfig,
+    ) -> bool {
+        let mut applied = self.lock();
+        if applied.as_ref() == Some(cfg) {
+            return false;
+        }
+        *applied = Some(cfg.clone());
+        drop(applied);
+
+        let ecs = world.world_mut();
+        // Whatever is buffered belongs to the exporter on its way out. Read
+        // rather than tested for: every world carries a sink from the moment
+        // it is built, the no-op one until something replaces it.
+        ecs.resource::<leviath_runtime::telemetry::Telemetry>()
+            .0
+            .force_flush();
+        // Built before the swap: on OTLP this constructs an exporter, and a
+        // failure has to leave the caller with a working (if silent) sink
+        // rather than a half-installed one.
+        let built = leviath_telemetry::build_sink(cfg);
+        let sink: Arc<dyn leviath_core::telemetry::TelemetrySink> = match built {
+            Some(built) => {
+                // `None` for the stdout exporter clears a bridge a previous
+                // OTLP config left behind, which is the point: the daemon's own
+                // log lines must stop going to a collector the user turned off.
+                (self.install_layer)(built.log_layer);
+                built.sink
+            }
+            None => {
+                (self.install_layer)(None);
+                Arc::new(NoopSink)
+            }
+        };
+        ecs.insert_resource(leviath_runtime::telemetry::Telemetry(sink));
+        true
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<ObservabilityConfig>> {
+        self.applied.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_core::config::TelemetryExporterKind;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What the last injected install call asked for: 1 for a layer, 2 for
+    /// clearing the slot. A static because the injection point is a plain `fn`
+    /// pointer (a closure would need the layer type to be nameable at the call
+    /// site), and the tests that read it run in one thread each.
+    static LAST_INSTALL: AtomicUsize = AtomicUsize::new(0);
+
+    fn record_install(layer: Option<leviath_telemetry::LogLayer>) -> bool {
+        LAST_INSTALL.store(if layer.is_some() { 1 } else { 2 }, Ordering::SeqCst);
+        true
+    }
+
+    fn reload() -> TelemetryReload {
+        LAST_INSTALL.store(0, Ordering::SeqCst);
+        TelemetryReload::with_installer(record_install)
+    }
+
+    fn cfg(enabled: bool, exporter: TelemetryExporterKind) -> ObservabilityConfig {
+        ObservabilityConfig {
+            enabled,
+            exporter,
+            endpoint: None,
+            service_name: None,
+        }
+    }
+
+    fn world() -> (tokio::runtime::Runtime, leviath_runtime::PipelineWorld) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let world = leviath_runtime::PipelineWorld::new(
+            leviath_runtime::ProviderRegistry::new(),
+            Arc::new(crate::daemon::tool_service::CliToolService::new()),
+            leviath_runtime::inference_pool::InferencePoolConfig::new(),
+            1,
+            None,
+            runtime.handle().clone(),
+        );
+        (runtime, world)
+    }
+
+    /// The installed sink's identity, so a test can say "this is not the one
+    /// that was there before" without the sink having to be downcastable.
+    fn sink_ptr(world: &mut leviath_runtime::PipelineWorld) -> *const () {
+        Arc::as_ptr(
+            &world
+                .world_mut()
+                .get_resource::<leviath_runtime::telemetry::Telemetry>()
+                .expect("the world always has a sink")
+                .0,
+        ) as *const ()
+    }
+
+    #[test]
+    fn the_first_refresh_installs_and_a_repeat_of_it_does_not() {
+        let reload = reload();
+        let (_rt, mut world) = world();
+        let enabled = cfg(true, TelemetryExporterKind::Stdout);
+        assert!(reload.refresh_into(&mut world, &enabled));
+        let after = sink_ptr(&mut world);
+
+        assert!(
+            !reload.refresh_into(&mut world, &enabled),
+            "an unchanged [observability] must not rebuild the exporter"
+        );
+        assert_eq!(sink_ptr(&mut world), after);
+    }
+
+    /// The bug: `enabled = true` reached the file, the run went out with the
+    /// no-op sink, and the collector stayed empty.
+    #[test]
+    fn turning_export_on_after_boot_swaps_the_sink() {
+        let reload = reload();
+        let (_rt, mut world) = world();
+        assert!(reload.refresh_into(&mut world, &cfg(false, TelemetryExporterKind::Stdout)));
+        let off = sink_ptr(&mut world);
+
+        assert!(reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::Stdout)));
+        assert_ne!(
+            sink_ptr(&mut world),
+            off,
+            "the run after the edit has to emit into the exporter the user just asked for"
+        );
+    }
+
+    #[test]
+    fn turning_export_off_puts_the_noop_sink_back_and_clears_the_bridge() {
+        let reload = reload();
+        let (_rt, mut world) = world();
+        reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::Stdout));
+        let on = sink_ptr(&mut world);
+
+        assert!(reload.refresh_into(&mut world, &cfg(false, TelemetryExporterKind::Stdout)));
+        assert_ne!(sink_ptr(&mut world), on);
+        assert_eq!(
+            LAST_INSTALL.load(Ordering::SeqCst),
+            2,
+            "the daemon's own log lines must stop reaching a collector that was turned off"
+        );
+    }
+
+    #[test]
+    fn an_exporter_that_builds_nothing_leaves_a_working_silent_sink() {
+        // `exporter = "none"` with `enabled = true` is the config-level way to
+        // say "build no pipeline"; a failed OTLP construction reaches the same
+        // arm, having warned.
+        let reload = reload();
+        let (_rt, mut world) = world();
+        assert!(reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::None)));
+        assert_eq!(LAST_INSTALL.load(Ordering::SeqCst), 2);
+        // Emitting into it is a no-op rather than a panic.
+        world
+            .world_mut()
+            .get_resource::<leviath_runtime::telemetry::Telemetry>()
+            .unwrap()
+            .0
+            .force_flush();
+    }
+
+    /// Moving to OTLP installs the daemon-log bridge as well as the sink, and
+    /// moving off it takes the bridge back out. Port 9 (discard) is never
+    /// connected until an export flush, which nothing here triggers.
+    #[test]
+    fn the_otlp_exporter_brings_the_daemon_log_bridge_with_it() {
+        let reload = reload();
+        let (_rt, mut world) = world();
+        let otlp = ObservabilityConfig {
+            enabled: true,
+            exporter: TelemetryExporterKind::Otlp,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            service_name: Some("leviath-test".to_string()),
+        };
+        assert!(reload.refresh_into(&mut world, &otlp));
+        assert_eq!(
+            LAST_INSTALL.load(Ordering::SeqCst),
+            1,
+            "the daemon's own log lines go to the collector the user just named"
+        );
+
+        assert!(reload.refresh_into(&mut world, &cfg(true, TelemetryExporterKind::Stdout)));
+        assert_eq!(
+            LAST_INSTALL.load(Ordering::SeqCst),
+            2,
+            "and stop when the exporter they go through is no longer configured"
+        );
+    }
+
+    #[test]
+    fn a_changed_endpoint_is_a_change() {
+        let reload = reload();
+        let (_rt, mut world) = world();
+        let mut first = cfg(true, TelemetryExporterKind::Stdout);
+        reload.refresh_into(&mut world, &first);
+        first.service_name = Some("leviath-b".to_string());
+        assert!(
+            reload.refresh_into(&mut world, &first),
+            "a rename has to reach the exporter's resource attributes"
+        );
+    }
+
+    #[test]
+    fn for_daemon_starts_with_nothing_applied() {
+        let reload = TelemetryReload::for_daemon();
+        assert!(
+            reload.lock().is_none(),
+            "so the boot install goes through the same path as every later change"
+        );
+    }
+}

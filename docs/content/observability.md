@@ -32,6 +32,11 @@ value beats the environment.
 To see what would be exported without sending it anywhere, set `exporter = "stdout"`. It narrates
 the same events as readable lines on stderr.
 
+This block reloads: the daemon re-reads it and the next run emits into whatever it now names, with
+no restart. Turning export off puts the daemon's own log lines back on stderr alone. The one part
+that is fixed for the process's life is the log level, which comes from `--verbose` on the daemon's
+own command line rather than from here.
+
 > [!WARNING]
 > Export is OTLP over HTTP, on port **4318**. Many collector examples use 4317, which is the gRPC
 > port, and Leviath does not speak it. Pointing at 4317 fails silently from the outside.

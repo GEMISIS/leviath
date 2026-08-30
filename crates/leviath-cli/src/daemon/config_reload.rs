@@ -15,16 +15,17 @@
 //!
 //! Provider credentials are rebuilt from the same reloaded config by the
 //! `provider_reload` module beside this one, so a key added or removed here
-//! reaches the next run too. Settings that live somewhere other than the
-//! spawn-time config follow it through [`ConfigReloader::with_reload_hook`]: a
-//! caller registers what to re-apply, and it runs on each successful reload.
-//! The daemon uses it for the process-wide network policy, which is mirrored
-//! into atomics the shared blocking HTTP client reads
-//! (`script_host::mirror_process_policy`).
+//! reaches the next run too, and `[observability]` is rebuilt by the
+//! `telemetry_reload` module next to that. Settings that live somewhere other
+//! than the spawn-time config follow it through
+//! [`ConfigReloader::with_reload_hook`]: a caller registers what to re-apply,
+//! and it runs on each successful reload. The daemon uses it for the
+//! process-wide network policy, which is mirrored into atomics the shared
+//! blocking HTTP client reads (`script_host::mirror_process_policy`).
 //!
-//! What is still established once at boot is MCP connections and the telemetry
-//! sink: those hold live connections and process-wide state, and adding an MCP
-//! server still needs a daemon restart; see `daemon.md`.
+//! What is still established once at boot is MCP connections: those hold live
+//! connections, and adding an MCP server still needs a daemon restart; see
+//! `daemon.md`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};

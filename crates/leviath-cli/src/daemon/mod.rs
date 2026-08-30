@@ -21,4 +21,5 @@ pub(crate) mod seed_tool;
 pub mod setup;
 pub(crate) mod spawn;
 pub(crate) mod subagent;
+pub(crate) mod telemetry_reload;
 pub(crate) mod tool_service;

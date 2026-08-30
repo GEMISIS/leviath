@@ -23,8 +23,8 @@ where you look up the exact name, type, and default. The same contract ships mac
 > up by the next run started, whether it came from `lev run`, the API or the dashboard, and it
 > makes no difference whether the edit came from `lev setup`, `PUT /api/config` or an editor. A
 > run already under way keeps the provider its current stage started on. `lev serve` reads the
-> file per request, so an edit is on the next page load. MCP connections and telemetry exporters
-> are still boot-time wiring and need `lev daemon restart`. See
+> file per request, so an edit is on the next page load. MCP connections are still boot-time
+> wiring and need `lev daemon restart`. See
 > [the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run).
 
 ## Top level

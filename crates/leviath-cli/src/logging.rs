@@ -6,7 +6,7 @@
 //! OTLP is only read later (by the daemon, after `Config::load`). Bridging
 //! that gap is what the reload slot is for: [`init`] installs the fmt layer
 //! plus an empty slot and parks the reload handle in a static;
-//! `install_otel_layer` fills the slot once the daemon has built its
+//! `set_otel_layer` fills the slot once the daemon has built its
 //! exporter. Everything stays on **stderr** - `lev agent-client` uses stdout
 //! as its JSON-RPC channel, and a stray log line there would corrupt the
 //! stream a host is parsing.
@@ -36,7 +36,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry, reload};
 /// What the reload slot holds: nothing, or the installed OTLP layer.
 type OtelSlot = Option<leviath_telemetry::LogLayer>;
 
-/// The handle [`install_otel_layer`] reloads through, parked by [`init`].
+/// The handle [`set_otel_layer`] reloads through, parked by [`init`].
 static OTEL_HANDLE: OnceLock<reload::Handle<OtelSlot, Registry>> = OnceLock::new();
 
 /// Whether a TUI currently owns the terminal.
@@ -172,12 +172,19 @@ pub fn init(verbose: bool) {
     let _ = OTEL_HANDLE.set(handle);
 }
 
-/// Fill the reload slot with the daemon's OTLP log-export layer. Returns
-/// whether the layer was installed - `false` when [`init`] hasn't run (a
-/// library consumer with its own subscriber) or the slot is gone.
-pub(crate) fn install_otel_layer(layer: leviath_telemetry::LogLayer) -> bool {
+/// Put the daemon's OTLP log-export layer in the reload slot, or `None` to
+/// empty it. Returns whether the slot was written - `false` when [`init`]
+/// hasn't run (a library consumer with its own subscriber) or the slot is
+/// gone.
+///
+/// Takes an `Option` because `[observability]` reloads: a user who turns
+/// export off, or moves from the OTLP exporter to the stdout one, has to stop
+/// the daemon's own log lines reaching a collector they are no longer pointing
+/// at. The slot is a `reload::Layer`, so emptying it is the same operation as
+/// filling it.
+pub(crate) fn set_otel_layer(layer: Option<leviath_telemetry::LogLayer>) -> bool {
     match OTEL_HANDLE.get() {
-        Some(handle) => handle.reload(Some(layer)).is_ok(),
+        Some(handle) => handle.reload(layer).is_ok(),
         None => false,
     }
 }
@@ -211,7 +218,7 @@ mod tests {
     fn init_parks_the_handle_and_install_forwards_events() {
         // Before any handle is parked: nothing to install into.
         let (layer, _exporter) = bridge_with_exporter();
-        assert!(!install_otel_layer(layer));
+        assert!(!set_otel_layer(Some(layer)));
 
         // Park a handle whose subscriber this thread controls.
         let (otel_layer, handle) = reload::Layer::new(None as OtelSlot);
@@ -223,7 +230,7 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let (layer, exporter) = bridge_with_exporter();
-        assert!(install_otel_layer(layer));
+        assert!(set_otel_layer(Some(layer)));
         tracing::info!(target: "leviath::logging::test", "forwarded line");
         let emitted = exporter.get_emitted_logs().unwrap();
         assert!(
@@ -246,7 +253,7 @@ mod tests {
         init(false);
         init(true);
         let (layer, _exporter) = bridge_with_exporter();
-        assert!(install_otel_layer(layer));
+        assert!(set_otel_layer(Some(layer)));
     }
 
     /// The hold is what keeps a log line out of a wizard someone is reading,
