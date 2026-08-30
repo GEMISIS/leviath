@@ -300,9 +300,9 @@ way off the machine, the same as `shell` or `web_fetch`. The answer is what `lev
 anyone who reads `GET /api/agents/{id}/result`, and what the dashboard shows.
 
 So a stage that read a Private region and then submits it meets the gate before the answer is
-recorded. Your policy decides what happens: allow, deny, or ask. A run with nobody watching is
-blocked rather than asked. Taint tracking is off unless you turn it on, so this changes nothing for
-an install that leaves it alone.
+recorded. Your policy decides what happens: allow it, deny it, or ask. A blocked submission is not
+recorded as the run's answer, and the model is told, so the stage can submit something else. Taint
+tracking is off unless you turn it on, so this changes nothing for an install that leaves it alone.
 
 ## Large results
 
