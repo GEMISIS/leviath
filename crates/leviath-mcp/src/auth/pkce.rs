@@ -10,18 +10,18 @@ use sha2::{Digest, Sha256};
 
 /// A PKCE verifier/challenge pair plus the CSRF `state` for one authorization.
 #[derive(Debug, Clone)]
-pub(crate) struct Pkce {
+pub struct Pkce {
     /// The high-entropy secret, sent only on the token request.
-    pub(crate) verifier: String,
+    pub verifier: String,
     /// `BASE64URL(SHA256(verifier))`, sent on the authorization request.
-    pub(crate) challenge: String,
+    pub challenge: String,
     /// Opaque value echoed through the redirect to detect a forged callback.
-    pub(crate) state: String,
+    pub state: String,
 }
 
 impl Pkce {
     /// Generate a fresh pair from the system CSPRNG.
-    pub(crate) fn generate() -> Self {
+    pub fn generate() -> Self {
         // 32 random bytes → 43 base64url chars, comfortably inside the spec's
         // 43–128 range and well above the 256 bits of entropy it wants.
         let verifier = random_token(32);

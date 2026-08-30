@@ -14,7 +14,7 @@
 // server's own origin" means. The OAuth chain and the transport have to agree:
 // they are guarding the same token against the same server.
 pub(crate) mod metadata;
-mod pkce;
+pub mod pkce;
 pub mod store;
 
 use leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped, read_text_capped};
@@ -26,7 +26,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use metadata::{AuthServerMetadata, ProtectedResourceMetadata};
-use pkce::Pkce;
+pub use pkce::Pkce;
 pub use store::{AuthStore, ServerAuth};
 
 /// How the browser gets opened. Injected so tests never launch one.
@@ -41,6 +41,12 @@ pub type BrowserOpener = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// How long to wait for the user to finish authorizing in the browser.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The loopback path this crate's own logins redirect to.
+///
+/// Free to choose here: an MCP server learns the redirect URI through dynamic
+/// client registration, so whatever this says is what gets registered.
+pub const CALLBACK_PATH: &str = "/callback";
 
 /// The scopes requested when the server advertises none.
 const DEFAULT_SCOPES: &str = "openid profile email";
@@ -171,7 +177,7 @@ impl OAuthClient {
             .local_addr()
             .expect("a bound listener always has a local address")
             .port();
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
 
         let client_id = match reuse_client_id {
             Some(id) => id.to_string(),
@@ -204,7 +210,8 @@ impl OAuthClient {
             println!("(couldn't open a browser automatically - open the link above)");
         }
 
-        let code = wait_for_callback(listener, &pkce.state, CALLBACK_TIMEOUT).await?;
+        let code =
+            wait_for_callback(listener, &pkce.state, CALLBACK_PATH, CALLBACK_TIMEOUT).await?;
 
         let token = self
             .exchange_code(
@@ -735,10 +742,16 @@ fn expires_at(expires_in: Option<u64>, now: u64) -> u64 {
 /// Accept the browser redirect on the loopback listener and return the code.
 ///
 /// Validates `state` to reject a forged or replayed callback, replies with a
-/// human-friendly page, and gives up after [`CALLBACK_TIMEOUT`].
-async fn wait_for_callback(
+/// human-friendly page, and gives up after `timeout`.
+///
+/// `path` is the redirect path this listener answers on. MCP servers get one
+/// through dynamic registration, so any loopback path works and this crate
+/// asks for `/callback`; a provider whose client id is pre-registered has no
+/// such freedom and must be handed whatever path that registration named.
+pub async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
+    path: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
     let accept = async {
@@ -751,7 +764,7 @@ async fn wait_for_callback(
                 .expect("accepting on a bound loopback listener cannot fail");
             // A browser may make incidental requests (favicon, etc); only the
             // one carrying our params counts.
-            if let Some(result) = handle_callback_connection(stream, expected_state).await? {
+            if let Some(result) = handle_callback_connection(stream, expected_state, path).await? {
                 return Ok(result);
             }
         }
@@ -773,6 +786,7 @@ async fn wait_for_callback(
 async fn handle_callback_connection(
     mut stream: tokio::net::TcpStream,
     expected_state: &str,
+    path: &str,
 ) -> anyhow::Result<Option<String>> {
     use tokio::io::AsyncReadExt;
 
@@ -782,7 +796,7 @@ async fn handle_callback_connection(
     let Some(target) = request_target(&request) else {
         return Ok(None);
     };
-    if !target.starts_with("/callback") {
+    if !target.starts_with(path) {
         write_response(&mut stream, "404 Not Found", "Not found.").await;
         return Ok(None);
     }
@@ -1048,7 +1062,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            wait_for_callback(listener, "st8", Duration::from_secs(5)).await
+            wait_for_callback(listener, "st8", CALLBACK_PATH, Duration::from_secs(5)).await
         });
 
         let response = hit(addr, "/callback?code=the-code&state=st8").await;
@@ -1061,11 +1075,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callback_answers_on_the_path_it_was_given() {
+        // A provider whose client id is pre-registered cannot choose its
+        // redirect path; the Codex client id is registered on /auth/callback.
+        // So the path is a parameter, and this pins that it is honoured on
+        // both sides: the registered path answers, this crate's own does not.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            wait_for_callback(listener, "st8", "/auth/callback", Duration::from_secs(5)).await
+        });
+
+        let wrong = hit(addr, "/callback?code=c&state=st8").await;
+        assert!(wrong.contains("404"), "got: {wrong}");
+        let right = hit(addr, "/auth/callback?code=the-code&state=st8").await;
+        assert!(right.contains("200 OK"), "got: {right}");
+        assert_eq!(server.await.unwrap().unwrap(), "the-code");
+    }
+
+    #[tokio::test]
     async fn callback_skips_unrelated_requests_then_accepts_the_real_one() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            wait_for_callback(listener, "st8", Duration::from_secs(5)).await
+            wait_for_callback(listener, "st8", CALLBACK_PATH, Duration::from_secs(5)).await
         });
 
         // A browser often fetches /favicon.ico first; it must not end the wait.
@@ -1081,7 +1114,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            wait_for_callback(listener, "expected", Duration::from_secs(5)).await
+            wait_for_callback(listener, "expected", CALLBACK_PATH, Duration::from_secs(5)).await
         });
 
         let response = hit(addr, "/callback?code=c&state=forged").await;
@@ -1094,10 +1127,9 @@ mod tests {
     async fn callback_surfaces_an_oauth_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server =
-            tokio::spawn(
-                async move { wait_for_callback(listener, "s", Duration::from_secs(5)).await },
-            );
+        let server = tokio::spawn(async move {
+            wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_secs(5)).await
+        });
 
         let response = hit(addr, "/callback?error=access_denied").await;
         assert!(response.contains("400"), "got: {response}");
@@ -1109,10 +1141,9 @@ mod tests {
     async fn callback_rejects_a_request_missing_code_and_state() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server =
-            tokio::spawn(
-                async move { wait_for_callback(listener, "s", Duration::from_secs(5)).await },
-            );
+        let server = tokio::spawn(async move {
+            wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_secs(5)).await
+        });
 
         let response = hit(addr, "/callback?nothing=here").await;
         assert!(response.contains("400"), "got: {response}");
@@ -1127,7 +1158,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let accept = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_callback_connection(stream, "s").await
+            handle_callback_connection(stream, "s", CALLBACK_PATH).await
         });
         // Connect and immediately close without writing.
         let stream = TcpStream::connect(addr).await.unwrap();
@@ -1826,7 +1857,7 @@ mod tests {
     async fn callback_times_out_when_no_redirect_arrives() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Nobody connects, so the tiny timeout must fire.
-        let err = wait_for_callback(listener, "s", Duration::from_millis(100))
+        let err = wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_millis(100))
             .await
             .expect_err("must time out");
         assert!(err.to_string().contains("timed out"), "got: {err}");
