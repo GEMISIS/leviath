@@ -190,6 +190,12 @@ pub(crate) fn now_secs() -> u64 {
 /// GitHub refuses a request with no `User-Agent`, so it carries one naming the
 /// program doing the asking, which is what their guidance asks for.
 pub(crate) fn fetch_release(url: &str) -> Result<String, String> {
+    fetch_release_capped(url, leviath_net::read_caps::JSON_BODY_CAP)
+}
+
+/// [`fetch_release`] with the body cap as a parameter, so a test can hit it
+/// with a body of a few bytes rather than 64 MiB.
+fn fetch_release_capped(url: &str, cap: usize) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .user_agent(concat!("leviath/", env!("CARGO_PKG_VERSION")))
@@ -200,12 +206,31 @@ pub(crate) fn fetch_release(url: &str) -> Result<String, String> {
         // and a fast one the same way.
         .build()
         .unwrap_or_default();
-    let response = client.get(url).send().map_err(describe)?;
+    let mut response = client.get(url).send().map_err(describe)?;
     // A 404 is an answer - that channel has published nothing - and it arrives
     // as a body carrying no version, which reads the same as any other unusable
     // answer. Nothing here separates the failures, because no caller renders
     // them differently.
-    response.text().map_err(describe)
+    //
+    // Read through `take` rather than `text()`, which buffers whatever the peer
+    // sends: the same cap and message as every other buffered body the daemon
+    // reads (see `leviath_net::read_caps`). One byte past the cap is read so
+    // an over-long body is told apart from one that is exactly the cap.
+    let peer = response
+        .url()
+        .host_str()
+        .unwrap_or("an unnamed peer")
+        .to_string();
+    let mut body = Vec::new();
+    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut response, limit), &mut body)
+        .map_err(describe)?;
+    if body.len() > cap {
+        return Err(leviath_net::read_caps::BodyReadError::TooLarge { cap, peer }.to_string());
+    }
+    // The releases API answers UTF-8 JSON; lossy so a stray byte reads as a
+    // body carrying no version rather than a second failure shape.
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Every failure in [`fetch_release`], flattened to its message.

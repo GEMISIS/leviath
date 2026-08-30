@@ -109,6 +109,12 @@ same list.
 
 ### Fixed
 
+- The update check read the GitHub releases answer with no size cap, the one
+  buffered remote read left after the daemon's caps landed. It now stops at
+  the same 64 MiB as every other buffered body and reports the same
+  `response body exceeded 64 MiB from api.github.com` message. The security
+  page names it, and the one bounded-differently read (a chunked body on a
+  script's `http_get`).
 - `requests_per_minute = 0` under `[rate_limits.<provider>]` hung every call
   to that provider: the limiter waited for the request count to drop under
   zero, which it never could, and the wait sat in front of any HTTP timeout.
