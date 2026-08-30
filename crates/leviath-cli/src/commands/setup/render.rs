@@ -642,6 +642,25 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
                 Style::default().fg(C_DIM),
             )));
         }
+        // Nothing is typed here: the credential is a browser sign-in taken by
+        // a separate command, and this card reports whether it has been.
+        Credential::Signin => {
+            let (text, colour) = match &row.signed_in {
+                Some(who) => (format!("Signed in: {who}"), C_WHITE),
+                None => ("Not signed in yet.".to_string(), C_WARN),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(row_marker, Style::default().fg(C_ACCENT)),
+                Span::styled(text, Style::default().fg(colour)),
+            ]));
+            if row.signed_in.is_none() {
+                lines.push(Line::from(Span::styled(
+                    "Run `lev auth login codex` to sign in with your ChatGPT account. \
+                     It opens a browser and stores the grant outside config.toml.",
+                    Style::default().fg(C_DIM),
+                )));
+            }
+        }
         // A preset's screen is a form per entry, not this card.
         Credential::Endpoint => return endpoints::build_endpoint_detail(wizard, index),
     }

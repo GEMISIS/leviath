@@ -822,6 +822,8 @@ Transport is inferred from whether you pass `--url` or `--command`.
 | Command | Flags | Purpose |
 |---|---|---|
 | `lev auth status` | | Which credential backend is in use and what it holds |
+| `lev auth login <provider>` | | Sign in with a browser (`codex`); stores the grant outside `config.toml` |
+| `lev auth logout <provider>` | | Forget a browser sign-in, leaving the provider enabled |
 | `lev auth migrate` | `--to-file`, `--dry-run` | Move secrets between `config.toml` and the OS keychain |
 
 `lev auth migrate` moves keys into the OS store by default; `--to-file` moves them back out. Set

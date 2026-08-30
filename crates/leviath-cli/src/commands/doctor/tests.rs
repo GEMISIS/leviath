@@ -1381,3 +1381,62 @@ async fn a_registry_that_will_not_build_is_reported_as_a_failed_check() {
             .contains("could not build any provider client")
     );
 }
+
+// ─── codex ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_codex_check_says_nothing_when_it_is_not_enabled() {
+    // The report has no business mentioning a provider nobody asked for.
+    let config = Config::default();
+    assert!(codex_check(&config).is_none());
+}
+
+#[test]
+fn the_codex_check_warns_when_it_is_enabled_but_not_signed_in() {
+    // The failure this exists to name: without it the first inference fails
+    // with a bare HTTP 401 and nothing pointing at the command that fixes it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        let check = codex_check(&config).expect("a check");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("lev auth login codex"),
+            "names the fix: {}",
+            check.detail
+        );
+    });
+}
+
+#[test]
+fn the_codex_check_reports_the_account_once_signed_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let path =
+            leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+        store.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                email: Some("someone@example.com".to_string()),
+                plan_type: Some("plus".to_string()),
+                ..Default::default()
+            },
+        );
+        store.save(&path).expect("save");
+
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        let check = codex_check(&config).expect("a check");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.detail.contains("someone@example.com"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.contains("plus"), "{}", check.detail);
+    });
+}

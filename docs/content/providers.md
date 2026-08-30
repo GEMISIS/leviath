@@ -397,6 +397,20 @@ daemon inherited its environment when it started, so an `export` in your shell a
 reaches it. Write the key to `config.toml`, or run `lev daemon restart` from the shell that exports
 it.
 
+### Browser sign-ins
+
+A provider that authenticates with a browser keeps its grant in
+`~/.leviath/provider-auth.json` (mode 0600), never in `config.toml`, which is
+rewritten by the CLI and has no business holding a refresh token. With
+`[security] credential_store = "keychain"` the grant moves to the OS store like
+every other secret, and `lev auth migrate` moves it with them.
+
+```bash
+lev auth login codex     # sign in
+lev auth status          # which account, and on what plan
+lev auth logout codex    # forget it (leaves the provider enabled)
+```
+
 ## Rate limits
 
 Optional per-provider client-side rate limits, enforced before each call:
@@ -419,6 +433,73 @@ example are in [OpenAI-compatible endpoints](/docs/configuration#openai-compatib
 
 A server that needs more than the OpenAI shape, or a different one altogether, is a small Rhai
 script instead. [Rhai providers](/docs/rhai-providers) walks through a complete Groq provider.
+
+## OpenAI Codex (ChatGPT subscription)
+
+If you have a ChatGPT Plus, Pro, Business or Enterprise plan, Leviath can bill
+inference to it instead of an API balance. Sign in once with a browser and no
+API key is involved at all.
+
+```bash
+lev auth login codex     # opens your browser, stores the grant outside config.toml
+lev setup                # select "OpenAI Codex" to turn it on
+```
+
+`lev setup` offers it as an ordinary provider row. The sign-in itself is the
+separate command above, because a browser round trip does not belong inside the
+wizard's screen.
+
+This is a different provider from `openai`, not a mode of it. You can hold both
+credentials; a blueprint reaches this one as `codex/gpt-5.6-sol`.
+
+```toml
+[providers]
+codex_enabled          = true
+codex_reasoning_effort = "medium"   # none | minimal | low | medium | high | xhigh
+codex_verbosity        = "medium"   # low | medium | high
+```
+
+### It never wins a bare model name
+
+A blueprint entry that names a model with no provider is offered to every
+configured provider, and model names are compared on their last path segment,
+so `openai` and `codex` both answer to a bare `gpt-5.6-sol`. Turning this
+provider on would otherwise move billing for every such stage with one line of
+config and nothing saying so.
+
+So it is only reachable deliberately: an explicit `codex/...` in a blueprint or
+`--model`, an explicit `fallback_order` entry, or being your `default_provider`.
+
+### Measured caveats
+
+Everything here was checked against a live account rather than read from a
+reference.
+
+**No per-stage output cap, and no temperature.** The route rejects both
+outright, so a stage's `max_output_tokens` is advisory here and `temperature`
+is ignored. Every model on this route is a reasoning model; use
+`codex_reasoning_effort` instead.
+
+**No cache breakpoints.** There is no `cache_control` and no TTL to choose,
+only implicit prefix caching. Your structured regions still arrive intact and
+in the order assembly sorted them, and that order is now the whole caching
+strategy rather than an optimisation. Caching measured at 93% of the prefix
+once the prefix is large; below roughly nine thousand tokens it does not engage
+at all.
+
+**Cost is reported as zero, because it is.** A subscription has no per-call
+price. What to watch instead is the quota: a rolling five-hour window and a
+weekly one, both of which Leviath reads to decide how long to wait after a rate
+limit rather than guessing.
+
+**The model list is compiled in.** The route publishes no catalogue, so the
+context windows are this build's belief, and which models answer depends on
+your plan. `lev models list --provider codex` shows what your plan reaches.
+
+**Reasoning continuity is replayed by Leviath.** The route stores nothing
+server-side, so each turn's reasoning is handed back on the next request. Set
+`codex_replay_reasoning = false` to stop, at the cost of the model re-deriving
+its chain of thought every turn.
 
 ## Claude Code transport
 
