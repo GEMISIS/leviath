@@ -20,6 +20,12 @@ pub(crate) use security::*;
 mod serve;
 pub(crate) use serve::*;
 
+// Why a config file would not load, kept structured rather than flattened into
+// a string, so the surfaces that have to explain a broken file can point at
+// the line or the key instead of pasting a paragraph.
+mod fault;
+pub(crate) use fault::ConfigFault;
+
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
 // tests below reach them through the imports here.
@@ -420,6 +426,16 @@ impl Config {
     /// After loading from file (or using defaults), environment variables are
     /// checked as fallbacks. Env vars override config file values if set.
     pub fn load() -> anyhow::Result<Self> {
+        Ok(Self::load_faulted()?)
+    }
+
+    /// [`load`](Self::load) keeping the structure of a failure, for the
+    /// callers that report one instead of exiting on it.
+    ///
+    /// `lev doctor` is why: it turns a config that will not load into a check,
+    /// and a check that can point at the line beats one that pastes the
+    /// loader's paragraph.
+    pub(crate) fn load_faulted() -> Result<Self, Box<ConfigFault>> {
         // In the crate's own test build, refuse to read the *real* environment.
         //
         // `Config::load()` reads process-wide state, and `cargo test` runs tests
@@ -478,7 +494,7 @@ impl Config {
             load_dotenv_filtered(".env");
         }
 
-        let config = Self::load_from_path(&Self::config_path())?;
+        let config = Self::load_from_path_faulted(&Self::config_path())?;
 
         // Check config file permissions on Unix
         check_permissions();
@@ -612,40 +628,73 @@ impl Config {
         unknown
     }
 
+    /// The file half of loading: read, parse, validate. Everything that can
+    /// blame the file lives here, and it fails with a [`ConfigFault`] rather
+    /// than a flattened string so a caller can say *where*.
+    ///
+    /// Split out of [`load_from_path`](Self::load_from_path) because the
+    /// health surfaces - the dashboard banner, `lev doctor`, `GET
+    /// /api/config` - want exactly this question answered and have no use for
+    /// the environment fallbacks or the keychain lookup that follow it.
+    /// [`ConfigFault::check`] is the no-config-wanted form.
+    pub(crate) fn read_file(path: &std::path::Path) -> Result<Self, Box<ConfigFault>> {
+        if !path.exists() {
+            let path_display = path.display();
+            tracing::debug!("No config file found at {}, using defaults", path_display);
+            return Ok(Self::default());
+        }
+        let content =
+            std::fs::read_to_string(path).map_err(|e| Box::new(ConfigFault::read(path, &e)))?;
+
+        let c: Self = toml::from_str(&content)
+            .map_err(|e| Box::new(ConfigFault::parse(path, &content, &e)))?;
+
+        Self::warn_unknown_config_keys(&content);
+        c.warn_qualified_default_model();
+
+        // Catch a malformed MCP server entry here, at load, rather than at
+        // the first tool call: a typo that drops a server's tools should
+        // fail loudly and immediately.
+        for server in &c.mcp_servers {
+            server.validate().map_err(|e| {
+                Box::new(ConfigFault::validation(
+                    path,
+                    &format!("mcp_servers.{}", server.name),
+                    &e.to_string(),
+                ))
+            })?;
+        }
+        // An endpoint with no address is the same kind of mistake, and is
+        // named against its table for the same reason.
+        for (name, provider) in &c.model_providers {
+            provider.validate(name).map_err(|e| {
+                Box::new(ConfigFault::validation(
+                    path,
+                    &format!("model_providers.{name}"),
+                    &e.to_string(),
+                ))
+            })?;
+        }
+
+        let path_display = path.display();
+        tracing::debug!("Loaded config from {}", path_display);
+        Ok(c)
+    }
+
     /// Core of `load()`, parameterized by path so it can be exercised in
     /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
     fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
-        let mut config = if !path.exists() {
-            let path_display = path.display();
-            tracing::debug!("No config file found at {}, using defaults", path_display);
-            Self::default()
-        } else {
-            let content = std::fs::read_to_string(path).map_err(|e| {
-                anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e)
-            })?;
+        Ok(Self::load_from_path_faulted(path)?)
+    }
 
-            let c: Self = toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
-
-            Self::warn_unknown_config_keys(&content);
-            c.warn_qualified_default_model();
-
-            // Catch a malformed MCP server entry here, at load, rather than at
-            // the first tool call: a typo that drops a server's tools should
-            // fail loudly and immediately.
-            for server in &c.mcp_servers {
-                server.validate()?;
-            }
-            // An endpoint with no address is the same kind of mistake, and is
-            // named against its table for the same reason.
-            for (name, provider) in &c.model_providers {
-                provider.validate(name)?;
-            }
-
-            let path_display = path.display();
-            tracing::debug!("Loaded config from {}", path_display);
-            c
-        };
+    /// [`load_from_path`](Self::load_from_path) keeping the structure of a
+    /// failure, for the callers that report one rather than exit on it.
+    ///
+    /// The daemon's reloader is the reason this exists: it keeps serving the
+    /// last good config and has to be able to *say* what is wrong with the
+    /// new one, down to the line.
+    pub(crate) fn load_from_path_faulted(path: &std::path::Path) -> Result<Self, Box<ConfigFault>> {
+        let mut config = Self::read_file(path)?;
 
         // Env var fallbacks (env vars override config file if set)
         if config.providers.anthropic_api_key.is_none() {
