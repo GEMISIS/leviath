@@ -78,43 +78,67 @@ pub struct EndpointSpec {
 }
 
 impl EndpointSpec {
-    /// The endpoint `creds` describes, or `None` when it is not one.
+    /// The endpoint `creds` describes, or `Ok(None)` when it is not one.
     ///
     /// An endpoint with no base URL is not an endpoint: the config layer
     /// refuses to load one, so this is a second guard rather than the first.
-    pub fn from_creds(creds: &ProviderCreds) -> Option<Self> {
+    ///
+    /// An option that is there but does not read back is an error, not an
+    /// absence. The runtime wrote these from the config, so a failure is a
+    /// bug, and reading past it used to change what the entry meant: a
+    /// `models` list that did not parse became "the config did not say",
+    /// which lets the endpoint route any id where the list would have
+    /// refused the rest, and a header with a bad position was a header the
+    /// server never saw. The error names the entry and the option.
+    pub fn from_creds(
+        creds: &ProviderCreds,
+    ) -> Result<Option<Self>, leviath_providers::ProviderError> {
         if creds.options.get(KIND_OPTION).map(String::as_str) != Some(OPENAI_COMPATIBLE) {
-            return None;
+            return Ok(None);
         }
-        let base_url = creds.base_url.clone()?;
+        let Some(base_url) = creds.base_url.clone() else {
+            return Ok(None);
+        };
+        let malformed = |option: &str, what: &str| {
+            leviath_providers::ProviderError::Other(format!(
+                "endpoint '{}': the '{option}' option is not {what}; the runtime wrote it \
+                 from the config, so this is a bug in leviath rather than in the config",
+                creds.name
+            ))
+        };
         // Sorted by the position the encoder stamped, so the config's own
         // order is what the wire sees whatever order the map iterates in.
-        let mut headers: Vec<(usize, String, String)> = creds
-            .options
-            .iter()
-            .filter_map(|(key, value)| {
-                let rest = key.strip_prefix(HEADER_PREFIX)?;
-                let (position, name) = rest.split_once(':')?;
-                Some((position.parse().ok()?, name.to_string(), value.clone()))
-            })
-            .collect();
+        let mut headers: Vec<(usize, String, String)> = Vec::new();
+        for (key, value) in &creds.options {
+            let Some(rest) = key.strip_prefix(HEADER_PREFIX) else {
+                continue;
+            };
+            let position = rest
+                .split_once(':')
+                .and_then(|(position, name)| Some((position.parse().ok()?, name)));
+            let Some((position, name)) = position else {
+                return Err(malformed(key, "a numbered header (header:<n>:<name>)"));
+            };
+            headers.push((position, name.to_string(), value.clone()));
+        }
         headers.sort();
-        Some(Self {
+        let list = |option: &str| -> Result<Option<Vec<String>>, _> {
+            creds
+                .options
+                .get(option)
+                .map(|json| serde_json::from_str(json))
+                .transpose()
+                .map_err(|_| malformed(option, "a JSON list of strings"))
+        };
+        Ok(Some(Self {
             base_url,
             headers: headers
                 .into_iter()
                 .map(|(_, name, value)| (name, value))
                 .collect(),
-            models: creds
-                .options
-                .get(MODELS_OPTION)
-                .and_then(|json| serde_json::from_str(json).ok()),
-            serves: creds
-                .options
-                .get(SERVES_OPTION)
-                .and_then(|json| serde_json::from_str(json).ok())
-                .unwrap_or_default(),
-        })
+            models: list(MODELS_OPTION)?,
+            serves: list(SERVES_OPTION)?.unwrap_or_default(),
+        }))
     }
 }
 
@@ -350,7 +374,7 @@ pub fn build_provider_registry_probing(
         // Decided by kind before the name is looked at: an endpoint is
         // registered under whatever name the config gave it, and that name is
         // the user's to choose.
-        if let Some(endpoint) = EndpointSpec::from_creds(c) {
+        if let Some(endpoint) = EndpointSpec::from_creds(c)? {
             registry.register(
                 c.name.clone(),
                 Arc::new(
@@ -558,7 +582,9 @@ mod tests {
             Some(vec!["llama-3".to_string()]),
             vec!["llama".to_string()],
         );
-        let spec = EndpointSpec::from_creds(&creds).expect("an endpoint");
+        let spec = EndpointSpec::from_creds(&creds)
+            .expect("decodes")
+            .expect("an endpoint");
         assert_eq!(
             spec,
             EndpointSpec {
@@ -574,38 +600,67 @@ mod tests {
 
         // Nothing configured stays nothing rather than becoming an empty list.
         let bare = ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
-        let spec = EndpointSpec::from_creds(&bare).expect("an endpoint");
+        let spec = EndpointSpec::from_creds(&bare)
+            .expect("decodes")
+            .expect("an endpoint");
         assert_eq!(spec.models, None);
         assert!(spec.serves.is_empty());
         assert!(spec.headers.is_empty());
     }
 
-    /// Not an endpoint: a native provider, an endpoint that lost its address,
-    /// and options written by hand that do not decode.
+    /// Not an endpoint: a native provider, and an endpoint that lost its
+    /// address.
     #[test]
     fn a_cred_that_is_not_an_endpoint_yields_no_spec() {
         assert_eq!(
-            EndpointSpec::from_creds(&ProviderCreds::simple("anthropic")),
+            EndpointSpec::from_creds(&ProviderCreds::simple("anthropic")).expect("decodes"),
             None
         );
 
         let mut no_url =
             ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
         no_url.base_url = None;
-        assert_eq!(EndpointSpec::from_creds(&no_url), None);
+        assert_eq!(EndpointSpec::from_creds(&no_url).expect("decodes"), None);
+    }
 
-        let mut odd = ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
-        odd.options
-            .insert("header:X-No-Position".to_string(), "v".to_string());
-        odd.options
-            .insert("header:notanumber:X-Bad".to_string(), "v".to_string());
-        odd.options
-            .insert("models".to_string(), "not json".to_string());
-        odd.options.insert("serves".to_string(), "[".to_string());
-        let spec = EndpointSpec::from_creds(&odd).expect("still an endpoint");
-        assert!(spec.headers.is_empty());
-        assert_eq!(spec.models, None);
-        assert!(spec.serves.is_empty());
+    /// An option the runtime wrote that does not read back is a bug, and it
+    /// must not turn into a looser entry: `models` going from "this complete
+    /// list" to "the config did not say" lets the endpoint route any id, and
+    /// a header that lost its position is a header the server never sees.
+    /// The registry refuses the entry and names it and the option.
+    #[test]
+    fn a_malformed_endpoint_option_fails_the_registry_rather_than_loosening_it() {
+        for (option, value) in [
+            ("models", "not json"),
+            ("serves", "["),
+            ("header:notanumber:X-Bad", "v"),
+            ("header:X-No-Position", "v"),
+        ] {
+            let mut bad = ProviderCreds::openai_compatible(
+                "gw",
+                "http://127.0.0.1:1/v1",
+                None,
+                vec![],
+                Some(vec!["m".to_string()]),
+                vec![],
+            );
+            bad.options.insert(option.to_string(), value.to_string());
+            let decoded = EndpointSpec::from_creds(&bad);
+            assert!(decoded.is_err(), "{option}={value:?} must not decode");
+            let text = decoded.expect_err("checked above").to_string();
+            assert!(text.contains("'gw'"), "{option}: names the entry: {text}");
+            assert!(text.contains(option), "names the option: {text}");
+            let registry = build_provider_registry(&[bad]);
+            assert!(
+                registry.is_err(),
+                "{option}={value:?} must fail the registry"
+            );
+            assert_eq!(
+                registry.map(drop).expect_err("checked above").to_string(),
+                text,
+                "the registry passes it on as is"
+            );
+        }
     }
 
     /// A header value is a credential as often as not.

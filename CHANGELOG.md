@@ -238,6 +238,14 @@ same list.
   its shutdown, and the tool stayed routable for a run that no longer leased
   it. The client is now taken first, the bookkeeping goes only once it is, and
   a busy server gets another grace window.
+- An OpenAI-compatible endpoint entry whose `models`, `serves` or header
+  options did not read back out of the provider credentials was quietly
+  loosened: an unreadable `models` list became "the config did not say", so
+  the endpoint routed any id where the list would have refused the rest, and
+  a header with a bad position was dropped. Those options are written by the
+  runtime itself, so the failure is a bug; the registry now refuses the
+  entry with an error naming it and the option instead of registering a more
+  permissive provider.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

@@ -775,6 +775,7 @@ mod tests {
         let request = requests.recv().await.expect("sent");
         assert_eq!(request.provider_id, "openai-compatible");
         let spec = leviath_runtime::provider_creds::EndpointSpec::from_creds(&request.creds)
+            .expect("decodes")
             .expect("an endpoint cred");
         assert_eq!(spec.base_url, "http://127.0.0.1:1/v1");
         assert_eq!(spec.headers, vec![("X-Org".to_string(), "r".to_string())]);
