@@ -759,6 +759,41 @@ mod tests {
         assert_eq!(routes_in("fn main() {}"), Vec::new());
     }
 
+    /// Every deadline exemption names a route the router serves, and the API
+    /// guide's Limits section names every exemption. A pattern for a route that
+    /// moved would exempt nothing, silently; an exemption the guide does not
+    /// mention is a limit the reader would state wrongly.
+    #[test]
+    fn every_deadline_exemption_is_a_served_route_the_guide_names() {
+        let declared = declared_routes();
+        let limits = API_GUIDE
+            .split("\n## Limits")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("api.md has a Limits section");
+        for pattern in request_limits::DEADLINE_EXEMPT {
+            let served = declared.iter().any(|(path, _)| {
+                let mut want = pattern.split('/');
+                let mut have = path.split('/');
+                loop {
+                    match (want.next(), have.next()) {
+                        (None, None) => break true,
+                        (Some("*"), Some(seg)) if seg.starts_with('{') => {}
+                        (Some(a), Some(b)) if a == b => {}
+                        _ => break false,
+                    }
+                }
+            });
+            assert!(served, "{pattern} exempts no route the router serves");
+            // The guide writes the parameter the way the router does.
+            let documented = pattern.replace('*', "{name}");
+            assert!(
+                limits.contains(&documented),
+                "the Limits section of api.md does not name {documented}"
+            );
+        }
+    }
+
     /// Extracted so the `assert!` failure-message region (only executed
     /// when the assertion fails) is covered by this function's own
     /// `#[should_panic]` test below, rather than showing as a

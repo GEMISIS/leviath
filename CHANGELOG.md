@@ -119,6 +119,14 @@ same list.
   default, so the token window stayed empty and the limit did nothing in
   practice. A streamed call now books the total its usage frames name once
   the stream is done, for the built-in providers and script providers alike.
+- `lev serve` cut `POST /api/mcp/servers/{name}/login`, `POST
+  /api/mcp/servers/{name}/test` and `POST /api/doctor/live` at the 30 s
+  request deadline. The login waits up to 300 s for the browser's consent
+  page, so the handler was dropped, and the loopback listener and PKCE
+  state with it, while the operator was still authorizing, and the caller
+  got a 408. Those three routes now take an in-flight slot but no deadline;
+  each is bounded by its own longer one, and the API guide's Limits section
+  lists them.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

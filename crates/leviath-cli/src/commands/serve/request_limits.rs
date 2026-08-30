@@ -18,6 +18,11 @@
 //! for hours, and it is the one place the API streams: every other route
 //! builds its whole body before answering, so cutting a handler at the deadline
 //! never cuts a body in half.
+//!
+//! A few routes are outside the deadline only, listed in [`DEADLINE_EXEMPT`]
+//! with the reason each: they wait on a browser, an MCP server's handshake or
+//! a spawned run, all of which take longer than the default 30 s by design.
+//! They still take a permit, so the cap holds over them.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,10 +106,56 @@ impl Gate {
     }
 }
 
-/// Whether a path is one the limits leave alone: the websocket routes, which
+/// Whether a path is one both limits leave alone: the websocket routes, which
 /// hold their connection open by design.
 fn is_exempt(path: &str) -> bool {
     path == "/ws" || path.starts_with("/ws/")
+}
+
+/// The routes that take a permit but get no deadline, as path patterns where
+/// `*` stands for one path segment.
+///
+/// Each of these waits on something slower than a request has any right to
+/// be, and cutting it at the deadline does worse than a slow answer: the
+/// handler future is dropped with whatever it was holding, and the client
+/// gets a 408 for work that was going fine. They still count against the cap,
+/// so a flood of them is refused like any other.
+pub(super) const DEADLINE_EXEMPT: &[&str] = &[
+    // The OAuth flow: opens the operator's browser and waits up to 300 s
+    // (`leviath_mcp::auth::CALLBACK_TIMEOUT`) for the consent page to redirect
+    // to the loopback listener. Dropping it mid-wait loses the listener and
+    // the PKCE state, so the redirect lands on a closed port.
+    "/api/mcp/servers/*/login",
+    // Connects to the server and lists its tools, under the MCP client's own
+    // deadlines: 30 s for the handshake and 120 s for the listing, both
+    // longer than the default request deadline.
+    "/api/mcp/servers/*/test",
+    // The billed doctor: two provider calls under the probe's 60 s request
+    // timeout, then a throwaway run through the daemon waited on for up to
+    // 90 s. It is admin-only and single-flight already.
+    "/api/doctor/live",
+];
+
+/// Whether `path` is one of the [`DEADLINE_EXEMPT`] routes.
+fn deadline_exempt(path: &str) -> bool {
+    DEADLINE_EXEMPT
+        .iter()
+        .any(|pattern| matches_route(pattern, path))
+}
+
+/// Segment-by-segment match of `path` against `pattern`, where `*` stands
+/// for exactly one non-empty segment. Nothing matches a prefix or a suffix.
+fn matches_route(pattern: &str, path: &str) -> bool {
+    let mut want = pattern.split('/');
+    let mut have = path.split('/');
+    loop {
+        match (want.next(), have.next()) {
+            (None, None) => return true,
+            (Some("*"), Some(segment)) if !segment.is_empty() => {}
+            (Some(expected), Some(segment)) if expected == segment => {}
+            _ => return false,
+        }
+    }
 }
 
 /// The layer itself. Outermost after CORS, so a request the auth layer
@@ -139,19 +190,20 @@ pub(super) async fn limit_requests(
         },
     };
 
-    match gate.limits.timeout() {
-        None => next.run(req).await,
-        Some(deadline) => match tokio::time::timeout(deadline, next.run(req)).await {
-            Ok(response) => response,
-            Err(_) => err(
-                StatusCode::REQUEST_TIMEOUT,
-                format!(
-                    "request took longer than {} s",
-                    gate.limits.request_timeout_secs
-                ),
-            )
-            .into_response(),
-        },
+    let deadline = match gate.limits.timeout() {
+        Some(deadline) if !deadline_exempt(req.uri().path()) => deadline,
+        _ => return next.run(req).await,
+    };
+    match tokio::time::timeout(deadline, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => err(
+            StatusCode::REQUEST_TIMEOUT,
+            format!(
+                "request took longer than {} s",
+                gate.limits.request_timeout_secs
+            ),
+        )
+        .into_response(),
     }
 }
 
@@ -163,7 +215,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::Body;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
@@ -178,6 +230,14 @@ mod tests {
 
     fn request(path: &str) -> Request {
         Request::builder().uri(path).body(Body::empty()).unwrap()
+    }
+
+    fn post_request(path: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
     }
 
     async fn error_of(response: Response) -> String {
@@ -250,6 +310,109 @@ mod tests {
         // A path that merely starts with the letters is not a websocket.
         let response = app(limits, router).oneshot(request("/wsx")).await.unwrap();
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    /// The routes that legitimately outlive the deadline: an OAuth login waits
+    /// on a person at a consent page, an MCP test on a server's handshake, a
+    /// live doctor on provider calls and a spawned run. Each finishes under a
+    /// deadline it would otherwise have blown, and a lookalike path does not.
+    #[tokio::test(start_paused = true)]
+    async fn the_long_routes_outlive_the_deadline() {
+        let limits = RequestLimits {
+            max_concurrent_requests: 64,
+            request_timeout_secs: 1,
+        };
+        let router = Router::new()
+            .route("/api/mcp/servers/{name}/login", post(slow))
+            .route("/api/mcp/servers/{name}/test", post(slow))
+            .route("/api/doctor/live", post(slow))
+            .route("/api/doctor", get(slow))
+            .route("/api/mcp/servers/{name}/status", get(slow));
+        for path in [
+            "/api/mcp/servers/navigator/login",
+            "/api/mcp/servers/navigator/test",
+            "/api/doctor/live",
+        ] {
+            let response = app(limits, router.clone())
+                .oneshot(post_request(path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+        // The offline doctor and a status read are ordinary routes.
+        for path in ["/api/doctor", "/api/mcp/servers/navigator/status"] {
+            let response = app(limits, router.clone())
+                .oneshot(request(path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT, "{path}");
+        }
+    }
+
+    /// A route outside the deadline is still inside the cap: a parked login
+    /// holds the only permit, so the next request is refused.
+    #[tokio::test]
+    async fn a_deadline_exempt_route_still_takes_a_permit() {
+        let limits = RequestLimits {
+            max_concurrent_requests: 1,
+            request_timeout_secs: 1,
+        };
+        let parked = Arc::new(Parked::default());
+        let app = app(
+            limits,
+            Router::new()
+                .route("/api/mcp/servers/{name}/login", post(super::tests::parked))
+                .route("/api/agents", get(super::tests::parked))
+                .with_state(Arc::clone(&parked)),
+        );
+        let login = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(post_request("/api/mcp/servers/navigator/login"))
+                    .await
+                    .unwrap()
+            })
+        };
+        while parked.arrived.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        let refused = app.clone().oneshot(request("/api/agents")).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error_of(refused).await,
+            "too many requests in flight (the cap is 1)"
+        );
+        parked.release.notify_waiters();
+        assert_eq!(login.await.unwrap().status(), StatusCode::OK);
+        // The permit came back with the response.
+        parked.release.notify_one();
+        let after = app.oneshot(request("/api/agents")).await.unwrap();
+        assert_eq!(after.status(), StatusCode::OK);
+    }
+
+    /// The pattern matcher, segment by segment: `*` stands for one segment,
+    /// never zero and never several, and nothing matches a prefix.
+    #[test]
+    fn an_exempt_pattern_matches_one_segment_per_star() {
+        assert!(matches_route(
+            "/api/mcp/servers/*/login",
+            "/api/mcp/servers/a/login"
+        ));
+        assert!(!matches_route(
+            "/api/mcp/servers/*/login",
+            "/api/mcp/servers//login"
+        ));
+        assert!(!matches_route(
+            "/api/mcp/servers/*/login",
+            "/api/mcp/servers/a/b/login"
+        ));
+        assert!(!matches_route(
+            "/api/mcp/servers/*/login",
+            "/api/mcp/servers/a/login/x"
+        ));
+        assert!(!matches_route("/api/doctor/live", "/api/doctor"));
+        assert!(!matches_route("/api/doctor/live", "/api/doctor/liver"));
+        assert!(matches_route("/api/doctor/live", "/api/doctor/live"));
     }
 
     /// A handler that parks until the test releases it, counting arrivals so

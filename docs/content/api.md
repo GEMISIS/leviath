@@ -79,6 +79,17 @@ place the API streams, so every other route has built its whole body before the 
 cut it. An unauthenticated request takes a slot while it is being refused, so a flood without a
 token is refused at the cap like any other.
 
+Three routes take a slot but have no deadline, because each waits on something slower than the
+default by design and dropping it partway does damage a late answer would not:
+
+| Route | What it waits on |
+|---|---|
+| `POST /api/mcp/servers/{name}/login` | The operator at the consent page, up to 300 s. Dropping it closes the loopback listener the browser redirects to. |
+| `POST /api/mcp/servers/{name}/test` | The MCP server's handshake and tool listing, under the MCP client's own 30 s and 120 s deadlines. |
+| `POST /api/doctor/live` | Two billed provider calls and a throwaway run, up to the doctor's own 90 s. |
+
+Each is bounded by the deadline named in the table, so none can hold its slot forever.
+
 Neither limit is a ceiling on the runs behind the API. A spawn whose daemon takes a minute still
 spawns; the route answers as soon as the daemon has accepted it. `GET /api/config` reports the
 values in force under `limits.max_concurrent_requests` and `limits.request_timeout_secs`, so a
