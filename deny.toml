@@ -35,9 +35,10 @@ ignore = [
     # acceptance of risk, which is what this file exists to prevent.
     # smartstring is unmaintained: the repository was archived on 2026-05-03.
     #
-    # Accepted 2026-08-10, because nothing on our side can remove it. It is a
-    # hard, non-optional dependency of rhai, no rhai feature turns it off, and
-    # 1.25.1 is the latest release. rhai cannot swap it without a breaking
+    # Accepted 2026-08-10, re-checked 2026-08-29, because nothing on our side
+    # can remove it. It is a hard, non-optional dependency of rhai, no rhai
+    # feature turns it off, and 1.26.0 (the latest release, and the one in
+    # Cargo.lock) still pins smartstring 1.0.1. rhai cannot swap it without a breaking
     # change of its own, because SmartString appears in rhai's public API; the
     # maintainer is weighing `ecow` in rhaiscript/rhai#816.
     #
@@ -95,6 +96,13 @@ confidence-threshold = 0.9
 #   base64 0.22 / 0.23          0.22 via axum, hyper-util, reqwest, tiktoken-rs
 #   core-foundation 0.9 / 0.10  0.9 via system-configuration under hyper-util
 #   syn 2 / 3                   proc-macro only, zero bytes in the binary
+# Same version, two copies: `cargo tree -d` also lists these because a
+# proc-macro or build script compiles its own host-target copy of a crate the
+# binary links too. Nothing to resolve; one is never shipped.
+#   either, itertools           second copy under prost-derive (proc-macro)
+#   libc                        second copy under cc/cmake building aws-lc-sys
+#   once_cell                   second copy under const-random-macro (proc-macro)
+#   toml_datetime, toml_edit    second copy under bevy_macro_utils (proc-macro)
 # Also decided, not a duplicate: TLS is aws-lc-rs everywhere (reqwest and
 # axum-server resolve to the same provider). `ring` would save well under a
 # megabyte and change the audit posture; not worth it.
