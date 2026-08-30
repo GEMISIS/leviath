@@ -10,6 +10,7 @@ pub(crate) mod fanout_spawner;
 pub(crate) mod gate_rules;
 pub mod lifecycle;
 pub mod mcp_pool;
+pub mod provider_reload;
 pub mod readiness;
 pub(crate) mod recovery;
 pub(crate) mod sandbox_manager;

@@ -139,6 +139,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         // A fixed clock, so nothing here is a function of how long CI took.
         now_secs: || 1_700_000_000,
         reloader: None,
+        provider_reload: None,
     });
 
     // The daemon half: the host's own event sender served over a real control
