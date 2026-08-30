@@ -71,6 +71,10 @@ url = "https://mcp.example.com"
 headers = { Authorization = "Bearer ${MY_TOKEN}" }   # ${VAR} is expanded
 ```
 
+Either way, the next run picks it up. The daemon watches `config.toml`, so a server you add, edit
+or remove takes effect without `lev daemon restart` - see
+[the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run).
+
 ## Discovery and invocation
 
 On connect, Leviath discovers the server's tools and exposes them to any stage whose

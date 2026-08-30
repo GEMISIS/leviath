@@ -196,6 +196,15 @@ pub(crate) async fn setup_daemon_host_with(
         config.security.allow_env_vars.clone(),
         config.limits.mcp_idle_disconnect_secs,
     );
+    // File each global server's own defs under its signature. They were
+    // connected a moment ago by `ToolRegistry::build`, and the pool has to know
+    // what each one contributed for `mcp_reload` to reconcile the set later
+    // without keeping a second list of the same tools.
+    mcp_pool.seed_all(
+        &config.mcp_servers,
+        &registry.mcp_tool_defs,
+        &registry.mcp_tool_owners,
+    );
     mcp_pool.warm_recovered(&runs_dir).await;
     Ok(build_host(HostParts {
         config,
@@ -406,14 +415,23 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         crate::daemon::provider_reload::for_daemon(&parts.config, pp_providers.clone())
     });
 
+    // The global `[[mcp_servers]]` as a live set rather than the boot copy.
+    // Reconciled against the reloaded config before each spawn, so `lev mcp
+    // add`, `POST /api/mcp/servers` and a hand edit all reach the next run.
+    let mcp_global = crate::daemon::mcp_reload::McpReload::new(
+        &parts.config,
+        parts.mcp_pool.clone(),
+        parts.mcp_tool_defs.clone(),
+        parts.mcp_tool_owners.clone(),
+    );
+
     // Install the fan-out spawner as a world resource so the parts.runtime's fan-out
     // systems can start workers (it captures the same context as the spawner
     // below, cloned before those move into the closure).
     let fanout_spawner = DaemonFanOutSpawner {
         config: reloader.clone(),
         shared_mcp: parts.shared_mcp.clone(),
-        mcp_tool_defs: parts.mcp_tool_defs.clone(),
-        mcp_tool_owners: parts.mcp_tool_owners.clone(),
+        mcp_global: mcp_global.clone(),
         mcp_pool: parts.mcp_pool.clone(),
         hub: hub.clone(),
         subagent_tx: subagent_tx.clone(),
@@ -460,8 +478,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_tools = tool_service.clone();
     let reload_reloader = reloader.clone();
     let reload_mcp = parts.shared_mcp.clone();
-    let reload_defs = parts.mcp_tool_defs.clone();
-    let reload_owners = parts.mcp_tool_owners.clone();
+    let reload_global = mcp_global.clone();
     let reload_hub = hub.clone();
     let reload_tx = subagent_tx.clone();
     let reload_runs = parts.runs_dir.clone();
@@ -483,6 +500,9 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // the files name now rather than the one this daemon booted with.
         reload_policy.refresh_into(world);
         reload_telemetry.refresh_into(world, &reload_config.observability);
+        // The global MCP set as it stands now, not as it stood at boot: a run
+        // paged back in is rebuilt with the tools a fresh spawn would get.
+        let (reload_defs, reload_owners) = reload_global.current();
         let entity = crate::daemon::recovery::reload_run(
             world,
             crate::daemon::spawn::SpawnDeps {
@@ -533,13 +553,19 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // against a guess from its name, and nothing later corrects it.
     let pp_reloader = reloader.clone();
     let pp_reload = provider_reload.clone();
+    let pp_global = mcp_global.clone();
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
         let blueprint_path = args.blueprint_path.clone();
         let agents_dir = pp_agents_dir.clone();
         let config = pp_reloader.current();
         let reload = pp_reload.clone();
+        let global = pp_global.clone();
         Box::pin(async move {
+            // Before the blueprint's own servers, and before the sync spawner
+            // reads the set: connecting is async, and this is the only hook on
+            // the spawn path that can await (issue #684's MCP half).
+            global.refresh(&config).await;
             warm_blueprint_mcp(&pool, &blueprint_path).await;
             warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
             // Before the models are warmed, not after: a provider the user
@@ -565,6 +591,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let spawn_provider_reload = provider_reload.clone();
     let spawn_policy = policy_reload.clone();
     let spawn_telemetry = telemetry_reload.clone();
+    let spawn_global = mcp_global.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -573,10 +600,13 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
+        // The global set the preprocessor just reconciled, plus this
+        // blueprint's own servers.
+        let (global_defs, global_owners) = spawn_global.current();
         let (defs, owners) = per_agent_mcp_defs(
             &spawn_pool,
-            &parts.mcp_tool_defs,
-            &parts.mcp_tool_owners,
+            &global_defs,
+            &global_owners,
             &args.blueprint_path,
         );
         // Hold the blueprint's per-agent servers open for this run's life;

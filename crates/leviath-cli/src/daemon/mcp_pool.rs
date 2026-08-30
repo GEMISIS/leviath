@@ -29,13 +29,16 @@ pub struct McpPool {
     /// mutex (held only briefly, never across `.await`) so the sync spawner can
     /// read it from a runtime thread without `blocking_lock`'s panic.
     connected: StdMutex<HashMap<String, Vec<Tool>>>,
-    /// Where MCP OAuth grants are kept, so a refreshed token is written back to
-    /// the backend it came from. Defaults to the file store, which is also the
-    /// config default - a pool built without being told reads `mcp-auth.json`.
-    credential_store: leviath_core::CredentialStoreKind,
-    /// `[security] allow_env_vars`: which credential-shaped variables an MCP
-    /// server's `${VAR}` headers may interpolate.
-    allow_env_vars: Vec<String>,
+    /// The `[security]` settings that shape a *connection* rather than the
+    /// pool: where MCP OAuth grants are kept, and which credential-shaped
+    /// variables a server's `${VAR}` headers may interpolate.
+    ///
+    /// Behind a lock because they were boot copies, and the docs said
+    /// otherwise: naming a variable in `allow_env_vars` was supposed to take
+    /// effect on the next load, and for an MCP server it took effect on the
+    /// next daemon restart. `mcp_reload` writes them on each config reconcile,
+    /// and they are read when a server is connected.
+    security: StdMutex<PoolSecurity>,
     /// Per-run leases on per-agent servers (see [`Self::lease_blueprint`]).
     /// Same `std` mutex discipline as `connected`: held briefly, never across
     /// an `.await`.
@@ -46,6 +49,17 @@ pub struct McpPool {
     /// server any blueprint ever declared stayed connected for the daemon's
     /// life.
     idle_disconnect: std::time::Duration,
+}
+
+/// The connection-shaping half of `[security]`, as of the last config
+/// reconcile.
+struct PoolSecurity {
+    /// Where MCP OAuth grants are read from and written back to. Defaults to
+    /// the file store, which is also the config default - a pool built without
+    /// being told reads `mcp-auth.json`.
+    credential_store: leviath_core::CredentialStoreKind,
+    /// `[security] allow_env_vars`.
+    allow_env_vars: Vec<String>,
 }
 
 /// Which runs hold which per-agent servers open.
@@ -88,7 +102,7 @@ struct ServerLease {
 /// A stable dedup key for a server config: its full serialized form. Two
 /// blueprints declaring an identical server share one connection; a difference in
 /// name/command/url/args/env/headers is a distinct server.
-fn signature(config: &MCPServerConfig) -> String {
+pub(crate) fn signature(config: &MCPServerConfig) -> String {
     // Serializing a plain config never fails; fall back to an empty key rather
     // than carry a dead error closure.
     serde_json::to_string(config).unwrap_or_default()
@@ -108,8 +122,10 @@ impl McpPool {
             shared,
             reserved,
             connected: StdMutex::new(HashMap::new()),
-            credential_store: leviath_core::CredentialStoreKind::default(),
-            allow_env_vars: Vec::new(),
+            security: StdMutex::new(PoolSecurity {
+                credential_store: leviath_core::CredentialStoreKind::default(),
+                allow_env_vars: Vec::new(),
+            }),
             leases: StdMutex::new(LeaseTable::default()),
             idle_disconnect: std::time::Duration::from_secs(DEFAULT_MCP_IDLE_DISCONNECT_SECS),
         }
@@ -130,15 +146,33 @@ impl McpPool {
     }
 
     /// Allow these credential-shaped variables in MCP `${VAR}` headers.
-    pub(crate) fn with_env_allowlist(mut self, allow: Vec<String>) -> Self {
-        self.allow_env_vars = allow;
+    pub(crate) fn with_env_allowlist(self, allow: Vec<String>) -> Self {
+        self.lock_security().allow_env_vars = allow;
         self
     }
 
     /// Read and write MCP grants through `kind`'s backend.
-    pub(crate) fn with_credential_store(mut self, kind: leviath_core::CredentialStoreKind) -> Self {
-        self.credential_store = kind;
+    pub(crate) fn with_credential_store(self, kind: leviath_core::CredentialStoreKind) -> Self {
+        self.lock_security().credential_store = kind;
         self
+    }
+
+    /// Adopt `config`'s `[security]` for every connection opened from now on.
+    ///
+    /// Called from the config reconcile beside this, before anything is
+    /// connected: a server whose `${VAR}` header the user has just allowed is
+    /// reconnected there, and this is what makes the reconnect see the new
+    /// allowlist.
+    pub(crate) fn apply_security(&self, config: &crate::config::Config) {
+        let mut security = self.lock_security();
+        security.credential_store = config.security.credential_store;
+        security
+            .allow_env_vars
+            .clone_from(&config.security.allow_env_vars);
+    }
+
+    fn lock_security(&self) -> std::sync::MutexGuard<'_, PoolSecurity> {
+        self.security.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Build the daemon's shared pool over `shared_mcp`: reserve built-in and
@@ -205,6 +239,91 @@ impl McpPool {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(sig, defs);
+    }
+
+    /// Seed every global server in `servers` with the defs it contributed to
+    /// `defs`, worked out from `owners`.
+    ///
+    /// The alternative is [`seed`](Self::seed)'s empty vec, which is what the
+    /// startup path used while the global servers' defs lived in a separate
+    /// list beside the pool. Filing each server's own defs under its signature
+    /// makes [`cached_defs_for`](Self::cached_defs_for) the single answer to
+    /// "what does this set of servers advertise", for the global set as much as
+    /// a blueprint's - which is what lets the global set change under a running
+    /// daemon without a second list to keep in step.
+    pub(crate) fn seed_all(
+        &self,
+        servers: &[MCPServerConfig],
+        defs: &[Tool],
+        owners: &leviath_runtime::pipeline::ToolOwners,
+    ) {
+        for server in servers {
+            let mine: Vec<Tool> = defs
+                .iter()
+                .filter(|t| owners.get(&t.name).is_some_and(|o| *o == server.name))
+                .cloned()
+                .collect();
+            self.seed(server, mine);
+        }
+    }
+
+    /// [`ensure`](Self::ensure) for a server the *config* declares: the
+    /// connection belongs to the daemon rather than to any run, so it is exempt
+    /// from lease-driven idle disconnection, and a pending retirement from a
+    /// moment ago (the user removed it and put it back) is cancelled.
+    pub(crate) async fn ensure_global(&self, config: &MCPServerConfig) -> Vec<Tool> {
+        let sig = signature(config);
+        {
+            let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            table.global.insert(sig.clone());
+            // Dropping the row is what makes a scheduled disconnect a no-op:
+            // it looks for the row before it touches anything.
+            table.servers.remove(&sig);
+        }
+        self.ensure(config).await
+    }
+
+    /// Stop holding `config`'s server open on the daemon's behalf: it is no
+    /// longer in `[[mcp_servers]]`.
+    ///
+    /// `at_once` tears the connection down before returning, for an *edited*
+    /// entry - the replacement connects under the same name straight
+    /// afterwards, and a delayed teardown would take that one down with it.
+    /// Otherwise the server is handed to the same grace timer an unleased
+    /// per-agent server gets, so a run part-way through a stage keeps the tool
+    /// working for that window rather than losing it mid-call.
+    pub(crate) async fn retire_global(self: &Arc<Self>, config: &MCPServerConfig, at_once: bool) {
+        let sig = signature(config);
+        let name = config.name.clone();
+        let generation = {
+            let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            table.global.remove(&sig);
+            let entry = table
+                .servers
+                .entry(sig.clone())
+                .or_insert_with(|| ServerLease {
+                    name: name.clone(),
+                    holders: HashSet::new(),
+                    generation: 0,
+                });
+            entry.generation += 1;
+            entry.generation
+        };
+        let handle = tokio::runtime::Handle::try_current().ok();
+        match (at_once, handle) {
+            // No runtime to schedule on (a sync test) is the immediate case too:
+            // a deferred teardown that never runs is a leaked child process.
+            (true, _) | (false, None) => {
+                self.disconnect_if_still_idle(&sig, &name, generation).await;
+            }
+            (false, Some(handle)) => {
+                let pool = Arc::clone(self);
+                handle.spawn(async move {
+                    tokio::time::sleep(pool.idle_disconnect).await;
+                    pool.disconnect_if_still_idle(&sig, &name, generation).await;
+                });
+            }
+        }
     }
 
     /// Record `run_id` as holding every per-agent server `blueprint_path`
@@ -364,6 +483,14 @@ impl McpPool {
         }
     }
 
+    /// Whether the shared executor can still dispatch `tool`. The
+    /// advertisement and the connection are separate records, and the bug this
+    /// distinguishes is one going stale without the other.
+    #[cfg(test)]
+    pub(crate) async fn routes(&self, tool: &str) -> bool {
+        self.shared.lock().await.route(tool).is_ok()
+    }
+
     /// The signatures currently holding leases, for tests and diagnostics.
     #[cfg(test)]
     fn leased_holders(&self, config: &MCPServerConfig) -> usize {
@@ -394,9 +521,14 @@ impl McpPool {
         // static-header servers. Mirrors `ToolRegistry::build`.
         let oauth = leviath_mcp::OAuthClient::new();
         let store_path = leviath_mcp::AuthStore::default_path();
-        let credentials = crate::tools::credential_store_or_warn(crate::credentials::store_for(
-            self.credential_store,
-        ));
+        // Read out before the connect: both sit behind a `std` mutex, and the
+        // connect awaits.
+        let (store_kind, allow_env) = {
+            let security = self.lock_security();
+            (security.credential_store, security.allow_env_vars.clone())
+        };
+        let credentials =
+            crate::tools::credential_store_or_warn(crate::credentials::store_for(store_kind));
         let auth = match crate::tools::resolve_bearer(
             &oauth,
             &config.name,
@@ -416,7 +548,7 @@ impl McpPool {
         let auth_was_resolved = auth.is_some();
         let mut discovery = ToolDiscovery::new();
         match discovery
-            .discover_from_config_with_auth(config, auth, &self.allow_env_vars)
+            .discover_from_config_with_auth(config, auth, &allow_env)
             .await
         {
             Ok((_metas, mut client)) => {

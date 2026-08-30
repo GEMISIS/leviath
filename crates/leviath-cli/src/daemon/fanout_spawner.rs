@@ -36,10 +36,10 @@ pub(crate) struct DaemonFanOutSpawner {
     pub config: Arc<crate::daemon::config_reload::ConfigReloader>,
     /// The daemon-wide MCP executor, for servers configured globally.
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    /// Tool definitions from `shared_mcp`, resolved once rather than per worker.
-    pub mcp_tool_defs: Vec<Tool>,
-    /// Which server advertises each of them, for a stage granting a connector.
-    pub mcp_tool_owners: leviath_runtime::pipeline::ToolOwners,
+    /// The global `[[mcp_servers]]` as a live set. Read per worker rather than
+    /// captured, so a server added to `config.toml` after this daemon started
+    /// reaches a fan-out worker as it reaches any other run.
+    pub mcp_global: Arc<crate::daemon::mcp_reload::McpReload>,
     /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
     /// advertises its blueprint's already-connected servers and lazily warms any
     /// uncached ones for subsequent workers of the same type.
@@ -69,8 +69,7 @@ impl DaemonFanOutSpawner {
         &self,
         blueprint_path: &str,
     ) -> (Vec<Tool>, leviath_runtime::pipeline::ToolOwners) {
-        let mut defs = self.mcp_tool_defs.clone();
-        let mut owners = self.mcp_tool_owners.clone();
+        let (mut defs, mut owners) = self.mcp_global.current();
         let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
             return (defs, owners);
         };
@@ -376,6 +375,24 @@ mod tests {
             .to_string()
     }
 
+    /// A live global-MCP handle over `defs`, standing in for the servers
+    /// `config.toml` declares.
+    fn global_mcp(defs: Vec<Tool>) -> Arc<crate::daemon::mcp_reload::McpReload> {
+        let owners = defs
+            .iter()
+            .map(|t| (t.name.clone(), "global".to_string()))
+            .collect();
+        crate::daemon::mcp_reload::McpReload::new(
+            &Config::default(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
+            defs,
+            owners,
+        )
+    }
+
     fn spawner_with(tool_service: Arc<CliToolService>) -> DaemonFanOutSpawner {
         let shared_mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         DaemonFanOutSpawner {
@@ -383,8 +400,7 @@ mod tests {
                 Config::default(),
             )),
             shared_mcp: shared_mcp.clone(),
-            mcp_tool_defs: vec![],
-            mcp_tool_owners: Default::default(),
+            mcp_global: global_mcp(vec![]),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp, &[]),
             hub: InteractionHub::new(),
             subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
@@ -397,11 +413,11 @@ mod tests {
     #[tokio::test]
     async fn worker_mcp_defs_advertises_cached_servers_and_falls_back_to_global() {
         let mut spawner = spawner_with(Arc::new(CliToolService::new()));
-        spawner.mcp_tool_defs = vec![Tool {
+        spawner.mcp_global = global_mcp(vec![Tool {
             name: "global_tool".to_string(),
             description: String::new(),
             parameters: serde_json::json!({}),
-        }];
+        }]);
         // A worker blueprint declaring an MCP server.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
@@ -491,14 +507,15 @@ mod tests {
             parent_run_id: None,
             output: None,
         };
+        let (global_defs, global_owners) = spawner.mcp_global.current();
         let parent = build_agent(
             world.world_mut(),
             SpawnDeps {
                 tool_service: cli.as_ref(),
                 config: &spawner.config.current(),
                 shared_mcp: spawner.shared_mcp.clone(),
-                mcp_tool_defs: &spawner.mcp_tool_defs,
-                mcp_tool_owners: &spawner.mcp_tool_owners,
+                mcp_tool_defs: &global_defs,
+                mcp_tool_owners: &global_owners,
                 hub: &spawner.hub,
                 now_secs: 100,
                 subagent_tx: spawner.subagent_tx.clone(),

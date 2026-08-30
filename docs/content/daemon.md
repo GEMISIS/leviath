@@ -160,8 +160,19 @@ an in-progress edit never breaks a spawn.
 `[model_providers.<name>]` reloads too, as of this release. A script provider's own `.rhai` file
 has always been re-read on each use, so a table beside it that needed a restart made two halves of
 one feature disagree in silence - setting a `base_url` and watching it do nothing looked exactly
-like having typed the key wrong. Both halves are now live: edit the script, the table, or
-`[security] allow_env_vars`, and the next provider load uses it.
+like having typed the key wrong. Both halves are now live: edit the script or the table, and the
+next provider load uses it.
+
+`[security] allow_env_vars` is live for both things that read it: a Rhai script's `env_var()`, and
+the `${VAR}` in an MCP server's `headers`. Naming a variable there reaches the next provider load
+and the next MCP connection. A server already connected keeps the header it was given, so a global
+`[[mcp_servers]]` entry that interpolates a variable is reconnected when you change the list, which
+is what puts the new value in front of the next run.
+
+`[[mcp_servers]]` is live as well. Add, edit or remove a global server - with `lev mcp add`, `POST
+/api/mcp/servers`, or by hand - and the next run gets the tools the file names now. A run already
+under way keeps the servers it started with: a removed one stays connected for
+`[limits] mcp_idle_disconnect_secs` so nothing loses a tool mid-call, and is torn down after that.
 
 Provider credentials reload as well. Add a key, replace one, remove one by untoggling it in
 `lev setup`, point a provider at another base URL, or change `default_provider`: the daemon
@@ -191,7 +202,6 @@ only be set once per process. Changing that still means restarting the daemon.
 Some changes do still need `lev daemon restart`. They set up connections and process-wide state
 once at startup rather than per run:
 
-- `[[mcp_servers]]`, which hold live MCP connections.
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
   `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
   `provider_failures_before_open`, `provider_circuit_cooldown_secs`,
