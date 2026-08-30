@@ -1525,8 +1525,9 @@ mod tests {
             hub,
         )
         .await;
-        assert!(!out[0].1.contains("declined"), "{}", out[0].1);
-        assert!(!out[0].1.contains("Feedback"), "{}", out[0].1);
+        let result = &out[0].1;
+        assert!(!result.contains("declined"), "not a decline: {result}");
+        assert!(!result.contains("Feedback"), "no redirect: {result}");
     }
 
     #[tokio::test]

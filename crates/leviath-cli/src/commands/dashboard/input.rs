@@ -2899,18 +2899,18 @@ mod tests {
         dash.input_mode = true;
         dash.choice_selected = 0;
 
-        // Down through once / stage / run / deny
-        for expected in 1..=3 {
+        // Down through once / stage / run / deny / deny with feedback
+        for expected in 1..=4 {
             dash.handle_key(key(KeyCode::Down));
             assert_eq!(dash.choice_selected, expected);
         }
         // Can't go past last
         dash.handle_key(key(KeyCode::Down));
-        assert_eq!(dash.choice_selected, 3);
+        assert_eq!(dash.choice_selected, 4);
 
         // Up back
         dash.handle_key(key(KeyCode::Up));
-        assert_eq!(dash.choice_selected, 2);
+        assert_eq!(dash.choice_selected, 3);
     }
 
     #[test]
