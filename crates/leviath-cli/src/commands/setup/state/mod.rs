@@ -1003,38 +1003,22 @@ impl Wizard {
                 // Written below, from the entries rather than the row.
                 Credential::Endpoint => {}
                 _ if !row.selected => catalog::set_credential(&mut config, row.provider.id, None),
-                // A browser sign-in types nothing, so choosing the row *is*
-                // the setting and the credential itself lives outside the
-                // config. Ahead of the empty-value arm below, which is about a
-                // credential that was not given: this one never has a value to
-                // give, so it fell there and every finished sign-in was
-                // switched back off the moment the plan was applied.
-                // A browser sign-in types nothing, so choosing the row *is*
-                // the setting and the credential itself lives outside the
-                // config. Ahead of the empty-value arm below, which is about a
-                // credential that was not given: this one never has a value to
-                // give, so it fell there and every finished sign-in was
-                // switched back off the moment the plan was applied.
-                // A browser sign-in types nothing, so choosing the row *is*
-                // the setting and the credential itself lives outside the
-                // config. Ahead of the empty-value arm below, which is about a
-                // credential that was not given: this one never has a value to
-                // give, so it fell there and every finished sign-in was
-                // switched back off the moment the plan was applied.
-                Credential::Signin => {
-                    catalog::set_credential(&mut config, row.provider.id, Some(String::new()))
-                }
-                // An environment-supplied credential is left out of the file:
-                // the user put it in their environment on purpose, and
-                // `Config::load` already reads it back from there.
-                _ if row.value.is_empty() => {
+                // A key left blank is a credential the user did not give -
+                // usually because it is in their environment on purpose, and
+                // `Config::load` reads it back from there. This is the only
+                // kind that rule holds for, and it used to be written as "any
+                // empty value", which caught the kinds that never have one: a
+                // browser sign-in types nothing, so every finished Codex
+                // sign-in was switched back off the moment the plan was
+                // applied.
+                Credential::ApiKey if row.value.is_empty() => {
                     catalog::set_credential(&mut config, row.provider.id, None)
                 }
-                Credential::BaseUrl if row.value == catalog::DEFAULT_OLLAMA_URL => {
-                    // Storing the default would pin it; leaving it unset lets
-                    // the built-in default (and `$OLLAMA_HOST`) apply.
-                    catalog::set_credential(&mut config, row.provider.id, None)
-                }
+                // Everything else: choosing the row is the setting, and
+                // whatever was typed rides along. What that means is the row's
+                // own business - Ollama drops an address equal to its default
+                // so `$OLLAMA_HOST` still applies, and a browser sign-in has
+                // nothing to store at all - and none of it is decided here.
                 _ => catalog::set_credential(&mut config, row.provider.id, Some(row.value.clone())),
             }
         }
@@ -2947,17 +2931,18 @@ pub(super) mod tests {
         }
     }
 
-    /// The one documented exception to the rule above: a base-URL provider
-    /// left on its default writes nothing.
+    /// A base-URL provider left on its default is configured, and its
+    /// address is still not written down.
     ///
-    /// Deliberate - storing the default would pin it, and `$OLLAMA_HOST` and
-    /// the built-in default would both stop applying. The cost is that
-    /// choosing Ollama and keeping the default leaves it out of
-    /// `configured_providers`, so it cannot be picked as the default
-    /// provider. Asserted rather than skipped, so changing it is a decision
-    /// somebody makes on purpose.
+    /// Those used to be the same answer: the only record of the choice was
+    /// the URL, so keeping the default meant recording nothing, and choosing
+    /// Ollama left it out of `configured_providers` entirely - it could not
+    /// be picked as the default provider, and the wizard forgot it by the
+    /// next run. Storing the default instead would pin it and stop
+    /// `$OLLAMA_HOST` applying, so the choice and the address are now two
+    /// fields saying two different things.
     #[test]
-    fn a_base_url_provider_left_on_its_default_writes_nothing() {
+    fn a_base_url_provider_left_on_its_default_is_still_chosen() {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         let index = wizard
@@ -2975,8 +2960,21 @@ pub(super) mod tests {
         let config = wizard.build_config();
         let id = wizard.providers[index].provider.id;
         assert!(
-            !catalog::is_configured(&config, id),
-            "'{id}' on its default should leave the file alone"
+            catalog::is_configured(&config, id),
+            "'{id}' was chosen and is not configured"
+        );
+        assert_eq!(
+            config.ollama_base_url, None,
+            "the default address was pinned, so $OLLAMA_HOST stops applying"
+        );
+
+        // And a *different* address is written down, because that one is not
+        // something any default would supply.
+        wizard.providers[index].value = "http://elsewhere:11434".to_string();
+        let config = wizard.build_config();
+        assert_eq!(
+            config.ollama_base_url.as_deref(),
+            Some("http://elsewhere:11434")
         );
     }
 

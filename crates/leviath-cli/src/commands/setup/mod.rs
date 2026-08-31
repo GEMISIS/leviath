@@ -238,28 +238,46 @@ fn configured_providers(config: &Config) -> Vec<String> {
         .map(|(name, _)| name.as_str())
         .collect();
     endpoints.sort_unstable();
-    [
-        ("anthropic", config.providers.anthropic_api_key.is_some()),
-        ("openai", config.providers.openai_api_key.is_some()),
-        ("google", config.providers.google_api_key.is_some()),
-        ("openrouter", config.openrouter_api_key.is_some()),
-        ("claude-code", config.providers.claude_code_enabled),
+    let kind = |id: &str| {
+        catalog::providers()
+            .into_iter()
+            .find(|p| p.id == id)
+            .map(|p| p.credential)
+    };
+    let chosen: Vec<&'static str> = catalog::configured(config)
+        .into_iter()
+        // An endpoint *preset* is not a provider name: the entries under it
+        // are, and they are listed by name below.
+        .filter(|id| kind(id) != Some(catalog::Credential::Endpoint))
         // Enabled *and* signed in. Enabled alone would let a headless
         // `--codex true` make an unauthenticated provider the host default,
         // and the very next run would fail on a credential nobody was asked
         // for.
-        (
-            "codex",
-            config.providers.codex_enabled && codex_grant_exists(),
-        ),
-    ]
-    .into_iter()
-    .filter(|(_, configured)| *configured)
-    .map(|(id, _)| id)
-    .chain(endpoints)
-    .chain(config.ollama_base_url.is_some().then_some("ollama"))
-    .map(str::to_string)
-    .collect()
+        .filter(|id| *id != leviath_providers::codex::PROVIDER_NAME || codex_grant_exists())
+        .collect();
+    // A provider that needed no credential sorts last, and the first name in
+    // this list is what `--default-provider` picks when nothing else says.
+    // A local server the user happens to have is the weakest thing to choose
+    // on somebody's behalf: it should lose to every key they went and got,
+    // and to every endpoint they wrote down.
+    let (unkeyed, keyed): (Vec<&str>, Vec<&str>) = chosen
+        .into_iter()
+        .partition(|id| kind(id) == Some(catalog::Credential::BaseUrl));
+    keyed
+        .into_iter()
+        // The Claude Code transport has no catalog row: the wizard omits it
+        // by a pinned test, because the CLI adds its own context to every
+        // call. It is still a provider a run can use, so it is named here.
+        .chain(
+            config
+                .providers
+                .claude_code_enabled
+                .then_some("claude-code"),
+        )
+        .chain(endpoints)
+        .chain(unkeyed)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Whether a Codex sign-in has actually been taken.
@@ -586,6 +604,9 @@ mod tests {
                 ..Default::default()
             },
         );
+        // Ollama last: a local server nobody had to sign up for should not
+        // outrank an endpoint the user wrote down when something has to pick
+        // a default.
         assert_eq!(configured_providers(&config), ["alpha", "zeta", "ollama"]);
         apply_flags(&mut config, &args());
         assert_eq!(config.default_provider, "alpha");
