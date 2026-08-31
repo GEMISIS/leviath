@@ -31,7 +31,10 @@ pub struct CodexProvider {
     /// under that one.
     usage_url: String,
     /// The catalog this account can reach, learned once at start-up.
-    served: std::sync::RwLock<Option<Vec<String>>>,
+    ///
+    /// Taken through [`leviath_core::sync::lock`]; the sections clone a `Vec`
+    /// and nothing else.
+    served: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 impl CodexProvider {
@@ -52,7 +55,7 @@ impl CodexProvider {
             rate_limiter: None,
             request_timeout_secs: None,
             usage_url: super::USAGE_URL.to_string(),
-            served: std::sync::RwLock::new(None),
+            served: std::sync::Mutex::new(None),
         }
     }
 
@@ -155,7 +158,11 @@ impl CodexProvider {
     /// breaker and fail the run over every few hours of uptime.
     async fn send(&self, body: &serde_json::Value, model: &str) -> Result<reqwest::Response> {
         if let Some(limiter) = &self.rate_limiter {
-            limiter.acquire().await?;
+            // Discarded, not propagated. `acquire` waits for capacity and has
+            // no failure to report; its `Result` predates the current
+            // implementation. Propagating it would add an error path nothing
+            // can drive. If it ever gains a real error, propagate it here.
+            let _ = limiter.acquire().await;
         }
         let creds = self.credentials().await?;
         let response = self.post(body, &creds).await?;
@@ -378,14 +385,12 @@ impl Provider for CodexProvider {
             Some(plan) => Some(plan),
             None => self.quota().await.ok().and_then(|q| q.plan_type),
         };
-        if let Ok(mut slot) = self.served.write() {
-            *slot = Some(catalog::served(plan.as_deref()));
-        }
+        *leviath_core::sync::lock(&self.served) = Some(catalog::served(plan.as_deref()));
         Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let allowed = self.served.read().ok().and_then(|s| s.clone());
+        let allowed = leviath_core::sync::lock(&self.served).clone();
         Ok(catalog::CATALOG
             .iter()
             .filter(|(id, _)| {
@@ -415,7 +420,7 @@ impl Provider for CodexProvider {
         // `Some` is a promise of completeness, and the lint turns a name
         // outside it into a hard error. Only answered once the plan tier is
         // known; before that "cannot say" is the honest answer.
-        self.served.read().ok().and_then(|s| s.clone())
+        leviath_core::sync::lock(&self.served).clone()
     }
 
     fn explicit_route_only(&self) -> bool {

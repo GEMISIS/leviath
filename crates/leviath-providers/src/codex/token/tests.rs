@@ -386,6 +386,42 @@ async fn a_corrupt_store_reads_as_signed_out_rather_than_panicking() {
 }
 
 #[tokio::test]
+async fn a_store_holding_only_another_provider_reads_as_signed_out() {
+    // The file loads fine; there is simply no grant under this name. Distinct
+    // from an unreadable store, and the same answer either way.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    let mut store = ProviderAuthStore::default();
+    store.set("someone-else", grant("theirs", "rt-0"));
+    store.save(&path).expect("save");
+
+    let src = source(&path, Counting::new());
+    assert!(src.grant().is_none());
+    assert!(src.credentials().await.unwrap_err().is_terminal());
+    let err = src.refresh_stale("stale").await.unwrap_err();
+    assert!(
+        err.to_string().contains("lev auth login codex"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_against_an_unreadable_store_reports_no_sign_in() {
+    // The refresh path re-reads under the lock, so it has its own answer for
+    // a store it cannot parse.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    std::fs::write(&path, "{ not json").expect("write");
+    let src = source(&path, Counting::new());
+    let err = src.refresh_stale("stale").await.unwrap_err();
+    assert!(err.is_terminal());
+    assert!(
+        err.to_string().contains("lev auth login codex"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn a_source_can_be_named_for_another_provider() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("provider-auth.json");
@@ -471,6 +507,83 @@ fn a_lock_in_an_unwritable_place_is_simply_not_taken() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("no-such-dir").join("grant.lock");
     assert!(LockFile::acquire(path).is_none());
+}
+
+#[test]
+fn a_lock_stamped_in_the_future_is_left_alone() {
+    // A clock that jumped backwards makes `duration_since` fail. Treating that
+    // as "stale" would break a lock somebody is holding right now.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("grant.lock");
+    std::fs::write(&path, b"").expect("write");
+    filetime_set(&path, SystemTime::now() + Duration::from_secs(3600));
+    assert!(!LockFile::break_if_stale(&path));
+}
+
+#[tokio::test]
+async fn another_provider_s_grant_is_left_alone_by_a_refresh() {
+    // The store is read once and written back whole, so a rotation here must
+    // not drop a sign-in somebody else owns.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    let mut store = ProviderAuthStore::default();
+    store.set(super::super::PROVIDER_NAME, grant("stale", "rt-0"));
+    store.set("other", grant("other-token", "other-rt"));
+    store.save(&path).expect("save");
+
+    let src = source(&path, Counting::new());
+    src.refresh_stale("stale").await.expect("refresh");
+
+    let reloaded = ProviderAuthStore::load(&path).expect("load");
+    assert_eq!(
+        reloaded.get("other").expect("still there").access_token,
+        "other-token"
+    );
+    assert_eq!(
+        reloaded
+            .get(super::super::PROVIDER_NAME)
+            .expect("rotated")
+            .access_token,
+        "access-1"
+    );
+}
+
+#[tokio::test]
+async fn the_grant_is_read_from_disk_once_and_then_cached() {
+    // The second read must not touch the file: the daemon asks for the plan
+    // tier on paths that run per request.
+    let (_dir, path) = store_with(grant("cached", "rt-0"));
+    let src = source(&path, Counting::new());
+    assert_eq!(src.grant().expect("grant").access_token, "cached");
+    std::fs::remove_file(&path).expect("remove");
+    assert_eq!(
+        src.grant().expect("still cached").access_token,
+        "cached",
+        "the second read went back to disk"
+    );
+}
+
+#[tokio::test]
+async fn an_account_id_missing_from_the_grant_comes_from_the_id_token() {
+    // A grant written before the field existed still has the token to read.
+    let (_dir, path) = store_with(ProviderGrant {
+        access_token: "at".to_string(),
+        refresh_token: "rt".to_string(),
+        id_token: format!(
+            "aGVhZGVy.{}.c2ln",
+            URL_SAFE_NO_PAD.encode(
+                serde_json::json!({
+                    "https://api.openai.com/auth": { "chatgpt_account_id": "from-claims" },
+                })
+                .to_string()
+            )
+        ),
+        account_id: None,
+        ..Default::default()
+    });
+    let src = source(&path, Counting::new());
+    let creds = src.credentials().await.expect("credentials");
+    assert_eq!(creds.account_id.as_deref(), Some("from-claims"));
 }
 
 #[test]

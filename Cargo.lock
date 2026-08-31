@@ -2604,6 +2604,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-core",
+ "keyring-core",
  "leviath-core",
  "leviath-net",
  "leviath-scripting",

@@ -638,6 +638,55 @@ mod tests {
     }
 
     #[test]
+    fn the_codex_transport_counts_only_once_it_is_signed_in() {
+        // Enabled alone would let a headless run retarget `default_provider`
+        // onto a provider with no credential, and the next run would fail on
+        // one nobody had been asked for.
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let mut config = Config::default();
+            config.providers.codex_enabled = true;
+            assert!(!codex_grant_exists());
+            assert!(!configured_providers(&config).contains(&"codex".to_string()));
+
+            let path =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    ..Default::default()
+                },
+            );
+            store.save(&path).unwrap();
+
+            assert!(codex_grant_exists());
+            assert!(configured_providers(&config).contains(&"codex".to_string()));
+
+            // And a grant with the provider turned off still does not count.
+            config.providers.codex_enabled = false;
+            assert!(!configured_providers(&config).contains(&"codex".to_string()));
+        });
+    }
+
+    /// The flag sets the switch and nothing else: it never opens a browser,
+    /// because nothing is watching one in a non-interactive run.
+    #[test]
+    fn the_codex_flag_only_flips_the_switch() {
+        let mut config = Config::default();
+        let mut args = args();
+        args.codex = Some(true);
+        apply_flags(&mut config, &args);
+        assert!(config.providers.codex_enabled);
+
+        args.codex = Some(false);
+        apply_flags(&mut config, &args);
+        assert!(!config.providers.codex_enabled);
+    }
+
+    #[test]
     fn the_claude_code_transport_counts_as_a_configured_provider() {
         let mut config = Config::default();
         apply_flags(

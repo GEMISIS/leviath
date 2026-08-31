@@ -178,8 +178,18 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
     // the provider reads the grant itself. Opt-in because registering it
     // without a sign-in would put a provider in the registry that cannot
     // answer, and because selecting it changes what gets billed.
+    // Skipped rather than registered without one: the runtime has no business
+    // guessing where Leviath's files live, so the path is supplied here or the
+    // provider is not offered at all.
     if config.providers.codex_enabled {
         let mut options = std::collections::HashMap::new();
+        // Extended from an `Option` rather than branched on: with no home
+        // there is no path, the option is simply absent, and the registry
+        // skips the provider - which it is tested to do.
+        options.extend(
+            leviath_providers::codex::ProviderAuthStore::default_path()
+                .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
+        );
         if let Some(originator) = &config.providers.codex_originator {
             options.insert("originator".to_string(), originator.clone());
         }
@@ -1149,4 +1159,102 @@ mod tests {
     }
 
     // ─── resolve_task: None arg, non-TTY stdin ───────────────────────────
+
+    // ─── codex ───────────────────────────────────────────────────────────
+
+    /// Opt-in, and its settings reach the registry through the options map:
+    /// they are the only way a config key gets to the provider, so a typo in
+    /// one of these names is a silent no-op.
+    #[test]
+    fn the_codex_transport_is_off_until_it_is_enabled() {
+        let has_codex = |config: &Config| {
+            provider_creds_from_config(config)
+                .iter()
+                .any(|c| c.name == "codex")
+        };
+        assert!(!has_codex(&Config::default()));
+
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        assert!(has_codex(&config));
+    }
+
+    #[test]
+    fn the_codex_settings_travel_to_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let mut config = Config::default();
+            config.providers.codex_enabled = true;
+            config.providers.codex_originator = Some("Codex Leviath".to_string());
+            config.providers.codex_reasoning_effort = Some("xhigh".to_string());
+            config.providers.codex_verbosity = Some("high".to_string());
+            config.providers.codex_replay_reasoning = false;
+            config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+            config.rate_limits.insert(
+                "codex".to_string(),
+                leviath_providers::RateLimitConfig {
+                    requests_per_minute: 12,
+                    tokens_per_minute: 3400,
+                },
+            );
+
+            let creds = provider_creds_from_config(&config);
+            let codex = creds
+                .iter()
+                .find(|c| c.name == "codex")
+                .expect("registered");
+            assert_eq!(
+                codex.options.get("originator").map(String::as_str),
+                Some("Codex Leviath")
+            );
+            assert_eq!(
+                codex.options.get("effort").map(String::as_str),
+                Some("xhigh")
+            );
+            assert_eq!(
+                codex.options.get("verbosity").map(String::as_str),
+                Some("high")
+            );
+            assert_eq!(
+                codex.options.get("replay_reasoning").map(String::as_str),
+                Some("false")
+            );
+            assert_eq!(
+                codex.options.get("credential_store").map(String::as_str),
+                Some("keychain")
+            );
+            assert!(codex.options.contains_key("auth_store_path"));
+            // No key: the credential is a grant stored outside the config.
+            assert!(codex.api_key.is_none());
+            assert_eq!(
+                codex.rate_limit.as_ref().map(|r| r.requests_per_minute),
+                Some(12)
+            );
+        });
+    }
+
+    /// The file backend names no credential store, so the runtime reads the
+    /// grant out of the file the way it does by default.
+    #[test]
+    fn the_file_backend_sends_no_credential_store_option() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let mut config = Config::default();
+            config.providers.codex_enabled = true;
+            let creds = provider_creds_from_config(&config);
+            let codex = creds
+                .iter()
+                .find(|c| c.name == "codex")
+                .expect("registered");
+            assert!(!codex.options.contains_key("credential_store"));
+            // And the settings nobody set are simply absent rather than blank.
+            assert!(!codex.options.contains_key("originator"));
+            assert!(!codex.options.contains_key("effort"));
+            assert!(!codex.options.contains_key("verbosity"));
+            assert_eq!(
+                codex.options.get("replay_reasoning").map(String::as_str),
+                Some("true")
+            );
+        });
+    }
 }

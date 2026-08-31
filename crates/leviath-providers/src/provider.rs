@@ -2325,6 +2325,53 @@ mod tests {
         reqwest::get(format!("http://{}", addr)).await.unwrap()
     }
 
+    #[test]
+    fn a_provider_that_says_nothing_is_reachable_by_any_route() {
+        // The default, and the behaviour every provider had before the flag
+        // existed. Only a subscription transport opts out.
+        struct Ordinary;
+        #[async_trait]
+        impl Provider for Ordinary {
+            async fn infer(&self, _: &InferenceRequest) -> Result<InferenceResponse> {
+                Err(ProviderError::Other("stub".to_string()))
+            }
+            async fn count_tokens(&self, _: &str, _: &str) -> usize {
+                0
+            }
+            fn max_context_tokens(&self, _: &str) -> usize {
+                0
+            }
+            fn name(&self) -> &str {
+                "ordinary"
+            }
+            fn capabilities(&self, _: &str) -> ModelCapabilities {
+                ModelCapabilities::default()
+            }
+        }
+        assert!(!Ordinary.explicit_route_only());
+        assert!(Ordinary.served_catalog().is_none());
+        // The rest of the stub is part of the same contract; answering it here
+        // keeps the impl honest rather than leaving unreachable bodies.
+        assert_eq!(Ordinary.name(), "ordinary");
+        assert_eq!(Ordinary.max_context_tokens("m"), 0);
+        assert_eq!(Ordinary.capabilities("m"), ModelCapabilities::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        assert_eq!(runtime.block_on(Ordinary.count_tokens("t", "m")), 0);
+        let request = InferenceRequest {
+            system: Vec::new(),
+            messages: Vec::new(),
+            model: "m".to_string(),
+            max_tokens: 1,
+            temperature: 0.0,
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        assert!(runtime.block_on(Ordinary.infer(&request)).is_err());
+    }
+
     #[tokio::test]
     async fn check_http_response_success_returns_response() {
         let response = spawn_mock_response(200, "OK", &[], b"ok").await;

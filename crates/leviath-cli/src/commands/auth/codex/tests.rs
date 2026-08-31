@@ -338,6 +338,124 @@ fn signing_out_removes_the_grant_and_reports_it() {
     assert!(!logout(&path, None).expect("logout"));
 }
 
+#[tokio::test]
+async fn a_sign_in_with_no_free_port_is_refused_before_anything_else() {
+    let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let taken = held.local_addr().expect("addr").port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut env = env_for("http://127.0.0.1:1", &dir, browser_that_does_nothing());
+    env.ports = vec![taken];
+    let err = login(&env).await.unwrap_err().to_string();
+    assert!(err.contains("Codex CLI"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_forged_callback_is_refused() {
+    // The state is what binds the redirect to the browser session that started
+    // it; a mismatch is a forged or stale callback, not a sign-in.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let forging_browser: leviath_mcp::BrowserOpener = Arc::new(move |url: &str| {
+        let parsed = url::Url::parse(url).expect("a URL");
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        let port: u16 = pairs["redirect_uri"]
+            .rsplit(':')
+            .next()
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|p| p.parse().ok())
+            .expect("a port");
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            use tokio::io::AsyncWriteExt as _;
+            if let Ok(mut socket) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                let request = format!(
+                    "GET {}?code=c&state=forged HTTP/1.1\r\n\r\n",
+                    codex::CALLBACK_PATH
+                );
+                let _ = socket.write_all(request.as_bytes()).await;
+                let mut sink = Vec::new();
+                let _ = socket.read_to_end(&mut sink).await;
+            }
+        });
+        true
+    });
+    let env = env_for("http://127.0.0.1:1", &dir, forging_browser);
+    let err = login(&env).await.unwrap_err().to_string();
+    assert!(err.contains("state mismatch"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_corrupt_store_fails_the_sign_in_rather_than_overwriting_it() {
+    // Overwriting would drop whatever other provider's grant the file holds.
+    let body = serde_json::json!({ "access_token": "at-1", "refresh_token": "rt-1" });
+    let issuer = spawn_mock_server(200, "OK", body.to_string().into_bytes()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("provider-auth.json"), "{ not json").expect("write");
+
+    let err = login(&env_for(
+        &issuer,
+        &dir,
+        browser_that_redirects(Arc::new(Mutex::new(Vec::new()))),
+    ))
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("corrupt"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_store_that_refuses_the_write_fails_the_sign_in() {
+    let body = serde_json::json!({ "access_token": "at-1", "refresh_token": "rt-1" });
+    let issuer = spawn_mock_server(200, "OK", body.to_string().into_bytes()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mut env = env_for(
+        &issuer,
+        &dir,
+        browser_that_redirects(Arc::new(Mutex::new(Vec::new()))),
+    );
+    env.credential_store = Some(Arc::new(Refusing));
+    let err = login(&env).await.unwrap_err().to_string();
+    assert!(err.contains("failed to store the grant"), "got {err}");
+}
+
+#[test]
+fn a_store_that_refuses_the_write_fails_the_sign_out() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    let mut store = ProviderAuthStore::default();
+    // Two grants, so one survives the removal and has to be written back.
+    // Removing the only one leaves nothing to write and never asks the store.
+    for name in ["codex", "someone-else"] {
+        store.set(
+            name,
+            ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    store.save(&path).expect("save");
+    assert!(logout(&path, Some(&Refusing)).is_err());
+}
+
+/// A credential store that answers reads and refuses writes.
+struct Refusing;
+
+impl leviath_core::CredentialStore for Refusing {
+    fn get(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn set(&self, _: &str, _: &str) -> Result<(), String> {
+        Err("locked".to_string())
+    }
+    fn delete(&self, _: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
 #[test]
 fn signing_out_of_nothing_is_not_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");

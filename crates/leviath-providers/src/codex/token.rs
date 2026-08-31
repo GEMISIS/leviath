@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -155,22 +155,30 @@ impl LockFile {
     /// the compare-and-swap against the on-disk token is what actually prevents
     /// a double rotation, and that runs either way.
     fn acquire(path: PathBuf) -> Option<Self> {
-        for _ in 0..2 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Some(Self { path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !Self::break_if_stale(&path) {
-                        return None;
-                    }
-                }
-                Err(_) => return None,
-            }
+        if let Some(lock) = Self::create(&path) {
+            return Some(lock);
         }
-        None
+        // Somebody holds it. If they abandoned it, break it and try once more;
+        // a second failure means another process won the race, which is fine.
+        match Self::break_if_stale(&path) {
+            true => Self::create(&path),
+            false => None,
+        }
+    }
+
+    /// Create the lock file, or `None` if it is already there.
+    ///
+    /// Any other IO error is `None` too: both mean the lock was not taken, and
+    /// the caller treats them the same.
+    fn create(path: &Path) -> Option<Self> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .ok()
+            .map(|_| Self {
+                path: path.to_path_buf(),
+            })
     }
 
     /// Remove the lock if it is older than [`LOCK_STALE_AFTER`], reporting
@@ -196,7 +204,11 @@ impl Drop for LockFile {
 /// The real token source: a cached grant, a rotating refresh, and a file.
 pub struct CodexTokenSource {
     /// The grant as this process last saw it.
-    cached: RwLock<Option<ProviderGrant>>,
+    ///
+    /// Taken through [`leviath_core::sync::lock`], whose docs explain why
+    /// recovering from poisoning is sound: the sections below clone an
+    /// `Option` and nothing else.
+    cached: Mutex<Option<ProviderGrant>>,
     /// Serialises refresh within this process. A tokio mutex because it is held
     /// across the refresh await.
     gate: tokio::sync::Mutex<()>,
@@ -219,7 +231,7 @@ impl CodexTokenSource {
     /// Build a source over the grant file at `store_path`.
     pub fn new(store_path: PathBuf, transport: Arc<dyn RefreshTransport>) -> Self {
         Self {
-            cached: RwLock::new(None),
+            cached: Mutex::new(None),
             gate: tokio::sync::Mutex::new(()),
             poisoned: AtomicBool::new(false),
             store_path,
@@ -261,11 +273,16 @@ impl CodexTokenSource {
         PathBuf::from(path)
     }
 
-    /// Load this provider's grant from wherever it lives.
-    fn load(&self) -> Option<ProviderGrant> {
+    /// Every provider's grant, or `None` when the store cannot be read.
+    ///
+    /// The whole store rather than just this provider's grant, because a write
+    /// has to put the others back untouched. Reading once and handing the store
+    /// to [`Self::persist`] is also what closes the window a second read would
+    /// open between them.
+    fn load_store(&self) -> Option<ProviderAuthStore> {
         let store = self.credential_store.as_deref();
         match ProviderAuthStore::load_with(&self.store_path, store) {
-            Ok(all) => all.get(&self.provider).cloned(),
+            Ok(all) => Some(all),
             Err(e) => {
                 tracing::warn!("could not read the provider auth store: {e}");
                 None
@@ -273,27 +290,31 @@ impl CodexTokenSource {
         }
     }
 
-    /// Write `grant` back, preserving every other provider's.
-    fn persist(&self, grant: &ProviderGrant) -> Result<(), RefreshError> {
-        let store = self.credential_store.as_deref();
-        let mut all = ProviderAuthStore::load_with(&self.store_path, store).map_err(|e| {
-            RefreshError::Transient(format!("could not read the provider auth store: {e}"))
-        })?;
+    /// Load this provider's grant from wherever it lives.
+    fn load(&self) -> Option<ProviderGrant> {
+        self.load_store()?.get(&self.provider).cloned()
+    }
+
+    /// Write `grant` into `all` and save it, preserving every other provider's.
+    fn persist(
+        &self,
+        all: &mut ProviderAuthStore,
+        grant: &ProviderGrant,
+    ) -> Result<(), RefreshError> {
         all.set(&self.provider, grant.clone());
-        all.save_with(&self.store_path, store).map_err(|e| {
-            RefreshError::Transient(format!("could not write the provider auth store: {e}"))
-        })
+        all.save_with(&self.store_path, self.credential_store.as_deref())
+            .map_err(|e| {
+                RefreshError::Transient(format!("could not write the provider auth store: {e}"))
+            })
     }
 
     /// The cached grant, loading it from disk on first use.
     fn current(&self) -> Option<ProviderGrant> {
-        if let Some(grant) = self.cached.read().ok().and_then(|g| g.clone()) {
+        if let Some(grant) = leviath_core::sync::lock(&self.cached).clone() {
             return Some(grant);
         }
         let loaded = self.load()?;
-        if let Ok(mut slot) = self.cached.write() {
-            *slot = Some(loaded.clone());
-        }
+        *leviath_core::sync::lock(&self.cached) = Some(loaded.clone());
         Some(loaded)
     }
 
@@ -341,7 +362,7 @@ impl TokenSource for CodexTokenSource {
         let _guard = self.gate.lock().await;
 
         // Somebody in this process may have won the race while we waited.
-        if let Some(grant) = self.cached.read().ok().and_then(|g| g.clone())
+        if let Some(grant) = leviath_core::sync::lock(&self.cached).clone()
             && grant.access_token != stale
         {
             return Ok(credentials_of(&grant));
@@ -350,11 +371,13 @@ impl TokenSource for CodexTokenSource {
         // Another process may have rotated it. The lock narrows the window;
         // this re-read is what actually decides.
         let _lock = LockFile::acquire(self.lock_path());
-        let on_disk = self.load().ok_or_else(|| self.not_signed_in())?;
+        let mut all = self.load_store().ok_or_else(|| self.not_signed_in())?;
+        let on_disk = all
+            .get(&self.provider)
+            .cloned()
+            .ok_or_else(|| self.not_signed_in())?;
         if on_disk.access_token != stale {
-            if let Ok(mut slot) = self.cached.write() {
-                *slot = Some(on_disk.clone());
-            }
+            *leviath_core::sync::lock(&self.cached) = Some(on_disk.clone());
             return Ok(credentials_of(&on_disk));
         }
 
@@ -389,10 +412,8 @@ impl TokenSource for CodexTokenSource {
         // Persist before publishing. If the process dies in between, the
         // rotated refresh token is already on disk; the other order would leave
         // a token the issuer has invalidated as the only one we still know.
-        self.persist(&next)?;
-        if let Ok(mut slot) = self.cached.write() {
-            *slot = Some(next.clone());
-        }
+        self.persist(&mut all, &next)?;
+        *leviath_core::sync::lock(&self.cached) = Some(next.clone());
         Ok(credentials_of(&next))
     }
 

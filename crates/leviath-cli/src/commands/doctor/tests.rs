@@ -1440,3 +1440,30 @@ fn the_codex_check_reports_the_account_once_signed_in() {
         assert!(check.detail.contains("plus"), "{}", check.detail);
     });
 }
+
+#[test]
+fn the_codex_check_falls_back_when_the_grant_names_no_account() {
+    // A grant written before those fields existed still reports as signed in;
+    // saying nothing at all would read as "not signed in", which is worse.
+    let dir = tempfile::tempdir().expect("tempdir");
+    temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let path =
+            leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+        store.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                ..Default::default()
+            },
+        );
+        store.save(&path).expect("save");
+
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        let check = codex_check(&config).expect("a check");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.detail, "signed in");
+    });
+}

@@ -1432,6 +1432,37 @@ mod tests {
         assert!(!screen.contains("sk-oai"), "a key leaked:\n{screen}");
     }
 
+    /// A browser sign-in has nothing to type, so the card reports the account
+    /// instead of offering a field, and names the command when there is none.
+    #[test]
+    fn a_sign_in_card_reports_the_account_rather_than_asking_for_one() {
+        let (_dir, mut w) = wizard();
+        let index = w
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "codex")
+            .expect("the codex row is offered");
+        // The only selected row, so the detail card is this one.
+        for row in &mut w.providers {
+            row.selected = false;
+        }
+        w.providers[index].selected = true;
+        w.enter(Step::ProviderDetail);
+
+        let waiting = rendered(&w);
+        assert!(waiting.contains("Not signed in yet"), "{waiting}");
+        assert!(waiting.contains("lev auth login codex"), "{waiting}");
+        assert!(!waiting.contains("API key"), "{waiting}");
+
+        w.providers[index].signed_in = Some("someone@example.com (plus plan)".to_string());
+        let signed_in = rendered(&w);
+        assert!(signed_in.contains("someone@example.com"), "{signed_in}");
+        assert!(
+            !signed_in.contains("lev auth login codex"),
+            "the reminder outlived the sign-in:\n{signed_in}"
+        );
+    }
+
     #[test]
     fn a_stored_key_is_redacted_until_ctrl_r() {
         let (_dir, mut w) = wizard();

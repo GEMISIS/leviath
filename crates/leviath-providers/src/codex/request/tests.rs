@@ -625,6 +625,57 @@ fn a_stage_cannot_smuggle_a_rejected_parameter_through_its_parameters() {
 }
 
 #[test]
+fn two_text_blocks_in_one_turn_are_joined_on_a_blank_line() {
+    // A single newline would run the second block's first line onto the
+    // first's last, which matters when either is a markdown heading.
+    let req = request(
+        vec![],
+        vec![Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "## first".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "## second".to_string(),
+                },
+            ]),
+            cache_breakpoint: false,
+            reasoning: None,
+        }],
+    );
+    let items = build_default(&req)["input"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["content"][0]["text"], "## first\n\n## second");
+}
+
+#[test]
+fn text_before_a_tool_result_is_flushed_as_its_own_item() {
+    // Otherwise the text would be swallowed into the next item or dropped.
+    let req = request(
+        vec![],
+        vec![Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "here is what came back".to_string(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "output".to_string(),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+            reasoning: None,
+        }],
+    );
+    let items = build_default(&req)["input"].as_array().unwrap().clone();
+    assert_eq!(items[0]["content"][0]["text"], "here is what came back");
+    assert_eq!(items[1]["type"], "function_call_output");
+}
+
+#[test]
 fn a_null_extra_changes_nothing() {
     let req = request(vec![], vec![user("go")]);
     assert_eq!(build_default(&req)["model"], "gpt-5.6-sol");

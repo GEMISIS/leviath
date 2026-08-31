@@ -2343,7 +2343,7 @@ mod tests {
             &self,
             _: &leviath_providers::InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            unreachable!("resolution never infers")
+            Err(leviath_providers::ProviderError::Other("stub".to_string()))
         }
         async fn count_tokens(&self, _: &str, _: &str) -> usize {
             1
@@ -2390,6 +2390,41 @@ mod tests {
             model: None,
             fallback_order: Vec::new(),
         }
+    }
+
+    /// The stub answers every method, so none of its bodies is scenery. A
+    /// resolution never infers, but leaving that arm unreachable would be an
+    /// uncovered region like any other.
+    #[test]
+    fn the_named_stub_answers_the_whole_trait() {
+        use leviath_providers::Provider as _;
+        let p = Named {
+            model: "m".to_string(),
+            by_name_only: false,
+        };
+        assert_eq!(p.name(), "named");
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        assert_eq!(
+            p.capabilities("m"),
+            leviath_providers::ModelCapabilities::default()
+        );
+        assert!(p.serves_model("m").is_some());
+        assert!(p.serves_model("other").is_none());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        assert_eq!(runtime.block_on(p.count_tokens("t", "m")), 1);
+        let request = leviath_providers::InferenceRequest {
+            system: Vec::new(),
+            messages: Vec::new(),
+            model: "m".to_string(),
+            max_tokens: 1,
+            temperature: 0.0,
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        assert!(runtime.block_on(p.infer(&request)).is_err());
     }
 
     /// Enabling a subscription transport must not silently move billing.

@@ -196,7 +196,7 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn auth(&self, args: commands::auth::AuthArgs) -> anyhow::Result<()> {
-        commands::auth::execute(args).await
+        commands::auth::execute(args, commands::auth::AuthEnv::real()).await
     }
 
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()> {

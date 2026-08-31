@@ -126,9 +126,8 @@ fn env_credentials(lookup: &dyn Fn(&str) -> Option<String>) -> HashMap<&'static 
 /// Read once when the wizard is built. A grant taken while the wizard is open
 /// is not picked up, which is the honest reflection of the flow: signing in is
 /// a separate command, and the wizard is showing what was true when it opened.
-fn signed_in_as(provider: &str) -> Option<String> {
-    let path = leviath_providers::codex::ProviderAuthStore::default_path()?;
-    let grant = leviath_providers::codex::ProviderAuthStore::load(&path)
+fn signed_in_as(path: Option<&std::path::Path>, provider: &str) -> Option<String> {
+    let grant = leviath_providers::codex::ProviderAuthStore::load(path?)
         .ok()?
         .get(provider)
         .cloned()?;
@@ -168,7 +167,10 @@ impl Wizard {
                     .env_var
                     .filter(|v| stored.is_none() && env_only.contains_key(v));
                 let signed_in = match provider.credential {
-                    catalog::Credential::Signin => signed_in_as(provider.id),
+                    catalog::Credential::Signin => signed_in_as(
+                        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
+                        provider.id,
+                    ),
                     _ => None,
                 };
                 ProviderRow {
@@ -2764,5 +2766,92 @@ pub(super) mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, "Harness A");
         assert_eq!(errors, vec!["Harness B: unreadable"]);
+    }
+
+    // ─── browser sign-ins ───────────────────────────────────────────────────
+
+    /// The row reads the grant store, so the card can say who is signed in
+    /// rather than only that the provider is selected.
+    #[test]
+    fn a_sign_in_row_reports_the_account_from_the_grant_store() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let path =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+            std::fs::create_dir_all(path.parent().expect("a parent")).unwrap();
+            // Nobody signed in, nowhere to look, and a file that will not parse
+            // are all the same answer: nothing to report.
+            assert_eq!(signed_in_as(Some(&path), "codex"), None);
+            assert_eq!(signed_in_as(None, "codex"), None);
+            std::fs::write(&path, "{ not json").unwrap();
+            assert_eq!(signed_in_as(Some(&path), "codex"), None);
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    email: Some("someone@example.com".to_string()),
+                    plan_type: Some("plus".to_string()),
+                    ..Default::default()
+                },
+            );
+            store.save(&path).unwrap();
+            assert_eq!(
+                signed_in_as(Some(&path), "codex").as_deref(),
+                Some("someone@example.com (plus plan)")
+            );
+
+            // A grant with an account but no plan says the account alone.
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    email: Some("someone@example.com".to_string()),
+                    ..Default::default()
+                },
+            );
+            store.save(&path).unwrap();
+            assert_eq!(
+                signed_in_as(Some(&path), "codex").as_deref(),
+                Some("someone@example.com")
+            );
+
+            // A grant with no account at all is not something to report.
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    ..Default::default()
+                },
+            );
+            store.save(&path).unwrap();
+            assert_eq!(signed_in_as(Some(&path), "codex"), None);
+
+            // And a provider nobody has signed in to.
+            assert_eq!(signed_in_as(Some(&path), "someone-else"), None);
+        });
+    }
+
+    /// A sign-in row is checkable only once a grant exists: there is nothing
+    /// typed into it to verify.
+    #[test]
+    fn a_sign_in_row_is_checkable_only_when_it_is_signed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let wizard = test_wizard(dir.path());
+        let index = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "codex")
+            .expect("the codex row is offered");
+
+        let mut row = wizard.providers[index].clone();
+        assert!(!row.has_credential());
+        row.signed_in = Some("someone@example.com (plus plan)".to_string());
+        assert!(row.has_credential());
     }
 }

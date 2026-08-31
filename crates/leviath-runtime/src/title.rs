@@ -1788,6 +1788,15 @@ mod tests {
             title_request("t", "openai", "gpt-5-mini").extra,
             serde_json::Value::Null
         );
+        // Every model on the Codex route reasons, so left alone a title call
+        // spends its whole 256-token budget thinking and returns nothing.
+        assert_eq!(
+            title_request("t", "codex", "gpt-5.6-sol").extra,
+            serde_json::json!({
+                "reasoning": { "effort": "minimal" },
+                "text": { "verbosity": "low" }
+            })
+        );
     }
 
     #[tokio::test]

@@ -336,13 +336,7 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
-        else {
-            return Ok(());
-        };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_entry(content.clone(), tokens, kind.clone())
-        })
+        self.add_assistant_turn(region_name, kind, content, tokens, None)
     }
 
     /// [`add_typed_entry`](Self::add_typed_entry) for a turn that carries an
