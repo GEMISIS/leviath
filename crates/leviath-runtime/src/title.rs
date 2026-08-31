@@ -289,10 +289,18 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         "openrouter" => serde_json::json!({ "reasoning": { "enabled": false } }),
         // Every model on the Codex route is a reasoning model, so a title
         // call left alone spends its whole 256-token budget thinking and
-        // returns nothing. The route rejects `effort: "none"` for a model
-        // that has reasoning, so this asks for the least of it instead.
+        // returns nothing. This asks for the least of it instead.
+        //
+        // `"low"`, not `"minimal"` and not `"none"`: the accepted set is per
+        // model, and both ends of it are unportable. `gpt-5.5` refuses
+        // `minimal` and names its set - "Supported values are: 'none', 'low',
+        // 'medium', 'high', and 'xhigh'" - while a model that must reason
+        // refuses `none`. `low` is in every set this route has shown us, and
+        // a title that arrives beats a cheaper one that 400s. This shipped as
+        // `minimal`, and every `codex/gpt-5.5` run came out untitled with the
+        // reason visible only in `meta.json`'s `title_error`.
         "codex" => serde_json::json!({
-            "reasoning": { "effort": "minimal" },
+            "reasoning": { "effort": "low" },
             "text": { "verbosity": "low" }
         }),
         _ => serde_json::Value::Null,
@@ -1790,13 +1798,23 @@ mod tests {
         );
         // Every model on the Codex route reasons, so left alone a title call
         // spends its whole 256-token budget thinking and returns nothing.
-        assert_eq!(
-            title_request("t", "codex", "gpt-5.6-sol").extra,
-            serde_json::json!({
-                "reasoning": { "effort": "minimal" },
-                "text": { "verbosity": "low" }
-            })
-        );
+        //
+        // The effort is the same for every model on the route, and it is
+        // `low` rather than the cheaper `minimal`: `gpt-5.5` answers 400 to
+        // `minimal` and names its set, which has `low` in it. Sending a value
+        // one model refuses costs the title outright, so the portable value
+        // wins over the cheap one - and asserting it for both models is what
+        // says that out loud.
+        for model in ["gpt-5.6-sol", "gpt-5.5"] {
+            assert_eq!(
+                title_request("t", "codex", model).extra,
+                serde_json::json!({
+                    "reasoning": { "effort": "low" },
+                    "text": { "verbosity": "low" }
+                }),
+                "{model}"
+            );
+        }
     }
 
     #[tokio::test]
