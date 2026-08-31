@@ -682,7 +682,7 @@ restarted:
 | `lev ps` | The same fact under the run table |
 | `lev doctor` | The `config` check fails, with the line and column, or with the key |
 | `lev dash` | A warning across the top of the screen for as long as the file is broken |
-| `lev validate` | A warning that the model and read-path checks were skipped; the blueprint is still checked |
+| `lev validate` | A warning that the model and read-path checks were skipped; the blueprint is still checked. A file that *does* load gets the same scrutiny `lev doctor` gives it: stale keys and script providers whose file is missing are warned about on the way past |
 | `GET /api/config` | A `config_error` object, and a `config_health` frame on `/ws`. See [the API reference](/docs/api#when-the-config-file-will-not-load) |
 
 Two kinds of problem are reported differently, because they are found differently:
@@ -705,10 +705,16 @@ WARN config.toml has keys nothing reads; they are being ignored.
      keys=limits.max_concurrent_tool, cache, providers.anthropic_cach_ttl
 ```
 
-`lev doctor` reports the same list, for when that scrolls past. It also names a
-`[rate_limits.<provider>]` entry whose provider does not exist, which is a case the key check cannot
-see: that table takes any name, so a misspelled provider deserializes perfectly and throttles
-nothing.
+`lev doctor` and `lev validate` report the same list, for when that scrolls past. `lev doctor` also
+names a `[rate_limits.<provider>]` entry whose provider does not exist, which is a case the key
+check cannot see: that table takes any name, so a misspelled provider deserializes perfectly and
+throttles nothing.
+
+A `[model_providers.<name>]` script entry whose `.rhai` file is nowhere on disk is close kin, and
+both commands name it too, with the path they looked for. Without that check the entry resolves to
+no provider and nothing says why. It also catches `sript = "x.rhai"`: the misspelled key is kept
+and forwarded to the script (see below), so `script` stays unset, the entry falls back to
+`<name>.rhai` by convention, and finds nothing.
 
 This is a warning, not an error. Every command reads `config.toml`, so one stale key should not take
 the CLI down. A blueprint is different: it is authored and validated deliberately, and it fails on

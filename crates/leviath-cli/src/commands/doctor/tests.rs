@@ -392,6 +392,129 @@ fn config_check_says_none_when_nothing_is_registered() {
     );
 }
 
+/// The check mirrors the daemon's own resolution rule: an explicit `script`
+/// (with `.rhai` appended when the value has no extension), else the entry's
+/// own name by convention - and an endpoint entry is not a script at all.
+#[test]
+fn missing_script_providers_applies_the_daemon_resolution_rule() {
+    let providers = tempfile::tempdir().unwrap();
+    std::fs::write(providers.path().join("present.rhai"), "// a provider").unwrap();
+    let config: Config = toml::from_str(
+        r#"
+default_provider = "anthropic"
+[model_providers.present]
+[model_providers.ghost]
+[model_providers.renamed]
+script = "present"
+[model_providers.gone]
+script = "elsewhere.rhai"
+[model_providers.endpoint]
+kind = "openai-compatible"
+base_url = "http://localhost:1/v1"
+"#,
+    )
+    .expect("the config loads");
+
+    let missing = missing_script_providers(&config, Some(providers.path()));
+    let joined = missing.join("\n");
+    assert_eq!(missing.len(), 2, "only the two absent scripts: {joined}");
+    assert!(joined.contains("model_providers.ghost"), "{joined}");
+    assert!(
+        joined.contains("ghost.rhai"),
+        "the convention path: {joined}"
+    );
+    assert!(joined.contains("model_providers.gone"), "{joined}");
+    assert!(joined.contains("elsewhere.rhai"), "{joined}");
+    assert!(
+        !joined.contains("model_providers.present") && !joined.contains("model_providers.renamed"),
+        "an entry whose script exists stays quiet: {joined}"
+    );
+    assert!(
+        !joined.contains("model_providers.endpoint"),
+        "an endpoint runs no script: {joined}"
+    );
+}
+
+/// An absolute `script` is honored verbatim (the documented way to keep one
+/// elsewhere), and a relative one with `..` in it is reported as refused
+/// rather than as a file to create, because that is what the daemon does.
+#[test]
+fn missing_script_providers_honors_absolute_paths_and_flags_traversal() {
+    let providers = tempfile::tempdir().unwrap();
+    let kept = providers.path().join("kept-elsewhere.rhai");
+    std::fs::write(&kept, "// a provider").unwrap();
+    let lost = providers.path().join("never-written.rhai");
+
+    let mut config = Config::default();
+    let scripted = |path: &std::path::Path| crate::config::ModelProviderConfig {
+        script: Some(path.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    config
+        .model_providers
+        .insert("far".to_string(), scripted(&kept));
+    config
+        .model_providers
+        .insert("lost".to_string(), scripted(&lost));
+    config.model_providers.insert(
+        "sneaky".to_string(),
+        crate::config::ModelProviderConfig {
+            script: Some("../outside".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let missing = missing_script_providers(&config, Some(providers.path()));
+    let joined = missing.join("\n");
+    assert_eq!(missing.len(), 2, "{joined}");
+    assert!(joined.contains("model_providers.lost"), "{joined}");
+    assert!(
+        !joined.contains("model_providers.far"),
+        "an absolute script that exists stays quiet: {joined}"
+    );
+    assert!(joined.contains("model_providers.sneaky"), "{joined}");
+    assert!(joined.contains("refused at load"), "{joined}");
+}
+
+/// With no providers directory at all (no home), a relative entry has nothing
+/// to resolve against; the missing-home problem is somebody else's report.
+#[test]
+fn missing_script_providers_with_no_providers_dir_skips_relative_entries() {
+    let config: Config = toml::from_str("[model_providers.ghost]\n").expect("the config loads");
+    assert!(missing_script_providers(&config, None).is_empty());
+}
+
+/// A `[model_providers.<name>]` script entry whose `.rhai` file is nowhere on
+/// disk resolves to no provider with no log line, and the unknown-key check
+/// cannot see it either: `sript = "typo.rhai"` lands in the entry's flattened
+/// `extra` and round-trips, so the entry quietly falls back to the
+/// `<name>.rhai` convention and finds nothing. This is the one place that
+/// cross-checks the name against the providers directory.
+#[test]
+fn config_check_names_a_script_provider_whose_file_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut vars = crate::config::config_isolation_vars(&root);
+    vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
+    let check = temp_env::with_vars(vars, || {
+        let config: Config = toml::from_str(
+            "default_provider = \"anthropic\"\n[model_providers.ghost]\nsript = \"typo.rhai\"\n",
+        )
+        .expect("the typo deserializes perfectly - that is the bug class");
+        config_check(&config, &ProviderRegistry::new())
+    });
+    assert_eq!(
+        check.status,
+        CheckStatus::Ok,
+        "a warning, not broken wiring"
+    );
+    assert!(
+        check.detail.contains("model_providers.ghost"),
+        "got: {}",
+        check.detail
+    );
+}
+
 /// A `[rate_limits]` entry naming no provider throttles nothing, and the
 /// unknown-key check cannot see it: the table takes arbitrary keys, so the
 /// typo deserializes perfectly.

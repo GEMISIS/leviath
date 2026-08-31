@@ -273,6 +273,13 @@ fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestChe
     // to find.
     crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
         .map_err(ManifestCheckError::Validation)?;
+    // Output validators and stage hook scripts get the same treatment, for the
+    // same reason: both are hard spawn errors, and the docs promise this
+    // command finds them without starting anything.
+    crate::daemon::spawn::resolve_output_validators(&blueprint, &manifest_path.to_string_lossy())
+        .map_err(ManifestCheckError::Validation)?;
+    crate::daemon::spawn::resolve_stage_hook_scripts(&blueprint, &manifest_path.to_string_lossy())
+        .map_err(ManifestCheckError::Validation)?;
 
     let agent_dir = manifest_path
         .parent()
@@ -860,6 +867,39 @@ fn broken_config_note(fault: &crate::config::ConfigFault) -> Vec<String> {
     ]
 }
 
+/// What `lev validate` says about a config file that loads but holds problems
+/// `lev doctor` would name: keys nothing reads, and script providers whose
+/// `.rhai` file is not on disk.
+///
+/// Warnings, not failures, exactly as the broken-config note is: the
+/// blueprint is what was asked about, but validating against a config the
+/// daemon will warn about is how a clean verdict here and a misrouted run
+/// stopped agreeing.
+fn loaded_config_notes(config: &crate::config::Config) -> Vec<String> {
+    let unread = crate::config::Config::unread_keys_at(&crate::config::Config::config_path());
+    let missing = crate::commands::doctor::missing_script_providers(
+        config,
+        crate::config::providers_dir().as_deref(),
+    );
+    config_note_lines(&unread, &missing)
+}
+
+/// The lines [`loaded_config_notes`] prints, from the two lists, so the
+/// rendering is assertable without planting a config file.
+fn config_note_lines(unread: &[String], missing: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !unread.is_empty() {
+        lines.push(format!(
+            "warning: config.toml has key(s) nothing reads - check the spelling: {}",
+            unread.join(", ")
+        ));
+    }
+    for entry in missing {
+        lines.push(format!("warning: {entry}"));
+    }
+    lines
+}
+
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     // A config that will not load is said out loud. `.ok()` here would turn it
@@ -867,7 +907,15 @@ pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     // an install would use, which read paths are granted. The blueprint still
     // validates without one, so this is a warning rather than a refusal.
     let config = match crate::config::Config::load_faulted() {
-        Ok(config) => Some(config),
+        Ok(config) => {
+            // A config that loads can still be one the daemon warns about;
+            // saying so here keeps this command's verdict and `lev doctor`'s
+            // in agreement.
+            for line in loaded_config_notes(&config) {
+                eprintln!("{line}");
+            }
+            Some(config)
+        }
         Err(fault) => {
             for line in broken_config_note(&fault) {
                 eprintln!("{line}");
@@ -2216,6 +2264,36 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         assert!(!check_manifest(empty.path()).unwrap_err().is_parse());
     }
 
+    /// docs/content/rhai-validators.md promises `lev validate <path>` compiles
+    /// output validators. Before this check existed, a blueprint whose
+    /// validator did not compile passed `lev validate` and died at spawn - the
+    /// exact failure the command exists to find early.
+    #[test]
+    fn check_manifest_rejects_an_output_validator_that_does_not_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shape.rhai"), "fn validate(content) { ][ }").unwrap();
+        let manifest = format!(
+            "{CLEAN_MANIFEST}\n[stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n"
+        );
+        write_manifest(dir.path(), &manifest);
+        let err = check_manifest(dir.path()).unwrap_err();
+        let text = format!("{err:?}");
+        assert!(text.contains("output validator"), "{text}");
+    }
+
+    /// Stage hook scripts are resolved exactly as a spawn resolves them, so a
+    /// hook file that is not there fails `lev validate` rather than the run.
+    #[test]
+    fn check_manifest_rejects_a_stage_hook_script_that_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest =
+            format!("{CLEAN_MANIFEST}\n[stages.main.hooks]\non_stage_enter = \"missing.rhai\"\n");
+        write_manifest(dir.path(), &manifest);
+        let err = check_manifest(dir.path()).unwrap_err();
+        let text = format!("{err:?}");
+        assert!(text.contains("stage hook script"), "{text}");
+    }
+
     #[test]
     fn check_manifest_direct_file_path_is_accepted() {
         let dir = tempfile::tempdir().unwrap();
@@ -2242,6 +2320,86 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
                 assert!(
                     execute(args_for(manifest_dir.path())).await.is_ok(),
                     "a blueprint is checked whether or not the config loads"
+                );
+            },
+        )
+        .await;
+    }
+
+    /// A config that loads can still hold problems `lev doctor` would name -
+    /// a key nothing reads, a script provider whose `.rhai` file is not on
+    /// disk. `lev validate` used to pass such a config in silence, so its
+    /// clean verdict and the daemon's behaviour disagreed.
+    #[test]
+    fn loaded_config_notes_name_stale_keys_and_missing_script_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut vars = crate::config::config_isolation_vars(&root);
+        vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
+        temp_env::with_vars(vars, || {
+            std::fs::write(
+                root.join("config.toml"),
+                "default_provider = \"anthropic\"\n\
+                 [cache]\nttl = 30\n\
+                 [model_providers.ghost]\n",
+            )
+            .unwrap();
+            let config = crate::config::Config::load_faulted().expect("it loads");
+            let notes = loaded_config_notes(&config);
+            let joined = notes.join("\n");
+            assert!(joined.contains("cache"), "the stale key is named: {joined}");
+            assert!(
+                joined.contains("model_providers.ghost"),
+                "the script provider with no file is named: {joined}"
+            );
+            assert!(
+                notes.iter().all(|line| line.starts_with("warning: ")),
+                "warnings, not errors: {joined}"
+            );
+        });
+    }
+
+    /// The rendering itself: quiet on clean lists, one line per problem
+    /// otherwise, every line marked as a warning.
+    #[test]
+    fn config_note_lines_render_both_kinds_and_stay_quiet_on_clean_lists() {
+        assert!(config_note_lines(&[], &[]).is_empty());
+
+        let lines = config_note_lines(
+            &["cache.ttl".to_string()],
+            &[
+                "model_providers.ghost is a script provider but its script is not on disk"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(lines.len(), 2);
+        let stale = &lines[0];
+        assert!(stale.contains("cache.ttl"), "{stale}");
+        let missing = &lines[1];
+        assert!(
+            missing.starts_with("warning: model_providers.ghost"),
+            "{missing}"
+        );
+    }
+
+    /// The other side of the coin: a config that loads but holds a stale key
+    /// gets its warning printed on the way past, and the blueprint check
+    /// still runs and still passes. A warning, never a refusal.
+    #[tokio::test]
+    async fn execute_warns_about_a_loaded_config_with_stale_keys_and_still_checks() {
+        crate::config::with_isolated_config_path_async(
+            "validate-stale-key-config",
+            |dir| async move {
+                std::fs::write(
+                    dir.join("config.toml"),
+                    "default_provider = \"anthropic\"\n[cache]\nttl = 30\n",
+                )
+                .unwrap();
+                let manifest_dir = tempfile::tempdir().unwrap();
+                write_test_agent(manifest_dir.path(), CLEAN_MANIFEST);
+                assert!(
+                    execute(args_for(manifest_dir.path())).await.is_ok(),
+                    "a stale config key is a warning, not a refusal"
                 );
             },
         )
