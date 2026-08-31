@@ -719,11 +719,12 @@ pub struct RunFlags {
     ///
     /// A script that will not compile, or that throws where the runtime has to
     /// carry on regardless, is skipped rather than fatal - which is the right
-    /// call and was also completely silent. An output validator that throws is
-    /// the case that prompted this: the submission is recorded *unchecked*,
-    /// because reading a script bug as "the answer is wrong" would burn the
-    /// retry budget on it and end the run with nothing. So the run finishes,
-    /// looks successful, and the only trace is a line in the daemon log.
+    /// call and used to be completely silent; this list is the trace. An
+    /// output validator that cannot run is the exception: by default the
+    /// submission is rejected and the script's own error goes back to the
+    /// model as retry feedback, while `on_validator_error = "accept"` records
+    /// the submission unchecked and leaves this list as the only trace of an
+    /// answer nothing checked. The script is named here in both modes.
     ///
     /// Named rather than counted, because the useful question is which one -
     /// the answer tells you which file to open.
