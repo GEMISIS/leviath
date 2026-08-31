@@ -74,6 +74,25 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub claude_code_effort: Option<String>,
 
+    /// Whether to offer Ollama.
+    ///
+    /// Ollama needs no key and answers on a well-known local port, so it used
+    /// to be registered on every machine whether or not anybody asked. That
+    /// made a bare model name in a blueprint resolvable against whatever
+    /// happened to be running locally, which is a surprising place for a run
+    /// to end up.
+    ///
+    /// Kept separate from `ollama_base_url` because the two say different
+    /// things: this is "I chose Ollama", and the URL is "and it is not at the
+    /// default address". Writing the default URL to mean the first would pin
+    /// it, and `$OLLAMA_HOST` and the built-in default would both stop
+    /// applying.
+    ///
+    /// A config that names a URL counts as having chosen it, so an install
+    /// that set one before this field existed keeps working.
+    #[serde(default)]
+    pub ollama_enabled: bool,
+
     /// Whether to offer the Codex transport, which bills inference to a
     /// ChatGPT subscription rather than an API balance.
     ///
@@ -184,6 +203,7 @@ impl Default for ProviderConfig {
             claude_code_enabled: false,
             claude_code_binary: None,
             claude_code_effort: None,
+            ollama_enabled: false,
             codex_enabled: false,
             codex_originator: None,
             codex_reasoning_effort: None,
