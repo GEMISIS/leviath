@@ -177,6 +177,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         event_tx,
         control: control.clone(),
         mcp: super::mcp::McpAdmin::default(),
+        providers: super::providers::ProviderAdmin::default(),
         limits: Default::default(),
     };
     let relay = tokio::spawn(super::polling::event_loop(

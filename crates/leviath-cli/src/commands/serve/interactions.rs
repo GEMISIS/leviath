@@ -132,6 +132,7 @@ mod tests {
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         Router::new()

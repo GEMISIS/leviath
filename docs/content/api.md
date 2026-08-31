@@ -220,6 +220,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider` or [`default_model`](#the-default-model) applies to the next run spawned, with no daemon restart |
 | `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
+| `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
@@ -937,6 +938,150 @@ without an `agent`, since the answer is the same either way.
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
 
+## Signing in to a subscription provider
+
+Most providers take an API key, which is a string a form can post. One does not: Codex bills a
+ChatGPT subscription and its credential is an OAuth grant, taken in a browser and stored outside
+`config.toml` entirely. `PUT /api/config` can turn it on and can never sign anybody in, so a
+console that only wrote the flag would leave the user enabled and unable to run anything.
+
+These four routes are the rest of it.
+
+```
+GET  /api/providers                    what exists, and what state it is in
+POST /api/providers/{name}/login       start the browser flow            (admin)
+POST /api/providers/{name}/logout      forget the grant                  (admin)
+POST /api/providers/{name}/check       prove the grant still works       (admin)
+```
+
+`GET /api/providers` is open to any caller holding the bearer token. It reports the account
+address and the plan tier - the same facts `lev auth status` prints - and never a token:
+
+```json
+{
+  "providers": [
+    {
+      "id": "codex",
+      "display": "OpenAI Codex (ChatGPT subscription)",
+      "enabled": true,
+      "signed_in": true,
+      "account": "someone@example.com",
+      "plan": "plus",
+      "expires_at": 1735689600
+    }
+  ]
+}
+```
+
+`enabled` and `signed_in` are separate on purpose. Either can be true alone, they are set by
+different routes, and the combination that breaks runs - enabled, not signed in - is the one a
+console has to be able to see. `expires_at` is when the *access* token lapses; it is refreshed
+automatically well before that, and it is here so a UI can show that the session is live rather
+than implying anybody has to act on it.
+
+### The flow
+
+`POST .../login` does not hold the request open for the whole sign-in. It answers as soon as
+there is a URL, which is immediately, and the flow carries on behind it:
+
+```mermaid
+sequenceDiagram
+  participant UI as Console
+  participant Serve as lev serve
+  participant Browser as Browser on the serving host
+  participant OpenAI
+
+  UI->>Serve: POST /api/providers/codex/login
+  Serve->>Browser: open the authorize URL
+  Serve-->>UI: 202 {status: waiting, authorize_url}
+  Note over UI: render the URL, in case no browser opened
+  Browser->>OpenAI: sign in
+  OpenAI->>Serve: redirect to localhost:1455/auth/callback
+  Serve->>OpenAI: exchange the code
+  loop until it settles
+    UI->>Serve: GET /api/providers
+    Serve-->>UI: signin.state = waiting
+  end
+  UI->>Serve: GET /api/providers
+  Serve-->>UI: signed_in: true, no signin state
+```
+
+The MCP login route does hold its request open, for up to five minutes. That is fine for a CLI
+and wrong for a browser: the tab has nothing to draw while it waits, no way to show the URL, and
+no way to give up without losing the flow. One extra poll buys a UI that can render the whole
+thing.
+
+While it runs, the provider carries a `signin` object:
+
+```json
+{ "state": "waiting", "authorize_url": "https://auth.openai.com/oauth/authorize?…",
+  "started_at": 1735689000 }
+```
+
+and if it does not finish:
+
+```json
+{ "state": "failed", "message": "could not listen on port 1455 or 1457 (…)", "at": 1735689100 }
+```
+
+A success leaves no `signin` at all - the grant store is the answer, and a second copy of "signed
+in" is how two answers come to disagree. A failure stays until the next attempt, so a console
+that was not watching still finds out what happened.
+
+Starting a second sign-in while one is waiting answers `409`, with the first one's
+`authorize_url` in the body. A console that lost the response can pick the flow back up instead
+of having to cancel it.
+
+### The browser has to be on the serving host
+
+The redirect goes to `localhost:1455` on the machine running `lev serve` and nowhere else,
+because that is the address OpenAI registered the public client id against. Leviath cannot choose
+a different one.
+
+For a console driving a daemon on the same machine, this is invisible: the browser opens and the
+callback lands. For a remote daemon, the flow still starts and `authorize_url` still comes back,
+but somebody has to open that URL on the daemon's host. Show it rather than relying on the
+opener - it silently does nothing over SSH and in a bare console.
+
+### Checking, and why the check is real
+
+`POST .../check` asks the account, not a table:
+
+```json
+{ "status": "ok", "provider": "codex", "models": ["gpt-5.6-sol", "gpt-5.6-terra", …] }
+```
+
+Codex's model list is compiled into the build, so a check that read it would answer "5 models"
+for a revoked session, an expired one, and for never having signed in. This one makes an
+authenticated call, so a `200` means the subscription really did agree, and the `models` are the
+ones *this plan* can reach. A refusal is a `502` carrying the provider's own reason.
+
+It also refreshes a lapsed access token on the way in, which makes it the cheapest way to keep a
+rarely-used sign-in alive.
+
+### Turning it on
+
+Signing in and enabling are two separate acts, and `logout` deliberately does not do both -
+signing out is not the same as turning the provider off. `PUT /api/config` carries the setting:
+
+```json
+{ "codex_enabled": true, "codex_reasoning_effort": "medium", "codex_verbosity": "medium" }
+```
+
+`codex_reasoning_effort` takes `none`, `minimal`, `low`, `medium`, `high` or `xhigh`;
+`codex_verbosity` takes `low`, `medium` or `high`. Both are validated before anything is written,
+because the provider silently ignores a value it does not recognise - a typo would otherwise be
+saved, read back by `GET /api/config`, and quietly do nothing.
+
+`codex_replay_reasoning` is on by default and worth leaving on. It is writable so it can be
+turned off from a console the day the route stops accepting a replayed reasoning blob, without
+editing `config.toml` by hand on the serving machine.
+
+The three write routes need `--allow-admin`, like the MCP login they mirror: they open a browser
+on the serving host, delete a credential, and make an authenticated outbound call. The read half
+is always mounted, so a console without admin can still show what is signed in and offer nothing
+else.
+
 ## When the config file will not load
 
 `GET /api/config` describes the config **in force**, which is not always the file on disk. A save
@@ -1126,6 +1271,7 @@ than that feature, not broken.
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
 | `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
+| `providers.signin` | `GET /api/providers` and the three admin routes under it: the browser sign-in for a provider that has no API key. Without it a console can write `codex_enabled` and has no way to complete the sign-in, which leaves the user enabled and unable to run anything. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. Without it a missing `config_error` means nothing, so a console cannot tell a file that loads from a daemon that would not say. See [when the config file will not load](#when-the-config-file-will-not-load) |
 
 ## Live updates over WebSocket

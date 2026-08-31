@@ -47,6 +47,9 @@ pub mod token;
 pub mod usage;
 
 pub use claims::CodexClaims;
+// Public for the sake of `expiry`: the HTTP API reports when an access
+// token lapses, and reading it from the token beats storing a second copy
+// beside the grant that could disagree with it.
 pub use provider::CodexProvider;
 pub use refresh::HttpRefresh;
 pub use store::{ProviderAuthStore, ProviderGrant, grant_account};

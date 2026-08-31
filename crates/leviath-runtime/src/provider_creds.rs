@@ -561,6 +561,10 @@ pub fn build_provider_registry_probing(
                             .with_request_timeout(timeout)
                             .with_base_url(c.base_url.clone())
                             .with_originator(c.options.get("originator").cloned())
+                            // A separate host from `base_url` in production,
+                            // so it takes its own option rather than a path
+                            // under that one.
+                            .with_usage_url(c.options.get("usage_url").cloned())
                             .with_reasoning(
                                 c.options.get("effort").cloned(),
                                 c.options.get("verbosity").cloned(),

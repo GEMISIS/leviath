@@ -144,6 +144,8 @@ pub(crate) struct AppState {
     pub(super) control: leviath_runtime::control_socket::ControlClient,
     /// Paths + seams for the MCP management endpoints.
     pub(super) mcp: super::mcp::McpAdmin,
+    /// Seams and in-flight state for the provider sign-in endpoints.
+    pub(super) providers: super::providers::ProviderAdmin,
     /// The spawn-request restrictions from [`ServeArgs`], resolved once at
     /// startup so every handler reads the same decision.
     pub(super) limits: Arc<ServeLimits>,
@@ -1283,6 +1285,10 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
+            codex_enabled: false,
+            codex_reasoning_effort: None,
+            codex_verbosity: None,
+            codex_replay_reasoning: true,
             gateways: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 0,

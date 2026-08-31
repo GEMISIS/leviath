@@ -53,6 +53,7 @@ pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::t
         event_tx,
         control: no_daemon_client(),
         mcp: super::mcp::McpAdmin::default(),
+        providers: super::providers::ProviderAdmin::default(),
         limits: Default::default(),
     }
 }
@@ -72,6 +73,7 @@ pub(super) fn state_with_config_at(path: &std::path::Path) -> super::types::AppS
         event_tx,
         control: no_daemon_client(),
         mcp: super::mcp::McpAdmin::default(),
+        providers: super::providers::ProviderAdmin::default(),
         limits: Default::default(),
     }
 }

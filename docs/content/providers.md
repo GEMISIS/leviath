@@ -463,6 +463,13 @@ answer means the account really did agree.
 If your browser does not open (an SSH session, say), the card prints the URL to
 copy.
 
+There is an HTTP route for the same thing, so a web console can offer it too:
+`GET /api/providers` reports what is signed in, and `POST
+/api/providers/codex/login` starts the flow and hands back the URL. See
+[signing in to a subscription provider](/docs/api#signing-in-to-a-subscription-provider).
+The browser still has to be on the machine running `lev serve`, because the
+redirect goes to `localhost:1455` there and OpenAI registered it that way.
+
 This is a different provider from `openai`, not a mode of it. You can hold both
 credentials; a blueprint reaches this one as `codex/gpt-5.6-sol`.
 

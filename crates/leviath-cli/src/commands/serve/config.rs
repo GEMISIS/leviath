@@ -62,6 +62,10 @@ fn redact(
         has_google_key: c.providers.google_api_key.is_some(),
         has_openrouter_key: c.openrouter_api_key.is_some(),
         ollama_base_url: c.ollama_base_url.clone(),
+        codex_enabled: c.providers.codex_enabled,
+        codex_reasoning_effort: c.providers.codex_reasoning_effort.clone(),
+        codex_verbosity: c.providers.codex_verbosity.clone(),
+        codex_replay_reasoning: c.providers.codex_replay_reasoning,
         gateways: gateways_of(c),
         agent_paths: c.agent_paths.clone(),
         mcp_server_count: c.mcp_servers.len(),
@@ -69,6 +73,37 @@ fn redact(
         capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         limits: ApiLimits::current(requests),
     }
+}
+
+/// The reasoning efforts the Codex route accepts.
+const CODEX_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+/// The text verbosities it accepts.
+const CODEX_VERBOSITIES: &[&str] = &["low", "medium", "high"];
+
+/// Refuse a value outside `allowed`, naming what was expected.
+///
+/// The provider drops a setting it does not recognise, so an unchecked typo
+/// is saved, reported back by `GET /api/config`, and silently does nothing -
+/// the same class of quiet no-op a mistyped `gate` key is in a blueprint.
+fn validated(
+    value: Option<String>,
+    allowed: &[&str],
+    what: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if allowed.contains(&value.as_str()) {
+        return Ok(Some(value));
+    }
+    Err(err(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "unknown Codex {what} '{value}'; use one of {}",
+            allowed.join(", ")
+        ),
+    ))
 }
 
 /// `GET /api/config`. Reads the file rather than a start-up copy, so an edit
@@ -137,6 +172,21 @@ pub(super) async fn put_config(
     if let Some(v) = req.ollama_base_url {
         config.ollama_base_url = Some(v);
     }
+    // Checked before anything is written, like the gateway kind below: the
+    // provider silently ignores a value it does not know, so a console that
+    // sent a typo would see it saved and never take effect.
+    let effort = validated(
+        req.codex_reasoning_effort,
+        CODEX_EFFORTS,
+        "reasoning effort",
+    )?;
+    let verbosity = validated(req.codex_verbosity, CODEX_VERBOSITIES, "verbosity")?;
+    config.providers.codex_enabled = req.codex_enabled.unwrap_or(config.providers.codex_enabled);
+    config.providers.codex_replay_reasoning = req
+        .codex_replay_reasoning
+        .unwrap_or(config.providers.codex_replay_reasoning);
+    config.providers.codex_reasoning_effort = effort.or(config.providers.codex_reasoning_effort);
+    config.providers.codex_verbosity = verbosity.or(config.providers.codex_verbosity);
     // Field by field, like everything above: a gateway names only what it is
     // changing, so a console can edit a base URL without knowing the key or
     // sending it back through the browser.
@@ -520,6 +570,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -533,6 +584,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -566,6 +618,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -767,6 +820,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         let app = Router::new()
@@ -808,6 +862,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -937,6 +992,10 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
+            codex_enabled: false,
+            codex_reasoning_effort: None,
+            codex_verbosity: None,
+            codex_replay_reasoning: true,
             gateways: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 2,
@@ -964,6 +1023,10 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: Some("http://localhost:11434".to_string()),
+            codex_enabled: false,
+            codex_reasoning_effort: None,
+            codex_verbosity: None,
+            codex_replay_reasoning: true,
             gateways: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 0,
@@ -989,6 +1052,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         (state, paths_for(path))
@@ -1014,6 +1078,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         (state, paths_for(path))
@@ -1122,6 +1187,93 @@ mod tests {
             .body(Body::from(body.to_string()))
             .unwrap();
         app.oneshot(req).await.unwrap()
+    }
+
+    /// The Codex switch and its two tuning knobs are writable, so a console
+    /// can offer the provider without the user editing `config.toml` by hand.
+    #[tokio::test]
+    async fn put_config_writes_the_codex_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        let body = serde_json::json!({
+            "codex_enabled": true,
+            "codex_reasoning_effort": "high",
+            "codex_verbosity": "low",
+            "codex_replay_reasoning": false,
+        })
+        .to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rc: RedactedConfig = serde_json::from_slice(&bytes).unwrap();
+        assert!(rc.codex_enabled);
+        assert_eq!(rc.codex_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(rc.codex_verbosity.as_deref(), Some("low"));
+        assert!(!rc.codex_replay_reasoning);
+
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(saved.providers.codex_enabled);
+        assert_eq!(
+            saved.providers.codex_reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(saved.providers.codex_verbosity.as_deref(), Some("low"));
+        assert!(!saved.providers.codex_replay_reasoning);
+    }
+
+    /// An absent field leaves the setting alone, the partial-update rule every
+    /// field here follows. Without it a console editing the effort would turn
+    /// the provider off by not mentioning it.
+    #[tokio::test]
+    async fn a_put_that_mentions_no_codex_field_changes_none_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.providers.codex_verbosity = Some("high".to_string());
+        config.save_to_path_public(&path).unwrap();
+
+        let body = serde_json::json!({ "default_provider": "codex" }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(saved.providers.codex_enabled, "the switch was turned off");
+        assert_eq!(saved.providers.codex_verbosity.as_deref(), Some("high"));
+    }
+
+    /// A value the provider would ignore is refused rather than saved. The
+    /// route drops an effort it does not recognise, so an unchecked typo is
+    /// written, read back by `GET /api/config`, and quietly does nothing.
+    #[tokio::test]
+    async fn a_codex_setting_the_provider_would_ignore_is_refused() {
+        for (field, value) in [
+            ("codex_reasoning_effort", "hard"),
+            ("codex_verbosity", "verbose"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            Config::default().save_to_path_public(&path).unwrap();
+
+            let body = serde_json::json!({ field: value, "codex_enabled": true }).to_string();
+            let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{field} = {value}"
+            );
+
+            let saved = Config::load_from_path_public(&path).unwrap();
+            assert!(
+                !saved.providers.codex_enabled,
+                "the check runs before anything is written, so {field} left the file alone"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1834,6 +1986,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         let Json(models) = super::models_with(&state, &|_t| {

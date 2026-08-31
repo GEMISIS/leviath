@@ -16,6 +16,7 @@ mod fs;
 mod interactions;
 mod mcp;
 mod polling;
+mod providers;
 mod request_limits;
 mod runs;
 mod scripts;
@@ -145,6 +146,7 @@ fn api_router() -> Router<AppState> {
         // MCP servers - read-only surface. Everything that connects to one or
         // opens a browser is mounted by `execute_with_shutdown`, behind
         // `--allow-admin`.
+        .route("/api/providers", get(providers::list_providers))
         .route("/api/mcp/servers", get(mcp::list_servers))
         .route("/api/mcp/servers/{name}/status", get(mcp::status))
         // Doctor - the offline half of the checks `lev doctor` runs, returned
@@ -372,6 +374,7 @@ async fn execute_with_shutdown(
         event_tx: event_tx.clone(),
         control,
         mcp: mcp::McpAdmin::default(),
+        providers: providers::ProviderAdmin::default(),
         limits: Arc::new(ServeLimits {
             workdir_root: args.workdir_root.clone(),
             no_remote_yolo: args.no_remote_yolo,
@@ -466,6 +469,16 @@ async fn execute_with_shutdown(
             // anyone holding the bearer token.
             .route("/api/mcp/servers/{name}/login", post(mcp::login))
             .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
+            // The provider sign-in opens the operator's browser and binds a
+            // fixed loopback port on this host, and the sign-out deletes a
+            // credential. Same category of act as the MCP login above, gated
+            // the same way. The read half stays open, so a console without
+            // admin can still show what is signed in and offer nothing else.
+            .route("/api/providers/{name}/login", post(providers::login))
+            .route("/api/providers/{name}/logout", post(providers::logout))
+            // The check makes a real authenticated call to the provider, the
+            // same category as `/api/models/probe` beside it.
+            .route("/api/providers/{name}/check", post(providers::check))
             // The live doctor makes two billed provider calls and spawns a run
             // through the daemon. The read half above stops before either.
             .route("/api/doctor/live", post(doctor::run_doctor_live))
@@ -810,6 +823,7 @@ mod tests {
         ("fs", include_str!("fs.rs")),
         ("interactions", include_str!("interactions.rs")),
         ("mcp", include_str!("mcp.rs")),
+        ("providers", include_str!("providers.rs")),
         ("runs", include_str!("runs.rs")),
         ("scripts", include_str!("scripts.rs")),
         ("tools", include_str!("tools.rs")),
@@ -838,6 +852,7 @@ mod tests {
         ("INTERNAL_SERVER_ERROR", 500),
         ("BAD_GATEWAY", 502),
         ("SERVICE_UNAVAILABLE", 503),
+        ("GATEWAY_TIMEOUT", 504),
     ];
 
     /// Every `StatusCode::` constant named in the body of `function` in
@@ -1181,6 +1196,7 @@ mod tests {
             event_tx: tx,
             control: no_daemon_control(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
