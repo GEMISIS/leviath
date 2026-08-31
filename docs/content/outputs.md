@@ -218,6 +218,11 @@ until one passes, so a bad correction never replaces a good answer.
 A submission is checked for well-formedness first, so "this is not even JSON" comes back before a
 list of missing properties. That is the more useful thing to hear.
 
+One asymmetry to know about: a schema that itself will not compile skips the check and records the
+submission unchecked, where a [Rhai validator](/docs/rhai-validators) that cannot run rejects by
+default. A bad schema refusing every submission would leave the run unable to finish, so it fails
+open, deliberately.
+
 ## Requiring one
 
 `require_output` makes a stage produce an answer before it moves on. `mode = "output"` sets it for

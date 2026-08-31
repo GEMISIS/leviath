@@ -251,7 +251,7 @@
         },
         "schema": {
           "type": "object",
-          "description": "A JSON Schema describing the answer's shape. Separate from format, which asks only whether the answer parses. A failing submission is refused back to the model to correct."
+          "description": "A JSON Schema describing the answer's shape. Separate from format, which asks only whether the answer parses. A failing submission is refused back to the model to correct. A schema that itself will not compile skips the check and records the submission unchecked, unlike a validator, whose failures follow on_validator_error."
         },
         "validator": {
           "type": "string",
@@ -262,6 +262,7 @@
             "reject",
             "accept"
           ],
+          "default": "reject",
           "description": "What happens to a submission when the validator itself cannot run: it threw, ran out of operations, or returned the wrong type. reject (the default) refuses the submission and sends the script's error back to the model as retry feedback; accept records the answer unchecked. The broken script is flagged on the run either way."
         }
       }
@@ -700,11 +701,11 @@
           "properties": {
             "glob": {
               "type": "string",
-              "description": "Concatenated contents of the workdir files matching this pattern."
+              "description": "Concatenated contents of the files matching this pattern, expanded against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: each match is fenced inside it, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one."
             },
             "files": {
               "type": "array",
-              "description": "Concatenated contents of these workdir-relative paths.",
+              "description": "Concatenated contents of these paths, resolved against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: a path outside it is refused at spawn, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one.",
               "items": {
                 "type": "string"
               }
@@ -715,7 +716,7 @@
             },
             "rhai": {
               "type": "string",
-              "description": "A Rhai script in the workdir whose returned String fills the region."
+              "description": "A Rhai script whose returned String fills the region, resolved against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: a path outside it is refused at spawn, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one."
             },
             "command": {
               "type": "string",

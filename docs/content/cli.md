@@ -44,7 +44,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--count <N>` | Start this many runs of the same agent and task, each under its own run id, from one invocation |
 | `--json` | Print the spawned run as JSON rather than a sentence. See below |
-| `--output-format <LABEL>` | Ask for the final output in this shape. See [Final outputs](/docs/outputs) |
+| `--output-format <LABEL>` | Ask for the final output in this shape. A label that differs from what the blueprint declares retires its Rhai validator and JSON schema, with a warning on stderr. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
@@ -205,6 +205,14 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 Parsing itself refuses a few things outright, before any finding is reported: a negative count
 anywhere in the file (`max_items = -1`), an unknown key under `[sandbox]`, and an unknown key in a
 stage table. Each of those errors names the key.
+
+The blueprint's scripts are compiled too, exactly as a spawn would compile them: a custom region
+script, an output validator, or a stage hook script that is missing or will not load fails the
+command, since it would fail the run. And because a clean verdict against a config the daemon
+would grumble about is worth less than it looks, the command reads your `config.toml` on the way
+past: keys nothing reads are named as warnings (usually a typo'd setting), and a
+`[model_providers.*]` script entry whose `.rhai` file is not on disk is named along with the path
+that was looked for.
 
 | Level | Code | What it means |
 |---|---|---|
@@ -367,6 +375,10 @@ asserted on, never performed, so a case can expect `write_file` without a file a
 A `tests/*.rhai` file is run instead as a script through the scripting engine, and fails the run if
 it returns `false`.
 
+Before any case runs, the blueprint's own scripts are compiled the way a spawn would compile them:
+custom region scripts, output validators, and stage hook scripts all have to load. `--dry-run`
+includes those checks, so a broken script is caught without spending anything.
+
 ### `lev models`
 
 | Command | Flags |
@@ -385,7 +397,9 @@ prints the table alone. `-r/--remote` is still accepted for older scripts and ch
 
 `--provider` naming a [Rhai script provider](/docs/rhai-providers) loads that script and calls its
 `list_models`: a script names its own catalog at run time, so there is no built-in table to read it
-from. A `--provider` that names nothing at all - no configured
+from. What it answers counts as a real provider listing, toward the trailing line and as
+`"learned": true` in `--json`. A `serves = [...]` or `[model_capabilities]` claim in your config
+never becomes a listing row at all: those feed validation, not this table. A `--provider` that names nothing at all - no configured
 provider, no row in the built-in table, no script of that name that loads - **exits non-zero**
 rather than printing an empty table, since there is nothing an empty table could be reporting.
 A provider the built-in table knows but this install has no credential for is still an empty table
@@ -402,7 +416,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's command seeds |
-| `--output-format <LABEL>` | Ask the agent for its [final output](/docs/outputs) in this format |
+| `--output-format <LABEL>` | Ask the agent for its [final output](/docs/outputs) in this format. A differing label retires the blueprint's declared validator and schema |
 | `--output-instructions <TEXT>` | Extra instructions for that final output |
 
 ## Blueprints and packaging
@@ -686,7 +700,7 @@ rest, and the one that fails is the diagnosis.
 
 | Check | What it proves | A failure means |
 |---|---|---|
-| `config` | `config.toml` parses and a provider registry can be built | The config file is malformed |
+| `config` | `config.toml` parses and a provider registry can be built. The OK line also carries notes for a file that loads with problems in it: keys nothing reads, and `[model_providers.*]` script entries whose `.rhai` file is not on disk | The config file is malformed |
 | `resolve` | Your defaults pick a provider that is actually registered | A key is missing or misspelled |
 | `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
 | `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |

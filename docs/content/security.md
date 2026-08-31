@@ -192,8 +192,13 @@ The rules that keep this safe:
   into the workdir when the pattern is compiled.
 - **Taint rises.** When a grant is active, the read tools are classified `Private` for that
   agent, so taint tracking treats out-of-workdir content with more suspicion, not less.
-- Rhai script tools have their own `read_file` and it stays workdir-confined; `[read_paths]`
-  applies to the built-in file tools only.
+- **Seeds answer to the same fence.** A `seed = { files = [...] }`, `glob` or `rhai` path that
+  resolves outside the workdir is refused at spawn unless a declared and granted `[read_paths]`
+  entry covers it, on the same reasoning as `read_file`: the blueprint chose that path, not you.
+  A `blueprint:`-prefixed seed reads only from the blueprint's own directory, and no grant can
+  let it out - a blueprint does not ship files outside itself.
+- Rhai script tools have their own `read_file` and it stays workdir-confined; among the tools,
+  `[read_paths]` applies to the built-in file tools only.
 
 Pick the run's workdir itself with `lev run <agent> --workdir <dir>` (defaults to the directory
 you ran the command from).

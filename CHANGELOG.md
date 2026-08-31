@@ -13,8 +13,66 @@ same list.
 
 ## Unreleased
 
+### Breaking
+
+- A Rhai output validator that cannot run - it threw, ran past its operation
+  budget, or returned something that is neither `()` nor a string - now
+  rejects the submission by default, with the script's own error sent back to
+  the model as retry feedback. It used to accept the answer unchecked, which
+  shipped exactly the submissions the validator existed to catch: a validator
+  whose first line is `parse_json(content)` throws on malformed output, and
+  that throw waved the malformed answer through. Set
+  `on_validator_error = "accept"` on the output block to restore the old
+  acceptance, for blueprints that would rather end with an unchecked answer
+  than risk ending with none - the tradeoff being that under the default a
+  genuine script bug reads as "this answer is wrong" on every retry. The
+  broken script is flagged on the run (`flags.broken_scripts`) in both modes.
+  A declared JSON `schema` that fails to compile still skips its check and
+  records the submission unchecked, deliberately (#756).
+- `false` from a custom region's `on_write` hook is a surfaced rejection now,
+  not a silent drop that reported success. A write from the model
+  (`context_write`, `context_append`, a routed tool result) gets a real tool
+  error carrying the refusal and its reason, and nothing is stored; a
+  framework write (an assistant turn, a delivered message, a nudge) is stored
+  unchanged with a warning, so a script can no longer silently delete the
+  conversation record. A script that relied on `false` to filter framework
+  writes should do that filtering in `render` or `on_overflow` instead. The
+  hook also gained an upsert story: `ctx.entry` carries the write's `key`, an
+  accept map may override it (`#{ content: "...", key: "..." }`), and `render`
+  sees a last-wins view per key while shadowed entries stay in the store until
+  eviction releases them (#754).
+
+### Fixed
+
+- Passing an `output_format` that differs from what the blueprint declares
+  still retires its Rhai validator and JSON schema - a check written for one
+  shape cannot judge another - but no longer does so silently: `lev run` warns
+  on stderr, the REST spawn response carries an additive `warnings` array
+  naming each retired check, and the daemon logs a line for every spawn path,
+  sub-agent and ACP spawns included (#755).
+- A script provider's reported usage goes through the same normalization the
+  native parsers apply: `prompt_tokens` is read as the whole prompt with the
+  cache counts inside it, so an OpenAI-shaped usage object forwarded verbatim
+  is no longer double-counted, and a missing `total_tokens` is derived from
+  the parts instead of being recorded as zero. Rows a script's `list_models`
+  answers now also count as a real provider listing in `lev models list`
+  (`"learned": true` under `--json`) instead of being mislabeled as rows from
+  this build's table (#752).
+
 ### Added
 
+- A `blueprint:` prefix on a seed path reads from the blueprint's own
+  directory instead of the run's workdir
+  (`seed = { files = ["blueprint:config/style.md"] }`, and the `glob` and
+  `rhai` forms the same way), so an agent can ship the files it seeds from.
+  The prefix is fenced inside that directory with no `[read_paths]` escape,
+  because a blueprint does not ship files outside itself (#751).
+- `lev validate` and `lev test` compile output validators and stage hook
+  scripts beside the region scripts they already checked, so a script that
+  would fail the spawn fails the command first. `lev validate` and
+  `lev doctor` also name config keys nothing reads and `[model_providers.*]`
+  script entries whose `.rhai` file is not on disk, along with the path that
+  was looked for (#753).
 - `GET /api/config` reports `default_model`, the model every stage runs on
   while it is set, and reports it as `null` rather than dropping the key when
   nothing is pinned. A console could read `default_provider` and not this, so

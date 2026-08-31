@@ -111,7 +111,18 @@ one). Return:
 | `#{ action: "reject", reason: "..." }` | Reject, and tell the writer why |
 | `#{ content: "...", key: "..." }` | Accept; both fields optional (`action: "accept"` implied). `content` replaces the text, `key` stores the entry under a different key than the write named |
 
-The map forms use the same vocabulary as [stage hooks](/docs/rhai-hooks), on purpose.
+The map vocabulary here is `accept` and `reject`, nothing else. It is deliberately narrower than
+the [stage hook](/docs/rhai-hooks) one: a region hook has no `allow`, `retry`, `cancel`, or
+`modify`, and an unknown action is a malformed map, which **accepts the entry unchanged** with a
+warning. So `#{ action: "cancel" }` does not refuse anything; write `#{ action: "reject" }` when
+you mean no.
+
+> [!IMPORTANT]
+> `false` changed meaning. Earlier releases treated it as a silent drop that still reported
+> success to the writer. Now a write from the model gets a tool error carrying the refusal, and a
+> framework write (an assistant turn, a delivered message, a nudge) is stored unchanged with a
+> warning. A script that used `false` to filter framework writes out of the region should do that
+> filtering in `render` or `on_overflow` instead.
 
 What a rejection does depends on who is writing. When the model writes through `context_write` or
 `context_append`, or a tool result is routed into the region, the tool result reports the refusal
