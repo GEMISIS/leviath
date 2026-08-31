@@ -1003,6 +1003,27 @@ impl Wizard {
                 // Written below, from the entries rather than the row.
                 Credential::Endpoint => {}
                 _ if !row.selected => catalog::set_credential(&mut config, row.provider.id, None),
+                // A browser sign-in types nothing, so choosing the row *is*
+                // the setting and the credential itself lives outside the
+                // config. Ahead of the empty-value arm below, which is about a
+                // credential that was not given: this one never has a value to
+                // give, so it fell there and every finished sign-in was
+                // switched back off the moment the plan was applied.
+                // A browser sign-in types nothing, so choosing the row *is*
+                // the setting and the credential itself lives outside the
+                // config. Ahead of the empty-value arm below, which is about a
+                // credential that was not given: this one never has a value to
+                // give, so it fell there and every finished sign-in was
+                // switched back off the moment the plan was applied.
+                // A browser sign-in types nothing, so choosing the row *is*
+                // the setting and the credential itself lives outside the
+                // config. Ahead of the empty-value arm below, which is about a
+                // credential that was not given: this one never has a value to
+                // give, so it fell there and every finished sign-in was
+                // switched back off the moment the plan was applied.
+                Credential::Signin => {
+                    catalog::set_credential(&mut config, row.provider.id, Some(String::new()))
+                }
                 // An environment-supplied credential is left out of the file:
                 // the user put it in their environment on purpose, and
                 // `Config::load` already reads it back from there.
@@ -2870,6 +2891,93 @@ pub(super) mod tests {
 
         assert!(wizard.detail_actions().is_empty());
         assert_eq!(wizard.row_count(), 0);
+    }
+
+    /// Every provider the wizard offers survives being chosen.
+    ///
+    /// Over `catalog::providers()` rather than a written-out list, so a
+    /// provider added to that table is covered the day it is added. This is
+    /// the invariant the whole screen exists to produce, and nothing else
+    /// asserted it end to end: Codex shipped selected, signed in, and switched
+    /// back off by `build_config`, because a browser sign-in types nothing and
+    /// the empty-value arm read that as "no credential given".
+    #[test]
+    fn every_offered_provider_is_configured_by_choosing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for provider in catalog::providers() {
+            // Endpoint presets are their entries, not a row credential, and
+            // have their own tests; everything else answers here.
+            if provider.credential == Credential::Endpoint {
+                continue;
+            }
+            let mut wizard = test_wizard(dir.path());
+            let index = wizard
+                .providers
+                .iter()
+                .position(|r| r.provider.id == provider.id)
+                .expect("the row this came from");
+            for row in &mut wizard.providers {
+                row.selected = false;
+                row.value = String::new();
+            }
+
+            // Unselected: not configured, whatever the file said before.
+            let off = wizard.build_config();
+            assert!(
+                !catalog::is_configured(&off, provider.id),
+                "'{}' is configured without being chosen",
+                provider.id
+            );
+
+            // Chosen, and given whatever its kind actually needs. A sign-in
+            // needs nothing typed, which is the case that broke.
+            wizard.providers[index].selected = true;
+            wizard.providers[index].value = match provider.credential {
+                Credential::ApiKey => "a-credential".to_string(),
+                // Not the default one: see the separate case below.
+                Credential::BaseUrl => "http://elsewhere:11434".to_string(),
+                Credential::Signin | Credential::Endpoint => String::new(),
+            };
+            let on = wizard.build_config();
+            assert!(
+                catalog::is_configured(&on, provider.id),
+                "choosing '{}' did not configure it",
+                provider.id
+            );
+        }
+    }
+
+    /// The one documented exception to the rule above: a base-URL provider
+    /// left on its default writes nothing.
+    ///
+    /// Deliberate - storing the default would pin it, and `$OLLAMA_HOST` and
+    /// the built-in default would both stop applying. The cost is that
+    /// choosing Ollama and keeping the default leaves it out of
+    /// `configured_providers`, so it cannot be picked as the default
+    /// provider. Asserted rather than skipped, so changing it is a decision
+    /// somebody makes on purpose.
+    #[test]
+    fn a_base_url_provider_left_on_its_default_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let index = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.credential == Credential::BaseUrl)
+            .expect("the catalog offers one");
+        for row in &mut wizard.providers {
+            row.selected = false;
+            row.value = String::new();
+        }
+        wizard.providers[index].selected = true;
+        wizard.providers[index].value = catalog::DEFAULT_OLLAMA_URL.to_string();
+
+        let config = wizard.build_config();
+        let id = wizard.providers[index].provider.id;
+        assert!(
+            !catalog::is_configured(&config, id),
+            "'{id}' on its default should leave the file alone"
+        );
     }
 
     /// The codex row at its index, on a wizard whose only selection it is and

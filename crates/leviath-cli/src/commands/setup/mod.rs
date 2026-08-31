@@ -674,6 +674,148 @@ mod tests {
         });
     }
 
+    /// Choosing a provider in the wizard reaches the runtime: it is offered
+    /// as a default, and it is built into the credentials a run resolves
+    /// against.
+    ///
+    /// Over `catalog::providers()`, so a provider added to that table is
+    /// covered the day it is added rather than the day somebody remembers.
+    ///
+    /// Adding a provider means touching about eight places - the catalog row,
+    /// three match arms in `catalog`, the credential arm in `build_config`,
+    /// the tuple in `configured_providers`, the creds in
+    /// `provider_creds_from_config` and the registry arm in
+    /// `provider_creds` - and nothing held them together. Codex reached the
+    /// last two and stopped at the fifth, so it signed in, congratulated the
+    /// user, and vanished. This is the test that says so.
+    #[test]
+    fn every_offered_provider_reaches_the_runtime_when_it_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            // Codex counts as configured only once it is signed in, so the
+            // grant has to exist before the question is asked.
+            let grants =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    ..Default::default()
+                },
+            );
+            store.save(&grants).unwrap();
+
+            for provider in crate::commands::setup::catalog::providers() {
+                // An endpoint preset writes `[model_providers]` entries under
+                // a name the user picks, not a credential under its own id.
+                // Those have their own tests.
+                if provider.credential == crate::commands::setup::catalog::Credential::Endpoint {
+                    continue;
+                }
+                let mut wizard = crate::commands::setup::state::tests::test_wizard(dir.path());
+                let index = wizard
+                    .providers
+                    .iter()
+                    .position(|r| r.provider.id == provider.id)
+                    .expect("the row this came from");
+                for row in &mut wizard.providers {
+                    row.selected = false;
+                    row.value = String::new();
+                }
+                wizard.providers[index].selected = true;
+                wizard.providers[index].value = match provider.credential {
+                    crate::commands::setup::catalog::Credential::ApiKey => {
+                        "a-credential".to_string()
+                    }
+                    // Not the default: that deliberately writes nothing, and
+                    // `state::tests` asserts it separately.
+                    crate::commands::setup::catalog::Credential::BaseUrl => {
+                        "http://elsewhere:11434".to_string()
+                    }
+                    _ => String::new(),
+                };
+
+                let config = wizard.build_config();
+                assert!(
+                    configured_providers(&config).contains(&provider.id.to_string()),
+                    "'{}' cannot be chosen as the default provider after being configured",
+                    provider.id
+                );
+                let creds = crate::commands::run::session::provider_creds_from_config(&config);
+                // Named up front rather than formatted into the assertion: a
+                // call that only runs when it fails is a region no passing
+                // test reaches.
+                let built: Vec<&String> = creds.iter().map(|c| &c.name).collect();
+                assert!(
+                    built.iter().any(|name| *name == provider.id),
+                    "'{}' is configured but a run would not build it: {built:?}",
+                    provider.id
+                );
+            }
+        });
+    }
+
+    /// The reported bug, end to end: choose Codex in the wizard, apply, and
+    /// find it in the file and on the default-provider list.
+    ///
+    /// The unit above proves `configured_providers` reads the two flags
+    /// correctly; it did not prove anything ever wrote the first one. It did
+    /// not: a browser sign-in types nothing, `build_config` read that as "no
+    /// credential given", and the sign-in was switched off at Apply. The
+    /// symptom was a wizard that connected, congratulated you, and left a
+    /// config with `codex_enabled` unset - no `codex/...` models, and Codex
+    /// missing from the default-provider choices on the next run through.
+    #[test]
+    fn choosing_codex_in_the_wizard_reaches_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let grants =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    ..Default::default()
+                },
+            );
+            store.save(&grants).unwrap();
+
+            let mut wizard = crate::commands::setup::state::tests::test_wizard(dir.path());
+            let index = wizard
+                .providers
+                .iter()
+                .position(|r| r.provider.id == "codex")
+                .expect("the codex row is offered");
+            for row in &mut wizard.providers {
+                row.selected = false;
+            }
+            wizard.providers[index].selected = true;
+
+            let config_path = dir.path().join("config.toml");
+            let plan = wizard.build_plan();
+            plan::apply(&plan, &config_path, &dir.path().join("agents"), None)
+                .expect("the plan applies");
+
+            let saved = Config::load_from_path_public(&config_path).expect("it reads back");
+            assert!(
+                saved.providers.codex_enabled,
+                "the sign-in was switched off on the way to disk"
+            );
+            assert!(
+                configured_providers(&saved).contains(&"codex".to_string()),
+                "codex is not offered as a default provider"
+            );
+
+            // And the text really is in the file, not only in the struct.
+            let toml = std::fs::read_to_string(&config_path).expect("the file");
+            assert!(toml.contains("codex_enabled"), "{toml}");
+        });
+    }
+
     /// The flag sets the switch and nothing else: it never opens a browser,
     /// because nothing is watching one in a non-interactive run.
     #[test]
