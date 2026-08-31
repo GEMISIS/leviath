@@ -33,7 +33,8 @@ anthropic_cache_ttl = "5m"
 claude_code_binary = "/usr/local/bin/claude"
 claude_code_effort = "medium"
 # Bill inference to a ChatGPT subscription instead of an API balance.
-# Sign in with `lev auth login codex`; the grant is stored outside this file.
+# Sign in from `lev setup` (or `lev auth login codex` on a headless machine);
+# the grant is stored outside this file and its token renews itself.
 codex_enabled = false
 codex_originator = "leviath"
 codex_reasoning_effort = "medium"
