@@ -70,6 +70,68 @@ fn parse_inference_full() {
     assert_eq!(r.finish_reason, FinishReason::ToolCall);
 }
 
+/// The common case: an upstream that reports `prompt_tokens` and
+/// `completion_tokens` but no total (the Anthropic shape, and the docs' own
+/// `usage_of` helper before it learned better). The total is derived from the
+/// parts, not read back as zero - a zero here is what the rate limiter records
+/// and what the run reports as `tokens_used`.
+#[test]
+fn usage_without_a_total_still_reports_one() {
+    let r = parse_inference_dynamic(dyn_from_json(
+        r#"{"content":"","tokens_used":{"prompt_tokens":3,"completion_tokens":2}}"#,
+    ))
+    .unwrap();
+    assert_eq!(r.tokens_used.total_tokens, 5);
+}
+
+/// A script forwarding an OpenAI-shaped usage object verbatim sends a
+/// `prompt_tokens` that INCLUDES the cached slice. The host subtracts the
+/// cache counts back out, the same normalization the native OpenAI provider
+/// applies, so the cached tokens are not billed once at the full input rate
+/// inside `prompt_tokens` and again at the cache rate.
+#[test]
+fn an_openai_shaped_usage_forwarded_verbatim_is_not_double_counted() {
+    let r = parse_inference_dynamic(dyn_from_json(
+        r#"{"content":"","tokens_used":{
+                "prompt_tokens":100,"completion_tokens":5,"total_tokens":105,
+                "cached_tokens":80}}"#,
+    ))
+    .unwrap();
+    assert_eq!(r.tokens_used.prompt_tokens, 20, "fresh input only");
+    assert_eq!(r.tokens_used.cached_tokens, 80);
+    assert_eq!(r.tokens_used.input_tokens(), 100);
+    assert_eq!(r.tokens_used.total_tokens, 105);
+}
+
+/// A script that knows only a total (an endpoint that reports nothing finer)
+/// keeps it: deriving the total from all-zero parts and discarding the one
+/// figure the script had would zero the call.
+#[test]
+fn a_total_only_usage_keeps_its_total() {
+    let r = parse_inference_dynamic(dyn_from_json(
+        r#"{"content":"","tokens_used":{"total_tokens":9}}"#,
+    ))
+    .unwrap();
+    assert_eq!(r.tokens_used.total_tokens, 9);
+    assert_eq!(r.tokens_used.prompt_tokens, 0);
+    assert_eq!(r.tokens_used.completion_tokens, 0);
+}
+
+/// A malformed report whose cache counts exceed its own prompt count clamps
+/// to zero fresh input rather than wrapping, and the total never reads lower
+/// than what the parts add up to.
+#[test]
+fn a_usage_whose_parts_exceed_its_prompt_count_saturates() {
+    let r = parse_inference_dynamic(dyn_from_json(
+        r#"{"content":"","tokens_used":{
+                "prompt_tokens":10,"completion_tokens":5,
+                "cached_tokens":80,"cache_write_tokens":40}}"#,
+    ))
+    .unwrap();
+    assert_eq!(r.tokens_used.prompt_tokens, 0);
+    assert_eq!(r.tokens_used.total_tokens, 125);
+}
+
 #[test]
 fn parse_inference_defaults_and_missing_fields() {
     let r = parse_inference_dynamic(dyn_from_json("{}")).unwrap();

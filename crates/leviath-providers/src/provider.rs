@@ -394,6 +394,18 @@ impl ModelInfo {
         self
     }
 
+    /// This entry marked as read from the provider's own listing, for a
+    /// listing that reports rows directly (a script's `list_models`) rather
+    /// than through a [`crate::learned::LearnedModel`] record.
+    ///
+    /// Rows synthesized from configuration claims (`serves = [...]`,
+    /// `[model_capabilities]`) are someone describing a model, not the
+    /// provider answering for itself, and must not pass through here.
+    pub fn listed(mut self) -> Self {
+        self.learned = true;
+        self
+    }
+
     /// This entry marked as read from the listing, carrying what it said.
     pub fn learned_from(mut self, learned: &crate::learned::LearnedModel) -> Self {
         self.display_name = learned.display_name.clone();

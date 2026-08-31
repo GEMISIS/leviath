@@ -1888,6 +1888,44 @@ mod tests {
         }
     }
 
+    /// The rows a script's `list_models` answers are the provider's own
+    /// listing, not this build's table. `print_listing` counts its trailing
+    /// line by the `learned` flag and `--json` reports the flag verbatim, so
+    /// an unlearned script row makes a purely live table print "N rows from
+    /// this build's table; no provider listing was read" - exactly backwards.
+    #[tokio::test]
+    async fn a_script_providers_rows_count_as_its_own_listing() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("listed.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"listed-large\" } ] }",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-a_script_providers_rows_count_as_its_own_listing",
+            |_fake_dir| async move {
+                let config = Config::load().expect("the isolated config loads");
+                let registry = script_registry(dir)(&config).expect("the registry builds");
+                let mut entries = Vec::new();
+                merge_script_provider(&registry, "listed", &mut entries)
+                    .await
+                    .expect("the script lists its models");
+                assert!(!entries.is_empty(), "the script answered a row");
+                for row in &entries {
+                    assert!(
+                        row.learned,
+                        "'{}' came from the script's own list_models, not this build's table",
+                        row.id
+                    );
+                }
+            },
+        )
+        .await;
+    }
+
     /// A script that will not compile is a candidate name the registry cannot
     /// hand back. `show` skips it the way `list` does, and still answers from
     /// whatever else it has: here, nothing, so the model is reported unknown
