@@ -582,17 +582,29 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
             Some(ProviderCatalog::Complete(ids)) => {
                 let key = model_key(&entry.model);
                 if !ids.iter().any(|id| model_key(id) == key) {
+                    // The provider's own reason wins. "Does not serve it" is
+                    // right for a typo and wrong for a model the route carries
+                    // and this account cannot reach, and the two send a reader
+                    // to different places.
+                    let reason = env
+                        .provider_refusals
+                        .get(&format!("{}/{}", entry.provider, entry.model));
                     findings.push(
                         LintFinding::new(
                             LintSeverity::Error,
                             "unserved-model",
-                            format!(
-                                "names {}/{}, which provider '{}' does not serve (it lists {})",
-                                entry.provider,
-                                entry.model,
-                                entry.provider,
-                                sample_catalog(ids),
-                            ),
+                            match reason {
+                                Some(reason) => {
+                                    format!("names {}/{}: {reason}", entry.provider, entry.model)
+                                }
+                                None => format!(
+                                    "names {}/{}, which provider '{}' does not serve (it lists {})",
+                                    entry.provider,
+                                    entry.model,
+                                    entry.provider,
+                                    sample_catalog(ids),
+                                ),
+                            },
                         )
                         .in_stage(&stage.name)
                         .with_fix(format!(

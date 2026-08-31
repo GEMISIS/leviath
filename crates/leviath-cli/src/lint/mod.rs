@@ -191,6 +191,15 @@ pub(crate) struct LintEnv {
     /// and its entries go unchecked. See [`ProviderCatalog`] for what the two
     /// present states mean.
     pub provider_catalogs: HashMap<String, ProviderCatalog>,
+    /// Why a provider refuses one particular `provider/model`, when it had
+    /// more to say than the absence itself - keyed the way a blueprint writes
+    /// it.
+    ///
+    /// A catalogue that depends on the *account* rather than the build makes
+    /// "does not serve it" wrong: Codex carries `gpt-5.3-codex-spark` and a
+    /// Plus plan cannot reach it, and telling somebody to check their
+    /// spelling sends them nowhere useful.
+    pub provider_refusals: HashMap<String, String>,
 
     /// Bare model names the blueprint leaves unrouted: it names the model and
     /// no provider, and nothing this install can reach claims to serve it.
@@ -250,6 +259,7 @@ impl LintEnv {
             // serve. Doing it again here would cost every agent a round of
             // priming to say something the spawn says louder a moment later.
             provider_catalogs: HashMap::new(),
+            provider_refusals: HashMap::new(),
             unrouted_models: HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
         }
@@ -321,6 +331,23 @@ impl LintEnv {
                 None => continue,
             };
             self.provider_catalogs.insert(name.to_string(), catalog);
+        }
+
+        // And what each refused entry's provider says about it, asked while
+        // the provider is still in hand: the checks run over plain data.
+        //
+        // No "already asked" guard, unlike the loop above: that one is keyed
+        // by provider and its question can cost a network call, while this is
+        // keyed by the exact pair and answered from memory. A blueprint naming
+        // one pair in two stages asks twice and inserts the same string.
+        for entry in entries() {
+            let Some(provider) = registry.get(&entry.provider) else {
+                continue;
+            };
+            if let Some(reason) = provider.refusal_reason(model_key(&entry.model)) {
+                self.provider_refusals
+                    .insert(format!("{}/{}", entry.provider, entry.model), reason);
+            }
         }
 
         // The open entries, asked the way the resolver asks: does *any*

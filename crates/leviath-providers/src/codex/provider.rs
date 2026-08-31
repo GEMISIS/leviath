@@ -447,6 +447,15 @@ impl Provider for CodexProvider {
             .then(|| model_key.to_string())
     }
 
+    fn refusal_reason(&self, model_key: &str) -> Option<String> {
+        // Only for a model this route really does serve. Anything else is a
+        // name nobody here has heard of, and the caller's own "not carried"
+        // message is the better one for that.
+        let known = catalog::CATALOG.iter().any(|(id, _)| *id == model_key);
+        (known && !catalog::plan_allows(self.plan().as_deref(), model_key))
+            .then(|| catalog::gated_remedy(self.plan().as_deref(), model_key))
+    }
+
     fn served_catalog(&self) -> Option<Vec<String>> {
         // `Some` is a promise of completeness, and the lint turns a name
         // outside it into a hard error. Only answered once the plan tier is

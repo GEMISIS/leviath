@@ -275,6 +275,17 @@ impl ProviderRegistry {
             .any(|id| crate::pipeline::model_key(id) == key)
     }
 
+    /// What `provider` says about refusing `model`, when it has more to say
+    /// than the absence itself.
+    ///
+    /// Asked only after [`refuses_model`](Self::refuses_model) has already
+    /// said no, so this is about the wording of a decision rather than the
+    /// decision.
+    pub(crate) fn refusal_reason(&self, provider: &str, model: &str) -> Option<String> {
+        self.get(provider)?
+            .refusal_reason(crate::pipeline::model_key(model))
+    }
+
     /// Get all *natively-registered* provider names. Script providers are
     /// resolved on demand and so are not enumerated here - see
     /// [`resolvable_names`](Self::resolvable_names) for the set that includes
@@ -362,6 +373,8 @@ mod tests {
         /// the ordinary fixture and means "will not say", which no caller may
         /// read as a refusal.
         catalog: Option<Vec<String>>,
+        /// What it says about refusing anything outside that catalogue.
+        refusal: Option<String>,
     }
 
     impl StubProvider {
@@ -371,6 +384,7 @@ mod tests {
                 outcome,
                 warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
                 catalog: None,
+                refusal: None,
             }
         }
 
@@ -379,6 +393,14 @@ mod tests {
             Self {
                 catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
                 ..Self::new(PrimeOutcome::Ok)
+            }
+        }
+
+        /// And one that explains what it will not serve.
+        fn explaining(models: &[&str], reason: &str) -> Self {
+            Self {
+                refusal: Some(reason.to_string()),
+                ..Self::publishing(models)
             }
         }
     }
@@ -438,6 +460,37 @@ mod tests {
         fn served_catalog(&self) -> Option<Vec<String>> {
             self.catalog.clone()
         }
+
+        fn refusal_reason(&self, _model_key: &str) -> Option<String> {
+            self.refusal.clone()
+        }
+    }
+
+    /// A provider gets to explain a refusal, and one with nothing to add is
+    /// silent rather than inventing a sentence.
+    #[test]
+    fn refusal_reason_comes_from_the_provider_or_not_at_all() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "codexish".to_string(),
+            Arc::new(StubProvider::explaining(
+                &["gpt-5.5"],
+                "your plan does not include it",
+            )),
+        );
+        reg.register(
+            "groq".to_string(),
+            Arc::new(StubProvider::publishing(&["llama-4-scout"])),
+        );
+
+        assert_eq!(
+            reg.refusal_reason("codexish", "gpt-5.3-spark").as_deref(),
+            Some("your plan does not include it")
+        );
+        assert_eq!(reg.refusal_reason("groq", "llama-3.1-70b"), None);
+        // And a provider that is not here explains nothing rather than
+        // panicking on the lookup.
+        assert_eq!(reg.refusal_reason("absent", "anything"), None);
     }
 
     /// `refuses_model` folds three different "no" answers into `false`, because
