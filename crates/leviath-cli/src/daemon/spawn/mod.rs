@@ -441,6 +441,22 @@ fn log_blueprint_lint(content: &str, blueprint: &Blueprint, manifest_path: &str)
     }
 }
 
+/// Log the declared shape checks a caller's output-format override retires.
+///
+/// The CLI and the REST server also tell their own callers, but sub-agent and
+/// ACP spawns have no warning channel of their own, so this line in the daemon
+/// log is the one place the retirement is guaranteed to be recorded. Named
+/// rather than inlined so a test can drive the warning path directly.
+fn warn_retired_output_checks(
+    run_id: &str,
+    blueprint: &Blueprint,
+    request: Option<&leviath_core::output::OutputSpec>,
+) {
+    for line in leviath_core::output::retired_check_warnings(blueprint, request) {
+        tracing::warn!(run_id = %run_id, agent_name = %blueprint.name, "{line}");
+    }
+}
+
 fn build_agent_inner(
     world: &mut World,
     deps: SpawnDeps<'_>,
@@ -796,6 +812,12 @@ fn build_agent_inner(
     let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
     let stage_hooks = resolve_stage_hook_scripts(&blueprint, &args.blueprint_path)?;
     let output_validators = resolve_output_validators(&blueprint, &args.blueprint_path)?;
+
+    // A requested output format that differs from the declared one retires the
+    // blueprint's validator and schema for the reshaped stages (see
+    // `resolve_output_spec`). Deliberate, but no longer silent: every spawn
+    // path funnels through here, so the daemon log always says what was lost.
+    warn_retired_output_checks(&args.run_id, &blueprint, args.output.as_ref());
 
     // Whether any stage can produce a file change the framework would see -
     // asked here, while the blueprint is still in hand, because it cannot
@@ -1285,6 +1307,29 @@ system = { kind = "pinned", max_tokens = 1000 }
         bp.output = agent_script.map(spec);
         bp.stages[0].output = stage_script.map(spec);
         bp
+    }
+
+    /// The daemon-log lines for a format override that retires a declared
+    /// validator. The wording lives in `leviath_core::output` and is tested
+    /// there; this drives the logging path every spawn walks through, both
+    /// when it has something to say and when it has nothing.
+    #[test]
+    fn warn_retired_output_checks_logs_the_retirement() {
+        // Under a real subscriber, so the macro's field expressions run.
+        crate::test_support::with_tracing(|| {
+            let bp = validator_blueprint(Some("validators/shape.rhai"), None);
+            let request = leviath_core::output::OutputSpec {
+                format: Some("json".to_string()),
+                ..leviath_core::output::OutputSpec::default()
+            };
+            assert_eq!(
+                leviath_core::output::retired_check_warnings(&bp, Some(&request)).len(),
+                1,
+                "the fixture needs a retirement for the log line to run"
+            );
+            warn_retired_output_checks("run-1", &bp, Some(&request));
+            warn_retired_output_checks("run-1", &bp, None);
+        });
     }
 
     /// Compiled at spawn, so a broken validator stops the run before any tokens

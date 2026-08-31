@@ -339,6 +339,37 @@ fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
     lines
 }
 
+/// Say, before the run starts, that `--output-format` retires the declared
+/// shape checks.
+///
+/// Overriding the format retires any Rhai validator and JSON schema the
+/// blueprint declared, because a check written for one shape cannot judge
+/// another. That is deliberate and stays; what cannot stay is the silence. The
+/// daemon logs the retirement at spawn, but into `daemon.log`, and the person
+/// who typed the override is the one counting on a check that will not run.
+fn warn_retired_output_checks(spawn_args: &SpawnArgs) {
+    for line in retired_check_warning_for_spawn(spawn_args) {
+        eprintln!("warning: {line}");
+    }
+}
+
+/// The retirement warning for a spawn request, read from the real manifest.
+/// Empty when nothing is retired, and empty when the manifest cannot be read
+/// or parsed: best-effort for the same reason as
+/// [`warn_ungranted_read_paths`].
+fn retired_check_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
+    if spawn_args.output.is_none() {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
+        return Vec::new();
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return Vec::new();
+    };
+    leviath_core::output::retired_check_warnings(&blueprint, spawn_args.output.as_ref())
+}
+
 /// What `lev run --json` prints on a successful spawn.
 ///
 /// `lev run` hands the agent to the daemon and returns, so the run id is the
@@ -410,6 +441,7 @@ pub(crate) async fn send_spawn(
     warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
     warn_held_checkpoints(&spawn_args);
+    warn_retired_output_checks(&spawn_args);
     let spawned = spawn_once(client, spawn_args).await?;
     println!("{}", spawn_report(&spawned, json));
     Ok(())
@@ -444,6 +476,7 @@ pub async fn send_spawn_batch(
     warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
     warn_held_checkpoints(&spawn_args);
+    warn_retired_output_checks(&spawn_args);
     let mut spawned = Vec::with_capacity(count);
     for _ in 0..count {
         let mut args = spawn_args.clone();
@@ -1487,6 +1520,108 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             assert!(joined.contains("plan_approval"), "{joined}");
             assert!(joined.contains("until somebody answers"), "{joined}");
         });
+    }
+
+    /// A manifest declaring a Rhai validator for its output, written to disk,
+    /// so the retirement warning is exercised through the real read-and-parse
+    /// path.
+    fn manifest_with_a_validator(dir: &std::path::Path) -> String {
+        let manifest = dir.join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            r#"
+[agent]
+name = "checked"
+version = "0.1.0"
+description = "declares a validator"
+
+[agent.output]
+format = "markdown"
+validator = "checks/report.rhai"
+
+[stages.plan]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+"#,
+        )
+        .unwrap();
+        manifest.to_string_lossy().into_owned()
+    }
+
+    /// A request whose only content is a format label, the shape every
+    /// `--output-format` flag arrives in.
+    fn format_request(label: &str) -> Option<leviath_core::output::OutputSpec> {
+        Some(leviath_core::output::OutputSpec {
+            format: Some(label.to_string()),
+            ..leviath_core::output::OutputSpec::default()
+        })
+    }
+
+    /// `--output-format` over a blueprint with a validator retires the check,
+    /// and stderr now says so before the run starts; re-stating the declared
+    /// format retires nothing and stays quiet, as does no override at all.
+    #[test]
+    fn an_output_format_override_announces_the_retired_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint_path = manifest_with_a_validator(dir.path());
+        let args = SpawnArgs {
+            blueprint_path: blueprint_path.clone(),
+            output: format_request("json"),
+            ..SpawnArgs::default()
+        };
+        let joined = retired_check_warning_for_spawn(&args).join("\n");
+        assert!(joined.contains("checks/report.rhai"), "{joined}");
+        assert!(joined.contains("stage 'plan'"), "{joined}");
+        assert!(joined.contains("'json'"), "{joined}");
+        warn_retired_output_checks(&args);
+
+        assert!(
+            retired_check_warning_for_spawn(&SpawnArgs {
+                blueprint_path: blueprint_path.clone(),
+                output: format_request("markdown"),
+                ..SpawnArgs::default()
+            })
+            .is_empty(),
+            "re-stating the declared format keeps the checks"
+        );
+        assert!(
+            retired_check_warning_for_spawn(&SpawnArgs {
+                blueprint_path,
+                output: None,
+                ..SpawnArgs::default()
+            })
+            .is_empty(),
+            "no override, nothing retired"
+        );
+    }
+
+    /// The same lenient arms as every warning on this path: a manifest that is
+    /// not there or will not parse must stay quiet, never stop a spawn.
+    #[test]
+    fn the_retirement_warning_gives_up_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            retired_check_warning_for_spawn(&SpawnArgs {
+                blueprint_path: dir
+                    .path()
+                    .join("nope.leviath")
+                    .to_string_lossy()
+                    .into_owned(),
+                output: format_request("json"),
+                ..SpawnArgs::default()
+            })
+            .is_empty()
+        );
+
+        let unparseable = dir.path().join("agent.leviath");
+        std::fs::write(&unparseable, "not valid toml [[[").unwrap();
+        assert!(
+            retired_check_warning_for_spawn(&SpawnArgs {
+                blueprint_path: unparseable.to_string_lossy().into_owned(),
+                output: format_request("json"),
+                ..SpawnArgs::default()
+            })
+            .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -1396,7 +1396,9 @@ curl -X POST http://localhost:3000/api/agents \
 
 Then read it back from `GET /api/agents/{id}/result`, where `final_output` carries the answer, its
 format label, and the stage that produced it. Add `output_schema` when you want the answer validated
-against a JSON Schema. [Final outputs](/docs/outputs) covers the whole cascade.
+against a JSON Schema. A format that differs from the blueprint's retires any Rhai validator and
+JSON schema the blueprint declared, and the spawn response says so: a `warnings` array beside the
+run id names each retired check. [Final outputs](/docs/outputs) covers the whole cascade.
 
 ## Spawning with a signed webhook
 

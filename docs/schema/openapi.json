@@ -2596,7 +2596,7 @@
           },
           "output_format": {
             "type": "string",
-            "description": "Ask for the final output in this shape, overriding the blueprint's. Any label works - nothing converts between shapes; the label reaches the model, which produces the bytes. Naming this without output_schema drops a schema the blueprint declared."
+            "description": "Ask for the final output in this shape, overriding the blueprint's. Any label works - nothing converts between shapes; the label reaches the model, which produces the bytes. Naming a format the blueprint does not declare retires any Rhai validator and JSON schema it declared (a check written for one shape says nothing about another); the response's warnings array names what was retired. Supply output_schema when the new shape should still be checked."
           },
           "output_instructions": {
             "type": "string",
@@ -2634,6 +2634,13 @@
           },
           "run_id": {
             "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "How this run will differ from what its blueprint declares: today, the Rhai validator or JSON schema that a differing output_format retired. Omitted when there is nothing to say."
           }
         }
       },

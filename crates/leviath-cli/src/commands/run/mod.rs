@@ -98,8 +98,10 @@ pub struct RunArgs {
     /// the label and any instructions are handed to the model, which produces
     /// the bytes. Read the answer back with `lev result <run-id>`.
     ///
-    /// Naming a format without `--output-schema` drops a schema the blueprint
-    /// declared, since a check written for one shape says nothing about another.
+    /// Naming a format the blueprint does not declare retires any Rhai
+    /// validator and JSON schema it declared, since a check written for one
+    /// shape says nothing about another; a warning names what was retired.
+    /// Pass `--output-schema` when the new shape should still be checked.
     #[arg(long, value_name = "LABEL")]
     pub output_format: Option<String>,
 
