@@ -48,6 +48,14 @@ pub(super) struct RedactedConfig {
     pub(super) has_google_key: bool,
     pub(super) has_openrouter_key: bool,
     pub(super) ollama_base_url: Option<String>,
+    /// Whether Ollama is on.
+    ///
+    /// Beside `ollama_base_url` rather than folded into it, because the two
+    /// say different things: this is "I chose Ollama", the URL is "and it is
+    /// not at the default address". A config that names a URL counts as
+    /// having chosen it, so this reads `true` for one of those too - what a
+    /// console wants to draw is whether it is on, not which field said so.
+    pub(super) ollama_enabled: bool,
     /// Whether the Codex transport is on. Whether it is *signed in* is a
     /// separate question with a separate route: see `GET /api/providers`.
     pub(super) codex_enabled: bool,
@@ -423,6 +431,13 @@ pub(super) struct WriteConfigReq {
     /// sign-in, taken through `POST /api/providers/codex/login`. Writing this
     /// alone leaves a provider that is enabled and cannot answer, which is why
     /// `GET /api/providers` reports the two separately.
+    /// Turn Ollama on or off.
+    ///
+    /// Off, no run registers it. It needs no key and answers on a well-known
+    /// local port, so it used to be registered on every machine whether or
+    /// not anybody asked - which made a bare model name resolvable against
+    /// whatever happened to be running there.
+    pub(super) ollama_enabled: Option<bool>,
     pub(super) codex_enabled: Option<bool>,
     /// How hard Codex thinks: `none`, `minimal`, `low`, `medium`, `high` or
     /// `xhigh`. Validated before anything is written.

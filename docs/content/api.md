@@ -960,10 +960,13 @@ So `id` is not a key. `provider` + `id` is:
 
 ```json
 [
-  { "id": "gpt-5.5", "provider": "openai", "pricing": { "input": 1.25, "output": 10.0 } },
-  { "id": "gpt-5.5", "provider": "codex",  "pricing": { "input": 0.0,  "output": 0.0  } }
+  { "id": "gpt-5.5", "provider": "openai", "max_context_tokens": 400000 },
+  { "id": "gpt-5.5", "provider": "codex",  "max_context_tokens": 400000 }
 ]
 ```
+
+Measured against a live daemon signed in to both, that is four ids each served
+twice: `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`.
 
 A client keying a picker on `id` alone silently collapses those two into one
 row, and whichever it kept decides what the user pays. Build the key the way a
@@ -981,9 +984,13 @@ A provider this machine has not configured lists nothing rather than 404ing:
 the set of providers is whatever the config has, so "no models" is the honest
 answer to asking about one it does not have.
 
-The `pricing` on a Codex entry is a real zero rather than an absent one - the
-marginal cost of a subscription call is nothing, and `null` there would mean
-"unknown", which is a different thing a console should draw differently.
+`pricing` is `null` on a Codex entry, and on any other model whose provider
+did not quote a rate in its listing. It reports what the *listing* said, not
+what a run would be billed at, so a console should not read `null` as free.
+For Codex it happens to be free - a subscription has no per-call price, and a
+run on it reports `cost_usd: 0` - but the two facts arrive by different routes.
+See [where a run's cost went](#where-a-runs-cost-went) for the figure that is
+actually charged.
 
 ## Signing in to a subscription provider
 
@@ -1119,6 +1126,12 @@ signing out is not the same as turning the provider off. `PUT /api/config` carri
 `codex_verbosity` takes `low`, `medium` or `high`. Both are validated before anything is written,
 because the provider silently ignores a value it does not recognise - a typo would otherwise be
 saved, read back by `GET /api/config`, and quietly do nothing.
+
+`ollama_enabled` turns Ollama on, and `GET /api/config` reports it. It is
+opt-in like everything else: off, no run registers it. Setting
+`ollama_base_url` counts as choosing it too, and the `GET` reports `true` for
+either - a console asking "is Ollama on" wants one answer, not two fields to
+reconcile.
 
 `codex_replay_reasoning` is on by default and worth leaving on. It is writable so it can be
 turned off from a console the day the route stops accepting a replayed reasoning blob, without

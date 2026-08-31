@@ -1294,6 +1294,7 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
+            ollama_enabled: false,
             codex_enabled: false,
             codex_reasoning_effort: None,
             codex_verbosity: None,
