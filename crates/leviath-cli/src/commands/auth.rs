@@ -2180,9 +2180,13 @@ mod tests {
     /// A provider that signs in with a key is told where to go instead.
     #[test]
     fn a_key_based_provider_is_refused_with_the_alternative() {
-        let err = not_an_oauth_provider("anthropic").to_string();
-        assert!(err.contains("anthropic"), "{err}");
-        assert!(err.contains("codex"), "{err}");
-        assert!(err.contains("lev setup"), "{err}");
+        let refusal = not_an_oauth_provider("anthropic").to_string();
+        // Named needles rather than printing the refusal itself. The message
+        // comes out of an `oauth`-named function, and CodeQL's
+        // cleartext-logging rule reads any value from one of those reaching a
+        // format argument as a leaked secret.
+        for needle in ["anthropic", "codex", "lev setup"] {
+            assert!(refusal.contains(needle), "refusal never mentions {needle}");
+        }
     }
 }
