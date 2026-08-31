@@ -927,6 +927,22 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Why this provider will not serve `model_key`, when it has something
+    /// more useful to say than "it is not in my catalogue".
+    ///
+    /// `None` by default, and `None` is also the right answer for a plain
+    /// typo: the caller's own message already names the model and says how to
+    /// list what is carried.
+    ///
+    /// It exists for a provider whose catalogue depends on the *account*
+    /// rather than on the build - a subscription tier, an org allowlist. There
+    /// the honest answer is not "no such model" but "your plan does not
+    /// include it", and the two send a reader to completely different places:
+    /// one to check their spelling, the other to change the stage or the plan.
+    fn refusal_reason(&self, _model_key: &str) -> Option<String> {
+        None
+    }
+
     /// Whether this provider may only be reached by name.
     ///
     /// A blueprint entry that names a model without a provider asks every
@@ -2050,6 +2066,15 @@ mod tests {
         let provider = MinimalProvider;
         let models = provider.list_models().await.unwrap();
         assert!(models.is_empty());
+    }
+
+    /// A provider with nothing to add says nothing, and the caller keeps its
+    /// own wording. Only a catalogue that depends on the account has a better
+    /// answer than "not carried".
+    #[test]
+    fn the_default_refusal_has_no_reason_to_give() {
+        assert_eq!(MinimalProvider.refusal_reason("only-this-one"), None);
+        assert_eq!(MinimalProvider.refusal_reason("anything-else"), None);
     }
 
     /// The default credential check *is* the listing, which is the right

@@ -859,6 +859,38 @@ async fn a_check_falls_back_to_the_plan_in_the_grant() {
     );
 }
 
+/// A model the route carries and the plan cannot reach explains itself.
+///
+/// The catalog and the plan are different questions, and the answers send a
+/// reader to different places: one to check the spelling, the other to change
+/// the stage or the plan. Before this, both came out as "provider 'codex'
+/// does not serve it" - which is not true of a model Codex serves.
+#[test]
+fn a_plan_gated_model_says_which_plan_and_what_is_left() {
+    let plus = provider("http://x", Static::with_plan("t", Some("plus")));
+    let reason = plus
+        .refusal_reason("gpt-5.3-codex-spark")
+        .expect("plus does not reach it");
+    assert!(reason.contains("plus"), "{reason}");
+    assert!(reason.contains("gpt-5.3-codex-spark"), "{reason}");
+    // And what to use instead, which is the half that makes it actionable.
+    assert!(reason.contains("gpt-5.5"), "{reason}");
+
+    // A model the plan does reach has nothing to explain.
+    assert_eq!(plus.refusal_reason("gpt-5.5"), None);
+    // Nor does a name this route never carried: "not carried" is already the
+    // right message for that, and the caller has a better one.
+    assert_eq!(plus.refusal_reason("gpt-4o"), None);
+}
+
+/// An account whose tier could not be read refuses nothing, so it explains
+/// nothing. A missing claim must not read as "your plan excludes this".
+#[test]
+fn an_unknown_plan_explains_nothing() {
+    let unknown = provider("http://x", Static::with_plan("t", None));
+    assert_eq!(unknown.refusal_reason("gpt-5.3-codex-spark"), None);
+}
+
 #[test]
 fn an_empty_usage_url_leaves_the_default_alone() {
     let p = provider("http://x", Static::new("t")).with_usage_url(Some("  ".to_string()));

@@ -920,6 +920,55 @@ max_iterations = 10
     );
 }
 
+/// A provider that can say *why* it refuses says that instead.
+///
+/// "Does not serve it" is right for a typo and wrong for a model the route
+/// carries and this account cannot reach - Codex carries
+/// `gpt-5.3-codex-spark` and a Plus plan cannot reach it. The two send a
+/// reader to different places, one to check the spelling and one to change
+/// the stage or the plan, so the reason replaces the guess rather than
+/// sitting beside it.
+#[test]
+fn a_refusal_the_provider_can_explain_says_the_reason() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        provider_catalogs: HashMap::from([(
+            "groq".to_string(),
+            ProviderCatalog::Complete(vec!["llama-4-scout".to_string()]),
+        )]),
+        provider_refusals: HashMap::from([(
+            "groq/llama-3.1-70b".to_string(),
+            "your ChatGPT plus plan does not include it".to_string(),
+        )]),
+        ..LintEnv::default()
+    };
+
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["unserved-model"]);
+    let message = &findings[0].message;
+    assert!(message.contains("plus plan does not include"), "{message}");
+    assert!(
+        !message.contains("does not serve"),
+        "the reason should replace the guess, not sit beside it: {message}"
+    );
+    // The fix still points at the listing, which is where the alternatives
+    // are whichever way the refusal was worded.
+    assert!(
+        findings[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("lev models list")),
+        "{findings:?}"
+    );
+}
+
 /// A catalogue too long to print is summarised with a count, because "it lists
 /// 2" and "it lists 340" send someone to different places: the first to a typo
 /// in the script's own `list_models`, the second to a typo in the blueprint.
@@ -2650,6 +2699,41 @@ fn blueprint_open(models: &[&str]) -> leviath_core::Blueprint {
 /// `native_providers`, which is the list the resolver asks first.
 struct NativeProvider(Vec<String>);
 
+/// The same, but it publishes what it serves and can say why it refuses the
+/// rest - the shape of a provider whose catalogue depends on the account.
+struct ExplainingProvider {
+    serves: Vec<String>,
+    reason: String,
+}
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for ExplainingProvider {
+    async fn infer(
+        &self,
+        _r: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Err(leviath_providers::ProviderError::Other("t".to_string()))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        1000
+    }
+    fn name(&self) -> &str {
+        "explaining"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        Some(self.serves.clone())
+    }
+    fn refusal_reason(&self, model_key: &str) -> Option<String> {
+        (!self.serves.iter().any(|m| m == model_key)).then(|| self.reason.clone())
+    }
+}
+
 #[async_trait::async_trait]
 impl leviath_providers::Provider for NativeProvider {
     async fn infer(
@@ -2753,6 +2837,64 @@ async fn a_script_providers_catalogue_reaches_the_lint() {
             .any(|f| f.code == "unserved-model"),
         "the catalogue is what makes the model checkable"
     );
+}
+
+/// The env collects the provider's own reason for refusing an entry, so the
+/// check has it without holding a registry.
+///
+/// The lint runs over plain data, and the provider is only in hand while the
+/// env is built - so a reason not gathered here is a reason nobody can print.
+#[tokio::test]
+async fn a_providers_reason_for_refusing_reaches_the_lint() {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    registry.register(
+        "codexish".to_string(),
+        std::sync::Arc::new(ExplainingProvider {
+            serves: vec!["gpt-5.5".to_string()],
+            reason: "your ChatGPT plus plan does not include it".to_string(),
+        }),
+    );
+    let bp = blueprint_pinning(&[("codexish", "gpt-5.3-spark")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert_eq!(
+        env.provider_refusals
+            .get("codexish/gpt-5.3-spark")
+            .map(String::as_str),
+        Some("your ChatGPT plus plan does not include it")
+    );
+    // And the finding carries it rather than the generic wording.
+    let message = &lint_manifest("", &bp, &env)
+        .into_iter()
+        .find(|f| f.code == "unserved-model")
+        .expect("the catalogue makes it checkable")
+        .message;
+    assert!(message.contains("plus plan does not include"), "{message}");
+}
+
+/// A provider with nothing to add contributes no entry, so the check keeps its
+/// own wording.
+#[tokio::test]
+async fn a_provider_with_no_reason_adds_none() {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    registry.register(
+        "plain".to_string(),
+        std::sync::Arc::new(NativeProvider(vec!["gpt-5.5".to_string()])),
+    );
+    let bp = blueprint_pinning(&[("plain", "nope")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert!(env.provider_refusals.is_empty());
 }
 
 /// A script provider with no `list_models` is recorded as having said nothing,

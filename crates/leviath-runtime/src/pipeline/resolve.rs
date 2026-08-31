@@ -677,12 +677,23 @@ pub fn resolve_stages(
             // that published a complete catalogue can get here, so the answer
             // is evidence rather than an absence of it (`refuses_model`).
             if registry.refuses_model(&head.provider, &head.model) {
-                return Err(format!(
-                    "stage '{}' names {}/{}, which provider '{}' does not serve. \
-                     Run `lev models list --provider {}` to see what it carries, \
-                     then name one of those in the stage's models list.",
-                    stage.name, head.provider, head.model, head.provider, head.provider,
-                ));
+                // The provider gets to say *why* first. "Does not serve it"
+                // is right for a typo and wrong for a model the route carries
+                // and the account cannot reach - and those two send a reader
+                // to different places, one to check the spelling and one to
+                // change the stage or the plan.
+                return Err(match registry.refusal_reason(&head.provider, &head.model) {
+                    Some(reason) => format!(
+                        "stage '{}' names {}/{}: {reason}",
+                        stage.name, head.provider, head.model
+                    ),
+                    None => format!(
+                        "stage '{}' names {}/{}, which provider '{}' does not serve. \
+                         Run `lev models list --provider {}` to see what it carries, \
+                         then name one of those in the stage's models list.",
+                        stage.name, head.provider, head.model, head.provider, head.provider,
+                    ),
+                });
             }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved). A name matching nothing (a typo, or an
@@ -893,6 +904,7 @@ mod tests {
                 Arc::new(FakeProvider {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: None,
+                    refusal: None,
                 }),
             );
         }
@@ -908,6 +920,8 @@ mod tests {
         /// `None` is the ordinary fixture and means "will not say", which no
         /// caller may read as a refusal.
         catalog: Option<Vec<String>>,
+        /// What it says about refusing something outside that catalogue.
+        refusal: Option<String>,
     }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
@@ -940,6 +954,10 @@ mod tests {
         fn served_catalog(&self) -> Option<Vec<String>> {
             self.catalog.clone()
         }
+
+        fn refusal_reason(&self, _model_key: &str) -> Option<String> {
+            self.refusal.clone()
+        }
     }
 
     /// A registry whose providers each publish a complete catalogue, for the
@@ -952,6 +970,7 @@ mod tests {
                 Arc::new(FakeProvider {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
+                    refusal: None,
                 }),
             );
         }
@@ -1233,6 +1252,61 @@ mod tests {
         assert!(err.contains("plan"), "names the stage: {err}");
         assert!(err.contains("groq/llama-3.1-70b"), "names the pair: {err}");
         assert!(err.contains("lev models list"), "says what to do: {err}");
+    }
+
+    /// And when the provider can say *why*, the spawn error says that instead.
+    ///
+    /// "Does not serve it" is right for a typo and wrong for a model the route
+    /// carries and the account cannot reach: Codex carries
+    /// `gpt-5.3-codex-spark`, a Plus plan does not include it, and the two
+    /// send a reader to different places - one to check the spelling, the
+    /// other to change the stage or the plan. This is the message somebody
+    /// actually reads when a run will not start.
+    #[test]
+    fn resolve_stages_prefers_the_providers_own_reason() {
+        let stage = leviath_core::Stage::new(
+            "plan".to_string(),
+            model_cfg(vec![("codexish", "gpt-5.3-spark")]),
+        );
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "codexish".to_string(),
+            Arc::new(FakeProvider {
+                serves: vec!["gpt-5.5".to_string()],
+                catalog: Some(vec!["gpt-5.5".to_string()]),
+                refusal: Some(
+                    "your ChatGPT plus plan does not include it. Available: gpt-5.5".to_string(),
+                ),
+            }),
+        );
+
+        let err = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect_err("the plan does not reach it");
+
+        assert!(err.contains("plan"), "names the stage: {err}");
+        assert!(
+            err.contains("codexish/gpt-5.3-spark"),
+            "names the pair: {err}"
+        );
+        assert!(
+            err.contains("plus plan does not include"),
+            "the reason: {err}"
+        );
+        assert!(
+            !err.contains("does not serve"),
+            "the reason replaces the guess rather than sitting beside it: {err}"
+        );
     }
 
     /// The same shape, against a provider that publishes nothing. A provider

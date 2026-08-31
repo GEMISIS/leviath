@@ -1485,6 +1485,7 @@ mod tests {
             // bundled blueprint says about itself, not what one install happens
             // to have configured.
             provider_catalogs: std::collections::HashMap::new(),
+            provider_refusals: std::collections::HashMap::new(),
             unrouted_models: std::collections::HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
         }
