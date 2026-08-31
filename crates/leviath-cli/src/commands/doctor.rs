@@ -394,6 +394,71 @@ fn misdirected_rate_limits(config: &Config) -> Vec<String> {
     misdirected
 }
 
+/// `[model_providers.<name>]` script entries whose `.rhai` file is nowhere on
+/// disk, each rendered as one report line.
+///
+/// The runtime resolves such an entry to `None` with no log line, so a typo'd
+/// name, a `sript = "x.rhai"` misspelling (`flatten` keeps unknown keys, so
+/// `script` stays unset and the entry falls back to convention), and an
+/// endpoint entry that forgot its `kind` all read as "the provider does not
+/// exist" with nothing anywhere saying why. The resolution rule is the
+/// daemon's own (`script_provider.rs`): an explicit `script` value, taken
+/// verbatim when absolute and confined to the providers directory when
+/// relative, else `<name>.rhai` there by convention.
+///
+/// A missing file is a warning, not an error: it may legitimately appear
+/// later, and the rest of the config still works without it.
+pub(crate) fn missing_script_providers(
+    config: &Config,
+    providers_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (name, entry) in &config.model_providers {
+        if entry.is_endpoint() {
+            continue;
+        }
+        let stem = entry.script.as_deref().unwrap_or(name);
+        let candidate = std::path::PathBuf::from(stem);
+        let path = if candidate.is_absolute() {
+            candidate
+        } else {
+            let filename = match stem.ends_with(".rhai") {
+                true => stem.to_string(),
+                false => format!("{stem}.rhai"),
+            };
+            // A relative path with `..` in it is refused at load outright, so
+            // it is reported as such rather than as a file to create.
+            if std::path::PathBuf::from(&filename)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                missing.push(format!(
+                    "model_providers.{name} names a script outside the providers directory \
+                     ({stem}), which is refused at load"
+                ));
+                continue;
+            }
+            // No providers directory at all means nothing to resolve a
+            // relative path against; the daemon is in the same position, and
+            // the missing-home problem is reported elsewhere.
+            let Some(dir) = providers_dir else {
+                continue;
+            };
+            dir.join(filename)
+        };
+        if !path.is_file() {
+            missing.push(format!(
+                "model_providers.{name} is a script provider but its script is not on disk \
+                 ({}); a run that routes there finds no provider",
+                path.display()
+            ));
+        }
+    }
+    // A map iterates in arbitrary order; the report should not.
+    missing.sort_unstable();
+    missing
+}
+
 /// Report what the config named and what the registry ended up holding.
 ///
 /// Only native providers can be listed - a Rhai script provider is resolved by
@@ -418,20 +483,26 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // the rest of the file still applies, so this is not broken wiring.
     let mut unread = Config::unread_keys_at(&Config::config_path());
     unread.extend(misdirected_rate_limits(config));
-    if unread.is_empty() {
+    // Same posture as the unread keys, and reported beside them: the config
+    // deserializes fine and one entry of it does nothing.
+    let mut notes = missing_script_providers(config, crate::config::providers_dir().as_deref());
+    if !unread.is_empty() {
+        let subject = match unread.len() {
+            1 => "1 key in config.toml is".to_string(),
+            n => format!("{n} keys in config.toml are"),
+        };
+        notes.insert(
+            0,
+            format!(
+                "{subject} read by nothing - check the spelling: {}",
+                unread.join(", ")
+            ),
+        );
+    }
+    if notes.is_empty() {
         return Check::ok("config", detail);
     }
-    let subject = match unread.len() {
-        1 => "1 key in config.toml is",
-        n => &format!("{n} keys in config.toml are"),
-    };
-    Check::ok(
-        "config",
-        format!(
-            "{detail}  (note: {subject} read by nothing - check the spelling: {})",
-            unread.join(", ")
-        ),
-    )
+    Check::ok("config", format!("{detail}  (note: {})", notes.join("; ")))
 }
 
 /// The `config` check for a file that will not load.

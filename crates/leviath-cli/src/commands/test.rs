@@ -196,6 +196,13 @@ async fn execute_with_registry(
     let region_scripts =
         crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
             .map_err(|e| anyhow::anyhow!(e))?;
+    // Output validators and stage hook scripts are hard spawn errors too, so
+    // the preview loop checks them the same way; only the compile verdict is
+    // wanted here, the compiled scripts themselves run at spawn.
+    crate::daemon::spawn::resolve_output_validators(&blueprint, &manifest_path.to_string_lossy())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    crate::daemon::spawn::resolve_stage_hook_scripts(&blueprint, &manifest_path.to_string_lossy())
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let registry = if !args.dry_run {
         let config = Config::load()?;
@@ -755,6 +762,69 @@ expect_contains = "world"
 
         let result = execute(args).await;
         assert!(result.is_ok());
+    }
+
+    /// `lev test` is the preview loop, so it resolves output validators the
+    /// way a spawn would: one that does not compile fails the command here,
+    /// not at the end of a paid run.
+    #[tokio::test]
+    async fn dry_run_rejects_an_output_validator_that_does_not_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+
+[stages.main.output]
+format = "a2ui"
+validator = "shape.rhai"
+"#;
+        write_test_agent(project, manifest);
+        std::fs::write(project.join("shape.rhai"), "fn validate(content) { ][ }").unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let err = execute(args).await.unwrap_err().to_string();
+        assert!(err.contains("output validator"), "{err}");
+    }
+
+    /// And the same for stage hook scripts: a hook file that is not on disk is
+    /// a spawn error, so `lev test` says so first.
+    #[tokio::test]
+    async fn dry_run_rejects_a_stage_hook_script_that_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+
+[stages.main.hooks]
+on_stage_enter = "missing.rhai"
+"#;
+        write_test_agent(project, manifest);
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let err = execute(args).await.unwrap_err().to_string();
+        assert!(err.contains("stage hook script"), "{err}");
     }
 
     #[tokio::test]
