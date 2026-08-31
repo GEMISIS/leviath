@@ -148,12 +148,10 @@ fn describe(
     id: &str,
     display: &str,
     config: &crate::config::Config,
-    store_path: Option<&std::path::Path>,
+    store: Option<&leviath_providers::codex::ProviderAuthStore>,
     in_flight: &HashMap<String, Progress>,
 ) -> ProviderInfo {
-    let grant = store_path
-        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(path).ok())
-        .and_then(|store| store.get(id).cloned());
+    let grant = store.and_then(|store| store.get(id).cloned());
     let claims = grant.as_ref().map(leviath_providers::ProviderGrant::claims);
     ProviderInfo {
         id: id.to_string(),
@@ -180,31 +178,48 @@ fn describe(
 /// `GET /api/providers` - every browser-sign-in provider and its state.
 pub(super) async fn list_providers(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.current_config();
-    let store_path = state.providers.authorizer.store_path.clone();
+    // Read once, not once per row: this is a file, and the answer is the same
+    // for every provider in it.
+    let store = state
+        .providers
+        .authorizer
+        .store_path
+        .as_deref()
+        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(path).ok());
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     let providers: Vec<ProviderInfo> = signin_providers()
         .into_iter()
-        .map(|(id, display)| describe(id, display, &config, store_path.as_deref(), &in_flight))
+        .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
         .collect();
     Json(serde_json::json!({ "providers": providers })).into_response()
 }
 
-/// The refusal for a name this does not sign in, or `None` when it does.
+/// The catalog's own id for `name`, or the refusal for a name nothing signs
+/// in with.
 ///
-/// An `Option<Response>` rather than a `Result<(), Response>`: an axum
-/// response is a large value, and a `Result` whose `Err` is the big half is
-/// the shape clippy asks about. The answer reads the same at the call sites.
-fn unknown(name: &str) -> Option<axum::response::Response> {
-    if signin_providers().iter().any(|(id, _)| *id == name) {
-        return None;
-    }
-    Some(
-        err(
-            StatusCode::NOT_FOUND,
-            format!("no browser sign-in provider named '{name}'"),
-        )
-        .into_response(),
-    )
+/// Returns the `&'static str` from the table rather than the caller's string,
+/// and every handler works from that. The two are equal by the time this
+/// returns, so it is not a correctness fix - it is that nothing derived from
+/// the request URL then reaches a credential store path, a registry entry or
+/// a filesystem read, and neither a reader nor a scanner has to prove that by
+/// following the string.
+///
+/// The refusal is boxed because an axum response is a large value and this
+/// returns a small one beside it.
+fn resolve(name: &str) -> Result<&'static str, Box<axum::response::Response>> {
+    signin_providers()
+        .iter()
+        .find(|(id, _)| *id == name)
+        .map(|(id, _)| *id)
+        .ok_or_else(|| {
+            Box::new(
+                err(
+                    StatusCode::NOT_FOUND,
+                    format!("no browser sign-in provider named '{name}'"),
+                )
+                .into_response(),
+            )
+        })
 }
 
 /// `POST /api/providers/{name}/login` - start the browser sign-in.
@@ -215,13 +230,14 @@ pub(super) async fn login(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(response) = unknown(&name) {
-        return response;
-    }
+    let name = match resolve(&name) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
     // One at a time: the flow owns a fixed loopback port that a second could
     // not bind, and two browser windows asking the same question help nobody.
     if let Some(Progress::Waiting { authorize_url, .. }) =
-        leviath_core::sync::lock(&state.providers.in_flight).get(&name)
+        leviath_core::sync::lock(&state.providers.in_flight).get(name)
     {
         return (
             StatusCode::CONFLICT,
@@ -254,15 +270,14 @@ pub(super) async fn login(
     let authorizer = Arc::clone(&state.providers.authorizer);
     let tracker = Arc::clone(&state.providers.in_flight);
     let now = state.providers.now;
-    let id = name.clone();
     tokio::spawn(async move {
-        let outcome = authorizer.sign_in(&id, announce).await;
+        let outcome = authorizer.sign_in(name, announce).await;
         let mut in_flight = leviath_core::sync::lock(&tracker);
         match outcome {
             // Nothing is recorded on success: the grant store is now the
             // answer, and a second copy of "signed in" is how the two drift.
             Ok(_) => {
-                in_flight.remove(&id);
+                in_flight.remove(name);
             }
             Err(e) => {
                 let message = e
@@ -275,7 +290,7 @@ pub(super) async fn login(
                 let _ = leviath_core::sync::lock(&slot)
                     .take()
                     .map(|tx| tx.send(Err(message.clone())));
-                in_flight.insert(id.clone(), Progress::Failed { message, at: now() });
+                in_flight.insert(name.to_string(), Progress::Failed { message, at: now() });
             }
         }
     });
@@ -296,7 +311,7 @@ pub(super) async fn login(
     {
         Ok(url) => {
             leviath_core::sync::lock(&state.providers.in_flight).insert(
-                name.clone(),
+                name.to_string(),
                 Progress::Waiting {
                     authorize_url: url.clone(),
                     started_at: (state.providers.now)(),
@@ -325,12 +340,13 @@ pub(super) async fn logout(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(response) = unknown(&name) {
-        return response;
-    }
-    match state.providers.authorizer.sign_out(&name).await {
+    let name = match resolve(&name) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    match state.providers.authorizer.sign_out(name).await {
         Ok(()) => {
-            leviath_core::sync::lock(&state.providers.in_flight).remove(&name);
+            leviath_core::sync::lock(&state.providers.in_flight).remove(name);
             Json(serde_json::json!({ "status": "signed_out", "provider": name })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -346,9 +362,10 @@ pub(super) async fn check(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(response) = unknown(&name) {
-        return response;
-    }
+    let name = match resolve(&name) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
     let config = state.current_config();
     let mut options = crate::commands::run::session::codex_options(&config);
     // The authorizer's path, not the default one it usually resolves to: the
@@ -370,7 +387,8 @@ pub(super) async fn check(
             .map(|url| ("usage_url".to_string(), url)),
     );
     let creds = leviath_runtime::provider_creds::ProviderCreds {
-        name: name.clone(),
+        // The table's id, not the caller's string: see `resolve`.
+        name: name.to_string(),
         api_key: None,
         base_url: None,
         model_capabilities: HashMap::new(),
