@@ -43,10 +43,32 @@ pub struct AssembleMeta {
 
 /// What `on_write` decided about an incoming entry.
 pub(crate) enum OnWriteOutcome {
-    /// Store the entry with this (possibly replaced) content and token count.
-    Accept(String, usize),
-    /// The script declined the entry; report success to the writer.
-    Drop,
+    /// Store the entry.
+    Accept {
+        /// The content to store (possibly replaced by the hook).
+        content: String,
+        /// Its token count (re-estimated when the content was replaced).
+        tokens: usize,
+        /// A key the hook chose over the one the write named, when it did.
+        key_override: Option<String>,
+    },
+    /// The script refused the entry, with the reason it gave (if any). What a
+    /// refusal does is the caller's business: an agent-origin write becomes an
+    /// error carrying the reason, a system-origin write is stored unchanged
+    /// with a warning.
+    Reject(Option<String>),
+}
+
+/// One entry headed into a custom region, as `on_write` sees it.
+pub(crate) struct IncomingEntry<'a> {
+    /// The content the write carries.
+    pub content: &'a str,
+    /// Its estimated token count.
+    pub tokens: usize,
+    /// The entry kind the write would store.
+    pub kind: &'a EntryKind,
+    /// The key the write named, when it named one.
+    pub key: Option<&'a str>,
 }
 
 /// Serialize one region entry for a hook ctx. Typed metadata crosses as plain
@@ -97,12 +119,38 @@ fn region_to_json(region: &Region) -> serde_json::Value {
     })
 }
 
+/// The entries a custom region renders from: last-wins per key, unkeyed
+/// entries always kept, in stored order.
+///
+/// This is the upsert view a repeated keyed write earns: the store appends
+/// (so `on_overflow` indices and `context_delete` positions stay honest), and
+/// the model sees only the newest entry under each key. Shadowed entries keep
+/// holding budget until overflow or an explicit release removes them - which
+/// is also why `apply_overflow` hands its hook the UNFILTERED store: the
+/// indices it returns address every stored entry.
+fn render_entries(region: &Region) -> Vec<&RegionEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut keep: Vec<bool> = vec![true; region.content.len()];
+    for (index, entry) in region.content.iter().enumerate().rev() {
+        if let Some(key) = &entry.key
+            && !seen.insert(key.as_str())
+        {
+            keep[index] = false;
+        }
+    }
+    region
+        .content
+        .iter()
+        .zip(keep)
+        .filter_map(|(entry, kept)| kept.then_some(entry))
+        .collect()
+}
+
 /// The Temporary-style block a custom region falls back to whenever its hook
 /// can't run or misbehaves - identical to the plain-`assemble` arm, so the
 /// region is never silently dropped.
 fn fallback_block(region: &Region) -> leviath_providers::SystemBlock {
-    let text = region
-        .content
+    let text = render_entries(region)
         .iter()
         .map(|e| e.content.as_str())
         .collect::<Vec<_>>()
@@ -179,7 +227,10 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
 
     let ctx = serde_json::json!({
         "region": region_to_json(region),
-        "entries": region.content.iter().map(entry_to_json).collect::<Vec<_>>(),
+        "entries": render_entries(region)
+            .into_iter()
+            .map(entry_to_json)
+            .collect::<Vec<_>>(),
         "stage_name": meta.stage_name,
         "stage_iterations": meta.stage_iterations,
         "model": meta.model,
@@ -455,14 +506,25 @@ fn message_from_json(value: &serde_json::Value) -> Result<leviath_providers::Mes
 
 /// Run `on_write` for an entry headed into a custom region. Failure of any
 /// kind accepts the entry unchanged - a script bug must not lose writes.
+///
+/// The vocabulary mirrors the stage hooks' ([`leviath_scripting::stage_hook`]),
+/// deliberately - an author who has written one has written the other:
+///
+/// - a string: accept, replacing the content
+/// - `true` or `()`: accept unchanged
+/// - `false`: reject, with no reason given
+/// - `#{ action: "reject", reason: "..." }`: reject with that reason
+/// - `#{ content: "...", key: "..." }` (both optional, `action: "accept"`
+///   implied): accept, optionally replacing content and/or key
+///
+/// Anything else - other types, a map with unknown keys or wrongly typed
+/// fields, a script error - warns and accepts unchanged.
 pub(crate) fn apply_on_write(
     script: &RegionScript,
     region: &Region,
-    content: String,
-    tokens: usize,
-    kind: &EntryKind,
+    entry: IncomingEntry<'_>,
 ) -> OnWriteOutcome {
-    let kind_str = match kind {
+    let kind_str = match entry.kind {
         EntryKind::Text => "text",
         EntryKind::UserMessage => "user_message",
         EntryKind::AssistantTurn { .. } => "assistant_turn",
@@ -470,25 +532,50 @@ pub(crate) fn apply_on_write(
     };
     let ctx = serde_json::json!({
         "region": region_to_json(region),
-        "entry": { "content": content, "kind": kind_str, "tokens": tokens },
+        "entry": {
+            "content": entry.content,
+            "kind": kind_str,
+            "tokens": entry.tokens,
+            "key": entry.key,
+        },
     });
+    let accept_unchanged = || OnWriteOutcome::Accept {
+        content: entry.content.to_string(),
+        tokens: entry.tokens,
+        key_override: None,
+    };
     match run_on_write(script, ctx) {
         Ok(serde_json::Value::String(replacement)) => {
             let tokens = leviath_core::estimate_tokens(&replacement);
-            OnWriteOutcome::Accept(replacement, tokens)
+            OnWriteOutcome::Accept {
+                content: replacement,
+                tokens,
+                key_override: None,
+            }
         }
-        Ok(serde_json::Value::Bool(false)) => OnWriteOutcome::Drop,
-        Ok(serde_json::Value::Bool(true)) | Ok(serde_json::Value::Null) => {
-            OnWriteOutcome::Accept(content, tokens)
-        }
+        Ok(serde_json::Value::Bool(false)) => OnWriteOutcome::Reject(None),
+        Ok(serde_json::Value::Bool(true)) | Ok(serde_json::Value::Null) => accept_unchanged(),
+        Ok(serde_json::Value::Object(map)) => match on_write_map_outcome(&map, &entry) {
+            Ok(outcome) => outcome,
+            Err(reason) => {
+                tracing::warn!(
+                    region = %region.name,
+                    script = %script.path,
+                    reason = %reason,
+                    "on_write returned an invalid map; accepting entry unchanged"
+                );
+                accept_unchanged()
+            }
+        },
         Ok(other) => {
             tracing::warn!(
                 region = %region.name,
                 script = %script.path,
                 returned = %other,
-                "on_write must return a string, true/false, or unit; accepting entry unchanged"
+                "on_write must return a string, true/false, unit, or a map; \
+                 accepting entry unchanged"
             );
-            OnWriteOutcome::Accept(content, tokens)
+            accept_unchanged()
         }
         Err(e) => {
             tracing::warn!(
@@ -497,8 +584,55 @@ pub(crate) fn apply_on_write(
                 error = %e,
                 "on_write failed; accepting entry unchanged"
             );
-            OnWriteOutcome::Accept(content, tokens)
+            accept_unchanged()
         }
+    }
+}
+
+/// Interpret an `on_write` map return. Strict on shape: an unknown key or a
+/// wrongly typed field is an `Err` the caller turns into accept-unchanged,
+/// because a typo'd instruction must not silently read as a different one.
+fn on_write_map_outcome(
+    map: &serde_json::Map<String, serde_json::Value>,
+    entry: &IncomingEntry<'_>,
+) -> Result<OnWriteOutcome, String> {
+    for field in map.keys() {
+        if !matches!(field.as_str(), "action" | "reason" | "content" | "key") {
+            return Err(format!("unknown field '{field}'"));
+        }
+    }
+    let action = match map.get("action") {
+        None => "accept",
+        Some(serde_json::Value::String(s)) => s.as_str(),
+        Some(other) => return Err(format!("action must be a string, found {other}")),
+    };
+    let string_field = |name: &str| -> Result<Option<String>, String> {
+        match map.get(name) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+            Some(other) => Err(format!("{name} must be a string, found {other}")),
+        }
+    };
+    match action {
+        "reject" => Ok(OnWriteOutcome::Reject(string_field("reason")?)),
+        "accept" => {
+            let key_override = string_field("key")?;
+            let (content, tokens) = match string_field("content")? {
+                Some(replacement) => {
+                    let tokens = leviath_core::estimate_tokens(&replacement);
+                    (replacement, tokens)
+                }
+                None => (entry.content.to_string(), entry.tokens),
+            };
+            Ok(OnWriteOutcome::Accept {
+                content,
+                tokens,
+                key_override,
+            })
+        }
+        other => Err(format!(
+            "unknown action '{other}' (expected accept or reject)"
+        )),
     }
 }
 
@@ -787,6 +921,69 @@ mod tests {
     }
 
     #[test]
+    fn render_ctx_dedupes_keyed_entries_last_wins() {
+        // Two writes under `plan`: the hook sees only the newest, while the
+        // unkeyed entry and the other key survive in stored order.
+        let mut region = region_with(&[("unkeyed", EntryKind::Text)]);
+        region
+            .add_keyed_entry("plan", "v1".to_string(), 10)
+            .unwrap();
+        region
+            .add_keyed_entry("note", "n1".to_string(), 10)
+            .unwrap();
+        region
+            .add_keyed_entry("plan", "v2".to_string(), 10)
+            .unwrap();
+
+        let src = r#"
+            fn render(ctx) {
+                let out = "";
+                for entry in ctx.entries { out += `${entry.content}|`; }
+                out
+            }
+        "#;
+        let (blocks, _) = render(&region, Some(&script(src)), false);
+        assert_eq!(blocks[0].text, "unkeyed|n1|v2|");
+    }
+
+    #[test]
+    fn fallback_block_dedupes_keyed_entries_too() {
+        let mut region = region_with(&[]);
+        region
+            .add_keyed_entry("plan", "v1".to_string(), 10)
+            .unwrap();
+        region
+            .add_keyed_entry("plan", "v2".to_string(), 10)
+            .unwrap();
+
+        let (blocks, _) = render(&region, None, false);
+        assert_eq!(blocks[0].text, "[brain]:\nv2");
+    }
+
+    #[test]
+    fn on_overflow_sees_the_unfiltered_store() {
+        // Two entries under one key: render shows only the newest, but the
+        // overflow ctx must address the whole store or its indices would name
+        // the wrong entries. Dropping index 0 removes the SHADOWED copy.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_overflow(ctx) { if ctx.entries.len() == 2 { [0] } else { [] } }
+        "#;
+        let mut region = region_with(&[]);
+        region
+            .add_keyed_entry("plan", "v1".to_string(), 10)
+            .unwrap();
+        region
+            .add_keyed_entry("plan", "v2".to_string(), 10)
+            .unwrap();
+
+        let freed = with_tracing(|| apply_overflow(&script(src), &mut region, 5));
+        assert_eq!(freed, 10);
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.content[0].content, "v2");
+    }
+
+    #[test]
     fn render_missing_script_on_empty_region_emits_nothing() {
         let region = region_with(&[]);
         let (blocks, messages) = render(&region, None, false);
@@ -958,17 +1155,59 @@ mod tests {
 
     // ─── on_write ────────────────────────────────────────────────────────
 
-    /// Run `apply_on_write` and collapse the outcome to an Option - both
-    /// enum arms are exercised across this suite (through this one shared
-    /// mapping), so it has no never-taken branch.
-    fn on_write_kind(src: &str, content: &str, kind: &EntryKind) -> Option<(String, usize)> {
+    /// Run `apply_on_write` over an entry of `kind` carrying `key`.
+    fn on_write_keyed(
+        src: &str,
+        content: &str,
+        kind: &EntryKind,
+        key: Option<&str>,
+    ) -> OnWriteOutcome {
         let region = region_with(&[]);
-        let outcome =
-            with_tracing(|| apply_on_write(&script(src), &region, content.to_string(), 5, kind));
-        match outcome {
-            OnWriteOutcome::Accept(content, tokens) => Some((content, tokens)),
-            OnWriteOutcome::Drop => None,
+        with_tracing(|| {
+            apply_on_write(
+                &script(src),
+                &region,
+                IncomingEntry {
+                    content,
+                    tokens: 5,
+                    kind,
+                    key,
+                },
+            )
+        })
+    }
+
+    impl OnWriteOutcome {
+        /// The accepted `(content, tokens, key_override)`; `None` on a
+        /// rejection. Both arms are exercised across this suite through this
+        /// one shared mapping, so it has no never-taken branch.
+        fn accepted(self) -> Option<(String, usize, Option<String>)> {
+            match self {
+                OnWriteOutcome::Accept {
+                    content,
+                    tokens,
+                    key_override,
+                } => Some((content, tokens, key_override)),
+                OnWriteOutcome::Reject(_) => None,
+            }
         }
+
+        /// The rejection's reason slot; `None` when the entry was accepted.
+        /// The same both-arms note as [`Self::accepted`] applies.
+        fn rejected(self) -> Option<Option<String>> {
+            match self {
+                OnWriteOutcome::Accept { .. } => None,
+                OnWriteOutcome::Reject(reason) => Some(reason),
+            }
+        }
+    }
+
+    /// [`on_write_keyed`] collapsed to the accepted content and tokens; `None`
+    /// on a rejection.
+    fn on_write_kind(src: &str, content: &str, kind: &EntryKind) -> Option<(String, usize)> {
+        on_write_keyed(src, content, kind, None)
+            .accepted()
+            .map(|(content, tokens, _)| (content, tokens))
     }
 
     fn on_write_of(src: &str, content: &str) -> Option<(String, usize)> {
@@ -976,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn on_write_replaces_accepts_and_drops() {
+    fn on_write_replaces_accepts_and_rejects() {
         let replaced = on_write_of(
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { ctx.entry.content.to_upper() }",
             "hi",
@@ -998,8 +1237,108 @@ mod tests {
         assert_eq!(
             on_write_of("fn render(ctx) { \"\" }\nfn on_write(ctx) { false }", "x"),
             None,
-            "false drops the entry"
+            "false rejects the entry"
         );
+    }
+
+    #[test]
+    fn on_write_false_is_a_reasonless_rejection() {
+        let rejected = on_write_keyed(
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { false }",
+            "x",
+            &EntryKind::Text,
+            None,
+        )
+        .rejected();
+        assert_eq!(rejected, Some(None), "false carries no reason");
+
+        // And an acceptance is not a rejection - the other arm of the probe.
+        let accepted = on_write_keyed(
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { true }",
+            "x",
+            &EntryKind::Text,
+            None,
+        )
+        .rejected();
+        assert_eq!(accepted, None);
+    }
+
+    #[test]
+    fn on_write_reject_map_carries_its_reason() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ action: "reject", reason: "not sourced" } }
+        "#;
+        assert_eq!(
+            on_write_keyed(src, "claim", &EntryKind::Text, None).rejected(),
+            Some(Some("not sourced".to_string()))
+        );
+    }
+
+    #[test]
+    fn on_write_reject_map_without_reason_rejects_reasonless() {
+        let src = "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ action: \"reject\" } }";
+        assert_eq!(
+            on_write_keyed(src, "x", &EntryKind::Text, None).rejected(),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn on_write_accept_map_replaces_content_and_key() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ content: "tidied", key: "slot" } }
+        "#;
+        assert_eq!(
+            on_write_keyed(src, "messy", &EntryKind::Text, Some("orig")).accepted(),
+            Some((
+                "tidied".to_string(),
+                leviath_core::estimate_tokens("tidied"),
+                Some("slot".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn on_write_accept_map_fields_are_each_optional() {
+        // An explicit accept with neither field, and a key-only override
+        // that keeps the content and its original token count.
+        for (src, want_key) in [
+            (
+                "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ action: \"accept\" } }",
+                None,
+            ),
+            (
+                "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ key: \"k2\" } }",
+                Some("k2".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                on_write_keyed(src, "orig", &EntryKind::Text, Some("k1")).accepted(),
+                Some(("orig".to_string(), 5, want_key)),
+                "src: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_write_ctx_carries_the_incoming_key() {
+        // The hook echoes the key back as content, proving it saw it; an
+        // unkeyed write shows up as unit.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) {
+                if ctx.entry.key == () { "unkeyed" } else { ctx.entry.key }
+            }
+        "#;
+        let content_of = |key| {
+            on_write_keyed(src, "x", &EntryKind::Text, key)
+                .accepted()
+                .map(|(content, ..)| content)
+        };
+        assert_eq!(content_of(Some("rfc-9110")).as_deref(), Some("rfc-9110"));
+        assert_eq!(content_of(None).as_deref(), Some("unkeyed"));
     }
 
     #[test]
@@ -1007,6 +1346,29 @@ mod tests {
         for src in [
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { 42 }",
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { throw \"bad\" }",
+        ] {
+            assert_eq!(
+                on_write_of(src, "keep"),
+                Some(("keep".to_string(), 5)),
+                "src: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_write_invalid_maps_accept_unchanged() {
+        // A typo'd instruction must not read as a different one: every bad
+        // map shape warns and stores the entry exactly as written.
+        for src in [
+            // unknown field
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ contents: \"typo\" } }",
+            // unknown action
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ action: \"drop\" } }",
+            // wrongly typed fields
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ action: 1 } }",
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ content: 1 } }",
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ key: 1 } }",
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ action: \"reject\", reason: 1 } }",
         ] {
             assert_eq!(
                 on_write_of(src, "keep"),

@@ -90,6 +90,22 @@ pub enum Error {
         max: usize,
     },
 
+    /// A custom region's `on_write` hook rejected the write.
+    ///
+    /// Only raised for agent-origin writes (`context_write`, `context_append`,
+    /// routed tool results), where the refusal and its reason can be reported
+    /// back to the writer. A framework write that a hook rejects is stored
+    /// unchanged with a warning instead - a script must not be able to delete
+    /// an assistant turn or a system record.
+    #[error("Region '{region}' refused the write: {reason}")]
+    RegionRefusedWrite {
+        /// The region whose hook refused the write.
+        region: String,
+        /// Why, as the hook said it (or a generic phrase when it only
+        /// returned `false`).
+        reason: String,
+    },
+
     /// Pinned regions alone exceed total token budget
     #[error("Pinned regions ({pinned_tokens}) exceed total budget ({total_budget})")]
     PinnedRegionsOverBudget {
@@ -197,6 +213,18 @@ mod tests {
             max: 100,
         };
         assert_eq!(e.to_string(), "Content exceeds token budget: 500 > 100");
+    }
+
+    #[test]
+    fn error_region_refused_write() {
+        let e = Error::RegionRefusedWrite {
+            region: "claims".into(),
+            reason: "needs a source line".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Region 'claims' refused the write: needs a source line"
+        );
     }
 
     #[test]

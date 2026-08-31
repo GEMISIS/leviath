@@ -157,11 +157,11 @@ pub(crate) fn handle_context_tool(
                     Err(e) => format!("[error] {e}"),
                 }
             } else {
-                // Through the window method (not region.add_entry directly)
-                // so a custom region's on_write hook sees the write.
-                region.clear();
-                window.current_tokens = window.calculate_tokens();
-                match window.add_to_region_keyed(region_name, key, content.to_string(), tokens) {
+                // Through the window method (not region.clear + add directly)
+                // so a custom region's on_write hook sees the write BEFORE the
+                // region is cleared, and a refusal reaches the model as an
+                // error instead of a false "Stored".
+                match window.agent_replace_region(region_name, key, content.to_string(), tokens) {
                     Ok(()) => match key {
                         Some(k) => format!("Stored in '{region_name}' section under key '{k}'."),
                         None => format!("Stored in '{region_name}' section."),
@@ -211,7 +211,15 @@ pub(crate) fn handle_context_tool(
                 // honoured here rather than dropped: it was accepted on every
                 // region kind and only ever stored on HashMap ones, so an agent
                 // could name an entry that `context_delete` could never find.
-                match window.add_to_region_keyed(region_name, key, content.to_string(), tokens) {
+                // Agent origin: this is the model's own write, so a custom
+                // region's refusal comes back here as the error the model reads.
+                match window.add_to_region_keyed(
+                    crate::components::WriteOrigin::Agent,
+                    region_name,
+                    key,
+                    content.to_string(),
+                    tokens,
+                ) {
                     Ok(()) => match key {
                         Some(k) => {
                             format!("Appended to '{region_name}' section under key '{k}'.")
@@ -925,6 +933,107 @@ mod tests {
         // No regions configured.
         let mut empty = ContextWindow::new(100_000);
         assert!(call(&mut empty, "context_list", json!({})).contains("No context window sections"));
+    }
+
+    /// A window with one custom region (`brain`) whose script is `src`.
+    fn custom_window(src: &str) -> ContextWindow {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            1000,
+        ));
+        w.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(leviath_scripting::region_hook::compile("s.rhai", src).unwrap()),
+        );
+        w
+    }
+
+    /// The headline defect: a hook that declined a `context_write` used to
+    /// report "Stored in 'brain' section." to the model while storing nothing.
+    /// A refusal must be visible to the writer.
+    #[test]
+    fn a_hook_rejection_reaches_the_context_write_result() {
+        let mut w = custom_window("fn render(ctx) { \"\" }\nfn on_write(ctx) { false }");
+        let out = call(
+            &mut w,
+            "context_write",
+            json!({"region": "brain", "content": "spam"}),
+        );
+        assert!(
+            out.starts_with("[error]"),
+            "a refused write must not report success: {out}"
+        );
+        assert!(w.get_region("brain").unwrap().content.is_empty());
+    }
+
+    /// A rejection with a reason hands the reason to the model verbatim.
+    #[test]
+    fn a_hook_rejection_reason_reaches_the_model_verbatim() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ action: "reject", reason: "claims need a source line" } }
+        "#;
+        let mut w = custom_window(src);
+        let out = call(
+            &mut w,
+            "context_append",
+            json!({"region": "brain", "content": "unsourced claim"}),
+        );
+        assert!(out.starts_with("[error]"), "{out}");
+        assert!(out.contains("claims need a source line"), "{out}");
+        assert!(w.get_region("brain").unwrap().content.is_empty());
+    }
+
+    /// A rejected `context_write` must leave whatever the region already held
+    /// in place: refusing the replacement and clearing anyway would be a
+    /// second way to lose content.
+    #[test]
+    fn a_rejected_context_write_leaves_existing_content_alone() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) {
+                if ctx.entry.content == "bad" { #{ action: "reject", reason: "no" } } else { true }
+            }
+        "#;
+        let mut w = custom_window(src);
+        let ok = call(
+            &mut w,
+            "context_write",
+            json!({"region": "brain", "content": "good"}),
+        );
+        assert!(ok.contains("Stored"), "{ok}");
+        let refused = call(
+            &mut w,
+            "context_write",
+            json!({"region": "brain", "content": "bad"}),
+        );
+        assert!(refused.starts_with("[error]"), "{refused}");
+        assert_eq!(w.get_region("brain").unwrap().content[0].content, "good");
+    }
+
+    /// The hook sees the key the write named, and can override it; the stored
+    /// entry carries the override so `context_delete` finds it by that name.
+    #[test]
+    fn a_hook_key_override_names_the_stored_entry() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ key: `norm-${ctx.entry.key}` } }
+        "#;
+        let mut w = custom_window(src);
+        let out = call(
+            &mut w,
+            "context_append",
+            json!({"region": "brain", "key": "RFC 9110", "content": "the spec"}),
+        );
+        assert!(!out.starts_with("[error]"), "{out}");
+        let region = w.get_region("brain").unwrap();
+        assert_eq!(region.content[0].key.as_deref(), Some("norm-RFC 9110"));
+        assert_eq!(region.content[0].content, "the spec");
     }
 
     #[test]

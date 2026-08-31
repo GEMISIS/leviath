@@ -1803,12 +1803,13 @@ mod tests {
             )
             .unwrap();
         window
-            .add_typed_tainted_to_region(
+            .typed_write(
+                crate::components::WriteOrigin::System,
                 "brain",
                 leviath_core::EntryKind::UserMessage,
                 "d".to_string(),
                 1,
-                leviath_core::TaintLevel::Public,
+                Some(leviath_core::TaintLevel::Public),
             )
             .unwrap();
 
@@ -1833,57 +1834,189 @@ mod tests {
         assert_eq!(region.content[0].content, "text:e");
     }
 
+    /// The inversion of the old contract, where `false` from a hook silently
+    /// dropped a system write while the caller was told it succeeded. A
+    /// system-origin write a hook rejects is now stored unchanged (with a
+    /// warning), because these writes are framework records - an assistant
+    /// turn, a nudge - that a script must never be able to delete.
     #[test]
-    fn custom_region_on_write_drop_reports_success_without_storing() {
+    fn custom_region_on_write_reject_cannot_drop_system_writes() {
         let src = r#"
             fn render(ctx) { "" }
             fn on_write(ctx) { false }
         "#;
         let mut window = custom_window(src, false);
-        window
-            .add_to_region("brain", "spam".to_string(), 1)
-            .unwrap();
-        assert!(window.get_region("brain").unwrap().content.is_empty());
+        with_tracing(|| window.add_to_region("brain", "turn".to_string(), 1)).unwrap();
+        assert_eq!(
+            window.get_region("brain").unwrap().content[0].content,
+            "turn"
+        );
 
-        // A dropped replacement leaves existing content in place.
-        assert!(window.replace_region("brain", "more spam".to_string(), 1));
-        assert!(window.get_region("brain").unwrap().content.is_empty());
+        // Same for a system replacement: the rejection is downgraded and the
+        // replacement happens, rather than the script vetoing (say) an
+        // interaction answer.
+        assert!(with_tracing(|| window.replace_region(
+            "brain",
+            "revised".to_string(),
+            1
+        )));
+        let region = window.get_region("brain").unwrap();
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.content[0].content, "revised");
     }
 
     #[test]
-    fn custom_region_on_write_drop_covers_typed_and_tainted_methods() {
-        // Every write method's drop arm, not just add_to_region's.
+    fn custom_region_on_write_reject_is_downgraded_across_typed_and_tainted_methods() {
+        // Every system-origin write method's reject arm, not just
+        // add_to_region's: each stores its entry unchanged.
         let src = r#"
             fn render(ctx) { "" }
-            fn on_write(ctx) { false }
+            fn on_write(ctx) { #{ action: "reject", reason: "no thanks" } }
+        "#;
+        let mut window = custom_window(src, false);
+        with_tracing(|| {
+            window
+                .add_typed_entry(
+                    "brain",
+                    leviath_core::EntryKind::UserMessage,
+                    "a".to_string(),
+                    1,
+                )
+                .unwrap();
+            window
+                .add_tainted_to_region(
+                    "brain",
+                    "b".to_string(),
+                    1,
+                    leviath_core::TaintLevel::Public,
+                )
+                .unwrap();
+            window
+                .typed_write(
+                    crate::components::WriteOrigin::System,
+                    "brain",
+                    leviath_core::EntryKind::UserMessage,
+                    "c".to_string(),
+                    1,
+                    Some(leviath_core::TaintLevel::Public),
+                )
+                .unwrap();
+        });
+        let contents: Vec<_> = window
+            .get_region("brain")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["a", "b", "c"]);
+    }
+
+    /// The agent-origin half of the same contract: a rejection surfaces as an
+    /// error carrying the hook's reason, and nothing is stored.
+    #[test]
+    fn custom_region_on_write_reject_errors_agent_writes_with_the_reason() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ action: "reject", reason: "cite a source" } }
+        "#;
+        let mut window = custom_window(src, false);
+        let err = window
+            .add_to_region_keyed(
+                crate::components::WriteOrigin::Agent,
+                "brain",
+                Some("claim-1"),
+                "unsourced".to_string(),
+                2,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Region 'brain' refused the write: cite a source"
+        );
+        assert!(window.get_region("brain").unwrap().content.is_empty());
+
+        // A bare `false` still rejects, with a generic reason.
+        let mut window =
+            custom_window("fn render(ctx) { \"\" }\nfn on_write(ctx) { false }", false);
+        let err = window
+            .typed_write(
+                crate::components::WriteOrigin::Agent,
+                "brain",
+                leviath_core::EntryKind::Text,
+                "x".to_string(),
+                1,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("declined"), "{err}");
+    }
+
+    /// `agent_replace_region` runs the hook before clearing, so a rejection
+    /// leaves the region exactly as it was.
+    #[test]
+    fn agent_replace_region_reject_leaves_existing_content() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) {
+                if ctx.entry.content == "bad" { false } else { true }
+            }
+        "#;
+        let mut window = custom_window(src, false);
+        window
+            .agent_replace_region("brain", None, "good".to_string(), 1)
+            .unwrap();
+        let err = window
+            .agent_replace_region("brain", None, "bad".to_string(), 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("refused"), "{err}");
+        assert_eq!(
+            window.get_region("brain").unwrap().content[0].content,
+            "good"
+        );
+
+        // And a region that does not exist is still its own error.
+        let err = window
+            .agent_replace_region("ghost", None, "x".to_string(), 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("ghost"), "{err}");
+    }
+
+    /// A hook's key override lands on the stored entry for typed writes too,
+    /// so render-time dedupe can bucket what the hook renamed.
+    #[test]
+    fn custom_region_on_write_key_override_reaches_typed_entries() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ key: "bucket" } }
         "#;
         let mut window = custom_window(src, false);
         window
             .add_typed_entry(
                 "brain",
                 leviath_core::EntryKind::UserMessage,
-                "a".to_string(),
+                "hello".to_string(),
                 1,
             )
             .unwrap();
-        window
-            .add_tainted_to_region(
-                "brain",
-                "b".to_string(),
-                1,
-                leviath_core::TaintLevel::Public,
-            )
-            .unwrap();
-        window
-            .add_typed_tainted_to_region(
-                "brain",
-                leviath_core::EntryKind::UserMessage,
-                "c".to_string(),
-                1,
-                leviath_core::TaintLevel::Public,
-            )
-            .unwrap();
-        assert!(window.get_region("brain").unwrap().content.is_empty());
+        let entry = &window.get_region("brain").unwrap().content[0];
+        assert_eq!(entry.key.as_deref(), Some("bucket"));
+        assert_eq!(entry.content, "hello");
+    }
+
+    /// The system replacement path honours a key override too, so a hook can
+    /// name the single entry an authoritative-document region holds.
+    #[test]
+    fn replace_region_honours_a_hook_key_override() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ key: "current" } }
+        "#;
+        let mut window = custom_window(src, false);
+        assert!(window.replace_region("brain", "v1".to_string(), 1));
+        let entry = &window.get_region("brain").unwrap().content[0];
+        assert_eq!(entry.key.as_deref(), Some("current"));
+        assert_eq!(entry.content, "v1");
     }
 
     #[test]
@@ -2821,7 +2954,7 @@ mod tests {
         assert_eq!(assembled.messages[0].content.as_text(), "Begin.");
     }
 
-    // ─── add_typed_entry / add_typed_tainted_to_region error paths ────────
+    // ─── add_typed_entry / typed_write (tainted) error paths ──────────────
 
     #[test]
     fn test_add_typed_entry_to_nonexistent_region() {
@@ -2843,12 +2976,13 @@ mod tests {
     #[test]
     fn test_add_typed_tainted_to_nonexistent_region() {
         let mut window = ContextWindow::new(10000);
-        let result = window.add_typed_tainted_to_region(
+        let result = window.typed_write(
+            crate::components::WriteOrigin::System,
             "ghost",
             leviath_core::EntryKind::UserMessage,
             "data".to_string(),
             10,
-            leviath_core::TaintLevel::Public,
+            Some(leviath_core::TaintLevel::Public),
         );
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
@@ -3101,7 +3235,7 @@ mod tests {
     // ─── Coverage for ContextWindow typed+tainted methods ─────────────────
 
     #[test]
-    fn test_add_typed_tainted_to_region_success() {
+    fn typed_tainted_write_success() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new(
             "conv".to_string(),
@@ -3115,7 +3249,8 @@ mod tests {
         window.add_region(region);
 
         window
-            .add_typed_tainted_to_region(
+            .typed_write(
+                crate::components::WriteOrigin::System,
                 "conv",
                 leviath_core::EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -3124,7 +3259,7 @@ mod tests {
                 },
                 "secret data".to_string(),
                 100,
-                leviath_core::TaintLevel::Private,
+                Some(leviath_core::TaintLevel::Private),
             )
             .unwrap();
 
@@ -3136,14 +3271,15 @@ mod tests {
     }
 
     #[test]
-    fn test_add_typed_tainted_to_region_not_found() {
+    fn typed_tainted_write_not_found() {
         let mut window = ContextWindow::new(10000);
-        let result = window.add_typed_tainted_to_region(
+        let result = window.typed_write(
+            crate::components::WriteOrigin::System,
             "nonexistent",
             leviath_core::EntryKind::Text,
             "data".to_string(),
             10,
-            leviath_core::TaintLevel::Public,
+            Some(leviath_core::TaintLevel::Public),
         );
         assert!(result.is_err());
     }
@@ -3517,19 +3653,20 @@ mod tests {
     }
 
     #[test]
-    fn test_add_typed_tainted_to_region_propagates_budget_error() {
+    fn typed_tainted_write_propagates_budget_error() {
         // Region is found, but the entry exceeds its token budget, so the
         // inner `add_typed_tainted_entry` error must propagate through the `?`.
         let mut window = ContextWindow::new(10_000);
         let region = Region::new("conv".to_string(), RegionKind::Temporary, 10);
         window.add_region(region);
 
-        let result = window.add_typed_tainted_to_region(
+        let result = window.typed_write(
+            crate::components::WriteOrigin::System,
             "conv",
             leviath_core::EntryKind::Text,
             "far too many tokens".to_string(),
             100,
-            leviath_core::TaintLevel::Public,
+            Some(leviath_core::TaintLevel::Public),
         );
         assert!(result.is_err());
     }

@@ -19,6 +19,7 @@ questions, and nothing else changes:
 ```mermaid
 flowchart LR
   W["The agent writes<br/>something to the region"] -->|"on_write(ctx)"| STORE["Stored"]
+  W -.->|"rejected"| R["Refused, and the<br/>writer is told why"]
   STORE -->|"render(ctx)"| M["What the model sees"]
   STORE -->|"on_overflow(ctx)<br/>when over budget"| DROP["What gets dropped"]
 ```
@@ -26,7 +27,7 @@ flowchart LR
 | Hook | Answers |
 |---|---|
 | `render` | What does this region look like in the model's context? |
-| `on_write` | What happens to each incoming entry? |
+| `on_write` | What happens to each incoming entry: keep it, reshape it, or refuse it? |
 | `on_overflow` | What goes when the region is over budget? |
 
 Only `render` is required.
@@ -99,8 +100,33 @@ the conversation always ends the request. Declaring a region after the conversat
 trailing reminder does not work; use a [nudge](/docs/stages) for that.
 
 `on_write(ctx)` is **optional**. It sees each entry headed into the region, with
-`ctx = { region, entry: { content, kind, tokens } }`. Return a string to replace the content (tokens
-re-estimated, kind preserved), `true` or `()` to accept unchanged, or `false` to drop the entry.
+`ctx = { region, entry: { content, kind, tokens, key } }` (`key` is `()` unless the write named
+one). Return:
+
+| Return | Meaning |
+|---|---|
+| a string | Accept, replacing the content (tokens re-estimated, kind preserved) |
+| `true` or `()` | Accept unchanged |
+| `false` | Reject, with no reason given |
+| `#{ action: "reject", reason: "..." }` | Reject, and tell the writer why |
+| `#{ content: "...", key: "..." }` | Accept; both fields optional (`action: "accept"` implied). `content` replaces the text, `key` stores the entry under a different key than the write named |
+
+The map forms use the same vocabulary as [stage hooks](/docs/rhai-hooks), on purpose.
+
+What a rejection does depends on who is writing. When the model writes through `context_write` or
+`context_append`, or a tool result is routed into the region, the tool result reports the refusal
+and its reason instead of claiming success, and nothing is stored. When the framework writes (an
+assistant turn, a delivered message, a system nudge), the entry is stored unchanged and a warning
+is logged: a script cannot delete the conversation record.
+
+### Keyed writes render as an upsert
+
+When several stored entries share a key, `render` sees only the newest one for that key; unkeyed
+entries always appear, in order. Combined with `context_write`'s `key` argument (or a `key`
+override from `on_write`), repeated writes to one key give the model an upserted view without any
+hashmap plumbing in your script. The shadowed entries stay in the store, though: they keep holding
+budget until `on_overflow` or `context_delete` removes them, and `on_overflow` always sees the
+whole unfiltered store so its indices stay honest.
 
 `on_overflow(ctx)` is **optional**. It runs when the region must shrink, with
 `ctx = { region, entries, needed_tokens }`. Return an array of entry indices to drop. If the hook is
@@ -153,7 +179,9 @@ Load-time problems fail fast. Runtime problems never break an inference:
 |---|---|
 | Script missing, does not compile, or has no `fn render(ctx)` | **Hard spawn error**, also caught by `lev validate` |
 | `render` errors or returns an invalid shape | Warning, and the region renders as a plain `[name]:` block |
-| `on_write` errors or returns an invalid type | Warning, and the entry is accepted unchanged |
+| `on_write` errors, or returns an invalid type or a malformed map | Warning, and the entry is accepted unchanged. A typo'd map must not read as a different instruction |
+| `on_write` rejects an agent write | The tool result carries the refusal and the reason; nothing is stored |
+| `on_write` rejects a framework write | Warning, and the entry is stored unchanged. Earlier releases treated `false` as a silent drop that still reported success; that no longer happens |
 | `on_overflow` errors or returns invalid indices | Warning, and oldest-first eviction runs |
 | Rendered output exceeds the region's budget | Warning only, and it is sent anyway. The [context-window guard](/docs/context#requests-are-measured-before-they-are-sent) refuses it only if the whole request would overflow the model |
 
@@ -171,8 +199,10 @@ The point of the escape hatch is that you could write the built-ins yourself, an
   typed messages. Exact, and the reason typed message emission exists.
 - **compacting**: approximable with deterministic condensing in `on_overflow`. The LLM
   summarization lane is not script-accessible.
-- **hashmap**: not recreatable. Keyed upsert is built-in only, because `on_write` cannot modify an
-  existing entry.
+- **hashmap**: close. Keyed writes plus last-wins rendering give the model the same upserted view,
+  and `on_write` can normalize keys on the way in. The difference is in the store: a real `hashmap`
+  region replaces the old entry and frees its tokens immediately, while a custom region only
+  shadows it at render time until eviction or an explicit release catches up.
 
 ## Previewing
 
@@ -188,5 +218,8 @@ parses and defines `render`.
   cannot override it per call.
 - Reordering or reshaping content between inferences can cost you provider prompt-cache hits. The
   script owns that tradeoff.
+- Entries shadowed by a newer write to the same key still hold their tokens until eviction or an
+  explicit `context_delete` releases them. A region rewritten under one key every turn should pair
+  the pattern with an `on_overflow` that drops the shadowed copies first.
 
 See [Context](/docs/context) for how regions, budgets, and cache hints fit together.

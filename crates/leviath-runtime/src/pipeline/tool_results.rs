@@ -12,7 +12,7 @@ pub(crate) struct ToolResults(pub UnboundedReceiver<ToolOutcome>);
 /// output went, and the pointer is only worth anything if it is true: the
 /// region may have been too full to take the result whole, in which case
 /// "stored in region X" is a claim about tokens that are not there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Stored {
     /// The result went in as written.
     Whole,
@@ -20,6 +20,9 @@ enum Stored {
     Truncated { omitted: usize },
     /// The region refused even a truncated entry; only a marker is there.
     Dropped,
+    /// The region's `on_write` hook rejected the write for this reason;
+    /// nothing was stored.
+    Rejected(String),
 }
 
 /// Tools whose first argument is a path into the workspace, and which therefore
@@ -235,21 +238,31 @@ pub(crate) fn apply_one_tool_result(
     // Add `content` (with entry `kind`) to `region`, honoring taint and falling
     // back to a truncated (then omitted) entry if the region is full.
     //
-    // Reports which of the three happened, because the pointer left in the
+    // Reports which of the four happened, because the pointer left in the
     // conversation describes this write: it must not promise the full result
-    // when the region kept less than that.
+    // when the region kept less than that - or nothing at all.
+    //
+    // `origin` is per write: the routed store is the model's own output
+    // landing where the stage routed it (Agent, so a custom region's
+    // refusal comes back with its reason), while the conversation entries
+    // (the tool_result pairing and the pointer) are framework records a
+    // script must not be able to delete (System).
     let add_kind = |window: &mut ContextWindow,
                     region: &str,
                     kind: leviath_core::EntryKind,
                     content: String,
-                    tokens: usize|
+                    tokens: usize,
+                    origin: crate::components::WriteOrigin|
      -> Stored {
-        let put = |w: &mut ContextWindow, c: String, t: usize| match taint_level {
-            Some(level) => w.add_typed_tainted_to_region(region, kind.clone(), c, t, level),
-            None => w.add_typed_entry(region, kind.clone(), c, t),
+        let put = |w: &mut ContextWindow, c: String, t: usize| {
+            w.typed_write(origin, region, kind.clone(), c, t, taint_level)
         };
-        if put(window, content.clone(), tokens).is_ok() {
-            return Stored::Whole;
+        match put(window, content.clone(), tokens) {
+            Ok(()) => return Stored::Whole,
+            Err(leviath_core::Error::RegionRefusedWrite { reason, .. }) => {
+                return Stored::Rejected(reason);
+            }
+            Err(_) => {}
         }
         let available = window
             .get_region(region)
@@ -270,8 +283,14 @@ pub(crate) fn apply_one_tool_result(
             )
         };
         let trunc_tokens = leviath_core::estimate_tokens(&truncated);
-        if put(window, truncated, trunc_tokens).is_ok() {
-            return Stored::Truncated { omitted };
+        match put(window, truncated, trunc_tokens) {
+            Ok(()) => return Stored::Truncated { omitted },
+            // The hook re-ran over the truncated text and refused that shape:
+            // still a rejection, not a budget problem.
+            Err(leviath_core::Error::RegionRefusedWrite { reason, .. }) => {
+                return Stored::Rejected(reason);
+            }
+            Err(_) => {}
         }
         let _ = put(window, "[result omitted]".to_string(), 5);
         Stored::Dropped
@@ -284,13 +303,15 @@ pub(crate) fn apply_one_tool_result(
 
     if target_region == "conversation" {
         // Not routed (or routed back to the message stream): the tool_result
-        // lives in `conversation`, paired with its tool_use.
+        // lives in `conversation`, paired with its tool_use. System origin -
+        // the pairing is required by the provider, so a script cannot refuse it.
         add_kind(
             window,
             "conversation",
             result_kind(),
             result_text,
             result_tokens,
+            crate::components::WriteOrigin::System,
         );
     } else {
         // Routed to a knowledge region. Anthropic requires each tool_result to sit
@@ -318,6 +339,7 @@ pub(crate) fn apply_one_tool_result(
             leviath_core::EntryKind::Text,
             result_text,
             result_tokens,
+            crate::components::WriteOrigin::Agent,
         );
         // What this text asks the model to do is the whole point of it.
         //
@@ -350,6 +372,9 @@ pub(crate) fn apply_one_tool_result(
             (false, Stored::Dropped) => format!(
                 "[output could NOT be stored - context region '{target_region}' is full and refused it, so only this preview survives. Release what you are finished with (context_delete) and fetch it again if you still need it. Preview: {preview}{ellipsis}]"
             ),
+            (false, Stored::Rejected(reason)) => format!(
+                "[output was refused by context region '{target_region}': {reason}. Nothing was stored there; only this preview survives. Preview: {preview}{ellipsis}]"
+            ),
         };
         let pointer_tokens = leviath_core::estimate_tokens(&pointer);
         add_kind(
@@ -358,6 +383,7 @@ pub(crate) fn apply_one_tool_result(
             result_kind(),
             pointer,
             pointer_tokens,
+            crate::components::WriteOrigin::System,
         );
     }
 }
