@@ -199,7 +199,7 @@ rules     = { kind = "pinned", seed = { literal = "Never edit generated files." 
 env       = { kind = "pinned", seed = { command = "git log --oneline -20" } }
 clock     = { kind = "pinned", seed = { tool = "current_time" } }
 machine   = { kind = "pinned", seed = { tools = ["current_time", "system_info"] } }
-computed  = { kind = "temporary", seed = { rhai = "seeds/plan.rhai" } }
+computed  = { kind = "temporary", seed = { rhai = "blueprint:seeds/plan.rhai" } }
 inherited = { kind = "pinned", seed = { caller = "brief" } }
 ```
 
@@ -232,7 +232,40 @@ task refuses a task outright rather than running without it.
 > them for one run, and `[security] allow_seed_commands = false` refuses them machine-wide. Seeds
 > run once: a daemon restart does not replay them.
 
-#### Seed paths stay in the working directory
+#### Where a seed path resolves
+
+`files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
+A path that does is refused at spawn, before anything is read.
+
+The rule is the one `read_file` follows, for the same reason: the *blueprint* chose this path, not
+you. Seeded contents land in a region the model reads on its first turn, so a path that escaped
+would put whatever it named in front of the model without anything having asked you.
+
+To read outside on purpose, declare it under `[read_paths]` and grant it in your config. That is
+already the mechanism for "this agent is meant to read there and I agreed", and seeding answers to
+it rather than having a second one of its own. A glob is checked per match, since `../*.toml` cannot
+be judged before it is expanded.
+
+A blueprint can also seed from files it ships itself. The `blueprint:` prefix resolves the rest of
+the path against the blueprint's own directory instead of the working directory, so bundled
+material travels with the agent:
+
+```toml
+guidelines = { kind = "pinned", seed = { files = ["blueprint:config/style.md"] } }
+rubric     = { kind = "pinned", seed = { glob  = "blueprint:rubrics/*.md" } }
+plan       = { kind = "temporary", seed = { rhai = "blueprint:seeds/plan.rhai" } }
+```
+
+A prefixed path may never leave the blueprint's directory, and `[read_paths]` does not apply to it.
+A grant widens what an agent may read on your machine, not what a package pretends to ship, so
+`blueprint:../secrets.txt` is refused however the config is set. This is the same containment a
+script gets, because the claim is the same: these are the blueprint's own files, and a blueprint's
+own files live beside it.
+
+Scripts proper are stricter still and have no `[read_paths]` escape at all: a stage hook, a
+custom-region script and an output validator must all live inside the blueprint's own directory. A
+script is code the agent ships, and there is no such thing as loading your logic from somewhere
+else on purpose.
 
 ### Seeding from tools
 
@@ -304,22 +337,6 @@ previous value is stale, and stale beats absent. `lev validate` marks a refreshi
 "on every stage entry".
 
 Seeds do not re-run when a run is reloaded from a snapshot, whatever their `refresh` setting.
-
-`files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
-A path that does is refused at spawn, before anything is read.
-
-The rule is the one `read_file` follows, for the same reason: the *blueprint* chose this path, not
-you. Seeded contents land in a region the model reads on its first turn, so a path that escaped
-would put whatever it named in front of the model without anything having asked you.
-
-To read outside on purpose, declare it under `[read_paths]` and grant it in your config. That is
-already the mechanism for "this agent is meant to read there and I agreed", and seeding answers to
-it rather than having a second one of its own. A glob is checked per match, since `../*.toml` cannot
-be judged before it is expanded.
-
-Scripts are stricter and have no `[read_paths]` escape: a stage hook, a custom-region script and an
-output validator must all live inside the blueprint's own directory. A script is code the agent
-ships, and there is no such thing as loading your logic from somewhere else on purpose.
 
 ## What the model sees
 

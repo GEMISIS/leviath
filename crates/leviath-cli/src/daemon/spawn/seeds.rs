@@ -54,6 +54,53 @@ pub(super) fn seed_path_within(
         .ok_or_else(refusal)
 }
 
+/// The marker a blueprint puts on a seed path to say "this file ships with
+/// me": `seed = { files = ["blueprint:config/style.md"] }` reads from the
+/// blueprint's own directory instead of the run's working directory.
+pub(super) const BLUEPRINT_SEED_PREFIX: &str = "blueprint:";
+
+/// Fence a `blueprint:`-prefixed seed path (already joined onto the
+/// blueprint's directory) inside that directory.
+///
+/// The same containment [`script_within_blueprint`] gives a hook script, and
+/// for the same reason: the prefix means "a file I ship", and a blueprint does
+/// not ship files outside its own directory. There is deliberately no
+/// `[read_paths]` fallback on this arm - that mechanism lets the
+/// workdir-relative form out with the user's consent, while an escaping
+/// `blueprint:` path is a contradiction in terms, and a grant must not turn it
+/// into a probe of whatever the grant happens to cover.
+///
+/// [`script_within_blueprint`]: super::scripts::script_within_blueprint
+pub(super) fn blueprint_seed_within(
+    blueprint_dir: &std::path::Path,
+    full: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    match leviath_core::resolves_within(full, blueprint_dir) {
+        true => Ok(full.to_path_buf()),
+        false => Err(format!(
+            "seed path '{}' resolves outside the blueprint's directory ({}); the \
+             'blueprint:' prefix reads only files the blueprint ships",
+            full.display(),
+            blueprint_dir.display()
+        )),
+    }
+}
+
+/// Resolve one declared seed path string: `blueprint:<rel>` against the
+/// blueprint's directory with no way out, anything else against the workdir
+/// with the `[read_paths]` fallback [`seed_path_within`] applies.
+fn declared_seed_path(
+    declared: &str,
+    workdir: &std::path::Path,
+    blueprint_dir: &std::path::Path,
+    read_paths: &leviath_core::ReadPathPolicy,
+) -> Result<std::path::PathBuf, String> {
+    match declared.strip_prefix(BLUEPRINT_SEED_PREFIX) {
+        Some(rel) => blueprint_seed_within(blueprint_dir, &blueprint_dir.join(rel)),
+        None => seed_path_within(workdir, &workdir.join(declared), read_paths),
+    }
+}
+
 /// Resolve every region's initial content from its blueprint-declared
 /// [`RegionSeed`] plus the caller-provided values on `args`, into a
 /// name→content map ready for [`spawn_agent_seeded`].
@@ -64,7 +111,9 @@ pub(super) fn seed_path_within(
 ///   `required` and the value is missing/blank this returns `Err` - the
 ///   required-at-spawn gate, before any inference.
 /// - `Files` / `Glob` read workdir files; `Literal` is verbatim; `Rhai` runs a
-///   workdir script whose `String` return seeds the region.
+///   workdir script whose `String` return seeds the region. Any of the three
+///   may point a path at the blueprint's own directory instead with the
+///   [`BLUEPRINT_SEED_PREFIX`].
 /// - `Command` runs a shell command in the workdir under `commands` -
 ///   sandboxed, time- and size-capped, and skippable. Every failure is
 ///   non-fatal unless the region is `required`.
@@ -108,6 +157,10 @@ pub(super) fn resolve_seeds(
     }
 
     let base = std::path::Path::new(workdir);
+    let blueprint_dir = std::path::Path::new(&args.blueprint_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
     let mut seeds: HashMap<String, String> = HashMap::new();
 
     for region in &blueprint.context_layout.regions {
@@ -137,7 +190,7 @@ pub(super) fn resolve_seeds(
             RegionSeed::Files { paths } => {
                 let resolved = paths
                     .iter()
-                    .map(|p| seed_path_within(base, &base.join(p), read_paths))
+                    .map(|p| declared_seed_path(p, base, &blueprint_dir, read_paths))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| format!("region '{}': {e}", region.name))?;
                 let content = read_and_concat(&region.name, resolved.into_iter(), region.required)?;
@@ -146,15 +199,24 @@ pub(super) fn resolve_seeds(
                 }
             }
             RegionSeed::Glob { pattern } => {
-                let full = base.join(pattern);
+                let from_blueprint = pattern.strip_prefix(BLUEPRINT_SEED_PREFIX);
+                let full = match from_blueprint {
+                    Some(rel) => blueprint_dir.join(rel),
+                    None => base.join(pattern),
+                };
                 let full = full.to_string_lossy();
                 let matches = glob::glob(&full)
                     .map_err(|e| format!("region '{}': bad glob '{pattern}': {e}", region.name))?;
                 // Each *match* is checked, not the pattern: `../../*.toml`
-                // cannot be judged before it is expanded.
+                // cannot be judged before it is expanded. The prefixed form is
+                // fenced per match on the same grounds, just against the
+                // blueprint's directory and with no `[read_paths]` way out.
                 let paths = matches
                     .filter_map(|m| m.ok())
-                    .map(|p| seed_path_within(base, &p, read_paths))
+                    .map(|p| match from_blueprint {
+                        Some(_) => blueprint_seed_within(&blueprint_dir, &p),
+                        None => seed_path_within(base, &p, read_paths),
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| format!("region '{}': {e}", region.name))?;
                 let content = read_and_concat(&region.name, paths.into_iter(), region.required)?;
@@ -172,7 +234,7 @@ pub(super) fn resolve_seeds(
                 }
             }
             RegionSeed::Rhai { script } => {
-                let path = seed_path_within(base, &base.join(script), read_paths)
+                let path = declared_seed_path(script, base, &blueprint_dir, read_paths)
                     .map_err(|e| format!("region '{}': {e}", region.name))?;
                 let src = std::fs::read_to_string(&path).map_err(|e| {
                     format!(

@@ -4512,6 +4512,217 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         assert!(err.contains("outside the working directory"), "{err}");
     }
 
+    // ─── `blueprint:` seed paths ─────────────────────────────────────────────
+
+    /// A blueprint directory holding shipped seed material, a workdir somewhere
+    /// else entirely, and a secret *beside* the blueprint directory that a
+    /// prefixed path must never reach. Returns (root, manifest path, workdir).
+    fn blueprint_dir_with_files() -> (tempfile::TempDir, String, String) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bp_dir = root.path().join("agents").join("pack");
+        std::fs::create_dir_all(bp_dir.join("config")).expect("dirs");
+        std::fs::write(bp_dir.join("config").join("style.md"), "two spaces").expect("write");
+        std::fs::write(root.path().join("agents").join("secret.txt"), "sk-SECRET").expect("write");
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).expect("dirs");
+        (
+            root,
+            bp_dir.join("agent.leviath").to_string_lossy().to_string(),
+            work.to_string_lossy().to_string(),
+        )
+    }
+
+    /// The feature itself: `blueprint:` reads from the blueprint's directory,
+    /// not the workdir - the file exists only beside the manifest.
+    #[test]
+    fn a_blueprint_prefixed_seed_file_reads_from_the_blueprint_directory() {
+        let (_root, bp_path, wd) = blueprint_dir_with_files();
+        let blueprint = bp(
+            r#"style = { kind = "pinned", max_tokens = 2000, seed = { files = ["blueprint:config/style.md"] }, required = true }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let seeds = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert!(seeds.get("style").is_some_and(|s| s.contains("two spaces")));
+    }
+
+    /// `blueprint:` claims "a file I ship", so a path that climbs out of the
+    /// blueprint directory is a contradiction and is refused outright.
+    #[test]
+    fn a_blueprint_prefixed_seed_escaping_the_blueprint_directory_is_refused() {
+        let (_root, bp_path, wd) = blueprint_dir_with_files();
+        let blueprint = bp(
+            r#"style = { kind = "pinned", max_tokens = 2000, seed = { files = ["blueprint:../secret.txt"] } }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let err = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+    }
+
+    /// The one that keeps the fence honest: `[read_paths]` widens what an agent
+    /// may read on the user's machine, not what a package pretends to ship, so
+    /// a grant covering the target must NOT rescue an escaping `blueprint:` path.
+    #[test]
+    fn a_read_paths_grant_does_not_rescue_an_escaping_blueprint_seed() {
+        let (root, bp_path, wd) = blueprint_dir_with_files();
+        let outside = root.path().to_string_lossy().to_string();
+        let mut policy = no_read_paths();
+        policy.blueprint = leviath_core::ReadPathSet::compile(
+            std::slice::from_ref(&outside),
+            std::path::Path::new(&wd),
+            None,
+            cfg!(windows),
+        )
+        .expect("declaration compiles");
+        policy.allow_blueprint = true;
+
+        let blueprint = bp(
+            r#"style = { kind = "pinned", max_tokens = 2000, seed = { files = ["blueprint:../secret.txt"] } }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let err = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &policy,
+        )
+        .unwrap_err();
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+    }
+
+    /// A prefixed glob expands against the blueprint directory and picks up the
+    /// files shipped there.
+    #[test]
+    fn a_blueprint_prefixed_glob_seeds_shipped_files() {
+        let (root, bp_path, wd) = blueprint_dir_with_files();
+        let rubrics = root.path().join("agents").join("pack").join("rubrics");
+        std::fs::create_dir_all(&rubrics).expect("dirs");
+        std::fs::write(rubrics.join("one.md"), "rubric one").expect("write");
+        std::fs::write(rubrics.join("two.md"), "rubric two").expect("write");
+        let blueprint = bp(
+            r#"rubric = { kind = "pinned", max_tokens = 4000, seed = { glob = "blueprint:rubrics/*.md" } }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let seeds = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        let rubric = seeds.get("rubric").expect("region seeded");
+        assert!(rubric.contains("rubric one") && rubric.contains("rubric two"));
+    }
+
+    /// A prefixed glob is fenced per match, exactly as the workdir form is:
+    /// `blueprint:../*` expands fine and every escaping match is refused.
+    #[test]
+    fn a_blueprint_prefixed_glob_matching_outside_is_refused() {
+        let (_root, bp_path, wd) = blueprint_dir_with_files();
+        let blueprint = bp(
+            r#"rubric = { kind = "pinned", max_tokens = 4000, seed = { glob = "blueprint:../*.txt" } }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let err = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+    }
+
+    /// A rhai seed ships with the blueprint the way its hooks do: the prefix
+    /// finds the script beside the manifest and runs it.
+    #[test]
+    fn a_blueprint_prefixed_rhai_seed_runs_from_the_blueprint_directory() {
+        let (root, bp_path, wd) = blueprint_dir_with_files();
+        let seeds_dir = root.path().join("agents").join("pack").join("seeds");
+        std::fs::create_dir_all(&seeds_dir).expect("dirs");
+        std::fs::write(
+            seeds_dir.join("plan.rhai"),
+            r#""planned: " + input["task"]"#,
+        )
+        .expect("write");
+        let blueprint = bp(
+            r#"plan = { kind = "temporary", max_tokens = 500, seed = { rhai = "blueprint:seeds/plan.rhai" } }"#,
+        );
+        let mut args = args_with("go", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let seeds = resolve_seeds(
+            &blueprint,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert_eq!(seeds.get("plan").map(String::as_str), Some("planned: go"));
+    }
+
+    /// A missing prefixed file answers to `required` exactly as a workdir one
+    /// does: required errors, optional leaves the region out.
+    #[test]
+    fn a_missing_blueprint_prefixed_file_honors_required_and_optional() {
+        let (_root, bp_path, wd) = blueprint_dir_with_files();
+        let req = bp(
+            r#"style = { kind = "pinned", max_tokens = 2000, seed = { files = ["blueprint:missing.md"] }, required = true }"#,
+        );
+        let mut args = args_with("t", HashMap::new(), &wd);
+        args.blueprint_path = bp_path;
+        let err = resolve_seeds(
+            &req,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
+        assert!(err.contains("missing.md"), "got: {err}");
+        let opt = bp(
+            r#"style = { kind = "pinned", max_tokens = 2000, seed = { files = ["blueprint:missing.md"] } }"#,
+        );
+        let seeds = resolve_seeds(
+            &opt,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert!(!seeds.contains_key("style"));
+    }
+
     #[test]
     fn a_rhai_seed_script_outside_the_workdir_is_refused() {
         let (_root, wd) = workdir_with_a_neighbour();
