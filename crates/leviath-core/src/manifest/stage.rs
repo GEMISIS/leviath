@@ -492,7 +492,10 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // Parse the stage's declared output shape: [stages.<name>.output].
     // Narrows [agent.output]; whoever starts the run overrides both.
     if let Some(output_table) = table_of(stage_value, "output") {
-        stage.output = Some(parse_output_spec(output_table));
+        stage.output = Some(parse_output_spec(
+            &format!("stage '{stage_name}': output"),
+            output_table,
+        )?);
     }
 
     // Parse accepts_messages flag: whether mid-run user messages are

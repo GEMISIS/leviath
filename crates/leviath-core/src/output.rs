@@ -40,6 +40,28 @@ use serde::{Deserialize, Serialize};
 /// file and say where it is.
 pub const MAX_FINAL_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// What happens to a submission when its Rhai validator cannot run: the script
+/// threw, exhausted its operation budget, or returned something that is neither
+/// `()` nor a string.
+///
+/// Distinct from the validator *rejecting* the answer, which always refuses the
+/// submission back to the model. This knob is only about the script itself
+/// failing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnValidatorError {
+    /// Refuse the submission, sending the script's error text to the model as
+    /// retry feedback. The default: an answer nothing checked must not ship as
+    /// if it passed, and a `parse_json` throw on malformed output is something
+    /// the model can act on.
+    #[default]
+    Reject,
+    /// Record the submission unchecked, as if no validator were declared. For
+    /// blueprints that would rather have an unchecked answer than a failed run.
+    /// The broken script is still flagged on the run either way.
+    Accept,
+}
+
 /// What shape an agent should return.
 ///
 /// Declared by a blueprint (`[agent.output]`), narrowed by a stage
@@ -93,6 +115,13 @@ pub struct OutputSpec {
     /// format retires it along with the schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validator: Option<String>,
+
+    /// What to do when the validator itself cannot run. `None` means the
+    /// default, [`OnValidatorError::Reject`]. Travels with the validator: a
+    /// caller who retires the validator by overriding the format retires this
+    /// setting along with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_validator_error: Option<OnValidatorError>,
 }
 
 impl OutputSpec {
@@ -104,6 +133,7 @@ impl OutputSpec {
             && self.example.is_none()
             && self.schema.is_none()
             && self.validator.is_none()
+            && self.on_validator_error.is_none()
     }
 }
 
@@ -274,6 +304,12 @@ pub fn resolve_output_spec(
         true => request.and_then(|r| r.validator.clone()),
         false => field(agent, stage, request, |s| s.validator.clone()),
     };
+    // The error policy accompanies the validator it is about, so it follows the
+    // validator's cascade: retired with it on a reshape, inherited otherwise.
+    let on_validator_error = match reshaped {
+        true => request.and_then(|r| r.on_validator_error),
+        false => field(agent, stage, request, |s| s.on_validator_error),
+    };
 
     Some(OutputSpec {
         format: field(agent, stage, request, |s| s.format.clone()),
@@ -281,6 +317,7 @@ pub fn resolve_output_spec(
         example: field(agent, stage, request, |s| s.example.clone()),
         schema: shape_field(|s| s.schema.clone()),
         validator,
+        on_validator_error,
     })
 }
 
@@ -538,6 +575,13 @@ mod tests {
             }
             .is_empty()
         );
+        assert!(
+            !OutputSpec {
+                on_validator_error: Some(OnValidatorError::Accept),
+                ..OutputSpec::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]
@@ -553,6 +597,7 @@ mod tests {
             example: Some("agent example".to_string()),
             schema: None,
             validator: None,
+            on_validator_error: None,
         };
         let stage = OutputSpec {
             instructions: Some("stage guidance".to_string()),
@@ -593,12 +638,14 @@ mod tests {
     }
 
     /// A Rhai validator is written for one format, so it retires with the schema
-    /// when a caller asks for a different one.
+    /// when a caller asks for a different one - and its error policy, which is
+    /// about that validator, retires with it.
     #[test]
     fn reshaping_retires_the_validator_too() {
         let agent = OutputSpec {
             format: Some("a2ui".to_string()),
             validator: Some("a2ui.rhai".to_string()),
+            on_validator_error: Some(OnValidatorError::Accept),
             ..OutputSpec::default()
         };
         let request = spec(Some("xml"), None);
@@ -606,6 +653,52 @@ mod tests {
             .expect("the agent asked for one");
         assert_eq!(resolved.format.as_deref(), Some("xml"));
         assert_eq!(resolved.validator, None);
+        assert_eq!(resolved.on_validator_error, None);
+    }
+
+    /// The error policy cascades the way the validator does: a stage's setting
+    /// beats the agent's.
+    #[test]
+    fn the_stage_error_policy_overrides_the_agents() {
+        let agent = OutputSpec {
+            format: Some("a2ui".to_string()),
+            validator: Some("a2ui.rhai".to_string()),
+            on_validator_error: Some(OnValidatorError::Reject),
+            ..OutputSpec::default()
+        };
+        let stage = OutputSpec {
+            on_validator_error: Some(OnValidatorError::Accept),
+            ..OutputSpec::default()
+        };
+        let resolved =
+            resolve_output_spec(Some(&agent), Some(&stage), None).expect("the agent asked for one");
+        assert_eq!(resolved.on_validator_error, Some(OnValidatorError::Accept));
+        assert_eq!(
+            resolved.validator.as_deref(),
+            Some("a2ui.rhai"),
+            "the validator itself still falls through from the agent"
+        );
+    }
+
+    /// A caller who reshapes and brings their own validator can bring their own
+    /// error policy with it.
+    #[test]
+    fn a_reshaping_caller_can_supply_their_own_error_policy() {
+        let agent = OutputSpec {
+            format: Some("a2ui".to_string()),
+            validator: Some("a2ui.rhai".to_string()),
+            ..OutputSpec::default()
+        };
+        let request = OutputSpec {
+            format: Some("xml".to_string()),
+            validator: Some("xml.rhai".to_string()),
+            on_validator_error: Some(OnValidatorError::Accept),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&request))
+            .expect("the agent asked for one");
+        assert_eq!(resolved.validator.as_deref(), Some("xml.rhai"));
+        assert_eq!(resolved.on_validator_error, Some(OnValidatorError::Accept));
     }
 
     /// A caller that brings its own checks keeps them.
@@ -910,6 +1003,7 @@ mod tests {
             example: Some("{\"root\": {}}".to_string()),
             schema: Some(json!({"type": "object"})),
             validator: None,
+            on_validator_error: None,
         });
         assert!(described.contains("Return it in this format: a2ui."));
         assert!(described.contains("One card per finding."));
@@ -967,6 +1061,25 @@ mod tests {
         assert_eq!(back, original);
         // Unset fields stay off the wire rather than serializing as nulls.
         assert!(!text.contains("instructions"));
+        assert!(!text.contains("on_validator_error"));
+    }
+
+    /// The wire spelling is the manifest spelling: `accept` and `reject`,
+    /// nothing else. A request naming a third policy is refused rather than
+    /// quietly mapped to either behaviour.
+    #[test]
+    fn the_error_policy_uses_the_manifest_spelling_on_the_wire() {
+        let original = OutputSpec {
+            on_validator_error: Some(OnValidatorError::Accept),
+            ..OutputSpec::default()
+        };
+        let text = serde_json::to_string(&original).expect("a spec serializes");
+        assert!(text.contains(r#""on_validator_error":"accept""#), "{text}");
+        let back: OutputSpec = serde_json::from_str(&text).expect("and deserializes");
+        assert_eq!(back, original);
+
+        let rejected = serde_json::from_str::<OutputSpec>(r#"{"on_validator_error":"sometimes"}"#);
+        assert!(rejected.is_err(), "an unknown policy must not deserialize");
     }
 
     #[test]

@@ -114,7 +114,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // Parse the agent's default output shape: [agent.output]. A per-stage
     // block narrows it, and whoever starts the run overrides both.
     if let Some(output_table) = table_of(agent, "output") {
-        blueprint.output = Some(parse_output_spec(output_table));
+        blueprint.output = Some(parse_output_spec("[agent.output]", output_table)?);
     }
 
     // Parse agent-level sandbox config: [sandbox]

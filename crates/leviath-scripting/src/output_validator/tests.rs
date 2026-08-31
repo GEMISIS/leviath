@@ -50,8 +50,10 @@ fn a_validator_can_inspect_the_content_it_is_given() {
     );
 }
 
-/// A broken validator must not read as "every answer is wrong". That would burn
-/// the agent's whole retry budget on a script bug and end the run with nothing.
+/// A throw is its own verdict, not folded into `Invalid`: the consumer decides
+/// what happens to the submission, and either way the run flags the script as
+/// broken. The error text travels with the verdict so a refusal can hand the
+/// model something actionable.
 #[test]
 fn a_validator_that_throws_is_unusable_rather_than_a_rejection() {
     let v = compiled(r#"fn validate(content) { throw "boom" }"#);

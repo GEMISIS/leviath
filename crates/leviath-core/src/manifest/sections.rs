@@ -137,14 +137,34 @@ pub(super) fn parse_repetition_detection(
 ///
 /// `schema` is taken as arbitrary TOML and converted to JSON, so an author can
 /// write the schema inline as a TOML table rather than embedding a JSON string.
-pub(super) fn parse_output_spec(table: &toml::value::Table) -> crate::output::OutputSpec {
+///
+/// `on_validator_error` is the one enum-ish field, and a value it does not
+/// recognise is a hard error rather than a silent fallback: a misspelled
+/// policy would otherwise load as the default and change what happens to a
+/// run's answer. `where_` names the table an error came from.
+pub(super) fn parse_output_spec(
+    where_: &str,
+    table: &toml::value::Table,
+) -> Result<crate::output::OutputSpec> {
     let string_field = |key: &str| {
         table
             .get(key)
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
     };
-    crate::output::OutputSpec {
+    let on_validator_error = match table.get("on_validator_error") {
+        None => None,
+        Some(value) => match value.as_str().map(str::trim) {
+            Some("reject") => Some(crate::output::OnValidatorError::Reject),
+            Some("accept") => Some(crate::output::OnValidatorError::Accept),
+            _ => {
+                return Err(Error::Other(format!(
+                    "{where_}: on_validator_error must be \"reject\" or \"accept\", got: {value}"
+                )));
+            }
+        },
+    };
+    Ok(crate::output::OutputSpec {
         format: string_field("format"),
         instructions: string_field("instructions"),
         example: string_field("example"),
@@ -156,8 +176,22 @@ pub(super) fn parse_output_spec(table: &toml::value::Table) -> crate::output::Ou
             .get("schema")
             .and_then(|v| serde_json::to_value(v).ok()),
         validator: string_field("validator"),
-    }
+        on_validator_error,
+    })
 }
+
+/// Every key [`parse_output_spec`] reads off an output table, for the schema
+/// guard in `tests.rs`. Like `REGION_KEYS`, a list and not a check: the parser
+/// ignores a key it does not know.
+#[cfg(test)]
+pub(super) const OUTPUT_KEYS: &[&str] = &[
+    "example",
+    "format",
+    "instructions",
+    "on_validator_error",
+    "schema",
+    "validator",
+];
 
 pub(super) fn parse_security_config(security_table: &toml::value::Table) -> crate::SecurityConfig {
     let mut sc = crate::SecurityConfig::default();

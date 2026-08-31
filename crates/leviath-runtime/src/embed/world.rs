@@ -104,6 +104,7 @@ impl SpawnSpec {
             example: None,
             schema: None,
             validator: None,
+            on_validator_error: None,
         });
         self
     }

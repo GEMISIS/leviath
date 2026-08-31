@@ -101,7 +101,9 @@ format's parser.
 **Does it have the shape you wanted?** That is a schema, and only happens if you write one.
 
 For JSON, use a JSON Schema. For anything else, ship a [Rhai validator](/docs/rhai-validators) with
-your agent.
+your agent. A validator that cannot run rejects the submission by default, sending the script's
+error back to the model as feedback; set `on_validator_error = "accept"` on the output block if you
+would rather record the answer unchecked.
 
 ## Asking for a shape at launch
 
