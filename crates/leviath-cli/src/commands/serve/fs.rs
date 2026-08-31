@@ -288,6 +288,7 @@ mod tests {
             event_tx: tx,
             control: no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Arc::new(ServeLimits {
                 workdir_root,
                 ..Default::default()

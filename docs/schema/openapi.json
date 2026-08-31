@@ -46,6 +46,9 @@
     },
     {
       "name": "scripts"
+    },
+    {
+      "name": "providers"
     }
   ],
   "paths": {
@@ -1216,6 +1219,146 @@
           }
         },
         "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`."
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Providers that sign in with a browser, and whether they are signed in",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "Reports `enabled` (what `config.toml` says) and `signed_in` (whether a grant is stored) separately, because either can be true alone and a provider that is enabled without a sign-in fails every run. While a sign-in is in flight `signin` carries `{\"state\": \"waiting\", \"authorize_url\": ...}`; after one fails it carries `{\"state\": \"failed\", \"message\": ...}` until the next attempt, and it is absent when there is neither. Open to any caller: it discloses the account address and plan tier, the same facts `lev auth status` prints, and no token."
+      }
+    },
+    "/api/providers/{name}/login": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Start the browser sign-in for a provider",
+        "responses": {
+          "202": {
+            "description": "The flow started; poll `GET /api/providers`."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it opens the operator's browser on the host running the server and binds a fixed loopback port there. Returns `202` with `{\"status\": \"waiting\", \"authorize_url\": ...}` as soon as there is a URL, and the flow continues behind the response - poll `GET /api/providers` for the outcome. It does not hold the request open for the whole flow the way the MCP login does: a browser UI needs to render the URL and a progress state, and a request held open for five minutes gives it neither. **The browser has to be on the serving host**, because the redirect goes to `localhost:1455` there and nowhere else - that is what OpenAI registered the public client id against. A console driving a remote daemon can start the flow and show `authorize_url`, but somebody has to open it on that machine. `409` when a sign-in to the same provider is already waiting, with its `authorize_url` in the body so a reconnecting console can pick the flow back up rather than having to cancel it."
+      }
+    },
+    "/api/providers/{name}/logout": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Forget a provider's stored sign-in",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "Admin only, like the sign-in it undoes: it deletes a credential from the grant store, and from the OS keychain when `[security] credential_store = \"keychain\"`. `config.toml` is deliberately untouched, the same as `lev auth logout` - signing out is not the same as turning the provider off, and doing both would surprise anyone who meant to sign in again. Set `codex_enabled` through `PUT /api/config` to do the other one."
+      }
+    },
+    "/api/providers/{name}/check": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Prove a provider's stored sign-in still works",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "Admin only, the same category as `POST /api/models/probe`: it makes this host open an authenticated connection to the provider. The same check `lev setup` runs, through the same code. It asks the account rather than reading a compiled model table, so a `200` means the subscription really did agree - and it refreshes a lapsed access token on the way in, which is also what keeps a rarely-used sign-in alive. Answers `{\"status\": \"ok\", \"models\": [...]}` with the models this plan can reach, and `502` with the provider's own reason when it is refused."
       }
     },
     "/api/mcp/servers": {

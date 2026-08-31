@@ -835,6 +835,7 @@ mod tests {
             event_tx: tx,
             control: no_daemon(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -866,6 +867,7 @@ mod tests {
             event_tx: tx,
             control: no_daemon(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Arc::new(ServeLimits {
                 allow_local_network: false,
                 workdir_root: Some(root.path().to_path_buf()),
@@ -1132,6 +1134,7 @@ mod tests {
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -2996,6 +2999,7 @@ system_prompt = "Plan the work"
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         let app = Router::new()
@@ -3054,6 +3058,7 @@ system_prompt = "Plan the work"
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         let app = Router::new()

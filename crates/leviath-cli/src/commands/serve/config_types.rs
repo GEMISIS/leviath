@@ -48,6 +48,17 @@ pub(super) struct RedactedConfig {
     pub(super) has_google_key: bool,
     pub(super) has_openrouter_key: bool,
     pub(super) ollama_base_url: Option<String>,
+    /// Whether the Codex transport is on. Whether it is *signed in* is a
+    /// separate question with a separate route: see `GET /api/providers`.
+    pub(super) codex_enabled: bool,
+    /// Its reasoning effort, when the config pins one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) codex_reasoning_effort: Option<String>,
+    /// Its text verbosity, when the config pins one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) codex_verbosity: Option<String>,
+    /// Whether reasoning is replayed between turns.
+    pub(super) codex_replay_reasoning: bool,
     /// Every custom gateway `[model_providers]` declares, name-sorted.
     ///
     /// The four fields above can only describe the providers that existed when
@@ -297,6 +308,15 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // approval request. Announced because an older daemon drops the field
     // without a word: a console that offered the box against one would send
     // the person's redirect nowhere.
+    // `GET /api/providers` and the three admin routes under it: the browser
+    // sign-in for a provider that has no API key. Announced because a console
+    // that cannot tell whether they exist has to offer a Codex row that either
+    // 404s on sign-in or, worse, writes `codex_enabled` and leaves the user
+    // enabled but not signed in - which is a provider every run fails against.
+    // The read half is always mounted; the three writes need `--allow-admin`,
+    // and a client finds that out the way it does for the MCP admin routes,
+    // by calling one and reading the status.
+    "providers.signin",
     "interaction.feedback",
     // `config_error` and `config_mtime` on `GET /api/config`, and the
     // `config_health` websocket frame. Announced because the absence of
@@ -386,6 +406,24 @@ pub(super) struct WriteConfigReq {
     pub(super) google_key: Option<String>,
     pub(super) openrouter_key: Option<String>,
     pub(super) ollama_base_url: Option<String>,
+    /// Turn the Codex transport on or off.
+    ///
+    /// The one provider here with no key to send: its credential is a browser
+    /// sign-in, taken through `POST /api/providers/codex/login`. Writing this
+    /// alone leaves a provider that is enabled and cannot answer, which is why
+    /// `GET /api/providers` reports the two separately.
+    pub(super) codex_enabled: Option<bool>,
+    /// How hard Codex thinks: `none`, `minimal`, `low`, `medium`, `high` or
+    /// `xhigh`. Validated before anything is written.
+    pub(super) codex_reasoning_effort: Option<String>,
+    /// How much it writes: `low`, `medium` or `high`.
+    pub(super) codex_verbosity: Option<String>,
+    /// Whether a turn's opaque reasoning token is replayed on the next one.
+    ///
+    /// On by default and worth leaving on; it is here so it can be turned off
+    /// from a console the day the route stops accepting a replayed blob,
+    /// without editing `config.toml` by hand on the serving machine.
+    pub(super) codex_replay_reasoning: Option<bool>,
     /// Gateways to add or update, by name. Absent means "change none", the
     /// same partial-update rule every field above follows: a gateway this list
     /// does not mention is left exactly as it was.

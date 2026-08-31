@@ -75,8 +75,9 @@ pub(crate) struct McpAdmin {
     pub clock: fn() -> u64,
 }
 
-/// Real Unix time in seconds.
-fn system_now() -> u64 {
+/// Real Unix time in seconds. Shared with the provider routes, which
+/// track sign-in timestamps the same way.
+pub(super) fn system_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -412,6 +413,7 @@ mod tests {
                 opener: Arc::new(opener),
                 clock: fixed_clock,
             },
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -822,6 +824,7 @@ for line in sys.stdin:
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
     }
@@ -888,6 +891,7 @@ for line in sys.stdin:
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
         let app = scoped(
