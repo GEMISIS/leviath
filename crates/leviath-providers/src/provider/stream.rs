@@ -331,6 +331,12 @@ impl PartialToolCall {
 /// across chunks and each names a different slice of the same call, while the
 /// cost, when a provider states one at all, is the whole call's price and comes
 /// once.
+///
+/// The totals add too, reconciled against the sum of the merged parts. For
+/// every built-in provider the two figures are identical, but a script
+/// provider's chunk may carry a total its parts do not account for (an
+/// endpoint that reports nothing finer), and rebuilding the running total from
+/// the parts alone would silently drop it.
 fn merge_usage(into: TokenUsage, chunk: TokenUsage) -> TokenUsage {
     TokenUsage::new(
         into.prompt_tokens.saturating_add(chunk.prompt_tokens),
@@ -340,6 +346,7 @@ fn merge_usage(into: TokenUsage, chunk: TokenUsage) -> TokenUsage {
         into.completion_tokens
             .saturating_add(chunk.completion_tokens),
     )
+    .with_reported_total(into.total_tokens.saturating_add(chunk.total_tokens))
     .with_reported_cost(chunk.reported_cost_usd.or(into.reported_cost_usd))
 }
 
@@ -654,6 +661,32 @@ mod tests {
         let err = collect_stream(stream).await.expect_err("the stream failed");
 
         assert_eq!(err.failure_kind(), Some(FailureKind::Timeout));
+    }
+
+    /// A usage report carrying only a total (a script provider whose endpoint
+    /// says nothing finer) survives the fold. Rebuilding the running total
+    /// from the parts alone would silently zero it.
+    #[tokio::test]
+    async fn collect_stream_keeps_a_total_only_usage_report() {
+        let total_only = TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 9,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            reported_cost_usd: None,
+        };
+        let stream = chunks(vec![StreamChunk {
+            delta: String::new(),
+            tool_calls: Vec::new(),
+            tokens: Some(total_only),
+            finish_reason: Some(FinishReason::Complete),
+            reasoning: None,
+        }]);
+
+        let response = collect_stream(stream).await.expect("a complete stream");
+
+        assert_eq!(response.tokens_used.total_tokens, 9);
     }
 
     /// Chunk counts accumulate across a stream; two large reports must clamp

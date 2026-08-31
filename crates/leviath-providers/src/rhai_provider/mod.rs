@@ -732,7 +732,14 @@ fn parse_models(value: Dynamic, provider: &str) -> Vec<ModelInfo> {
                         .get("display_name")
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
-                    Some(ModelInfo::new(id, provider, capabilities).named(display_name))
+                    // `listed`: these rows are the script's own answer, not a
+                    // table compiled into this build, and `lev models list`
+                    // counts which is which by the flag.
+                    Some(
+                        ModelInfo::new(id, provider, capabilities)
+                            .named(display_name)
+                            .listed(),
+                    )
                 })
                 .collect()
         })

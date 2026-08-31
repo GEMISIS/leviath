@@ -39,14 +39,32 @@ fn parse_usage(obj: Option<&Value>) -> TokenUsage {
     let cost = obj
         .and_then(|v| v.get("cost_usd").or_else(|| v.get("cost")))
         .and_then(|v| v.as_f64());
-    TokenUsage {
-        prompt_tokens: usize_field(obj, "prompt_tokens"),
-        completion_tokens: usize_field(obj, "completion_tokens"),
-        total_tokens: usize_field(obj, "total_tokens"),
-        cached_tokens: usize_field(obj, "cached_tokens"),
-        cache_write_tokens: usize_field(obj, "cache_write_tokens"),
-        reported_cost_usd: cost,
-    }
+    let cached = usize_field(obj, "cached_tokens");
+    let cache_write = usize_field(obj, "cache_write_tokens");
+    // `prompt_tokens` here is the whole prompt, cache counts included, because
+    // that is what a script forwarding an OpenAI-shaped usage object sends
+    // verbatim. `TokenUsage::prompt_tokens` is the fresh figure, so the cache
+    // counts come back out - the same normalization the native OpenAI provider
+    // applies, and without it a cached token is billed once at the full input
+    // rate inside `prompt_tokens` and again at the cache rate. Saturating: a
+    // script whose cache counts exceed its own prompt count is malformed, and
+    // zero fresh input beats a wrapped figure.
+    //
+    // Going through `TokenUsage::new` derives the total from the parts, so a
+    // script that reports the parts but no total (an Anthropic-shaped upstream
+    // has no `total_tokens` to forward) no longer records zero tokens. A
+    // reported total larger than the derived one stands: a script that knows
+    // only a total has all-zero parts, and that total is the whole answer.
+    TokenUsage::new(
+        usize_field(obj, "prompt_tokens")
+            .saturating_sub(cached)
+            .saturating_sub(cache_write),
+        cached,
+        cache_write,
+        usize_field(obj, "completion_tokens"),
+    )
+    .with_reported_total(usize_field(obj, "total_tokens"))
+    .with_reported_cost(cost)
 }
 
 /// Convert the map returned by a script's `inference` function into an

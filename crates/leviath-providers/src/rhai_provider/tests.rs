@@ -293,6 +293,67 @@ async fn infer_no_http() {
     assert_eq!(exec.call_count(), 0);
 }
 
+/// A script that reports the parts but no total (an Anthropic-shaped upstream
+/// has no `total_tokens` field to forward) still records a real total: it is
+/// what the rate limiter counts and what the run reports as `tokens_used`.
+#[tokio::test]
+async fn infer_derives_a_total_the_script_did_not_send() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         #{{ content: \"hello\", \
+            tokens_used: #{{ prompt_tokens: 3, completion_tokens: 2 }} }} }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
+    assert_eq!(r.tokens_used.total_tokens, 5);
+}
+
+/// The docs' `usage_of` helper, verbatim: an OpenAI-shaped usage object
+/// forwarded as it arrives comes out normalized (cached tokens not double
+/// counted), and an upstream that omits `prompt_tokens_details` falls back
+/// cleanly through the `?? #{}` default.
+#[tokio::test]
+async fn the_documented_usage_helper_forwards_an_openai_usage_object() {
+    let src = format!(
+        "{NOOP_INIT}\
+         fn usage_of(u) {{ \
+             if u == () {{ return #{{ total_tokens: 0 }}; }} \
+             let details = u.prompt_tokens_details ?? #{{}}; \
+             #{{ \
+                 prompt_tokens: u.prompt_tokens ?? 0, \
+                 completion_tokens: u.completion_tokens ?? 0, \
+                 total_tokens: u.total_tokens ?? 0, \
+                 cached_tokens: details.cached_tokens ?? 0, \
+                 cache_write_tokens: 0, \
+             }} }}\n\
+         fn inference(state, request) {{ \
+             let resp = parse_json(http_post(\"http://api/x\", \"{{}}\", #{{}})); \
+             #{{ content: \"ok\", tokens_used: usage_of(resp.usage) }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![
+        Ok(
+            "{\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105,\
+            \"prompt_tokens_details\":{\"cached_tokens\":80}}}"
+                .to_string(),
+        ),
+        Ok(
+            "{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}"
+                .to_string(),
+        ),
+    ]);
+    let p = build(&src, exec).unwrap();
+
+    let cached = p.infer(&request("m")).await.unwrap();
+    assert_eq!(cached.tokens_used.prompt_tokens, 20, "fresh input only");
+    assert_eq!(cached.tokens_used.cached_tokens, 80);
+    assert_eq!(cached.tokens_used.total_tokens, 105);
+
+    let plain = p.infer(&request("m")).await.unwrap();
+    assert_eq!(plain.tokens_used.prompt_tokens, 10);
+    assert_eq!(plain.tokens_used.cached_tokens, 0);
+    assert_eq!(plain.tokens_used.total_tokens, 12);
+}
+
 #[tokio::test]
 async fn infer_single_http_post() {
     let src = format!(
@@ -602,6 +663,9 @@ async fn list_models_parses_and_filters() {
     assert_eq!(models[0].provider, "test");
     assert_eq!(models[0].capabilities.max_context_tokens, 1000);
     assert_eq!(models[0].capabilities.max_output_tokens, 256);
+    // These rows are the script's own answer, not a table compiled into this
+    // build: `lev models list` counts them as a provider listing by this flag.
+    assert!(models[0].learned, "a script's list_models is a listing");
 }
 
 #[tokio::test]

@@ -66,13 +66,17 @@ fn map_finish(reason) {
     }
 }
 
+// Forward the OpenAI-shaped usage object as it arrives: `prompt_tokens`
+// includes the cached slice, and the host subtracts `cached_tokens` back out.
+// An API that reports no total is fine; the host derives one from the parts.
 fn usage_of(u) {
     if u == () { return #{ total_tokens: 0 }; }
+    let details = u.prompt_tokens_details ?? #{};
     #{
         prompt_tokens: u.prompt_tokens ?? 0,
         completion_tokens: u.completion_tokens ?? 0,
         total_tokens: u.total_tokens ?? 0,
-        cached_tokens: 0,
+        cached_tokens: details.cached_tokens ?? 0,
         cache_write_tokens: 0,
     }
 }

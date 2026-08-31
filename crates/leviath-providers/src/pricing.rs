@@ -94,6 +94,19 @@ impl TokenUsage {
         self
     }
 
+    /// The derived total reconciled with a total the provider itself reported.
+    ///
+    /// The larger of the two stands. Parts in hand are evidence, so the
+    /// derived figure never goes down; but a provider that reports only a
+    /// total (a script forwarding an endpoint that says nothing finer) has
+    /// all-zero parts, and deriving from those would zero the one figure it
+    /// gave. For a provider whose total genuinely is the sum of its parts,
+    /// this is a no-op.
+    pub fn with_reported_total(mut self, total: usize) -> Self {
+        self.total_tokens = self.total_tokens.max(total);
+        self
+    }
+
     /// All input tokens, however they were billed.
     pub fn input_tokens(&self) -> usize {
         self.prompt_tokens

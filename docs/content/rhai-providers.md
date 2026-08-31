@@ -146,7 +146,8 @@ and must return:
   "content": "...",
   "tool_calls":  [ { "id": "...", "name": "...", "arguments": { /* parsed */ } } ],
   "tokens_used": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                   "cached_tokens": 0, "cache_write_tokens": 0 },
+                   "cached_tokens": 0, "cache_write_tokens": 0,
+                   "cost_usd": 0.0 },
   "finish_reason": "Complete"   // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
 }
 ```
@@ -154,6 +155,21 @@ and must return:
 `finish_reason` also accepts the common wire spellings (`tool_calls`, `tool_use`, `length`,
 `max_tokens`, `stop_sequence`), and anything unrecognized reads as `Complete`, so most APIs'
 values pass through unmapped.
+
+Every `tokens_used` field is optional, and the host normalizes what you send:
+
+- `prompt_tokens` is the whole prompt, cache counts included, which is what an
+  OpenAI-shaped `usage` object reports and what you should forward verbatim. The host
+  subtracts `cached_tokens` and `cache_write_tokens` back out, so each token class is billed
+  once at its own rate. If your API reports its input counts separately, the way Anthropic
+  does, send `prompt_tokens` as their sum.
+- `total_tokens` may be omitted: the host derives it from the other counts. Send it when your
+  API reports one (a total larger than the sum of the parts you sent is kept, so an endpoint
+  that reports only a total still records real usage).
+- `cost_usd` (or `cost`) is what the endpoint said the call cost, in USD. It is kept verbatim
+  and never recomputed: your script is the only thing that saw the invoice figure, and
+  Leviath has no rate card for a model it has never heard of. Omit it and the call reports
+  its cost as unknown rather than zero.
 
 ## Host functions
 
@@ -300,13 +316,17 @@ fn map_finish(reason) {
     }
 }
 
+// Forward the OpenAI-shaped usage object as it arrives: `prompt_tokens`
+// includes the cached slice, and the host subtracts `cached_tokens` back out.
+// An API that reports no total is fine; the host derives one from the parts.
 fn usage_of(u) {
     if u == () { return #{ total_tokens: 0 }; }
+    let details = u.prompt_tokens_details ?? #{};
     #{
         prompt_tokens: u.prompt_tokens ?? 0,
         completion_tokens: u.completion_tokens ?? 0,
         total_tokens: u.total_tokens ?? 0,
-        cached_tokens: 0,
+        cached_tokens: details.cached_tokens ?? 0,
         cache_write_tokens: 0,
     }
 }
