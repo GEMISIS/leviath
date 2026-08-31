@@ -2848,6 +2848,10 @@ pub(super) mod tests {
             .expect("the codex row is offered");
 
         let mut row = wizard.providers[index].clone();
+        // Set explicitly rather than assumed: `Wizard::new` reads the grant
+        // store under a process-wide `$LEVIATH_HOME`, so what this row arrives
+        // holding depends on what else is running.
+        row.signed_in = None;
         assert!(!row.has_credential());
         row.signed_in = Some("someone@example.com (plus plan)".to_string());
         assert!(row.has_credential());
@@ -2868,7 +2872,14 @@ pub(super) mod tests {
         assert_eq!(wizard.row_count(), 0);
     }
 
-    /// The codex row at its index, on a wizard whose only selection it is.
+    /// The codex row at its index, on a wizard whose only selection it is and
+    /// which is signed in to nothing.
+    ///
+    /// `signed_in` is cleared rather than trusted. `Wizard::new` reads the
+    /// grant store under `$LEVIATH_HOME`, `temp_env` sets that for the whole
+    /// process, and another test writing a grant into its own temp home is
+    /// visible here while it runs. Depending on that made this fail on
+    /// whichever platform lost the race - Windows, as it happened.
     fn wizard_showing_codex(agents_dir: &std::path::Path) -> (Wizard, usize) {
         let mut wizard = test_wizard(agents_dir);
         let index = wizard
@@ -2878,6 +2889,7 @@ pub(super) mod tests {
             .expect("the codex row is offered");
         for row in &mut wizard.providers {
             row.selected = false;
+            row.signed_in = None;
         }
         wizard.providers[index].selected = true;
         wizard.step = Step::ProviderDetail;
@@ -3095,8 +3107,20 @@ pub(super) mod tests {
                 who: "nobody".to_string(),
             })
             .unwrap();
+        let before: Vec<Option<String>> = wizard
+            .providers
+            .iter()
+            .map(|r| r.signed_in.clone())
+            .collect();
+
         wizard.drain_signins();
-        assert!(wizard.providers.iter().all(|r| r.signed_in.is_none()));
+
+        let after: Vec<Option<String>> = wizard
+            .providers
+            .iter()
+            .map(|r| r.signed_in.clone())
+            .collect();
+        assert_eq!(before, after, "an event landed on a row it was not for");
     }
 
     /// A sign-in provider is checked through the grant on disk, so the

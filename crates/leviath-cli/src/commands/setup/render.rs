@@ -1462,6 +1462,10 @@ mod tests {
             .expect("the codex row is offered");
         for row in &mut w.providers {
             row.selected = false;
+            // Cleared rather than trusted: `Wizard::new` reads the grant store
+            // under a `$LEVIATH_HOME` another test may have pointed at its own
+            // temp home, and this card is about the not-signed-in state.
+            row.signed_in = None;
         }
         w.providers[index].selected = true;
         w.enter(Step::ProviderDetail);

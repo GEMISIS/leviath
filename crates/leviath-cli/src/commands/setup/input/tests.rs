@@ -1045,6 +1045,9 @@ fn a_sign_in_screen_has_no_credential_to_edit() {
         .expect("the codex row is offered");
     for row in &mut w.providers {
         row.selected = false;
+        // See `render::tests::codex_card`: the ambient grant store is shared
+        // with whatever else is running.
+        row.signed_in = None;
     }
     w.providers[index].selected = true;
     w.enter(Step::ProviderDetail);
@@ -1075,6 +1078,9 @@ fn the_sign_in_button_asks_the_lane() {
         .expect("the codex row is offered");
     for row in &mut w.providers {
         row.selected = false;
+        // See `render::tests::codex_card`: the ambient grant store is shared
+        // with whatever else is running.
+        row.signed_in = None;
     }
     w.providers[index].selected = true;
     w.enter(Step::ProviderDetail);
