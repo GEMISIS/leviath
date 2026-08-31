@@ -101,6 +101,7 @@
           "type": "string"
         },
         "codex_reasoning_effort": {
+          "description": "How hard Codex thinks. Any given model accepts a subset of these and rejects the rest outright: `gpt-5.5` answers 400 to `minimal` and lists its own set as none, low, medium, high, xhigh, while a model that must reason rejects `none`. `low` and above have been accepted everywhere seen so far. Not checkable at save time - the answer differs per model and is only known by asking.",
           "enum": [
             "none",
             "minimal",

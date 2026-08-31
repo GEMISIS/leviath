@@ -523,6 +523,16 @@ limit rather than guessing.
 **The model list is compiled in.** The route publishes no catalogue, so the
 context windows are this build's belief, and which models answer depends on
 your plan. `lev models list --provider codex` shows what your plan reaches.
+The compiled list is cross-checked against OpenAI's published catalogue every
+week by `cargo xtask prices`, which reports a model that looks renamed,
+withdrawn or newly served - it cannot fix the list, because what Codex serves
+is published nowhere, but it stops the table going quietly stale.
+
+**Reasoning effort is accepted per model.** `codex_reasoning_effort` takes
+`none`, `minimal`, `low`, `medium`, `high` or `xhigh`, and any given model
+takes some subset. `gpt-5.5` answers `400` to `minimal` and names its own set
+as `none, low, medium, high, xhigh`; a model that must reason rejects `none`.
+`low` and above have been accepted by everything seen so far.
 
 **Reasoning continuity is replayed by Leviath.** The route stores nothing
 server-side, so each turn's reasoning is handed back on the next request. Set

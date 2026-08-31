@@ -40,6 +40,8 @@ ollama_enabled = false
 # the grant is stored outside this file and its token renews itself.
 codex_enabled = false
 codex_originator = "leviath"
+# Accepted values differ per model: gpt-5.5 rejects "minimal", and a model
+# that must reason rejects "none". "low" and above work everywhere so far.
 codex_reasoning_effort = "medium"
 codex_verbosity = "medium"
 codex_replay_reasoning = true

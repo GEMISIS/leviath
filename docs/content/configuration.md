@@ -49,7 +49,7 @@ update_check         = true          # ask whether a newer release exists
 | `default_model` | string | unset | A bare model id on `default_provider`, not `provider/model`. A leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. Unset is usually the better state; over the API, `PUT /api/config` with `"default_model": null` writes it away. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
-| `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434` |
+| `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434`. Setting it also counts as choosing Ollama, so an install that configured it before `[providers] ollama_enabled` existed keeps working |
 | `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `[stages.<name>.model] request_timeout_secs` wins for that stage |
 | `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. With it off, an agent can still opt in itself |
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
@@ -99,13 +99,26 @@ openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
+ollama_enabled         = false      # offer Ollama; setting ollama_base_url also counts
 codex_enabled          = false      # bill inference to a ChatGPT subscription
-codex_reasoning_effort = "medium"   # none | minimal | low | medium | high | xhigh
+codex_reasoning_effort = "medium"   # low | medium | high | xhigh (see below)
 codex_verbosity        = "medium"   # low | medium | high
 codex_replay_reasoning = true       # replay each turn's reasoning on the next request
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 ```
+
+`ollama_enabled` turns Ollama on. It is opt-in like every other provider: it needs no key and
+answers on a well-known local port, which used to be reason enough to register it on every
+machine - and that made a bare model name in a blueprint resolvable against whatever happened to
+be running locally. Setting `ollama_base_url` counts as choosing it too.
+
+`codex_reasoning_effort` takes `none`, `minimal`, `low`, `medium`, `high` or `xhigh`, but **the
+route decides per model which of those it accepts**, and rejects the rest outright. `gpt-5.5`
+answers `400` to `minimal` and lists its own set as `none, low, medium, high, xhigh`; a model that
+must reason rejects `none`. `low` and above are accepted everywhere seen so far. Leviath cannot
+check this at save time - the answer differs per model and is only known by asking - so a value
+one of your models refuses shows up as a failed call rather than a rejected config.
 
 `anthropic_cache_ttl` is how long a cached prompt prefix survives. The default `5m` is free; `1h`
 costs more to write and sends the beta header it needs. It is worth the write cost for a staged
