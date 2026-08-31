@@ -9,7 +9,12 @@
 //!   assembled context. Returns a string (one system block) or a map
 //!   `#{ system: ..., messages: [...] }`.
 //! - `on_write(ctx)` - optional. Sees each incoming entry; returns a string
-//!   (replace the content), `true`/`()` (accept unchanged), or `false` (drop).
+//!   (replace the content), `true`/`()` (accept unchanged), `false` (reject),
+//!   `#{ action: "reject", reason: "..." }` (reject with a reason), or
+//!   `#{ content: "...", key: "..." }` (accept with an optional content
+//!   replacement and/or key override) - the same map vocabulary the stage
+//!   hooks use. What a rejection does depends on the write's origin; the
+//!   runtime decides that.
 //! - `on_overflow(ctx)` - optional. Chooses what to evict under budget
 //!   pressure; returns an array of entry indices to drop.
 //!
@@ -355,6 +360,29 @@ mod tests {
             let out = run_on_write(&s, json!({"entry": {"content": "x"}})).unwrap();
             assert_eq!(out, expected, "body: {body}");
         }
+    }
+
+    #[test]
+    fn on_write_returns_maps_as_plain_objects() {
+        // The reject/accept maps cross the JSON boundary untouched; their
+        // interpretation is the runtime's job.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) {
+                if ctx.entry.key == () {
+                    #{ action: "reject", reason: "keyless" }
+                } else {
+                    #{ content: "tidied", key: ctx.entry.key }
+                }
+            }
+        "#;
+        let s = compile("w.rhai", src).unwrap();
+        let rejected =
+            run_on_write(&s, json!({ "entry": { "content": "x", "key": null } })).unwrap();
+        assert_eq!(rejected, json!({ "action": "reject", "reason": "keyless" }));
+        let accepted =
+            run_on_write(&s, json!({ "entry": { "content": "x", "key": "k1" } })).unwrap();
+        assert_eq!(accepted, json!({ "content": "tidied", "key": "k1" }));
     }
 
     #[test]

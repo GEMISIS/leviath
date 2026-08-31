@@ -5969,12 +5969,13 @@ fn call_had_no_effect_covers_every_refusal_prefix() {
 fn tainted_conv_window() -> ContextWindow {
     let mut w = conv_window();
     w.enable_taint_tracking();
-    let _ = w.add_typed_tainted_to_region(
+    let _ = w.typed_write(
+        crate::components::WriteOrigin::System,
         "conversation",
         leviath_core::EntryKind::UserMessage,
         "secret".to_string(),
         5,
-        leviath_core::TaintLevel::Internal,
+        Some(leviath_core::TaintLevel::Internal),
     );
     w
 }
@@ -16243,6 +16244,133 @@ fn a_pointer_says_when_the_region_could_not_take_the_whole_result() {
     assert!(
         !text.contains("already in this prompt"),
         "and must not claim the result is there to read: {text}"
+    );
+}
+
+/// Add a custom region backed by an `on_write` script to `window`.
+fn add_scripted_region(window: &mut ContextWindow, name: &str, budget: usize, src: &str) {
+    window.add_region(leviath_core::Region::new(
+        name.to_string(),
+        leviath_core::RegionKind::Custom {
+            script: "s.rhai".to_string(),
+            persistent: false,
+        },
+        budget,
+    ));
+    window.region_scripts.insert(
+        "s.rhai".to_string(),
+        std::sync::Arc::new(leviath_scripting::region_hook::compile("s.rhai", src).unwrap()),
+    );
+}
+
+/// A custom region's `on_write` hook can refuse a routed result, and the
+/// pointer must say so - carrying the hook's reason - instead of promising
+/// content the region never kept. Before this, `Stored::Whole` was reported
+/// for a write the script had dropped, and the model went on reasoning as
+/// though the result were stored.
+#[test]
+fn a_pointer_reports_a_hook_rejection_with_its_reason() {
+    let mut window = routed_window(&[], &[]);
+    add_scripted_region(
+        &mut window,
+        "findings",
+        20_000,
+        r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { #{ action: "reject", reason: "raw pages are not findings" } }
+        "#,
+    );
+    let (calls, results) = one_read_call();
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("findings")),
+        None,
+        None,
+    );
+    let text: String = window
+        .get_region("conversation")
+        .expect("conversation")
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(
+        text.contains("refused by context region 'findings'"),
+        "{text}"
+    );
+    assert!(text.contains("raw pages are not findings"), "{text}");
+    assert!(
+        !text.contains("already in this prompt"),
+        "must not claim the result is there to read: {text}"
+    );
+    assert!(
+        window
+            .get_region("findings")
+            .expect("target")
+            .content
+            .is_empty(),
+        "a refused write stores nothing"
+    );
+}
+
+/// The hook re-runs over the truncated fallback, and may refuse that shape
+/// even though it accepted the full one: still reported as a rejection, not
+/// as a truncation that happened.
+#[test]
+fn a_hook_that_refuses_the_truncated_fallback_is_reported_as_a_rejection() {
+    let mut window = routed_window(&[], &[]);
+    // Budget 200: the full result (about 500 tokens) fails the budget, and
+    // the truncated retry carries the `[truncated ...]` marker the hook keys
+    // off.
+    add_scripted_region(
+        &mut window,
+        "findings",
+        200,
+        r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) {
+                if ctx.entry.content.contains("[truncated") {
+                    #{ action: "reject", reason: "no partial pages" }
+                } else {
+                    true
+                }
+            }
+        "#,
+    );
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({"path": "manual.md"}),
+        thought_signature: None,
+    }];
+    let results = vec![("call-1".to_string(), "x".repeat(2000))];
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("findings")),
+        None,
+        None,
+    );
+    let text: String = window
+        .get_region("conversation")
+        .expect("conversation")
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(text.contains("no partial pages"), "{text}");
+    assert!(
+        window
+            .get_region("findings")
+            .expect("target")
+            .content
+            .is_empty(),
+        "neither the full nor the truncated form was stored"
     );
 }
 

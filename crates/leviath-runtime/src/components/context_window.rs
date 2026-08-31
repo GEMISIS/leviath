@@ -96,6 +96,43 @@ pub struct AssembledContext {
     pub system_hash: u64,
 }
 
+/// Whose write a region write is.
+///
+/// A custom region's `on_write` hook may reject a write, and what a rejection
+/// does depends on whether anyone can be told about it. An agent-origin write
+/// (a `context_write`/`context_append` call, a routed tool result) has a tool
+/// result to carry the refusal, so it becomes an error naming the reason. A
+/// system-origin write (an assistant turn, a delivered message, a framework
+/// record) has no such channel, and a script must not be able to silently
+/// delete it - the rejection is downgraded to accept-unchanged plus a warning.
+///
+/// When classifying a new write path, `System` is the safe default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteOrigin {
+    /// A write the model itself asked for; a rejection is reported back to it.
+    Agent,
+    /// A framework record; a rejection is stored unchanged with a warning.
+    System,
+}
+
+/// What a custom region's `on_write` hook decided about one write, with the
+/// original content carried through the `Refused` arm so a system-origin
+/// caller can store it unchanged.
+enum HookDecision {
+    /// Store this content (possibly replaced), with this token count and,
+    /// when the hook chose one, this key instead of the one the write named.
+    Store(String, usize, Option<String>),
+    /// The hook refused the write; the original entry rides along.
+    Refused {
+        /// The content exactly as the write carried it.
+        content: String,
+        /// Its original token count.
+        tokens: usize,
+        /// The hook's reason, when it gave one.
+        reason: Option<String>,
+    },
+}
+
 /// Context window component storing the agent's memory regions.
 #[derive(Component, Debug, Clone)]
 pub struct ContextWindow {
@@ -192,34 +229,101 @@ impl ContextWindow {
     }
 
     /// Run a custom region's `on_write` hook (when defined) for an incoming
-    /// entry. `None` means the script dropped the entry - the write reports
-    /// success without storing anything. Non-custom regions, missing scripts,
-    /// and hook failures all accept the entry unchanged.
+    /// entry. Non-custom regions, missing scripts, and hook failures all
+    /// store the entry unchanged; what a `Refused` decision does is the
+    /// origin adapters' business ([`Self::on_write_agent`],
+    /// [`Self::on_write_system`]).
     ///
     /// Deliberately NOT invoked by the layout-swap carry or restore overlay:
     /// those re-add entries the hook already accepted once.
-    fn on_write_outcome(
+    fn on_write_decision(
         &self,
         region_name: &str,
         content: String,
         tokens: usize,
         kind: &leviath_core::EntryKind,
-    ) -> Option<(String, usize)> {
+        key: Option<&str>,
+    ) -> HookDecision {
         let Some(script) = self.custom_script_for(region_name) else {
-            return Some((content, tokens));
+            return HookDecision::Store(content, tokens, None);
         };
         if !script.has_on_write() {
-            return Some((content, tokens));
+            return HookDecision::Store(content, tokens, None);
         }
         // The region exists - custom_script_for resolved through it.
         let region = self
             .get_region(region_name)
             .expect("custom_script_for resolved through this region");
-        match crate::custom_region::apply_on_write(&script, region, content, tokens, kind) {
-            crate::custom_region::OnWriteOutcome::Accept(content, tokens) => {
-                Some((content, tokens))
+        let incoming = crate::custom_region::IncomingEntry {
+            content: &content,
+            tokens,
+            kind,
+            key,
+        };
+        match crate::custom_region::apply_on_write(&script, region, incoming) {
+            crate::custom_region::OnWriteOutcome::Accept {
+                content,
+                tokens,
+                key_override,
+            } => HookDecision::Store(content, tokens, key_override),
+            crate::custom_region::OnWriteOutcome::Reject(reason) => HookDecision::Refused {
+                content,
+                tokens,
+                reason,
+            },
+        }
+    }
+
+    /// [`Self::on_write_decision`] for an agent-origin write: a refusal
+    /// becomes an error carrying the hook's reason, which the tool result
+    /// reports back to the model.
+    fn on_write_agent(
+        &self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+        kind: &leviath_core::EntryKind,
+        key: Option<&str>,
+    ) -> leviath_core::Result<(String, usize, Option<String>)> {
+        match self.on_write_decision(region_name, content, tokens, kind, key) {
+            HookDecision::Store(content, tokens, key_override) => {
+                Ok((content, tokens, key_override))
             }
-            crate::custom_region::OnWriteOutcome::Drop => None,
+            HookDecision::Refused { reason, .. } => Err(leviath_core::Error::RegionRefusedWrite {
+                region: region_name.to_string(),
+                reason: reason
+                    .unwrap_or_else(|| "the region's on_write hook declined it".to_string()),
+            }),
+        }
+    }
+
+    /// [`Self::on_write_decision`] for a system-origin write: a refusal is
+    /// downgraded to store-unchanged plus a warning, because these writes are
+    /// framework records (assistant turns, delivered messages, nudges) that a
+    /// script must never be able to silently delete.
+    fn on_write_system(
+        &self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+        kind: &leviath_core::EntryKind,
+        key: Option<&str>,
+    ) -> (String, usize, Option<String>) {
+        match self.on_write_decision(region_name, content, tokens, kind, key) {
+            HookDecision::Store(content, tokens, key_override) => (content, tokens, key_override),
+            HookDecision::Refused {
+                content,
+                tokens,
+                reason,
+            } => {
+                tracing::warn!(
+                    region = %region_name,
+                    reason = reason.as_deref().unwrap_or("none given"),
+                    "on_write rejected a system-origin write; storing unchanged \
+                     (a script cannot drop framework records)"
+                );
+                (content, tokens, None)
+            }
         }
     }
 
@@ -267,7 +371,7 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        self.add_to_region_keyed(region_name, None, content, tokens)
+        self.add_to_region_keyed(WriteOrigin::System, region_name, None, content, tokens)
     }
 
     /// Add an entry that may carry a key, so the agent can name it again to
@@ -280,16 +384,61 @@ impl ContextWindow {
     /// on one region kind and dropped on the rest.
     pub(crate) fn add_to_region_keyed(
         &mut self,
+        origin: WriteOrigin,
         region_name: &str,
         key: Option<&str>,
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        let Some((content, tokens)) =
-            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
-        else {
-            return Ok(()); // the region's script dropped the entry
+        let (content, tokens, key_override) = match origin {
+            WriteOrigin::Agent => self.on_write_agent(
+                region_name,
+                content,
+                tokens,
+                &leviath_core::EntryKind::Text,
+                key,
+            )?,
+            WriteOrigin::System => self.on_write_system(
+                region_name,
+                content,
+                tokens,
+                &leviath_core::EntryKind::Text,
+                key,
+            ),
         };
+        let key = key_override.as_deref().or(key);
+        self.write_to_region(region_name, tokens, &mut |region, tokens| match key {
+            Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
+            None => region.add_entry(content.clone(), tokens),
+        })
+    }
+
+    /// Replace a region's content with a single (possibly keyed) entry on the
+    /// agent's own behalf: `context_write`'s non-hashmap arm.
+    ///
+    /// The `on_write` hook runs BEFORE anything is cleared, so a rejection
+    /// leaves the region exactly as it was - refusing the replacement and
+    /// clearing anyway would be a second way to lose content.
+    pub(crate) fn agent_replace_region(
+        &mut self,
+        region_name: &str,
+        key: Option<&str>,
+        content: String,
+        tokens: usize,
+    ) -> leviath_core::Result<()> {
+        let (content, tokens, key_override) = self.on_write_agent(
+            region_name,
+            content,
+            tokens,
+            &leviath_core::EntryKind::Text,
+            key,
+        )?;
+        let Some(region) = self.get_region_mut(region_name) else {
+            return Err(leviath_core::Error::RegionNotFound(region_name.to_string()));
+        };
+        region.clear();
+        self.current_tokens = self.calculate_tokens();
+        let key = key_override.as_deref().or(key);
         self.write_to_region(region_name, tokens, &mut |region, tokens| match key {
             Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
             None => region.add_entry(content.clone(), tokens),
@@ -307,16 +456,24 @@ impl ContextWindow {
         tokens: usize,
     ) -> bool {
         // The replacement passes through on_write like any incoming entry - a
-        // custom region's script sees (and may transform or refuse) it.
-        let Some((content, tokens)) =
-            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
-        else {
-            // Dropped by the script: the region keeps its current content.
-            return self.get_region(region_name).is_some();
-        };
+        // custom region's script sees (and may transform) it. These callers
+        // are all framework lanes (stage seeds, transforms, interaction
+        // answers), so a hook rejection is downgraded inside the adapter to
+        // store-unchanged plus a warning: a script that could veto the
+        // replacement could silently delete an interaction answer.
+        let (content, tokens, key_override) = self.on_write_system(
+            region_name,
+            content,
+            tokens,
+            &leviath_core::EntryKind::Text,
+            None,
+        );
         if let Some(region) = self.get_region_mut(region_name) {
             region.clear();
-            let _ = region.add_entry(content, tokens);
+            let _ = match key_override.as_deref() {
+                Some(k) => region.add_keyed_entry(k, content, tokens),
+                None => region.add_entry(content, tokens),
+            };
             self.current_tokens = self.calculate_tokens();
             true
         } else {
@@ -353,17 +510,56 @@ impl ContextWindow {
         tokens: usize,
         reasoning: Option<String>,
     ) -> leviath_core::Result<()> {
-        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
-        else {
-            return Ok(());
+        self.typed_write(
+            WriteOrigin::System,
+            region_name,
+            kind,
+            content,
+            tokens,
+            None,
+        )?;
+        // On success the entry just written is the last one: the region may
+        // have evicted to make room, but it appends what it accepted. Same
+        // after-the-push attachment the core's reasoning-carrying add uses.
+        if reasoning.is_some()
+            && let Some(region) = self.get_region_mut(region_name)
+            && let Some(entry) = region.content.last_mut()
+        {
+            entry.reasoning = reasoning;
+        }
+        Ok(())
+    }
+
+    /// Shared core of the typed write methods: run the `on_write` seam with
+    /// the caller's origin, then insert the entry with its kind and (when
+    /// given) taint level, honouring a key override from the hook.
+    pub(crate) fn typed_write(
+        &mut self,
+        origin: WriteOrigin,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: String,
+        tokens: usize,
+        taint: Option<leviath_core::TaintLevel>,
+    ) -> leviath_core::Result<()> {
+        let (content, tokens, key_override) = match origin {
+            WriteOrigin::Agent => self.on_write_agent(region_name, content, tokens, &kind, None)?,
+            WriteOrigin::System => self.on_write_system(region_name, content, tokens, &kind, None),
         };
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_entry_with_reasoning(
-                content.clone(),
-                tokens,
-                kind.clone(),
-                reasoning.clone(),
-            )
+            match taint {
+                Some(level) => {
+                    region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), level)?;
+                }
+                None => region.add_typed_entry(content.clone(), tokens, kind.clone())?,
+            }
+            // A key override from the hook names the entry just pushed.
+            if let Some(key) = key_override.as_deref()
+                && let Some(entry) = region.content.last_mut()
+            {
+                entry.key = Some(key.to_string());
+            }
+            Ok(())
         })
     }
 
@@ -913,37 +1109,14 @@ impl ContextWindow {
         tokens: usize,
         taint_level: leviath_core::TaintLevel,
     ) -> leviath_core::Result<()> {
-        let Some((content, tokens)) =
-            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
-        else {
-            return Ok(());
-        };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_tainted_entry(content.clone(), tokens, taint_level)
-        })
-    }
-
-    /// Add a typed entry to a region with a specific taint level.
-    ///
-    /// The typed+tainted counterpart of [`add_typed_entry`](Self::add_typed_entry)
-    /// and [`add_tainted_to_region`](Self::add_tainted_to_region): the entry keeps
-    /// its `EntryKind` (so turn-group eviction stays intact) while contributing
-    /// the given taint level (so the taint gate sees sensitive tool output).
-    pub(crate) fn add_typed_tainted_to_region(
-        &mut self,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
-        content: String,
-        tokens: usize,
-        taint_level: leviath_core::TaintLevel,
-    ) -> leviath_core::Result<()> {
-        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
-        else {
-            return Ok(());
-        };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), taint_level)
-        })
+        self.typed_write(
+            WriteOrigin::System,
+            region_name,
+            leviath_core::EntryKind::Text,
+            content,
+            tokens,
+            Some(taint_level),
+        )
     }
 
     /// Get the overall taint level (max across all regions).
