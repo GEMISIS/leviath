@@ -629,7 +629,10 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let existing = parse_table(&text)?;
     let openrouter = parse_openrouter(&fetch(OPENROUTER_URL)?)?;
-    let litellm = parse_litellm(&fetch(LITELLM_URL)?)?;
+    // Fetched once and read twice: the prices below and the windows further
+    // down come out of the same document.
+    let litellm_body = fetch(LITELLM_URL)?;
+    let litellm = parse_litellm(&litellm_body)?;
     let merged = merge(&existing, &openrouter, &litellm, today)?;
 
     for change in &merged.changes {
@@ -646,6 +649,15 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     // job that fails on a question is a weekly job somebody turns off.
     for line in codex_catalog::drift(&codex_ids()?, &openrouter) {
         println!("? {line}");
+    }
+    // And the context windows, which rot the same way and more quietly: a row
+    // that is too small fails nothing, it just sizes every region for a
+    // fraction of the window the run has.
+    let windows = model_windows::parse_litellm_windows(&litellm_body)?;
+    for (label, source) in WINDOW_TABLES {
+        for line in model_windows::drift(label, &model_windows::parse_rows(source)?, &windows) {
+            println!("? {line}");
+        }
     }
     let added = merged
         .changes
@@ -689,6 +701,22 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     }
 }
 
+/// The provider tables whose windows are checked, as (label, source).
+///
+/// The two that carry OpenAI's models. Another vendor's table is checked the
+/// same way the day somebody adds its published windows to the comparison;
+/// reporting on a vendor nothing is compared against would be noise.
+const WINDOW_TABLES: &[(&str, &str)] = &[
+    (
+        "openai",
+        include_str!("../../crates/leviath-providers/src/openai.rs"),
+    ),
+    (
+        "codex",
+        include_str!("../../crates/leviath-providers/src/codex/catalog.rs"),
+    ),
+];
+
 /// The Codex catalog's model ids, read from the shipped source.
 fn codex_ids() -> Result<Vec<String>> {
     codex_catalog::catalog_ids(include_str!(
@@ -731,6 +759,10 @@ pub fn run(mode: PricesMode) -> Result<()> {
 /// business changing the binary's entrypoint.
 #[path = "codex_catalog.rs"]
 pub mod codex_catalog;
+
+/// The context-window check, fed by the same fetch again.
+#[path = "model_windows.rs"]
+pub mod model_windows;
 
 #[cfg(test)]
 #[path = "prices_tests.rs"]

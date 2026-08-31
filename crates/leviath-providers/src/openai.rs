@@ -111,12 +111,27 @@ pub(crate) const MODELS: &[Row] = &[
         context: 1_050_000,
         output: 128_000,
     },
+    // Its own row rather than the family's: the 5.6 models carry a window
+    // more than three times the family default, and without this they fell
+    // through to it and every percentage region budget was sized for a
+    // fraction of what the run had.
+    Row {
+        matches: &[Match::Prefix("gpt-5.6")],
+        temperature: true,
+        tools: true,
+        context: 922_000,
+        output: 128_000,
+    },
     // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini).
+    //
+    // 272,000, not the 400,000 this carried: that figure matched no model
+    // anybody publishes, and being *over* is the direction that fails - a run
+    // builds a context the model then refuses.
     Row {
         matches: &[Match::Prefix("gpt-5")],
         temperature: true,
         tools: true,
-        context: 400_000,
+        context: 272_000,
         output: 128_000,
     },
     Row {
@@ -609,7 +624,7 @@ mod tests {
             crate::provider::build_http_client(None).expect("a test client builds"),
             "test-key".to_string(),
         );
-        assert_eq!(provider.max_context_tokens("gpt-5.4-mini"), 400_000);
+        assert_eq!(provider.max_context_tokens("gpt-5.4-mini"), 272_000);
     }
 
     #[test]
@@ -812,7 +827,7 @@ mod tests {
         );
         let caps = provider.builtin_capabilities("gpt-5.4-mini");
         assert!(caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 400_000);
+        assert_eq!(caps.max_context_tokens, 272_000);
         assert_eq!(caps.max_output_tokens, 128_000);
     }
 
@@ -824,7 +839,7 @@ mod tests {
         );
         let caps = provider.builtin_capabilities("gpt-5.4-nano");
         assert!(caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 400_000);
+        assert_eq!(caps.max_context_tokens, 272_000);
         assert_eq!(caps.max_output_tokens, 128_000);
     }
 
@@ -1082,9 +1097,12 @@ mod tests {
             crate::provider::build_http_client(None).expect("a test client builds"),
             "key".to_string(),
         );
-        // gpt-5.4, gpt-5-mini, etc. should all match gpt-5 pattern
-        assert_eq!(provider.max_context_tokens("gpt-5.4"), 400_000);
-        assert_eq!(provider.max_context_tokens("gpt-5-mini"), 400_000);
+        // gpt-5.4, gpt-5-mini, etc. should all match gpt-5 pattern.
+        // 272,000 is OpenAI's published `max_input_tokens` for the family;
+        // this asserted 400,000, which nothing publishes, and `cargo xtask
+        // prices` now reports the day it stops matching.
+        assert_eq!(provider.max_context_tokens("gpt-5.4"), 272_000);
+        assert_eq!(provider.max_context_tokens("gpt-5-mini"), 272_000);
     }
 
     #[test]

@@ -495,7 +495,7 @@ fn this_provider_never_wins_a_bare_model_name() {
 fn no_model_is_offered_with_a_temperature() {
     let p = provider("http://x", Static::new("t"));
     assert!(!p.capabilities("gpt-5.6-sol").supports_temperature);
-    assert_eq!(p.max_context_tokens("gpt-5.6-sol"), 400_000);
+    assert_eq!(p.max_context_tokens("gpt-5.6-sol"), 922_000);
 }
 
 #[test]
