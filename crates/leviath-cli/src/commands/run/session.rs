@@ -25,10 +25,12 @@ fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
     }
 }
 
-/// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` is always
-/// present (it needs no key); the API-key providers are included only when their
-/// key is configured, and `claude-code` only when explicitly enabled. This is the
-/// sole point that reads provider settings out of `Config`.
+/// Build the list of [`ProviderCreds`] a [`Config`] implies.
+///
+/// Every provider here is opt-in: an API-key one when its key is configured,
+/// `claude-code` and `codex` when they are enabled, and `ollama` when it was
+/// chosen or given an address. This is the sole point that reads provider
+/// settings out of `Config`.
 pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     let caps = &config.model_capabilities;
     let timeout = config.request_timeout_secs;
@@ -90,22 +92,30 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         }
     }
 
-    // Ollama is always available (no key); carry any configured base URL.
-    creds.push(ProviderCreds {
-        name: "ollama".to_string(),
-        api_key: None,
-        base_url: Some(
-            config
-                .ollama_base_url
-                .as_deref()
-                .unwrap_or("http://localhost:11434")
-                .to_string(),
-        ),
-        model_capabilities: caps.clone(),
-        request_timeout_secs: timeout,
-        rate_limit: None,
-        options: std::collections::HashMap::new(),
-    });
+    // Ollama needs no key and answers on a well-known local port, so this
+    // used to register it on every machine whether or not anybody had asked.
+    // That made a bare model name in a blueprint resolvable against whatever
+    // happened to be running locally - a surprising place for a run to end
+    // up, and not one the user chose. Opt-in now, by the switch `lev setup`
+    // writes or by naming an address, which is what an install that
+    // configured it before the switch existed already has.
+    if config.providers.ollama_enabled || config.ollama_base_url.is_some() {
+        creds.push(ProviderCreds {
+            name: "ollama".to_string(),
+            api_key: None,
+            base_url: Some(
+                config
+                    .ollama_base_url
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434")
+                    .to_string(),
+            ),
+            model_capabilities: caps.clone(),
+            request_timeout_secs: timeout,
+            rate_limit: None,
+            options: std::collections::HashMap::new(),
+        });
+    }
 
     // Every `[model_providers.<name>]` entry that is an endpoint rather than a
     // script. Registered natively, under its own name, so it needs no `.rhai`
@@ -477,8 +487,9 @@ mod tests {
             &|_| true,
         )
         .expect("an HTTPS client builds in tests");
-        // Ollama needs no key and is always on.
-        assert!(registry.has("ollama"));
+        // Opt-in like everything else, so a default config registers it not
+        // at all.
+        assert!(!registry.has("ollama"));
         // Claude Code needs no key either, but is opt-in - a default config
         // must not reach the user's Claude subscription (or send their account
         // email to it) without them having said yes.
@@ -1030,7 +1041,7 @@ mod tests {
     // ─── resolve_task: multiline file content ───────────────────────────
 
     #[test]
-    fn build_provider_registry_defaults_have_ollama_only() {
+    fn build_provider_registry_defaults_have_nothing() {
         let config = Config::default();
         let registry = build_provider_registry_from_config_probing(
             &config,
@@ -1038,10 +1049,41 @@ mod tests {
             &|_| true,
         )
         .expect("an HTTPS client builds in tests");
-        // Ollama is present regardless of key configuration; claude-code is not,
-        // until the user opts in.
-        assert!(registry.has("ollama"));
+        // Every provider is opt-in, Ollama included. It needs no key and
+        // answers on a well-known local port, which used to be reason enough
+        // to register it everywhere - and made a bare model name resolvable
+        // against whatever happened to be running on the machine.
+        assert!(!registry.has("ollama"));
         assert!(!registry.has("claude-code"));
+    }
+
+    /// Chosen in `lev setup`, or given an address by hand: either counts.
+    ///
+    /// The second is what an install that configured Ollama before the switch
+    /// existed already has, so it keeps working without being re-run.
+    #[test]
+    fn ollama_registers_once_it_is_chosen_or_addressed() {
+        for config in [
+            Config {
+                providers: crate::config::ProviderConfig {
+                    ollama_enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Config {
+                ollama_base_url: Some("http://elsewhere:11434".to_string()),
+                ..Default::default()
+            },
+        ] {
+            let registry = build_provider_registry_from_config_probing(
+                &config,
+                &leviath_providers::provider::build_http_client,
+                &|_| true,
+            )
+            .expect("an HTTPS client builds in tests");
+            assert!(registry.has("ollama"));
+        }
     }
 
     #[test]
@@ -1143,8 +1185,8 @@ mod tests {
         .expect("an HTTPS client builds in tests");
         // Verify anthropic provider was registered
         assert!(registry.has("anthropic"));
-        // Verify ollama always registered
-        assert!(registry.has("ollama"));
+        // And nothing else: this config chose one provider.
+        assert!(!registry.has("ollama"));
     }
 
     // ─── launch_editor: candidates exhausted when no editors available ────

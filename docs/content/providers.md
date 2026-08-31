@@ -25,6 +25,13 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
+Every provider here is opt-in, Ollama included. It needs no key and answers on a well-known local
+port, which used to be reason enough to register it on every machine - and that made a bare model
+name in a blueprint resolvable against whatever happened to be running locally, which is a
+surprising place for a run to end up. Choose it in `lev setup`, or set `[providers]
+ollama_enabled = true`; naming an `ollama_base_url` also counts, so an install that configured it
+before the switch existed keeps working untouched.
+
 ## Model identifiers
 
 A model is always named by a `provider` and a `model` together. The `model` string is passed to that

@@ -32,6 +32,9 @@ claude_code_enabled = false
 anthropic_cache_ttl = "5m"
 claude_code_binary = "/usr/local/bin/claude"
 claude_code_effort = "medium"
+# Offer Ollama. Opt-in like everything else: setting `ollama_base_url` above
+# also counts as choosing it.
+ollama_enabled = false
 # Bill inference to a ChatGPT subscription instead of an API balance.
 # Sign in from `lev setup` (or `lev auth login codex` on a headless machine);
 # the grant is stored outside this file and its token renews itself.
