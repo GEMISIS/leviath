@@ -82,8 +82,20 @@ pub struct ProviderRow {
     pub checking: bool,
 
     /// For a [`Credential::Signin`] row, who is signed in, as a line to show.
-    /// `None` means nobody is. Read once when the wizard is built.
+    /// `None` means nobody is. Read when the wizard is built, and again from
+    /// whatever a finished sign-in reports.
     pub signed_in: Option<String>,
+    /// A sign-in is in flight: the browser is open and the user is somewhere
+    /// in it. Minutes, not the second a credential check takes, which is why
+    /// this is its own flag rather than reusing `checking`.
+    pub signing_in: bool,
+    /// The authorize URL of the sign-in in flight.
+    ///
+    /// Shown rather than only opened. The opener silently does nothing over
+    /// SSH and in a bare console, and without the URL on screen the wizard
+    /// would sit on "waiting for your browser" with no browser and no way for
+    /// the user to find out why.
+    pub authorize_url: Option<String>,
 }
 
 impl ProviderRow {
@@ -146,6 +158,10 @@ pub(crate) use crate::tui::widgets::picker::{Picker, PickerOption};
 pub(crate) enum DetailAction {
     /// Open the provider's signup or key page in a browser.
     OpenSignup,
+    /// Take a browser sign-in for a [`Credential::Signin`] provider.
+    SignIn,
+    /// Forget the stored sign-in.
+    SignOut,
     /// Check the credential against the provider.
     Verify,
 }
@@ -153,9 +169,28 @@ pub(crate) enum DetailAction {
 impl DetailAction {
     /// The button's text, which names the provider so the row says what it
     /// will do rather than what it is called.
-    pub(crate) fn label(self, provider: &str) -> String {
+    ///
+    /// Takes the row rather than the display name because two of these read
+    /// differently depending on what the provider wants. A sign-in provider
+    /// has no key page to open, and its sign-in button is an offer the first
+    /// time and a warning after that: doing it again replaces the account
+    /// every run is currently billed to.
+    pub(crate) fn label(self, row: &ProviderRow) -> String {
+        let provider = row.provider.display;
         match self {
+            // Unnamed, unlike the key-page button. This provider's display
+            // name is a sentence ("OpenAI Codex (ChatGPT subscription)"), it
+            // is already the heading two lines above, and a button that
+            // repeats it reads as a different provider's.
+            Self::OpenSignup if row.provider.credential == Credential::Signin => {
+                "Open the subscription plans page".to_string()
+            }
             Self::OpenSignup => format!("Open the {provider} key page"),
+            Self::SignIn if row.signed_in.is_some() => {
+                "Sign in again, as a different account".to_string()
+            }
+            Self::SignIn => "Sign in with your browser".to_string(),
+            Self::SignOut => "Sign out".to_string(),
             Self::Verify => "Check this credential".to_string(),
         }
     }
@@ -242,6 +277,76 @@ pub struct VerifyReply {
     pub provider_id: String,
     /// What the check concluded.
     pub outcome: Outcome,
+}
+
+/// Asked of the background sign-in lane.
+///
+/// A lane of its own rather than another kind of [`VerifyRequest`], because
+/// the two wait for entirely different things. A credential check is a round
+/// trip and the verifier runs them one after another; a sign-in waits for a
+/// person to find their password, and putting it in that queue would stall
+/// every check behind it for as long as the browser stayed open.
+#[derive(Debug, Clone)]
+pub struct SigninRequest {
+    /// Which provider to act on, matching the row that asked.
+    pub provider_id: String,
+    /// Whether to take a sign-in or forget the one that is stored.
+    pub action: SigninAction,
+}
+
+/// What a [`SigninRequest`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigninAction {
+    /// Open the browser and store what comes back.
+    In,
+    /// Forget the stored grant. Leaves `config.toml` alone: signing out is
+    /// not the same as turning the provider off.
+    Out,
+}
+
+/// Reported by the background sign-in lane, possibly more than once per
+/// request: the URL comes back as soon as it exists, long before the person
+/// has finished with it.
+#[derive(Debug, Clone)]
+pub enum SigninEvent {
+    /// The authorize URL, ready to be opened or copied.
+    Opened {
+        /// Which provider's sign-in this belongs to.
+        provider_id: String,
+        /// Where to go.
+        url: String,
+    },
+    /// A sign-in finished and this is who it was for.
+    SignedIn {
+        /// Which provider signed in.
+        provider_id: String,
+        /// The identity line to show, already formatted.
+        who: String,
+    },
+    /// A sign-out finished.
+    SignedOut {
+        /// Which provider signed out.
+        provider_id: String,
+    },
+    /// Neither finished, and this is why.
+    Failed {
+        /// Which provider was being acted on.
+        provider_id: String,
+        /// What went wrong, shown on the card.
+        message: String,
+    },
+}
+
+impl SigninEvent {
+    /// Which row this belongs to.
+    pub(crate) fn provider_id(&self) -> &str {
+        match self {
+            Self::Opened { provider_id, .. }
+            | Self::SignedIn { provider_id, .. }
+            | Self::SignedOut { provider_id }
+            | Self::Failed { provider_id, .. } => provider_id,
+        }
+    }
 }
 
 /// Where the text being typed goes when it is committed.

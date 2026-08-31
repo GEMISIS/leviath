@@ -1033,6 +1033,73 @@ fn a_provider_without_a_key_page_offers_only_the_check() {
     assert_eq!(w.row_count(), 2, "the credential row plus the one action");
 }
 
+/// The sign-in screen's buttons start at row 0, and pressing the first row
+/// must not open a text editor: there is no credential behind it to edit.
+#[test]
+fn a_sign_in_screen_has_no_credential_to_edit() {
+    let (_dir, mut w) = wizard();
+    let index = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "codex")
+        .expect("the codex row is offered");
+    for row in &mut w.providers {
+        row.selected = false;
+    }
+    w.providers[index].selected = true;
+    w.enter(Step::ProviderDetail);
+
+    // Row 1 is the plans-page button, not a field. (Row 0 is the sign-in,
+    // which would ask the lane rather than opening an editor either way.)
+    let (x, y) = point_of_row(&w, 1);
+    w.handle_mouse(click(x, y), AREA);
+    assert!(w.edit.is_none(), "an editor opened over nothing to type");
+    assert!(
+        w.message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Opened")),
+        "{:?}",
+        w.message
+    );
+}
+
+/// Enter on the sign-in button asks the lane rather than doing it inline, so
+/// the wizard keeps drawing while the browser is open.
+#[test]
+fn the_sign_in_button_asks_the_lane() {
+    let (_dir, mut w) = wizard();
+    let index = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "codex")
+        .expect("the codex row is offered");
+    for row in &mut w.providers {
+        row.selected = false;
+    }
+    w.providers[index].selected = true;
+    w.enter(Step::ProviderDetail);
+    let (mut requests, _events) = w.take_signin_ends().expect("first take");
+
+    let (x, y) = point_of_row(&w, 0);
+    w.handle_mouse(click(x, y), AREA);
+
+    let request = requests.try_recv().expect("the lane was asked");
+    assert_eq!(request.provider_id, "codex");
+    assert!(w.providers[index].signing_in);
+
+    // And with a sign-in stored the rows shift: check, sign in again, then
+    // sign out, which is the third.
+    w.providers[index].signed_in = Some("a@b.c".to_string());
+    w.providers[index].signing_in = false;
+    let (x, y) = point_of_row(&w, 2);
+    w.handle_mouse(click(x, y), AREA);
+    let request = requests.try_recv().expect("the lane was asked again");
+    assert_eq!(
+        request.action,
+        crate::commands::setup::state::SigninAction::Out
+    );
+}
+
 #[test]
 fn a_click_outside_the_body_does_nothing() {
     let (_dir, mut w) = wizard();

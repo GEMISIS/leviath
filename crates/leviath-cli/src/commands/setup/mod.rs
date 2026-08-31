@@ -22,6 +22,7 @@
 //! * `catalog` - which providers exist and how each is configured.
 //! * [`import`] - MCP servers found in other tools.
 //! * [`verify`] - proving a credential works.
+//! * [`signin`] - taking a browser sign-in for a provider that has no key.
 //!
 //! The terminal is a *front-end*, not the feature: everything it collects lands
 //! in a `plan::SetupPlan`, and `--non-interactive` builds the same struct
@@ -35,6 +36,7 @@ pub mod import;
 pub(crate) mod input;
 pub(crate) mod plan;
 pub(crate) mod render;
+pub mod signin;
 pub(crate) mod state;
 pub mod verify;
 
@@ -98,9 +100,9 @@ pub struct SetupArgs {
     pub claude_code_effort: Option<String>,
 
     /// Enable the Codex transport (runs on your ChatGPT subscription instead
-    /// of an API key). Sign in separately with `lev auth login codex`; this
-    /// flag never opens a browser, because nothing is watching one in a
-    /// non-interactive run.
+    /// of an API key). This flag only flips the switch: interactive `lev setup`
+    /// signs in from its own screen, and a non-interactive run has nobody
+    /// watching a browser, so on this path sign in with `lev auth login codex`.
     #[arg(long)]
     pub codex: Option<bool>,
 
@@ -353,6 +355,7 @@ pub(crate) async fn run_wizard_loop<B: ratatui::backend::Backend>(
     loop {
         wizard.ticks += 1;
         wizard.drain_verifications();
+        wizard.drain_signins();
         // The area is taken from the frame that was actually drawn, so a click
         // resolves against the layout the user was looking at rather than
         // against a size asked for separately afterwards.

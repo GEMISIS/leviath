@@ -182,33 +182,7 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
     // guessing where Leviath's files live, so the path is supplied here or the
     // provider is not offered at all.
     if config.providers.codex_enabled {
-        let mut options = std::collections::HashMap::new();
-        // Extended from an `Option` rather than branched on: with no home
-        // there is no path, the option is simply absent, and the registry
-        // skips the provider - which it is tested to do.
-        options.extend(
-            leviath_providers::codex::ProviderAuthStore::default_path()
-                .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
-        );
-        if let Some(originator) = &config.providers.codex_originator {
-            options.insert("originator".to_string(), originator.clone());
-        }
-        if let Some(effort) = &config.providers.codex_reasoning_effort {
-            options.insert("effort".to_string(), effort.clone());
-        }
-        if let Some(verbosity) = &config.providers.codex_verbosity {
-            options.insert("verbosity".to_string(), verbosity.clone());
-        }
-        options.insert(
-            "replay_reasoning".to_string(),
-            config.providers.codex_replay_reasoning.to_string(),
-        );
-        // The runtime has no view of `[security]`, and a grant only the CLI
-        // could read would leave the keychain backend silently signing the
-        // daemon out.
-        if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
-            options.insert("credential_store".to_string(), "keychain".to_string());
-        }
+        let options = codex_options(config);
         creds.push(ProviderCreds {
             name: leviath_providers::codex::PROVIDER_NAME.to_string(),
             api_key: None,
@@ -226,6 +200,54 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
     }
 
     creds
+}
+
+/// The `options` a Codex [`ProviderCreds`] carries.
+///
+/// Shared with `lev setup`, whose credential check has to build the provider
+/// the same way this does. It reads the grant from disk, so a wizard that
+/// pointed somewhere else would be checking a sign-in no run would ever use.
+pub(crate) fn codex_options(config: &Config) -> std::collections::HashMap<String, String> {
+    let mut options = std::collections::HashMap::new();
+    // Extended from an `Option` rather than branched on: with no home
+    // there is no path, the option is simply absent, and the registry
+    // skips the provider - which it is tested to do.
+    options.extend(
+        leviath_providers::codex::ProviderAuthStore::default_path()
+            .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
+    );
+    options.extend(
+        config
+            .providers
+            .codex_originator
+            .clone()
+            .map(|v| ("originator".to_string(), v)),
+    );
+    options.extend(
+        config
+            .providers
+            .codex_reasoning_effort
+            .clone()
+            .map(|v| ("effort".to_string(), v)),
+    );
+    options.extend(
+        config
+            .providers
+            .codex_verbosity
+            .clone()
+            .map(|v| ("verbosity".to_string(), v)),
+    );
+    options.insert(
+        "replay_reasoning".to_string(),
+        config.providers.codex_replay_reasoning.to_string(),
+    );
+    // The runtime has no view of `[security]`, and a grant only the CLI
+    // could read would leave the keychain backend silently signing the
+    // daemon out.
+    if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
+        options.insert("credential_store".to_string(), "keychain".to_string());
+    }
+    options
 }
 
 /// Convenience wrapper: build a [`ProviderRegistry`] straight from a [`Config`].

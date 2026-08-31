@@ -12,7 +12,9 @@ use std::sync::Mutex;
 
 /// A stub opener that plays the browser: it parses the authorize URL and hits
 /// the loopback callback with the code and the state it was given.
-fn browser_that_redirects(recorder: Arc<Mutex<Vec<String>>>) -> leviath_mcp::BrowserOpener {
+pub(crate) fn browser_that_redirects(
+    recorder: Arc<Mutex<Vec<String>>>,
+) -> leviath_mcp::BrowserOpener {
     Arc::new(move |url: &str| {
         recorder.lock().expect("recorder").push(url.to_string());
         let parsed = url::Url::parse(url).expect("a URL");
@@ -61,7 +63,7 @@ fn browser_that_does_nothing() -> leviath_mcp::BrowserOpener {
 ///
 /// Encoded by hand rather than through a crate: `base64` is not a dependency
 /// of the CLI, and adding one for a single test fixture is a poor trade.
-fn id_token() -> String {
+pub(crate) fn id_token() -> String {
     let claims = serde_json::json!({
         "email": "someone@example.com",
         "https://api.openai.com/auth": {
@@ -90,7 +92,11 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-fn env_for(issuer: &str, dir: &tempfile::TempDir, opener: leviath_mcp::BrowserOpener) -> LoginEnv {
+pub(crate) fn env_for(
+    issuer: &str,
+    dir: &tempfile::TempDir,
+    opener: leviath_mcp::BrowserOpener,
+) -> LoginEnv {
     LoginEnv {
         opener,
         store_path: dir.path().join("provider-auth.json"),

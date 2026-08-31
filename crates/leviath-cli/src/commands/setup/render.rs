@@ -642,21 +642,34 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
                 Style::default().fg(C_DIM),
             )));
         }
-        // Nothing is typed here: the credential is a browser sign-in taken by
-        // a separate command, and this card reports whether it has been.
+        // Nothing is typed here, so this is a status line rather than a
+        // cursor row, and the buttons below it are the whole screen.
         Credential::Signin => {
-            let (text, colour) = match &row.signed_in {
-                Some(who) => (format!("Signed in: {who}"), C_WHITE),
-                None => ("Not signed in yet.".to_string(), C_WARN),
+            let (text, colour) = match (row.signing_in, &row.signed_in) {
+                (true, _) => ("Waiting for your browser…".to_string(), C_ACCENT),
+                (false, Some(who)) => (format!("Signed in: {who}"), C_WHITE),
+                (false, None) => ("Not signed in yet.".to_string(), C_WARN),
             };
-            lines.push(Line::from(vec![
-                Span::styled(row_marker, Style::default().fg(C_ACCENT)),
-                Span::styled(text, Style::default().fg(colour)),
-            ]));
-            if row.signed_in.is_none() {
+            lines.push(Line::from(Span::styled(
+                format!("  {text}"),
+                Style::default().fg(colour),
+            )));
+            if let Some(url) = &row.authorize_url {
+                // In full rather than shortened: this is here to be copied by
+                // someone whose browser did not open, and half a URL is no
+                // use to them.
                 lines.push(Line::from(Span::styled(
-                    "Run `lev auth login codex` to sign in with your ChatGPT account. \
-                     It opens a browser and stores the grant outside config.toml.",
+                    "If it did not open, go to:",
+                    Style::default().fg(C_DIM),
+                )));
+                lines.push(Line::from(Span::styled(
+                    url.clone(),
+                    Style::default().fg(C_MUTED),
+                )));
+            } else if row.signed_in.is_none() {
+                lines.push(Line::from(Span::styled(
+                    "Signing in opens your browser and stores the grant outside config.toml. \
+                     Nothing to type here.",
                     Style::default().fg(C_DIM),
                 )));
             }
@@ -669,15 +682,22 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
     lines.push(status_line(wizard, index));
     lines.push(Line::from(""));
 
+    // A sign-in screen has no credential row, so its buttons are its only
+    // rows and the first of them is row 0.
+    let has_credential_row = wizard.detail_has_credential_row(index);
     let mut screen = Screen {
         lines,
-        rows: vec![credential_row],
+        rows: if has_credential_row {
+            vec![credential_row]
+        } else {
+            Vec::new()
+        },
     };
-    for (offset, action) in wizard.detail_actions().iter().enumerate() {
-        // Row 0 is the credential itself, so the actions start after it.
-        let focused = wizard.cursor == offset + 1;
+    let offset = usize::from(has_credential_row);
+    for (position, action) in wizard.detail_actions().iter().enumerate() {
+        let focused = wizard.cursor == position + offset;
         screen.row();
-        screen.push(button_line(&action.label(row.provider.display), focused));
+        screen.push(button_line(&action.label(row), focused));
     }
     screen.finish(wizard)
 }
@@ -1432,34 +1452,82 @@ mod tests {
         assert!(!screen.contains("sk-oai"), "a key leaked:\n{screen}");
     }
 
-    /// A browser sign-in has nothing to type, so the card reports the account
-    /// instead of offering a field, and names the command when there is none.
-    #[test]
-    fn a_sign_in_card_reports_the_account_rather_than_asking_for_one() {
-        let (_dir, mut w) = wizard();
+    /// Put the codex card on screen, with nothing else selected.
+    fn codex_card() -> (tempfile::TempDir, Wizard, usize) {
+        let (dir, mut w) = wizard();
         let index = w
             .providers
             .iter()
             .position(|r| r.provider.id == "codex")
             .expect("the codex row is offered");
-        // The only selected row, so the detail card is this one.
         for row in &mut w.providers {
             row.selected = false;
         }
         w.providers[index].selected = true;
         w.enter(Step::ProviderDetail);
+        (dir, w, index)
+    }
+
+    /// A browser sign-in has nothing to type, so the card reports the account
+    /// instead of offering a field, and offers the sign-in as a button rather
+    /// than as a command to go and run somewhere else.
+    #[test]
+    fn a_sign_in_card_reports_the_account_rather_than_asking_for_one() {
+        let (_dir, mut w, index) = codex_card();
 
         let waiting = rendered(&w);
         assert!(waiting.contains("Not signed in yet"), "{waiting}");
-        assert!(waiting.contains("lev auth login codex"), "{waiting}");
-        assert!(!waiting.contains("API key"), "{waiting}");
+        assert!(waiting.contains("Sign in with your browser"), "{waiting}");
+        assert!(
+            !waiting.contains("API key:"),
+            "no field is offered:\n{waiting}"
+        );
+        assert!(
+            !waiting.contains("lev auth login"),
+            "setup sends nobody to another command:\n{waiting}"
+        );
+        // Nothing to check and nothing to forget until there is a sign-in.
+        assert!(!waiting.contains("Check this credential"), "{waiting}");
+        assert!(!waiting.contains("Sign out"), "{waiting}");
 
         w.providers[index].signed_in = Some("someone@example.com (plus plan)".to_string());
         let signed_in = rendered(&w);
         assert!(signed_in.contains("someone@example.com"), "{signed_in}");
+        assert!(signed_in.contains("Check this credential"), "{signed_in}");
+        assert!(signed_in.contains("Sign out"), "{signed_in}");
+    }
+
+    /// While the browser is open the card says so, and shows the URL for a
+    /// session where no browser opened.
+    #[test]
+    fn a_sign_in_in_flight_shows_the_url_to_copy() {
+        let (_dir, mut w, index) = codex_card();
+        w.providers[index].signing_in = true;
+        w.providers[index].authorize_url = Some("https://auth.openai.com/oauth/x".to_string());
+
+        let screen = rendered(&w);
+        assert!(screen.contains("Waiting for your browser"), "{screen}");
         assert!(
-            !signed_in.contains("lev auth login codex"),
-            "the reminder outlived the sign-in:\n{signed_in}"
+            screen.contains("https://auth.openai.com/oauth/x"),
+            "{screen}"
+        );
+    }
+
+    /// The buttons are the only rows on this card, so the one the cursor
+    /// starts on is the action somebody opening this screen actually wants.
+    #[test]
+    fn the_first_row_of_a_sign_in_card_is_the_sign_in_button() {
+        let (_dir, w, index) = codex_card();
+        assert!(!w.detail_has_credential_row(index));
+        assert_eq!(w.cursor, 0);
+        assert_eq!(
+            w.detail_action_at(index, 0),
+            Some(crate::commands::setup::state::DetailAction::SignIn)
+        );
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("› [ Sign in with your browser ]"),
+            "the focus marker belongs on the sign-in button:\n{screen}"
         );
     }
 
