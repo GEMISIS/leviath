@@ -172,9 +172,12 @@ flowchart LR
   C --> D["what the model is asked for"]
 ```
 
-One rule breaks that pattern on purpose. If you name a `format` and supply no schema, any schema the
-blueprint declared is dropped. A check written for one shape says nothing about another. Supply your
-own schema alongside your format when you want the answer validated.
+One rule breaks that pattern on purpose. If you name a `format` other than the one the blueprint
+declares, any Rhai validator and any JSON schema it declared are retired together. A check written
+for one shape says nothing about another. The retirement is not silent: `lev run` warns on stderr,
+the REST spawn response carries a `warnings` array naming what was retired, and the daemon logs a
+line for every spawn path. Re-stating the format the blueprint already declares retires nothing.
+Supply your own schema alongside your format when you want the answer validated.
 
 ### It outranks the stage's prompt
 

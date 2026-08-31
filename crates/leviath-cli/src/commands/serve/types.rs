@@ -656,8 +656,11 @@ pub(super) struct SpawnAgentReq {
     /// inspects the answer's contents, and only because you asked: a submission
     /// that fails is refused back to the agent to correct.
     ///
-    /// Naming `output_format` without this drops a schema the blueprint
-    /// declared, since a check written for one shape says nothing about another.
+    /// An `output_format` that differs from the blueprint's retires any Rhai
+    /// validator and JSON schema the blueprint declared, since a check written
+    /// for one shape says nothing about another; the response's `warnings`
+    /// names what was retired. Supply this field when the new shape should
+    /// still be checked.
     pub(super) output_schema: Option<serde_json::Value>,
 }
 
@@ -699,6 +702,12 @@ impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
 pub(super) struct SpawnAgentResp {
     pub(super) agent_id: String,
     pub(super) run_id: String,
+    /// Things the caller should know about how this run will differ from what
+    /// its blueprint declares: today, the Rhai validator or JSON schema that a
+    /// differing `output_format` retired. Omitted when there is nothing to
+    /// say, so existing clients see the exact response they always did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) warnings: Vec<String>,
 }
 
 #[derive(Deserialize)]

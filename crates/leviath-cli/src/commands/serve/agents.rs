@@ -44,6 +44,30 @@ fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSp
     })
 }
 
+/// What this spawn should tell its caller alongside the run id: today, the
+/// declared shape checks the request's `output_format` retires.
+///
+/// The daemon logs the same retirement at spawn, but into its own log, which
+/// the API caller never reads; the check they may be counting on deserves a
+/// line in the response they do. Best-effort on purpose: a manifest that will
+/// not read or parse is the daemon's to report as the spawn error, and this
+/// must never be why one fails.
+fn spawn_warnings(
+    manifest_path: &std::path::Path,
+    request: Option<&leviath_core::output::OutputSpec>,
+) -> Vec<String> {
+    if request.is_none() {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return Vec::new();
+    };
+    leviath_core::output::retired_check_warnings(&blueprint, request)
+}
+
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
@@ -109,6 +133,7 @@ pub(super) async fn spawn_agent(
         // Serve spawns are top-level runs.
         parent_run_id: None,
     };
+    let warnings = spawn_warnings(&manifest_path, args.output.as_ref());
 
     match state.control.spawn(args).await {
         Ok(ControlResponse::Spawned { run_id }) => {
@@ -120,6 +145,7 @@ pub(super) async fn spawn_agent(
             Ok(Json(SpawnAgentResp {
                 agent_id: run_id.clone(),
                 run_id,
+                warnings,
             }))
         }
         Ok(ControlResponse::Error { message }) => Err(err(
@@ -1254,6 +1280,128 @@ system_prompt = "Plan the work"
         );
         assert!(seen(true, PLAIN).await, "the flag opts out for the caller");
         assert!(seen(true, OPTED_OUT).await, "both is still out");
+    }
+
+    /// A router over `POST /api/agents` whose one blueprint, "checked",
+    /// declares an output format with a Rhai validator, plus the fake daemon
+    /// answering it. For the retirement-warning tests below.
+    fn checked_spawn_app() -> (
+        Router,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (control, dir, srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "run-1".to_string(),
+        });
+        let agents = tempfile::tempdir().unwrap();
+        let bp = agents.path().join("checked");
+        std::fs::create_dir_all(&bp).unwrap();
+        std::fs::write(
+            bp.join("agent.leviath"),
+            r#"
+[agent]
+name = "checked"
+version = "1.0.0"
+description = "declares a validator"
+
+[agent.output]
+format = "markdown"
+validator = "checks/report.rhai"
+
+[stages.plan]
+system_prompt = "Plan the work"
+"#,
+        )
+        .unwrap();
+        let state = test_state_with_agent_paths(vec![agents.path().to_path_buf()], control);
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+        (app, agents, dir, srv)
+    }
+
+    /// POST a spawn and return the response body as JSON (asserting 200).
+    async fn post_spawn_json(app: Router, body: &str) -> serde_json::Value {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The headline: a spawn whose `output_format` differs from the declared
+    /// one retires the blueprint's Rhai validator, and the response now says
+    /// so instead of leaving the caller to believe the check still runs.
+    #[tokio::test]
+    async fn spawn_with_a_differing_format_reports_the_retired_checks() {
+        let (app, _agents, _dir, _srv) = checked_spawn_app();
+        let body = post_spawn_json(
+            app,
+            r#"{"blueprint":"checked","task":"t","workdir":"/tmp","output_format":"json"}"#,
+        )
+        .await;
+        let warnings = body["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !warnings.is_empty(),
+            "the response carries warnings: {body}"
+        );
+        let joined = warnings
+            .iter()
+            .filter_map(|w| w.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("checks/report.rhai"), "{joined}");
+        assert!(joined.contains("'plan'"), "{joined}");
+        assert!(joined.contains("'json'"), "{joined}");
+    }
+
+    /// Re-stating the format the blueprint already declares retires nothing
+    /// (the checks keep running), so there is nothing to warn about.
+    #[tokio::test]
+    async fn spawn_restating_the_declared_format_warns_about_nothing() {
+        let (app, _agents, _dir, _srv) = checked_spawn_app();
+        let body = post_spawn_json(
+            app,
+            r#"{"blueprint":"checked","task":"t","workdir":"/tmp","output_format":"markdown"}"#,
+        )
+        .await;
+        assert!(body.get("warnings").is_none(), "{body}");
+    }
+
+    /// The lenient arms: a manifest that is not there or will not parse stays
+    /// quiet here, because the spawn itself is where that failure is reported.
+    #[test]
+    fn spawn_warnings_give_up_quietly_on_a_bad_manifest() {
+        let request = Some(leviath_core::output::OutputSpec {
+            format: Some("json".to_string()),
+            ..leviath_core::output::OutputSpec::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        assert!(spawn_warnings(&dir.path().join("nope.leviath"), request.as_ref()).is_empty());
+        let unparseable = dir.path().join("agent.leviath");
+        std::fs::write(&unparseable, "not valid toml [[[").unwrap();
+        assert!(spawn_warnings(&unparseable, request.as_ref()).is_empty());
+    }
+
+    /// No format request, no retirement: the response stays exactly what
+    /// existing clients parse.
+    #[tokio::test]
+    async fn spawn_without_a_format_request_warns_about_nothing() {
+        let (app, _agents, _dir, _srv) = checked_spawn_app();
+        let body = post_spawn_json(
+            app,
+            r#"{"blueprint":"checked","task":"t","workdir":"/tmp"}"#,
+        )
+        .await;
+        assert!(body.get("warnings").is_none(), "{body}");
     }
 
     #[tokio::test]
@@ -3213,10 +3361,20 @@ system_prompt = "Plan the work"
         let resp = SpawnAgentResp {
             agent_id: "coder".to_string(),
             run_id: "run-abc-123".to_string(),
+            warnings: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"agent_id\":\"coder\""));
         assert!(json.contains("\"run_id\":\"run-abc-123\""));
+        // Nothing to say stays absent, so existing clients parse what they
+        // always did; something to say serializes as a plain string array.
+        assert!(!json.contains("warnings"));
+        let resp = SpawnAgentResp {
+            warnings: vec!["the validator is retired".to_string()],
+            ..resp
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"warnings\":[\"the validator is retired\"]"));
     }
 
     #[test]
