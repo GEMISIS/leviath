@@ -62,14 +62,34 @@ The same hardened engine every Leviath script gets. No filesystem, no network, n
 operation budget so a runaway script stops instead of hanging the run. You get the
 [standard helpers](/docs/scripting), including `parse_json`.
 
-A validator that throws, loops forever, or returns something that is neither `()` nor a string is
-treated as **broken, not as a rejection**. The submission is recorded, and the run says so.
+## When the validator itself fails
 
-That distinction matters. If a script bug read as "this answer is wrong", the agent would retry
-against a validator that can never pass. It would burn its whole budget and end with no answer at
-all. A bug in your validator should cost you a warning, not the agent's work.
+A validator can also fail to run at all: it throws, runs past its operation budget, or returns
+something that is neither `()` nor a string.
 
-Where the run says so:
+By default the submission is **rejected**, and the script's own error goes back to the agent as the
+reason. A throw is often the check working: a validator that calls `parse_json` on malformed output
+throws, and "malformed JSON" is something the agent can fix on its next try. The alternative, and
+the old behaviour, was to accept the answer unchecked, which shipped exactly the submissions the
+validator existed to catch.
+
+If you would rather end the run with an unchecked answer than risk ending it with none, say so:
+
+```toml
+[stages.present.output]
+format = "a2ui"
+validator = "validators/a2ui.rhai"
+on_validator_error = "accept"
+```
+
+With `accept`, a validator that cannot run records the submission as if no validator were declared.
+Choose it when any answer beats no answer, and be aware of what you are trading: a genuine script
+bug under the default reads as "this answer is wrong" on every retry, so the agent can burn its
+whole budget against a check that can never pass. The setting works at both levels, `[agent.output]`
+and `[stages.<name>.output]`, and the stage's value wins. Anything other than `reject` or `accept`
+refuses to load.
+
+In both modes the run flags the script:
 
 | Surface | What you see |
 |---|---|
@@ -80,8 +100,8 @@ Where the run says so:
 Named rather than counted, because the useful question is which one. Recorded once per script
 however many times the stage submits - a validator that throws throws every time.
 
-The failure would otherwise be invisible: the run completes, reports success, and the only trace is
-a line in the daemon log. An answer nobody checked looks exactly like an answer that passed.
+Under `accept` the flag is the only trace: the run completes, reports success, and an answer nobody
+checked looks exactly like an answer that passed. Check it before trusting those runs.
 
 `lev validate` compiles the machine's global tools and script providers as well as the blueprint's
 own, so a script that will not load is something you can find before a run needs it.

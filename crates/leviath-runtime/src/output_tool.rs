@@ -178,9 +178,13 @@ pub(crate) fn handle_output_tool(
     }
 
     // An agent's own validator, for a format nothing here can parse and a shape
-    // no JSON Schema can describe. A broken script is reported as broken rather
-    // than treated as a rejection: reading it as "the answer is wrong" would
-    // burn the retry budget on a script bug and end the run with nothing.
+    // no JSON Schema can describe. A validator that cannot run follows the
+    // spec's `on_validator_error` policy: by default the submission is refused
+    // with the script's own error as the reason, because an answer nothing
+    // checked must not ship as if it passed, and a `parse_json` throw on
+    // malformed output is feedback the model can act on. `accept` records the
+    // submission unchecked instead, for blueprints that would rather have an
+    // answer than a failed run. The script is flagged on the run either way.
     if let Some(script) = spec.and_then(|s| s.validator.as_deref())
         && let Some(held) = validators
         && let Some(validator) = held.compiled.get(script)
@@ -193,6 +197,7 @@ pub(crate) fn handle_output_tool(
                 );
             }
             leviath_scripting::output_validator::Verdict::Unusable(reason) => {
+                let policy = spec.and_then(|s| s.on_validator_error).unwrap_or_default();
                 // Once per script, not once per retry: a validator that throws
                 // throws every time, and the same stage submitting again would
                 // otherwise repeat the same line.
@@ -201,8 +206,14 @@ pub(crate) fn handle_output_tool(
                         stage = %stage,
                         script = %script,
                         error = %reason,
-                        "output validator failed to run; recording the submission \
-                         unchecked and flagging the script on this run"
+                        policy = ?policy,
+                        "output validator failed to run; flagging the script on this run"
+                    );
+                }
+                if policy == leviath_core::output::OnValidatorError::Reject {
+                    return (
+                        format!("[error] the final output was rejected: {reason}"),
+                        None,
                     );
                 }
             }

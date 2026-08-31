@@ -631,6 +631,13 @@ fn spec_with_validator(format: &str) -> OutputSpec {
     }
 }
 
+fn spec_with_lenient_validator(format: &str) -> OutputSpec {
+    OutputSpec {
+        on_validator_error: Some(leviath_core::output::OnValidatorError::Accept),
+        ..spec_with_validator(format)
+    }
+}
+
 /// The point of the seam: a format nothing in this codebase can parse, checked
 /// by the person whose format it is.
 #[test]
@@ -688,14 +695,16 @@ fn an_agent_supplied_validator_accepts_a_good_answer() {
     assert!(output.is_some());
 }
 
-/// A broken validator must not read as "every answer is wrong". That would burn
-/// the retry budget on a script bug and end the run with nothing at all.
+/// The default is fail closed: a validator that cannot run rejects the
+/// submission, and the script's own error goes back to the model. A
+/// `parse_json` throw on malformed output is feedback the model can act on;
+/// silently accepting the answer would ship it unchecked.
 #[test]
-fn a_broken_validator_records_the_submission_unchecked() {
+fn a_throwing_validator_rejects_the_submission_by_default() {
     let vals = validators_with(r#"fn validate(content) { throw "the script is broken" }"#);
     let mut w = win();
-    let (_, output) = handle_output_tool(
-        &json!({"content": "the agent's perfectly good answer"}),
+    let (message, output) = handle_output_tool(
+        &json!({"content": "an answer nothing checked"}),
         &OutputContext {
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
@@ -706,27 +715,60 @@ fn a_broken_validator_records_the_submission_unchecked() {
         0,
         &mut w,
     );
+    assert!(output.is_none(), "nothing recorded");
+    assert!(message.starts_with("[error]"), "{message}");
     assert!(
-        output.is_some(),
-        "a script bug must not cost the agent its answer"
+        message.contains("the script is broken"),
+        "the model must see the script's own error: {message}"
     );
     assert_eq!(
         vals.broken_names(),
         vec!["v.rhai".to_string()],
-        "and the run records which script it could not use, so the failure is \
-         not only a line in the daemon log"
+        "the diagnostic flag is kept in both modes"
+    );
+}
+
+/// `on_validator_error = "accept"` is the opt-out: a blueprint that would
+/// rather have an unchecked answer than a failed run records the submission as
+/// if no validator were declared.
+#[test]
+fn an_accept_policy_records_the_submission_unchecked() {
+    let vals = validators_with(r#"fn validate(content) { throw "the script is broken" }"#);
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({"content": "the agent's perfectly good answer"}),
+        &OutputContext {
+            spec: Some(&spec_with_lenient_validator("a2ui")),
+            validators: Some(&vals),
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
+        0,
+        &mut w,
+    );
+    assert!(
+        output.is_some(),
+        "accept means the script bug does not cost the agent its answer"
+    );
+    assert_eq!(
+        vals.broken_names(),
+        vec!["v.rhai".to_string()],
+        "and the run still records which script it could not use, so the \
+         failure is not only a line in the daemon log"
     );
 }
 
 /// Once per script, not once per retry. A validator that throws throws every
 /// time, so a stage that submits three corrections would otherwise report the
-/// same broken script three times.
+/// same broken script three times. The rejection itself does repeat: the model
+/// is told every time, the operator once.
 #[test]
 fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
     let vals = validators_with(r#"fn validate(content) { throw "still broken" }"#);
     let mut w = win();
     for _ in 0..3 {
-        handle_output_tool(
+        let (message, output) = handle_output_tool(
             &json!({"content": "an answer"}),
             &OutputContext {
                 spec: Some(&spec_with_validator("a2ui")),
@@ -738,6 +780,8 @@ fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
             0,
             &mut w,
         );
+        assert!(output.is_none(), "the default policy rejects every retry");
+        assert!(message.contains("still broken"), "{message}");
     }
     assert_eq!(vals.broken_names(), vec!["v.rhai".to_string()]);
 }

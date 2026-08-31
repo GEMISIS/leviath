@@ -27,8 +27,10 @@
 //!
 //! Execution runs on a fresh hardened engine per call: no filesystem, no
 //! network, no `eval`, operation-bounded. A validator that throws, loops, or
-//! returns something that is neither `()` nor a string is an authoring error,
-//! reported as such rather than being allowed to fail every submission.
+//! returns something that is neither `()` nor a string is reported as broken
+//! rather than folded into "the answer is wrong"; what happens to the
+//! submission then is the consumer's policy (`on_validator_error` on the
+//! output spec), not this module's.
 
 use rhai::{AST, Dynamic, Engine, Scope};
 
@@ -95,11 +97,15 @@ pub enum Verdict {
     /// The answer is not, for this reason. Goes back to the agent verbatim.
     Invalid(String),
     /// The validator itself is broken: it threw, ran out of operations, or
-    /// returned something that is neither `()` nor a string.
+    /// returned something that is neither `()` nor a string. Carries the error
+    /// text, script path included, so a consumer that refuses the submission
+    /// can hand the model something actionable.
     ///
-    /// Kept apart from [`Invalid`](Self::Invalid) on purpose. A broken validator
-    /// must not read as "every answer is wrong", which would burn the agent's
-    /// whole retry budget on a script bug and end the run with nothing.
+    /// Kept apart from [`Invalid`](Self::Invalid) on purpose: a broken script
+    /// is flagged on the run as an authoring problem, where a rejection is the
+    /// answer's problem. Whether the submission is then refused or recorded
+    /// unchecked is the consumer's `on_validator_error` policy, decided where
+    /// the verdict is applied rather than here.
     Unusable(String),
 }
 

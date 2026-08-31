@@ -1939,6 +1939,7 @@ mod tests {
                 example: Some("{\"root\": {}}".to_string()),
                 schema: None,
                 validator: None,
+                on_validator_error: None,
             }),
         );
         let resolved = resolve_one(&bp, None);

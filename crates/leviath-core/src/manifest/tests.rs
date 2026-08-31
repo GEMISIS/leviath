@@ -3040,6 +3040,77 @@ type = "object"
     );
 }
 
+/// The validator-error policy is read at both levels, and only the two spelled
+/// values load.
+#[test]
+fn on_validator_error_parses_at_agent_and_stage_level() {
+    let toml = r#"
+[agent]
+name = "policy-test"
+
+[agent.output]
+format = "a2ui"
+validator = "v.rhai"
+on_validator_error = "accept"
+
+[stages.summary]
+mode = "output"
+
+[stages.summary.output]
+on_validator_error = "reject"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert_eq!(
+        bp.output.as_ref().and_then(|s| s.on_validator_error),
+        Some(crate::output::OnValidatorError::Accept)
+    );
+    assert_eq!(
+        bp.find_stage("summary")
+            .expect("the stage exists")
+            .output
+            .as_ref()
+            .and_then(|s| s.on_validator_error),
+        Some(crate::output::OnValidatorError::Reject)
+    );
+}
+
+/// A policy this parser does not recognise is a load error, not a silent
+/// fallback: `"sometimes"` would otherwise load as the default and change what
+/// happens to the run's answer.
+#[test]
+fn an_unknown_validator_error_policy_is_refused_at_load() {
+    let toml = r#"
+[agent]
+name = "policy-test"
+
+[agent.output]
+on_validator_error = "sometimes"
+"#;
+    let err = parse_manifest(toml).expect_err("refused").to_string();
+    assert!(err.contains("[agent.output]"), "{err}");
+    assert!(err.contains("\"reject\" or \"accept\""), "{err}");
+    assert!(err.contains("sometimes"), "{err}");
+}
+
+/// The wrong type is refused with the same error, naming the stage whose table
+/// carried it. Reading only `as_str` would silently ignore a non-string value.
+#[test]
+fn a_non_string_validator_error_policy_is_refused_at_load() {
+    let toml = r#"
+[agent]
+name = "policy-test"
+
+[stages.summary]
+mode = "output"
+
+[stages.summary.output]
+on_validator_error = 3
+"#;
+    let err = parse_manifest(toml).expect_err("refused").to_string();
+    assert!(err.contains("stage 'summary': output"), "{err}");
+    assert!(err.contains("got: 3"), "{err}");
+}
+
 #[test]
 fn parse_manifest_with_stage_system_prompt() {
     let toml = r#"
@@ -5574,6 +5645,11 @@ fn the_published_schema_and_the_parser_agree_on_every_key() {
             "region",
             &["$defs", "region"][..],
             super::regions::REGION_KEYS,
+        ),
+        (
+            "output",
+            &["$defs", "outputSpec"][..],
+            super::sections::OUTPUT_KEYS,
         ),
         (
             "interaction point",

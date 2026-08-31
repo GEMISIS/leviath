@@ -256,6 +256,13 @@
         "validator": {
           "type": "string",
           "description": "A .rhai script deciding whether an answer is valid, as a path relative to the blueprint directory. For a format the engine cannot parse and a shape a JSON Schema cannot describe. Defines fn validate(content), returning () when fine or a string saying what is wrong. Compiled at spawn, so a broken script fails fast."
+        },
+        "on_validator_error": {
+          "enum": [
+            "reject",
+            "accept"
+          ],
+          "description": "What happens to a submission when the validator itself cannot run: it threw, ran out of operations, or returned the wrong type. reject (the default) refuses the submission and sends the script's error back to the model as retry feedback; accept records the answer unchecked. The broken script is flagged on the run either way."
         }
       }
     },

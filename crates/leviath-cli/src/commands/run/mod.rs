@@ -178,6 +178,7 @@ pub fn output_request(
         example: None,
         schema,
         validator: None,
+        on_validator_error: None,
     }))
 }
 

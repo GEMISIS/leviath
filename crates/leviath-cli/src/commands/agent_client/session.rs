@@ -87,6 +87,7 @@ pub(super) fn spawn_args(
                 example: None,
                 schema: None,
                 validator: None,
+                on_validator_error: None,
             }),
         },
     }
