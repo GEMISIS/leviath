@@ -1,6 +1,6 @@
 //! Config and models endpoints.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 
@@ -389,8 +389,16 @@ pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json
 /// that admits which numbers are guesses.
 const MODELS_PRIME_TIMEOUT_SECS: u64 = 5;
 
-pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelEntry>> {
-    models_with(&state, &leviath_providers::provider::build_http_client).await
+pub(super) async fn get_models(
+    State(state): State<AppState>,
+    Query(query): Query<ModelsQuery>,
+) -> Json<Vec<ModelEntry>> {
+    models_with(
+        &state,
+        &leviath_providers::provider::build_http_client,
+        &query,
+    )
+    .await
 }
 
 /// [`get_models`], with client construction injected so the "no usable HTTPS
@@ -398,8 +406,18 @@ pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelE
 pub(super) async fn models_with(
     state: &AppState,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
+    query: &ModelsQuery,
 ) -> Json<Vec<ModelEntry>> {
-    Json(list_models_from_config(&state.current_config(), build_client).await)
+    let mut models = list_models_from_config(&state.current_config(), build_client).await;
+    // Filtered here rather than left to the caller because the interesting
+    // case is two providers serving the *same* model ids: `openai` and
+    // `codex` both answer to `gpt-5.5`, and they bill to different places.
+    // A client that wants one of them should be able to ask for it rather
+    // than fetch both and match on a string it had to know.
+    if let Some(provider) = query.provider.as_deref() {
+        models.retain(|m| m.provider == provider);
+    }
+    Json(models)
 }
 
 /// Every model every configured provider reports, as `provider/id`: what the
@@ -573,6 +591,92 @@ mod tests {
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         }
+    }
+
+    /// `?provider=` narrows the listing, which is what makes two providers
+    /// serving the same model id tellable apart.
+    ///
+    /// That is the real case, not a hypothetical one: `openai` and `codex`
+    /// both answer to `gpt-5.5` and bill to entirely different places. This
+    /// stands two gateways up at dead ports with the same model in each, so
+    /// the ids collide exactly the way those two do - a client keying on `id`
+    /// alone would collapse them into one row and whichever it kept would
+    /// decide what the user pays.
+    #[tokio::test]
+    async fn the_model_listing_can_be_narrowed_to_one_provider() {
+        use crate::config::{ModelProviderConfig, ModelProviderKind};
+
+        let mut config = Config::default();
+        for name in ["alpha", "zeta"] {
+            config.model_providers.insert(
+                name.to_string(),
+                ModelProviderConfig {
+                    kind: Some(ModelProviderKind::OpenaiCompatible),
+                    // Nothing listens, so each falls back to the models its
+                    // entry names rather than asking a server.
+                    base_url: Some("http://127.0.0.1:1/v1".to_string()),
+                    models: Some(vec!["shared-model".to_string()]),
+                    ..Default::default()
+                },
+            );
+        }
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let state = AppState {
+            update_check: Default::default(),
+            update_jobs: Default::default(),
+            config: crate::commands::serve::testutil::fixed_config(config),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            providers: crate::commands::serve::providers::ProviderAdmin::default(),
+            limits: Default::default(),
+        };
+        let build = leviath_providers::provider::build_http_client;
+
+        // Unfiltered: the same id under both providers.
+        let Json(all) = super::models_with(&state, &build, &Default::default()).await;
+        // Sorted: the registry's iteration order is not the contract here,
+        // the pair of entries under one id is.
+        let mut shared: Vec<&str> = all
+            .iter()
+            .filter(|m| m.id == "shared-model")
+            .map(|m| m.provider.as_str())
+            .collect();
+        shared.sort_unstable();
+        let listed: Vec<String> = all
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect();
+        assert_eq!(shared, ["alpha", "zeta"], "{listed:?}");
+
+        // Filtered: one of them, and the id is still there.
+        let Json(narrowed) = super::models_with(
+            &state,
+            &build,
+            &super::ModelsQuery {
+                provider: Some("zeta".to_string()),
+            },
+        )
+        .await;
+        let got: Vec<String> = narrowed
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect();
+        assert_eq!(narrowed.len(), 1, "{got:?}");
+        assert_eq!(narrowed[0].provider, "zeta");
+        assert_eq!(narrowed[0].id, "shared-model");
+
+        // A provider this machine does not have lists nothing, rather than
+        // erroring: "no models" is the honest answer.
+        let Json(none) = super::models_with(
+            &state,
+            &build,
+            &super::ModelsQuery {
+                provider: Some("not-a-provider".to_string()),
+            },
+        )
+        .await;
+        assert!(none.is_empty());
     }
 
     fn test_state() -> AppState {
@@ -1994,9 +2098,11 @@ mod tests {
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
-        let Json(models) = super::models_with(&state, &|_t| {
-            Err(leviath_providers::provider::malformed_url_error())
-        })
+        let Json(models) = super::models_with(
+            &state,
+            &|_t| Err(leviath_providers::provider::malformed_url_error()),
+            &Default::default(),
+        )
         .await;
         assert!(models.is_empty());
     }
