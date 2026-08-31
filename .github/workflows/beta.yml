@@ -4,6 +4,13 @@ on:
   schedule:
     # Every Monday at 9am PST (4pm UTC)
     - cron: '0 16 * * 1'
+    # Backstop, four hours later, mirroring prod.yml. GitHub does not guarantee
+    # a scheduled event is ever delivered, and on 2026-08-31 it dropped the
+    # 16:00 dispatch outright, as it had for prod the Thursday before. The
+    # `Get alpha release info` gate already refuses to ship a version beta
+    # carries, so a redundant run is a fifteen-second no-op, and the
+    # beta-promote concurrency group queues the two slots if both ever arrive.
+    - cron: '0 20 * * 1'
   workflow_dispatch:
     inputs:
       force:
