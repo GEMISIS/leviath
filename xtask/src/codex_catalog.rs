@@ -38,6 +38,27 @@ fn is_codex_only(id: &str) -> bool {
     id.contains("codex")
 }
 
+/// Models OpenAI publishes that the Codex route has been *asked about* and
+/// refused, with when and on what.
+///
+/// The point of this list is that a question worth asking once is not worth
+/// asking every Monday for ever. Without it the report re-raised the same two
+/// names indefinitely, and a report that repeats itself is one people stop
+/// reading - which would cost us the genuinely new name when it appears.
+///
+/// The refusal does not distinguish "not on Codex at all" from "not on your
+/// plan": `gpt-5.3-codex-spark`, which is known to exist and to be Pro-only,
+/// answers with the same sentence. So an entry here means "not reachable on
+/// the plan it was measured on", and the note says which.
+const MEASURED_ABSENT: &[(&str, &str)] = &[
+    // Both answered `400 The '<model>' model is not supported when using
+    // Codex with a ChatGPT account.` on a Plus account, 2026-08-31, in the
+    // same run where `gpt-5.5` and `gpt-5.6-sol` answered 200 - so the
+    // request shape and the token were good and the refusal is the model's.
+    ("gpt-5.6-cyber", "refused on Plus, 2026-08-31"),
+    ("gpt-5.6-sol-pro", "refused on Plus, 2026-08-31"),
+];
+
 /// The `gpt-5.N` generation of an id, as `N`.
 ///
 /// `None` for anything outside the family, which is most of what OpenAI
@@ -114,6 +135,10 @@ pub fn drift(ids: &[String], openrouter: &Prices) -> Vec<String> {
         // catalog serves `gpt-5.6-sol` and friends, and asking every Monday
         // whether Codex serves `gpt-5.6` is the same noise in the other
         // direction.
+        // Asked and answered; see `MEASURED_ABSENT`.
+        if MEASURED_ABSENT.iter().any(|(absent, _)| absent == id) {
+            continue;
+        }
         let covered = ids
             .iter()
             .any(|known| known == id || known.starts_with(*id));
@@ -218,10 +243,15 @@ mod tests {
     /// even that: OpenRouter lists every OpenAI model.
     #[test]
     fn a_new_family_member_is_asked_about_and_an_outsider_is_not() {
+        // Not one of the names in `MEASURED_ABSENT`: those are filtered, and
+        // using one here would assert the wrong thing.
         let ids = vec!["gpt-5.5".to_string()];
-        let report = drift(&ids, &priced(&["gpt-5.5", "gpt-5.6-cyber", "gpt-4o", "o3"]));
+        let report = drift(
+            &ids,
+            &priced(&["gpt-5.5", "gpt-5.6-unasked", "gpt-4o", "o3"]),
+        );
         assert_eq!(report.len(), 1, "{report:?}");
-        assert!(report[0].contains("gpt-5.6-cyber"), "{report:?}");
+        assert!(report[0].contains("gpt-5.6-unasked"), "{report:?}");
         assert!(report[0].contains("does Codex serve it"));
     }
 
@@ -242,6 +272,44 @@ mod tests {
         let older_catalog = vec!["gpt-5.2-pro".to_string()];
         let report = drift(&older_catalog, &sources);
         assert_eq!(report.len(), 2, "{report:?}");
+    }
+
+    /// A model already asked about is not asked about again. The whole value
+    /// of the weekly report is that it is short enough to read.
+    #[test]
+    fn a_measured_absence_is_not_re_reported() {
+        let ids = vec!["gpt-5.6-sol".to_string()];
+        let sources = priced(&["gpt-5.6", "gpt-5.6-cyber", "gpt-5.6-sol-pro"]);
+        assert!(
+            drift(&ids, &sources).is_empty(),
+            "{:?}",
+            drift(&ids, &sources)
+        );
+
+        // A name that has *not* been asked about still is.
+        let sources = priced(&["gpt-5.6", "gpt-5.6-brand-new"]);
+        let report = drift(&ids, &sources);
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("gpt-5.6-brand-new"), "{report:?}");
+    }
+
+    /// Nothing in that list is also in the catalog.
+    ///
+    /// The two say opposite things - "we serve this" and "we asked and it
+    /// refused" - so a name in both is a contradiction, and the one that
+    /// would win is whichever the reader happened to look at.
+    #[test]
+    fn nothing_is_both_served_and_measured_absent() {
+        let ids = catalog_ids(include_str!(
+            "../../crates/leviath-providers/src/codex/catalog.rs"
+        ))
+        .expect("the shipped catalog parses");
+        let both: Vec<&str> = MEASURED_ABSENT
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| ids.iter().any(|known| known == id))
+            .collect();
+        assert!(both.is_empty(), "{both:?}");
     }
 
     /// A catalog that matches its sources says nothing at all.

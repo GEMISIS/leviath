@@ -14,6 +14,17 @@
 use crate::capabilities::{LimitsSource, Match, ModelCapabilities, Row};
 
 /// The models this route serves, as `(id, display name)`.
+///
+/// Kept honest by `cargo xtask prices`, which every week compares this against
+/// OpenAI's published catalogue and reports anything that looks renamed,
+/// withdrawn or newly served. It cannot fix the list - what Codex serves is
+/// published nowhere - so a name it raises is a prompt to ask the route.
+///
+/// Two it raised have been asked, on a Plus account on 2026-08-31:
+/// `gpt-5.6-cyber` and `gpt-5.6-sol-pro` both answer `400 ... not supported
+/// when using Codex with a ChatGPT account`, in the same run where `gpt-5.5`
+/// and `gpt-5.6-sol` answered 200. They are recorded in that task's
+/// `MEASURED_ABSENT` so it stops asking.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("gpt-5.6-sol", "GPT-5.6 Sol"),
     ("gpt-5.6-terra", "GPT-5.6 Terra"),
