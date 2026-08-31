@@ -22,6 +22,7 @@ use crate::config::Config;
 // existing `state::Wizard` path keeps working.
 mod endpoints;
 pub(crate) use endpoints::*;
+mod lanes;
 mod limits;
 use limits::*;
 mod types;
@@ -85,6 +86,13 @@ pub struct Wizard {
     reply_tx: mpsc::UnboundedSender<VerifyReply>,
     /// Where finished checks arrive, drained once per tick.
     pub reply_rx: mpsc::UnboundedReceiver<VerifyReply>,
+    /// Where a browser sign-in is sent. Its own lane, for the reason
+    /// [`SigninRequest`] gives.
+    pub signin_tx: mpsc::UnboundedSender<SigninRequest>,
+    signin_rx: Option<mpsc::UnboundedReceiver<SigninRequest>>,
+    signin_reply_tx: mpsc::UnboundedSender<SigninEvent>,
+    /// Where the sign-in lane reports, drained on the same tick as the checks.
+    pub signin_reply_rx: mpsc::UnboundedReceiver<SigninEvent>,
     /// Tick counter, for the spinner.
     pub ticks: u64,
     /// First visible row of the current step, so a screen taller than the
@@ -121,22 +129,22 @@ fn env_credentials(lookup: &dyn Fn(&str) -> Option<String>) -> HashMap<&'static 
         .collect()
 }
 
-/// Who is signed in to `provider`, as a line to show, or `None`.
+/// Who is signed in to `provider`, as a line to show, or `None` when nobody
+/// is.
 ///
-/// Read once when the wizard is built. A grant taken while the wizard is open
-/// is not picked up, which is the honest reflection of the flow: signing in is
-/// a separate command, and the wizard is showing what was true when it opened.
+/// Read when the wizard is built; a sign-in taken from inside the wizard
+/// updates the row from what the lane reports rather than by re-reading this.
+///
+/// A grant whose token carries no email still counts as signed in. It is the
+/// grant that decides whether the provider can answer, and reporting "not
+/// signed in" because a claim was missing would offer a second sign-in that
+/// replaces a working one.
 fn signed_in_as(path: Option<&std::path::Path>, provider: &str) -> Option<String> {
     let grant = leviath_providers::codex::ProviderAuthStore::load(path?)
         .ok()?
         .get(provider)
         .cloned()?;
-    let claims = grant.claims();
-    let who = grant.email.or(claims.email)?;
-    Some(match grant.plan_type.or(claims.plan_type) {
-        Some(plan) => format!("{who} ({plan} plan)"),
-        None => who,
-    })
+    Some(super::signin::describe(&grant))
 }
 
 impl Wizard {
@@ -180,6 +188,8 @@ impl Wizard {
                     outcome: Outcome::Skipped,
                     checking: false,
                     signed_in,
+                    signing_in: false,
+                    authorize_url: None,
                     provider,
                 }
             })
@@ -230,6 +240,8 @@ impl Wizard {
 
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
         let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+        let (signin_tx, signin_rx) = mpsc::unbounded_channel();
+        let (signin_reply_tx, signin_reply_rx) = mpsc::unbounded_channel();
 
         let endpoints = Self::endpoints_from_config(&base);
         let mut wizard = Self {
@@ -258,6 +270,10 @@ impl Wizard {
             verify_rx: Some(verify_rx),
             reply_tx,
             reply_rx,
+            signin_tx,
+            signin_rx: Some(signin_rx),
+            signin_reply_tx,
+            signin_reply_rx,
             ticks: 0,
             scroll: 0,
             show_advanced: false,
@@ -278,6 +294,19 @@ impl Wizard {
         mpsc::UnboundedSender<VerifyReply>,
     )> {
         self.verify_rx.take().map(|rx| (rx, self.reply_tx.clone()))
+    }
+
+    /// Hand the background sign-in lane its channel ends. Returns `None` if
+    /// already taken.
+    pub fn take_signin_ends(
+        &mut self,
+    ) -> Option<(
+        mpsc::UnboundedReceiver<SigninRequest>,
+        mpsc::UnboundedSender<SigninEvent>,
+    )> {
+        self.signin_rx
+            .take()
+            .map(|rx| (rx, self.signin_reply_tx.clone()))
     }
 
     // ── Rows and navigation ─────────────────────────────────────────────────
@@ -328,12 +357,62 @@ impl Wizard {
         if self.is_endpoint_preset(index) {
             return Vec::new();
         }
+        let row = &self.providers[index];
+        if row.provider.credential == Credential::Signin {
+            return Self::signin_actions(row);
+        }
         let mut actions = Vec::new();
-        if self.providers[index].provider.signup_url.is_some() {
+        if row.provider.signup_url.is_some() {
             actions.push(DetailAction::OpenSignup);
         }
         actions.push(DetailAction::Verify);
         actions
+    }
+
+    /// The buttons on a browser sign-in's screen, in the order they are
+    /// offered.
+    ///
+    /// Nothing is typed here, so these are the whole screen and the first of
+    /// them is what the cursor lands on. That decides the order: the thing
+    /// somebody opening this card came to do goes first, which is the sign-in
+    /// while there is none and the check once there is. Sign out and the plans
+    /// page are both further down because neither is why anyone is here.
+    ///
+    /// Sign out is offered only when there is something to forget, and the
+    /// check only when there is something to check: an unsigned-in row would
+    /// answer "no credential" to a question the line above it already
+    /// answered.
+    fn signin_actions(row: &ProviderRow) -> Vec<DetailAction> {
+        let mut actions = Vec::new();
+        if row.signed_in.is_some() {
+            actions.push(DetailAction::Verify);
+        }
+        actions.push(DetailAction::SignIn);
+        if row.signed_in.is_some() {
+            actions.push(DetailAction::SignOut);
+        }
+        // Where to get a subscription, for somebody who does not have one yet.
+        actions.extend(row.provider.signup_url.map(|_| DetailAction::OpenSignup));
+        actions
+    }
+
+    /// Whether the credential screen's first row is the credential itself.
+    ///
+    /// It is for everything typed or defaulted. A browser sign-in has nothing
+    /// to type, so its status is a line rather than a row and the buttons
+    /// start at the top: without this, Enter on a sign-in provider opened a
+    /// text editor over a credential that does not exist.
+    pub(crate) fn detail_has_credential_row(&self, index: usize) -> bool {
+        self.providers[index].provider.credential != Credential::Signin
+    }
+
+    /// Which action the cursor is on, accounting for whether a credential row
+    /// sits above them.
+    pub(crate) fn detail_action_at(&self, index: usize, cursor: usize) -> Option<DetailAction> {
+        let offset = usize::from(self.detail_has_credential_row(index));
+        self.detail_actions()
+            .get(cursor.checked_sub(offset)?)
+            .copied()
     }
 
     /// How many selectable rows the current step has.
@@ -343,7 +422,9 @@ impl Wizard {
             Step::Providers => self.providers.len(),
             Step::ProviderDetail => match self.detail_row() {
                 Some(index) if self.is_endpoint_preset(index) => self.endpoint_row_count(index),
-                Some(_) => 1 + self.detail_actions().len(),
+                Some(index) => {
+                    usize::from(self.detail_has_credential_row(index)) + self.detail_actions().len()
+                }
                 None => 0,
             },
             Step::Defaults => self.defaults.len(),
@@ -532,95 +613,6 @@ impl Wizard {
             return true;
         }
         false
-    }
-
-    // ── Verification ────────────────────────────────────────────────────────
-
-    /// Ask the background verifier about the provider at `index`.
-    ///
-    /// A provider with nothing to check is left alone rather than queued: a
-    /// blank API key would fail with a message about the key rather than saying
-    /// the obvious, that none was given.
-    pub(crate) fn request_verification(&mut self, index: usize) {
-        if self.is_endpoint_preset(index) {
-            self.verify_endpoints_under(index);
-            return;
-        }
-        let Some(row) = self.providers.get_mut(index) else {
-            return;
-        };
-        if !row.has_credential() {
-            row.outcome = Outcome::Skipped;
-            return;
-        }
-        let id = row.provider.id.to_string();
-        let key = if row.value.is_empty() {
-            self.env_only
-                .get(row.provider.env_var.unwrap_or_default())
-                .cloned()
-        } else {
-            Some(row.value.clone())
-        };
-        let base_url = (row.provider.credential == Credential::BaseUrl).then(|| {
-            if row.value.is_empty() {
-                catalog::DEFAULT_OLLAMA_URL.to_string()
-            } else {
-                row.value.clone()
-            }
-        });
-        row.checking = true;
-
-        let creds = leviath_runtime::provider_creds::ProviderCreds {
-            name: id.clone(),
-            api_key: base_url.is_none().then_some(key).flatten(),
-            base_url,
-            model_capabilities: HashMap::new(),
-            request_timeout_secs: Some(20),
-            rate_limit: None,
-            options: HashMap::new(),
-        };
-        // A closed receiver means the background task is gone; the row simply
-        // stays "checking" and nothing else breaks.
-        let _ = self.verify_tx.send(VerifyRequest {
-            provider_id: id,
-            creds,
-        });
-    }
-
-    /// Ask about every selected provider at once.
-    pub(crate) fn verify_all(&mut self) {
-        for index in self.selected_providers() {
-            self.request_verification(index);
-        }
-    }
-
-    /// Take whatever the background verifier has answered.
-    pub(crate) fn drain_verifications(&mut self) {
-        let mut landed = false;
-        while let Ok(reply) = self.reply_rx.try_recv() {
-            // Entries first: an entry is named after its preset by default
-            // (`llama-cpp`), and the preset's own row never asks for a check
-            // under its id, so a reply carrying that name is the entry's.
-            if self.settle_endpoint_reply(&reply) {
-                landed = true;
-            } else if let Some(row) = self
-                .providers
-                .iter_mut()
-                .find(|r| r.provider.id == reply.provider_id)
-            {
-                row.checking = false;
-                row.outcome = reply.outcome;
-                landed = true;
-            }
-        }
-        // A reply carries the model list, and the picker was built from
-        // whatever had arrived when the screen opened. Without this, moving on
-        // from a credential and straight into Defaults shows an empty picker
-        // for the provider that was verified half a second ago. Rebuilding
-        // keeps the current selection, so nothing the user chose is lost.
-        if landed && self.step == Step::Defaults {
-            self.rebuild_defaults();
-        }
     }
 
     /// What choosing one of these values actually decides.
@@ -2819,7 +2811,10 @@ pub(super) mod tests {
                 Some("someone@example.com")
             );
 
-            // A grant with no account at all is not something to report.
+            // A grant with no account at all still counts as signed in. The
+            // grant is what lets the provider answer, and reporting "not
+            // signed in" over a missing claim would offer to replace a
+            // working sign-in.
             let mut store = leviath_providers::codex::ProviderAuthStore::default();
             store.set(
                 "codex",
@@ -2830,7 +2825,10 @@ pub(super) mod tests {
                 },
             );
             store.save(&path).unwrap();
-            assert_eq!(signed_in_as(Some(&path), "codex"), None);
+            assert_eq!(
+                signed_in_as(Some(&path), "codex").as_deref(),
+                Some("signed in")
+            );
 
             // And a provider nobody has signed in to.
             assert_eq!(signed_in_as(Some(&path), "someone-else"), None);
@@ -2853,5 +2851,278 @@ pub(super) mod tests {
         assert!(!row.has_credential());
         row.signed_in = Some("someone@example.com (plus plan)".to_string());
         assert!(row.has_credential());
+    }
+
+    /// With nothing selected the credential screen has no provider to show,
+    /// so it offers no buttons rather than the first row's.
+    #[test]
+    fn a_credential_screen_with_no_provider_offers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        for row in &mut wizard.providers {
+            row.selected = false;
+        }
+        wizard.step = Step::ProviderDetail;
+
+        assert!(wizard.detail_actions().is_empty());
+        assert_eq!(wizard.row_count(), 0);
+    }
+
+    /// The codex row at its index, on a wizard whose only selection it is.
+    fn wizard_showing_codex(agents_dir: &std::path::Path) -> (Wizard, usize) {
+        let mut wizard = test_wizard(agents_dir);
+        let index = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "codex")
+            .expect("the codex row is offered");
+        for row in &mut wizard.providers {
+            row.selected = false;
+        }
+        wizard.providers[index].selected = true;
+        wizard.step = Step::ProviderDetail;
+        (wizard, index)
+    }
+
+    /// The buttons on offer follow the sign-in, because two of the three do
+    /// nothing without one.
+    #[test]
+    fn a_sign_in_row_offers_more_once_it_is_signed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+
+        assert_eq!(
+            wizard.detail_actions(),
+            vec![DetailAction::SignIn, DetailAction::OpenSignup]
+        );
+        // No credential row, so the buttons are the whole screen, and the
+        // first is the one this screen exists for.
+        assert!(!wizard.detail_has_credential_row(index));
+        assert_eq!(wizard.row_count(), 2);
+        assert_eq!(
+            wizard.detail_action_at(index, 0),
+            Some(DetailAction::SignIn)
+        );
+
+        wizard.providers[index].signed_in = Some("a@b.c".to_string());
+        assert_eq!(
+            wizard.detail_actions(),
+            vec![
+                DetailAction::Verify,
+                DetailAction::SignIn,
+                DetailAction::SignOut,
+                DetailAction::OpenSignup,
+            ],
+            "once signed in, checking it is what somebody came here to do"
+        );
+        assert_eq!(wizard.row_count(), 4);
+    }
+
+    /// A typed provider still has its credential above the buttons, so the
+    /// offset is not a blanket change.
+    #[test]
+    fn a_typed_row_still_starts_with_its_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let index = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "anthropic")
+            .expect("the anthropic row is offered");
+        for row in &mut wizard.providers {
+            row.selected = false;
+        }
+        wizard.providers[index].selected = true;
+        wizard.step = Step::ProviderDetail;
+
+        assert!(wizard.detail_has_credential_row(index));
+        assert_eq!(wizard.detail_action_at(index, 0), None, "row 0 is the key");
+        assert_eq!(
+            wizard.detail_action_at(index, 1),
+            Some(DetailAction::OpenSignup)
+        );
+        assert_eq!(wizard.row_count(), 3);
+    }
+
+    /// Asking to sign in puts the row into its waiting state at the key press
+    /// rather than a tick later, selects the provider, and sends the request.
+    #[test]
+    fn requesting_a_sign_in_shows_it_waiting_and_sends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+        wizard.providers[index].selected = false;
+        wizard.providers[index].outcome = Outcome::Reachable {
+            models: vec!["gpt-5.6-sol".to_string()],
+        };
+        let (mut requests, _events) = wizard.take_signin_ends().expect("first take");
+
+        wizard.request_signin(index, SigninAction::In);
+
+        assert!(wizard.providers[index].signing_in);
+        assert!(
+            wizard.providers[index].selected,
+            "signing in says what a checkbox says, only louder"
+        );
+        assert!(wizard.dirty);
+        assert_eq!(
+            wizard.providers[index].outcome,
+            Outcome::Skipped,
+            "the old check described the account being replaced"
+        );
+        let request = requests.try_recv().expect("the lane was asked");
+        assert_eq!(request.provider_id, "codex");
+        assert_eq!(request.action, SigninAction::In);
+    }
+
+    /// A sign-out asks without claiming the browser is open.
+    #[test]
+    fn requesting_a_sign_out_does_not_show_a_browser_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+        let (mut requests, _events) = wizard.take_signin_ends().expect("first take");
+
+        wizard.request_signin(index, SigninAction::Out);
+
+        assert!(!wizard.providers[index].signing_in);
+        assert_eq!(
+            requests.try_recv().expect("the lane was asked").action,
+            SigninAction::Out
+        );
+    }
+
+    /// An index no row has is a no-op rather than a panic.
+    #[test]
+    fn an_out_of_range_sign_in_request_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, _) = wizard_showing_codex(dir.path());
+        let (mut requests, _events) = wizard.take_signin_ends().expect("first take");
+        wizard.request_signin(999, SigninAction::In);
+        assert!(requests.try_recv().is_err());
+    }
+
+    /// The lane's ends can only be taken once, like the verifier's.
+    #[test]
+    fn the_sign_in_channel_ends_can_only_be_taken_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, _) = wizard_showing_codex(dir.path());
+        assert!(wizard.take_signin_ends().is_some());
+        assert!(wizard.take_signin_ends().is_none());
+    }
+
+    /// What the lane reports lands on the row: the URL while it waits, then
+    /// the identity, and the waiting state clears either way.
+    #[test]
+    fn a_finished_sign_in_settles_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+        let (_requests, events) = wizard.take_signin_ends().expect("first take");
+        wizard.providers[index].signing_in = true;
+
+        events
+            .send(SigninEvent::Opened {
+                provider_id: "codex".to_string(),
+                url: "https://auth.example/go".to_string(),
+            })
+            .unwrap();
+        wizard.drain_signins();
+        assert_eq!(
+            wizard.providers[index].authorize_url.as_deref(),
+            Some("https://auth.example/go")
+        );
+        assert!(wizard.providers[index].signing_in, "still waiting");
+
+        events
+            .send(SigninEvent::SignedIn {
+                provider_id: "codex".to_string(),
+                who: "a@b.c (plus plan)".to_string(),
+            })
+            .unwrap();
+        wizard.drain_signins();
+        assert!(!wizard.providers[index].signing_in);
+        assert_eq!(wizard.providers[index].authorize_url, None);
+        assert_eq!(
+            wizard.providers[index].signed_in.as_deref(),
+            Some("a@b.c (plus plan)")
+        );
+    }
+
+    /// A sign-out clears the identity, and a failure lands where a failed
+    /// check would so the card has one place to look.
+    #[test]
+    fn a_sign_out_and_a_failure_both_settle_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+        let (_requests, events) = wizard.take_signin_ends().expect("first take");
+        wizard.providers[index].signed_in = Some("a@b.c".to_string());
+        wizard.providers[index].signing_in = true;
+
+        events
+            .send(SigninEvent::SignedOut {
+                provider_id: "codex".to_string(),
+            })
+            .unwrap();
+        wizard.drain_signins();
+        assert_eq!(wizard.providers[index].signed_in, None);
+        assert!(!wizard.providers[index].signing_in);
+
+        wizard.providers[index].signing_in = true;
+        events
+            .send(SigninEvent::Failed {
+                provider_id: "codex".to_string(),
+                message: "could not listen on port 1455".to_string(),
+            })
+            .unwrap();
+        wizard.drain_signins();
+        assert!(!wizard.providers[index].signing_in);
+        assert_eq!(
+            wizard.providers[index].outcome,
+            Outcome::Failed {
+                message: "could not listen on port 1455".to_string()
+            }
+        );
+    }
+
+    /// An event for a row that is not on this wizard is dropped rather than
+    /// landing on whichever row happens to be first.
+    #[test]
+    fn an_event_for_an_unknown_provider_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, _) = wizard_showing_codex(dir.path());
+        let (_requests, events) = wizard.take_signin_ends().expect("first take");
+        events
+            .send(SigninEvent::SignedIn {
+                provider_id: "not-a-provider".to_string(),
+                who: "nobody".to_string(),
+            })
+            .unwrap();
+        wizard.drain_signins();
+        assert!(wizard.providers.iter().all(|r| r.signed_in.is_none()));
+    }
+
+    /// A sign-in provider is checked through the grant on disk, so the
+    /// request has to carry where that grant is - the registry refuses to
+    /// guess, and a check with no path would report the provider missing.
+    #[test]
+    fn checking_a_sign_in_provider_says_where_its_grant_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wizard, index) = wizard_showing_codex(dir.path());
+        wizard.providers[index].signed_in = Some("a@b.c".to_string());
+        let (mut requests, _replies) = wizard.take_verify_ends().expect("first take");
+
+        wizard.request_verification(index);
+
+        let request = requests.try_recv().expect("the verifier was asked");
+        assert_eq!(request.creds.name, "codex");
+        assert!(
+            request.creds.api_key.is_none(),
+            "a sign-in provider has no key to send"
+        );
+        // Bound rather than formatted inline: a call that only runs when the
+        // assertion fails is a region no passing test reaches.
+        let named: Vec<&String> = request.creds.options.keys().collect();
+        assert!(
+            request.creds.options.contains_key("auth_store_path"),
+            "{named:?}"
+        );
     }
 }

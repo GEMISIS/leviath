@@ -237,5 +237,8 @@ pub fn logout(
     Ok(removed)
 }
 
+// Visible to the rest of the crate's tests: `setup::signin` drives a whole
+// sign-in through the same stub browser, and a second copy of that harness
+// would be a second thing to keep true.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

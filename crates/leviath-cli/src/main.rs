@@ -784,6 +784,7 @@ fn open_controlling_tty() -> io::Result<File> {
 /// never instantiates it, so no unit test can reach the network through it.
 async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
     use commands::setup::{SetupEnv, import, verification_loop};
+    use leviath_cli::commands::setup::signin::{LiveAuthorizer, signin_loop};
     use leviath_cli::commands::setup::verify::{LiveVerifier, SkipVerifier};
 
     let home = leviath_cli::config::leviath_home_dir().unwrap_or_default();
@@ -826,6 +827,10 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         } else {
             tokio::spawn(verification_loop(LiveVerifier, requests, replies));
         }
+    }
+    if let Some((requests, events)) = wizard.take_signin_ends() {
+        let authorizer = LiveAuthorizer::real(env.opener.clone(), &env.config_path);
+        tokio::spawn(signin_loop(authorizer, requests, events));
     }
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,

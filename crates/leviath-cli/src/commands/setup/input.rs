@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use super::catalog::Credential;
 use super::state::{
     ConfirmPurpose, DetailAction, Edit, EditTarget, EndpointCursor, EndpointField, FieldValue,
-    Picker, Step, Wizard,
+    Picker, SigninAction, Step, Wizard,
 };
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
@@ -243,27 +243,44 @@ impl Wizard {
         }
         if self.step == Step::ProviderDetail
             && let Some(index) = self.detail_row()
-            && self.is_endpoint_preset(index)
         {
-            self.activate_endpoint_row(index);
+            // An endpoint preset's screen is its entries' own form; every
+            // other one is a credential row (where there is something to type)
+            // followed by its buttons.
+            if self.is_endpoint_preset(index) {
+                self.activate_endpoint_row(index);
+            } else {
+                self.activate_detail_row(index);
+            }
             return Action::Continue;
         }
         match self.step {
             Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
-            Step::ProviderDetail => match self.detail_actions().get(self.cursor.wrapping_sub(1)) {
-                // Row 0 is the credential: it opens its editor. `wrapping_sub`
-                // turns that row into an index no action has.
-                None => self.open_credential_editor(),
-                Some(DetailAction::OpenSignup) => self.open_signup_page(),
-                Some(DetailAction::Verify) => self.verify_current(),
-            },
             Step::Defaults | Step::Limits => self.activate_field(),
             // Rowless steps put the cursor on their button, so these arms are
             // reachable only with a hand-forced cursor; acting on nothing is
-            // correct then.
-            Step::Welcome | Step::Review => {}
+            // correct then. `ProviderDetail` joins them for a different
+            // reason: reaching it at all needs a selected provider, so the
+            // screen with no row to act on is one the wizard never opens.
+            Step::Welcome | Step::Review | Step::ProviderDetail => {}
         }
         Action::Continue
+    }
+
+    /// Enter on the credential screen of the provider at `index`.
+    ///
+    /// Row 0 is the credential on every screen that has one, and it opens its
+    /// editor; `detail_action_at` answers `None` there. A browser sign-in has
+    /// nothing to type, so its buttons start at row 0 instead and the `None`
+    /// arm is only the cursor past the last of them.
+    fn activate_detail_row(&mut self, index: usize) {
+        match self.detail_action_at(index, self.cursor) {
+            None => self.open_credential_editor(),
+            Some(DetailAction::OpenSignup) => self.open_signup_page(),
+            Some(DetailAction::SignIn) => self.request_signin(index, SigninAction::In),
+            Some(DetailAction::SignOut) => self.request_signin(index, SigninAction::Out),
+            Some(DetailAction::Verify) => self.verify_current(),
+        }
     }
 
     /// Enter on an endpoint preset's screen (the preset at provider row

@@ -14,6 +14,13 @@
 //! proves the credential and returns the model list the wizard's default-model
 //! picker needs. Two answers for the price of one round trip.
 //!
+//! The call made is
+//! [`check_credential`](leviath_providers::Provider::check_credential), which
+//! is that same listing for all of those and something else for a provider
+//! whose catalogue is a compiled-in table. Codex is the one that has to
+//! differ: its list is a table, so listing it proves nothing, and it answers
+//! the check from an authenticated route instead.
+//!
 //! ## The seam
 //!
 //! [`ProviderVerifier`] exists so no test ever reaches the network. Tests use a
@@ -133,7 +140,7 @@ pub(crate) async fn verify_via_registry_with(
             message: format!("no provider named '{}'", creds.name),
         };
     };
-    match provider.list_models().await {
+    match provider.check_credential().await {
         Ok(models) => Outcome::Reachable {
             models: models.into_iter().map(|m| m.id).collect(),
         },
