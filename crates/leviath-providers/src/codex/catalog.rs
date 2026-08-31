@@ -8,8 +8,19 @@
 //!
 //! Percentage region budgets resolve once at spawn against
 //! [`ModelCapabilities::max_context_tokens`], so a wrong row here silently
-//! mis-sizes every region for a whole run. The numbers are deliberately the
-//! conservative reading.
+//! mis-sizes every region for a whole run - which is exactly what happened:
+//! every model carried 400,000, a figure no vendor publishes for any of them,
+//! and a `gpt-5.5` run used 38% of the window it had for months.
+//!
+//! The windows are OpenAI's published `max_input_tokens`, cross-checked
+//! against OpenRouter's `context_length` (which is the whole window, and
+//! larger by exactly the output allowance). Whether the Codex *route* caps
+//! lower than the API is not knowable from here - it publishes no catalogue -
+//! so these assume it does not. If it turns out to, the symptom is a refused
+//! request rather than a silent one, and `[model_capabilities]` is the lever.
+//!
+//! `cargo xtask prices` re-checks these against the published figures every
+//! week and reports a row that has drifted. It never rewrites them.
 
 use crate::capabilities::{LimitsSource, Match, ModelCapabilities, Row};
 
@@ -57,14 +68,14 @@ pub(crate) const MODELS: &[Row] = &[
         matches: &[Match::Prefix("gpt-5.6")],
         temperature: false,
         tools: true,
-        context: 400_000,
+        context: 922_000,
         output: 128_000,
     },
     Row {
         matches: &[Match::Prefix("gpt-5.5")],
         temperature: false,
         tools: true,
-        context: 400_000,
+        context: 1_050_000,
         output: 128_000,
     },
     Row {
@@ -79,7 +90,7 @@ pub(crate) const MODELS: &[Row] = &[
         matches: &[Match::Prefix("gpt-5")],
         temperature: false,
         tools: true,
-        context: 400_000,
+        context: 272_000,
         output: 128_000,
     },
 ];
@@ -168,8 +179,11 @@ mod tests {
             assert!(caps.supports_tools, "{id}");
             assert!(caps.max_context_tokens >= 128_000, "{id}");
         }
-        assert_eq!(capabilities("gpt-5.6-sol").max_context_tokens, 400_000);
-        assert_eq!(capabilities("gpt-5.5").max_context_tokens, 400_000);
+        // The published `max_input_tokens`, not a round number: these were
+        // 400,000 for both, which no vendor publishes for either, and the
+        // weekly window check is what now holds them to the source.
+        assert_eq!(capabilities("gpt-5.6-sol").max_context_tokens, 922_000);
+        assert_eq!(capabilities("gpt-5.5").max_context_tokens, 1_050_000);
     }
 
     #[test]
