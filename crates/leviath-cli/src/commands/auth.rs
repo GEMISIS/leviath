@@ -131,7 +131,9 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
             let config = Config::load_from_path_public(&path)?;
             logout(&config, &provider, env.grant_path)
         }
-        AuthCommand::Migrate { to_file, dry_run } => migrate(&path, to_file, dry_run),
+        AuthCommand::Migrate { to_file, dry_run } => {
+            migrate(&path, to_file, dry_run, env.grant_path.as_deref())
+        }
     }
 }
 
@@ -464,7 +466,12 @@ pub(crate) fn render_status(s: &Status) -> String {
 }
 
 /// Move secrets between the config file and the OS credential store.
-fn migrate(path: &std::path::Path, to_file: bool, dry_run: bool) -> anyhow::Result<()> {
+fn migrate(
+    path: &std::path::Path,
+    to_file: bool,
+    dry_run: bool,
+    grant_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(path)?;
     let plan = plan_migration(&config, to_file);
 
@@ -482,7 +489,7 @@ fn migrate(path: &std::path::Path, to_file: bool, dry_run: bool) -> anyhow::Resu
         return Ok(());
     }
 
-    apply_migration(&config, path, to_file)?;
+    apply_migration(&config, path, to_file, grant_path)?;
     println!("\nDone. {}", plan.done);
     Ok(())
 }
@@ -535,7 +542,12 @@ pub(crate) fn plan_migration(config: &Config, to_file: bool) -> MigrationPlan {
 /// The order matters in both directions: write the destination first, verify it
 /// took, and only then remove the source. A migration that cleared the config
 /// file before the keychain write succeeded would destroy the user's API keys.
-fn apply_migration(config: &Config, path: &std::path::Path, to_file: bool) -> anyhow::Result<()> {
+fn apply_migration(
+    config: &Config,
+    path: &std::path::Path,
+    to_file: bool,
+    grant_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let resolved = crate::credentials::store_for(CredentialStoreKind::Keychain);
     apply_migration_with(
         config,
@@ -543,7 +555,12 @@ fn apply_migration(config: &Config, path: &std::path::Path, to_file: bool) -> an
         to_file,
         resolved,
         leviath_mcp::AuthStore::default_path().as_deref(),
-        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
+        // The caller's, not `default_path()`. Resolving it here reached the
+        // real `~/.leviath/provider-auth.json` from `AuthEnv`-driven tests,
+        // so running the suite on a machine signed in to Codex moved that
+        // grant into a mock keychain and rewrote the file. `AuthEnv` already
+        // carries the path for exactly this reason.
+        grant_path,
     )
 }
 
@@ -1435,7 +1452,10 @@ mod tests {
             AuthEnv {
                 // Never the real one: a test must not launch a browser.
                 opener: std::sync::Arc::new(|_| false),
-                grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                // Beside the caller's config, which is already a tempdir.
+                // `default_path()` here is the developer's own home, and
+                // `migrate` writes to whatever it is handed.
+                grant_path: Some(path.with_file_name("provider-auth.json")),
                 client: reqwest::Client::new(),
                 issuer: leviath_providers::codex::ISSUER.to_string(),
                 ports: vec![0],
@@ -1874,19 +1894,19 @@ mod tests {
         let path = dir.path().join("config.toml");
         Config::default().save_to_path_public(&path).unwrap();
 
-        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
-            let grants =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-            write_grant_store(&grants);
+        // Beside the config rather than under a `$LEVIATH_HOME` override:
+        // `temp_env` sets that for the whole process, so a wizard built on
+        // another thread while this ran read *this* home and reported itself
+        // signed in to a grant that is about to be deleted.
+        let grants = path.with_file_name("provider-auth.json");
+        write_grant_store(&grants);
 
-            run_auth(&path, AuthArgs::logout_for_test("codex")).expect("logout succeeds");
-            let store =
-                leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
-            assert!(store.get("codex").is_none());
+        run_auth(&path, AuthArgs::logout_for_test("codex")).expect("logout succeeds");
+        let store = leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
+        assert!(store.get("codex").is_none());
 
-            // And again, which reports there was nothing to do.
-            run_auth(&path, AuthArgs::logout_for_test("codex")).expect("a second logout is fine");
-        });
+        // And again, which reports there was nothing to do.
+        run_auth(&path, AuthArgs::logout_for_test("codex")).expect("a second logout is fine");
     }
 
     /// A provider that signs in with a key is refused by both halves.
