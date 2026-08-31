@@ -28,6 +28,8 @@ pub(crate) struct AdminPaths {
     pub config: std::path::PathBuf,
     /// OAuth token store.
     pub store: std::path::PathBuf,
+    /// Provider sign-in grants, for the `/api/providers` routes.
+    pub grants: std::path::PathBuf,
 }
 
 /// The operator's file locations for this process.
@@ -44,6 +46,7 @@ pub(crate) fn admin_paths() -> AdminPaths {
     AdminPaths {
         config: Config::config_path(),
         store: AuthStore::default_path().unwrap_or_default(),
+        grants: leviath_providers::codex::ProviderAuthStore::default_path().unwrap_or_default(),
     }
 }
 
@@ -433,6 +436,7 @@ mod tests {
         AdminPaths {
             config: dir.join("config.toml"),
             store: dir.join("mcp-auth.json"),
+            grants: dir.join("provider-auth.json"),
         }
     }
 
@@ -837,6 +841,10 @@ for line in sys.stdin:
             AdminPaths {
                 config: dir.path().join("cfg-dir"),
                 store: dir.path().join("store-dir"),
+                grants: dir
+                    .path()
+                    .join("store-dir")
+                    .with_file_name("provider-auth.json"),
             },
         );
         for (method, uri) in [
@@ -863,6 +871,10 @@ for line in sys.stdin:
             AdminPaths {
                 config: dir.path().join("cfg-dir"),
                 store: dir.path().join("store-dir"),
+                grants: dir
+                    .path()
+                    .join("store-dir")
+                    .with_file_name("provider-auth.json"),
             },
         );
         let (status_code, _) = send(
@@ -899,6 +911,10 @@ for line in sys.stdin:
             AdminPaths {
                 config: file.join("config.toml"),
                 store: dir.path().join("s.json"),
+                grants: dir
+                    .path()
+                    .join("s.json")
+                    .with_file_name("provider-auth.json"),
             },
         );
         let (status_code, _) = send(

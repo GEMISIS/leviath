@@ -1060,7 +1060,12 @@ mod tests {
 
     fn paths_for(config: std::path::PathBuf) -> AdminPaths {
         let store = config.with_file_name("mcp-auth.json");
-        AdminPaths { config, store }
+        let grants = config.with_file_name("provider-auth.json");
+        AdminPaths {
+            config,
+            store,
+            grants,
+        }
     }
 
     /// [`state_with_config_path`], but its config source *watches* that file
