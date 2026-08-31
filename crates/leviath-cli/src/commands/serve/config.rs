@@ -62,6 +62,9 @@ fn redact(
         has_google_key: c.providers.google_api_key.is_some(),
         has_openrouter_key: c.openrouter_api_key.is_some(),
         ollama_base_url: c.ollama_base_url.clone(),
+        // The switch or the address: either is a choice, and a console
+        // drawing "Ollama is on" should not have to know which one was used.
+        ollama_enabled: c.providers.ollama_enabled || c.ollama_base_url.is_some(),
         codex_enabled: c.providers.codex_enabled,
         codex_reasoning_effort: c.providers.codex_reasoning_effort.clone(),
         codex_verbosity: c.providers.codex_verbosity.clone(),
@@ -181,6 +184,9 @@ pub(super) async fn put_config(
         "reasoning effort",
     )?;
     let verbosity = validated(req.codex_verbosity, CODEX_VERBOSITIES, "verbosity")?;
+    config.providers.ollama_enabled = req
+        .ollama_enabled
+        .unwrap_or(config.providers.ollama_enabled);
     config.providers.codex_enabled = req.codex_enabled.unwrap_or(config.providers.codex_enabled);
     config.providers.codex_replay_reasoning = req
         .codex_replay_reasoning
@@ -1096,6 +1102,7 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
+            ollama_enabled: false,
             codex_enabled: false,
             codex_reasoning_effort: None,
             codex_verbosity: None,
@@ -1127,6 +1134,7 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: Some("http://localhost:11434".to_string()),
+            ollama_enabled: false,
             codex_enabled: false,
             codex_reasoning_effort: None,
             codex_verbosity: None,
@@ -1296,6 +1304,61 @@ mod tests {
             .body(Body::from(body.to_string()))
             .unwrap();
         app.oneshot(req).await.unwrap()
+    }
+
+    /// Ollama is writable and readable, so a console can turn it on.
+    ///
+    /// Found by driving the live API rather than by reading the code: the
+    /// Codex switch was on `GET`/`PUT` and this one was not, so a settings
+    /// page could see `ollama_base_url` and had no way to learn - or say -
+    /// whether Ollama was on at all.
+    #[tokio::test]
+    async fn put_config_writes_the_ollama_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        let body = serde_json::json!({ "ollama_enabled": true }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rc: RedactedConfig = serde_json::from_slice(&bytes).unwrap();
+        assert!(rc.ollama_enabled);
+        assert!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .providers
+                .ollama_enabled
+        );
+    }
+
+    /// An address counts as having chosen it, so the switch reads true for a
+    /// config that predates the switch. A console asking "is Ollama on" wants
+    /// one answer, not two fields to reconcile.
+    #[tokio::test]
+    async fn an_ollama_address_reads_as_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        // The *watching* state, built first and then edited underneath it:
+        // `state_with_config_path` serves a fixed config, and the reloader is
+        // mtime-checked, so the edit has to land after construction and look
+        // newer. This is the dance every other test of this reloader does.
+        let state = state_watching_config_path(path.clone());
+        Config {
+            ollama_base_url: Some("http://elsewhere:11434".to_string()),
+            ..Config::default()
+        }
+        .save_to_path_public(&path)
+        .unwrap();
+        bump_mtime(&path);
+
+        let json = get_config_request(state).await;
+        assert_eq!(json["ollama_enabled"], true, "{json}");
     }
 
     /// The Codex switch and its two tuning knobs are writable, so a console
