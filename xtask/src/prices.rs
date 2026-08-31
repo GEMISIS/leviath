@@ -638,6 +638,15 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     for d in &merged.disagreements {
         println!("? {d} (not written)");
     }
+    // The Codex model catalog rides along on this fetch. It is a compiled
+    // table with no endpoint behind it, so nothing here can rewrite it - but
+    // the catalogue already in hand is enough to say when it looks stale, and
+    // this is the job that runs every week. Reported, never fatal: the second
+    // half of the report is a question rather than a finding, and a weekly
+    // job that fails on a question is a weekly job somebody turns off.
+    for line in codex_catalog::drift(&codex_ids()?, &openrouter) {
+        println!("? {line}");
+    }
     let added = merged
         .changes
         .iter()
@@ -680,6 +689,13 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     }
 }
 
+/// The Codex catalog's model ids, read from the shipped source.
+fn codex_ids() -> Result<Vec<String>> {
+    codex_catalog::catalog_ids(include_str!(
+        "../../crates/leviath-providers/src/codex/catalog.rs"
+    ))
+}
+
 /// The workspace root, from this crate's manifest directory.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -708,6 +724,13 @@ pub fn run(mode: PricesMode) -> Result<()> {
         Err(err) => Err(err),
     }
 }
+
+/// The Codex model catalog check, fed by the same fetch as the prices above.
+/// Declared here rather than in `main.rs`, which is coverage-excluded and
+/// guarded in CI for that reason - a module belonging to this task has no
+/// business changing the binary's entrypoint.
+#[path = "codex_catalog.rs"]
+pub mod codex_catalog;
 
 #[cfg(test)]
 #[path = "prices_tests.rs"]
