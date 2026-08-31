@@ -44,11 +44,25 @@ use crate::commands::setup::signin::{LiveAuthorizer, ProviderAuthorizer};
 /// Shaped like [`McpAdmin`](super::mcp::McpAdmin) and for the same reason: the
 /// live authorizer opens a browser and binds a fixed port, so a test supplies
 /// its own rather than being careful.
+///
+/// **No file location lives here**, for the reason [`AdminPaths`] gives:
+/// anything reachable from a handler's parameters is request data as far as a
+/// scanner is concerned, and a file location that is request data is a
+/// path-injection finding. The grant store comes from
+/// [`admin_paths`](super::mcp::admin_paths) inside each handler instead. It
+/// did live here, and CodeQL was right to say so.
+///
+/// [`AdminPaths`]: super::mcp::AdminPaths
 #[derive(Clone)]
 pub(crate) struct ProviderAdmin {
-    /// Takes and forgets the sign-ins. Shared with `lev setup`, so the wizard
-    /// and the API cannot disagree about where a grant goes.
-    pub(crate) authorizer: Arc<LiveAuthorizer>,
+    /// Opens the browser during a sign-in.
+    pub(crate) opener: leviath_mcp::BrowserOpener,
+    /// The OAuth issuer, and the loopback ports its client id is registered
+    /// against. Overridden only by tests, which point them at a local mock and
+    /// port zero so a whole sign-in runs without a browser or a fixed port.
+    pub(crate) issuer: String,
+    /// See [`Self::issuer`].
+    pub(crate) ports: Vec<u16>,
     /// What each provider's sign-in is doing, for the poll to read.
     pub(crate) in_flight: Arc<Mutex<HashMap<String, Progress>>>,
     /// Current Unix time; a fn so a long-lived server stays current.
@@ -65,14 +79,30 @@ pub(crate) struct ProviderAdmin {
 impl Default for ProviderAdmin {
     fn default() -> Self {
         Self {
-            authorizer: Arc::new(LiveAuthorizer::real(
-                Arc::new(leviath_sys::open_url),
-                &super::mcp::admin_paths().config,
-            )),
+            opener: Arc::new(leviath_sys::open_url),
+            issuer: leviath_providers::codex::ISSUER.to_string(),
+            ports: leviath_providers::codex::CALLBACK_PORTS.to_vec(),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             now: super::mcp::system_now,
             usage_url: None,
         }
+    }
+}
+
+impl ProviderAdmin {
+    /// The authorizer for this request.
+    ///
+    /// Built per call rather than held, so the grant store and the credential
+    /// backend are both read from where they are *now*: a `[security]
+    /// credential_store` change used to need a restart of `lev serve` to take
+    /// effect, because the backend was resolved once at start-up.
+    fn authorizer(&self) -> LiveAuthorizer {
+        let paths = super::mcp::admin_paths();
+        let mut authorizer = LiveAuthorizer::real(self.opener.clone(), &paths.config);
+        authorizer.store_path = Some(paths.grants);
+        authorizer.issuer = self.issuer.clone();
+        authorizer.ports = self.ports.clone();
+        authorizer
     }
 }
 
@@ -179,13 +209,10 @@ fn describe(
 pub(super) async fn list_providers(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.current_config();
     // Read once, not once per row: this is a file, and the answer is the same
-    // for every provider in it.
-    let store = state
-        .providers
-        .authorizer
-        .store_path
-        .as_deref()
-        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(path).ok());
+    // for every provider in it. The location comes from `admin_paths` rather
+    // than from `state`; see `ProviderAdmin`.
+    let store =
+        leviath_providers::codex::ProviderAuthStore::load(&super::mcp::admin_paths().grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     let providers: Vec<ProviderInfo> = signin_providers()
         .into_iter()
@@ -267,7 +294,10 @@ pub(super) async fn login(
             .map(|tx| tx.send(Ok(url.to_string())));
     });
 
-    let authorizer = Arc::clone(&state.providers.authorizer);
+    // Resolved here, in the request, and moved into the task below: a
+    // `tokio::spawn` does not inherit the task-local the tests scope, so
+    // resolving it in there would reach the real home.
+    let authorizer = state.providers.authorizer();
     let tracker = Arc::clone(&state.providers.in_flight);
     let now = state.providers.now;
     tokio::spawn(async move {
@@ -344,7 +374,7 @@ pub(super) async fn logout(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    match state.providers.authorizer.sign_out(name).await {
+    match state.providers.authorizer().sign_out(name).await {
         Ok(()) => {
             leviath_core::sync::lock(&state.providers.in_flight).remove(name);
             Json(serde_json::json!({ "status": "signed_out", "provider": name })).into_response()
@@ -371,13 +401,9 @@ pub(super) async fn check(
     // The authorizer's path, not the default one it usually resolves to: the
     // sign-in wrote there, and a check that read somewhere else would report
     // a provider with no grant a moment after storing one.
-    options.extend(
-        state
-            .providers
-            .authorizer
-            .store_path
-            .as_ref()
-            .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
+    options.insert(
+        "auth_store_path".to_string(),
+        super::mcp::admin_paths().grants.display().to_string(),
     );
     options.extend(
         state

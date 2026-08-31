@@ -1219,6 +1219,7 @@ mod tests {
             // about one run in three, on an assertion about *routing*.
             config: std::env::temp_dir().join("leviath-serve-router-tests-no-such-config.toml"),
             store: std::env::temp_dir().join("leviath-serve-router-tests-no-such-store.json"),
+            grants: std::env::temp_dir().join("leviath-serve-router-tests-no-such-grants.json"),
         }
     }
 

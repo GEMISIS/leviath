@@ -24,23 +24,30 @@ fn fixed_now() -> u64 {
     1_700_000_000
 }
 
-/// An authorizer pointed at `issuer`, writing into `dir`, with `opener`
-/// playing the browser.
-fn authorizer(
-    dir: &std::path::Path,
-    issuer: String,
-    opener: leviath_mcp::BrowserOpener,
-) -> LiveAuthorizer {
-    LiveAuthorizer {
+/// An admin pointed at `issuer`, with `opener` playing the browser.
+///
+/// No path here: the grant store comes from `admin_paths`, which `app_at`
+/// scopes onto the router. See `ProviderAdmin`.
+fn admin(issuer: String, opener: leviath_mcp::BrowserOpener) -> ProviderAdmin {
+    ProviderAdmin {
         opener,
-        store_path: Some(dir.join("provider-auth.json")),
-        credential_store: Ok(None),
-        client: reqwest::Client::new(),
         issuer,
         // The registered ports are the production value; a test that bound
         // them would fight whatever the developer has signed in.
         ports: vec![0],
+        in_flight: Arc::new(Mutex::new(HashMap::new())),
+        now: fixed_now,
+        usage_url: None,
     }
+}
+
+/// An admin that never reaches an issuer and never opens anything, for the
+/// routes that do neither.
+fn quiet_admin() -> ProviderAdmin {
+    admin(
+        "http://127.0.0.1:1".to_string(),
+        Arc::new(|_: &str| panic!("no browser may open")),
+    )
 }
 
 /// App state carrying `admin`, with the rest stubbed.
@@ -58,22 +65,21 @@ fn state_with(admin: ProviderAdmin, config: Config) -> AppState {
     }
 }
 
-fn admin_over(authorizer: LiveAuthorizer) -> ProviderAdmin {
-    ProviderAdmin {
-        authorizer: Arc::new(authorizer),
-        in_flight: Arc::new(Mutex::new(HashMap::new())),
-        now: fixed_now,
-        usage_url: None,
-    }
-}
-
-fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/providers", get(list_providers))
-        .route("/api/providers/{name}/login", post(login))
-        .route("/api/providers/{name}/logout", post(logout))
-        .route("/api/providers/{name}/check", post(check))
-        .with_state(state)
+/// A router over `state` whose handlers read the files under `dir`.
+fn app_at(dir: &std::path::Path, state: AppState) -> Router {
+    crate::commands::serve::mcp::scoped(
+        Router::new()
+            .route("/api/providers", get(list_providers))
+            .route("/api/providers/{name}/login", post(login))
+            .route("/api/providers/{name}/logout", post(logout))
+            .route("/api/providers/{name}/check", post(check))
+            .with_state(state),
+        crate::commands::serve::mcp::AdminPaths {
+            config: dir.join("config.toml"),
+            store: dir.join("mcp-auth.json"),
+            grants: dir.join("provider-auth.json"),
+        },
+    )
 }
 
 async fn send(app: &Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -130,14 +136,13 @@ async fn the_listing_reports_enabled_and_signed_in_separately() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.providers.codex_enabled = true;
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| true),
-        )),
-        config,
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin("http://127.0.0.1:1".to_string(), Arc::new(|_: &str| true)),
+            config,
+        ),
+    );
 
     let (status, body) = send(&app, "GET", "/api/providers").await;
     assert_eq!(status, StatusCode::OK);
@@ -163,14 +168,13 @@ async fn the_listing_reports_enabled_and_signed_in_separately() {
 async fn the_listing_never_carries_a_token() {
     let dir = tempfile::tempdir().unwrap();
     store_grant(dir.path());
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| true),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin("http://127.0.0.1:1".to_string(), Arc::new(|_: &str| true)),
+            Config::default(),
+        ),
+    );
 
     let (_, body) = send(&app, "GET", "/api/providers").await;
     let text = body.to_string();
@@ -188,14 +192,16 @@ async fn the_listing_never_carries_a_token() {
 async fn a_login_returns_a_url_at_once_and_the_listing_settles() {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            mock_issuer().await,
-            browser_that_redirects(Arc::clone(&seen)),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                mock_issuer().await,
+                browser_that_redirects(Arc::clone(&seen)),
+            ),
+            Config::default(),
+        ),
+    );
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/login").await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -228,15 +234,17 @@ async fn a_login_returns_a_url_at_once_and_the_listing_settles() {
 async fn a_failed_login_is_reported_and_then_visible_on_the_listing() {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            // Nothing listens on port 1, so the code exchange fails.
-            "http://127.0.0.1:1".to_string(),
-            browser_that_redirects(Arc::clone(&seen)),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                // Nothing listens on port 1, so the code exchange fails.
+                "http://127.0.0.1:1".to_string(),
+                browser_that_redirects(Arc::clone(&seen)),
+            ),
+            Config::default(),
+        ),
+    );
 
     let (status, _) = send(&app, "POST", "/api/providers/codex/login").await;
     assert_eq!(status, StatusCode::ACCEPTED, "it started before it failed");
@@ -266,14 +274,13 @@ async fn a_failed_login_is_reported_and_then_visible_on_the_listing() {
 async fn a_second_login_is_refused_with_the_url_of_the_first() {
     let dir = tempfile::tempdir().unwrap();
     // A browser that never redirects, so the first flow stays waiting.
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| false),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin("http://127.0.0.1:1".to_string(), Arc::new(|_: &str| false)),
+            Config::default(),
+        ),
+    );
 
     let (status, first) = send(&app, "POST", "/api/providers/codex/login").await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -288,14 +295,16 @@ async fn a_second_login_is_refused_with_the_url_of_the_first() {
 #[tokio::test]
 async fn an_unknown_provider_is_a_404_everywhere() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| panic!("no browser may open")),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                "http://127.0.0.1:1".to_string(),
+                Arc::new(|_: &str| panic!("no browser may open")),
+            ),
+            Config::default(),
+        ),
+    );
 
     for route in [
         "/api/providers/anthropic/login",
@@ -314,14 +323,16 @@ async fn signing_out_forgets_the_grant_and_not_the_setting() {
     store_grant(dir.path());
     let mut config = Config::default();
     config.providers.codex_enabled = true;
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| panic!("no browser may open")),
-        )),
-        config,
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                "http://127.0.0.1:1".to_string(),
+                Arc::new(|_: &str| panic!("no browser may open")),
+            ),
+            config,
+        ),
+    );
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/logout").await;
     assert_eq!(status, StatusCode::OK);
@@ -341,38 +352,38 @@ async fn signing_out_forgets_the_grant_and_not_the_setting() {
 async fn a_sign_out_that_cannot_read_the_store_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("provider-auth.json"), "{ not json").unwrap();
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| panic!("no browser may open")),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                "http://127.0.0.1:1".to_string(),
+                Arc::new(|_: &str| panic!("no browser may open")),
+            ),
+            Config::default(),
+        ),
+    );
 
     let (status, _) = send(&app, "POST", "/api/providers/codex/logout").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-/// A login whose flow ends before it has a URL - no home to write into -
-/// reports the reason rather than the timeout.
+/// A login whose flow ends before it has a URL reports the reason, rather
+/// than leaving the caller waiting on a URL that is never coming.
+///
+/// Driven with no ports to try, which is the shape of the real failure: the
+/// two registered ones are taken, usually by a `codex login` of the user's
+/// own.
 #[tokio::test]
 async fn a_login_that_never_starts_reports_why() {
-    let mut authorizer = authorizer(
-        std::path::Path::new("/unused"),
-        "http://127.0.0.1:1".to_string(),
-        Arc::new(|_: &str| panic!("no browser may open")),
-    );
-    authorizer.store_path = None;
-    let app = router(state_with(admin_over(authorizer), Config::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut admin = quiet_admin();
+    admin.ports = Vec::new();
+    let app = app_at(dir.path(), state_with(admin, Config::default()));
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/login").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("LEVIATH_HOME"),
+        !body["error"].as_str().unwrap_or_default().is_empty(),
         "{body}"
     );
 }
@@ -382,14 +393,13 @@ async fn a_login_that_never_starts_reports_why() {
 #[tokio::test]
 async fn a_waiting_sign_in_records_when_it_started() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| false),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin("http://127.0.0.1:1".to_string(), Arc::new(|_: &str| false)),
+            Config::default(),
+        ),
+    );
 
     send(&app, "POST", "/api/providers/codex/login").await;
     let (_, body) = send(&app, "GET", "/api/providers").await;
@@ -415,14 +425,13 @@ async fn the_account_falls_back_to_the_id_token() {
     );
     store.save(&dir.path().join("provider-auth.json")).unwrap();
 
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| true),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin("http://127.0.0.1:1".to_string(), Arc::new(|_: &str| true)),
+            Config::default(),
+        ),
+    );
 
     let (_, body) = send(&app, "GET", "/api/providers").await;
     assert_eq!(body["providers"][0]["account"], "someone@example.com");
@@ -434,14 +443,16 @@ async fn the_account_falls_back_to_the_id_token() {
 #[tokio::test]
 async fn checking_without_a_sign_in_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| panic!("no browser may open")),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                "http://127.0.0.1:1".to_string(),
+                Arc::new(|_: &str| panic!("no browser may open")),
+            ),
+            Config::default(),
+        ),
+    );
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/check").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -456,24 +467,34 @@ async fn checking_without_a_sign_in_is_refused() {
 #[tokio::test]
 async fn checking_an_unknown_provider_is_a_404() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(state_with(
-        admin_over(authorizer(
-            dir.path(),
-            "http://127.0.0.1:1".to_string(),
-            Arc::new(|_: &str| panic!("no browser may open")),
-        )),
-        Config::default(),
-    ));
+    let app = app_at(
+        dir.path(),
+        state_with(
+            admin(
+                "http://127.0.0.1:1".to_string(),
+                Arc::new(|_: &str| panic!("no browser may open")),
+            ),
+            Config::default(),
+        ),
+    );
 
     let (status, _) = send(&app, "POST", "/api/providers/openai/check").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// The default admin resolves this machine rather than being handed paths.
+/// The default admin points at the real issuer and the two registered ports,
+/// and its authorizer takes its store from `admin_paths` rather than from a
+/// field somebody could set.
 #[test]
 fn the_default_admin_points_at_this_machine() {
     let admin = ProviderAdmin::default();
-    assert!(admin.authorizer.store_path.is_some(), "a home resolves");
+    assert_eq!(admin.issuer, leviath_providers::codex::ISSUER);
+    assert_eq!(admin.ports, leviath_providers::codex::CALLBACK_PORTS);
+    let authorizer = admin.authorizer();
+    assert_eq!(
+        authorizer.store_path,
+        Some(crate::commands::serve::mcp::admin_paths().grants)
+    );
     assert!(
         leviath_core::sync::lock(&admin.in_flight).is_empty(),
         "nothing is in flight before anything is asked"
@@ -493,13 +514,9 @@ async fn a_check_reports_the_models_the_plan_can_reach() {
         br#"{"plan_type":"plus","rate_limit":{}}"#.to_vec(),
     )
     .await;
-    let mut admin = admin_over(authorizer(
-        dir.path(),
-        "http://127.0.0.1:1".to_string(),
-        Arc::new(|_: &str| panic!("no browser may open")),
-    ));
+    let mut admin = quiet_admin();
     admin.usage_url = Some(usage);
-    let app = router(state_with(admin, Config::default()));
+    let app = app_at(dir.path(), state_with(admin, Config::default()));
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/check").await;
     assert_eq!(status, StatusCode::OK, "{body}");
