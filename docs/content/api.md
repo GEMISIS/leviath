@@ -218,7 +218,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider` or [`default_model`](#the-default-model) applies to the next run spawned, with no daemon restart |
-| `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
+| `GET /api/models?provider=` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
@@ -937,6 +937,42 @@ without an `agent`, since the answer is the same either way.
 
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
+
+## Two providers, one model id
+
+`GET /api/models` returns a flat list, and each entry carries the `provider`
+that serves it. That matters more than it looks: **`openai` and `codex` serve
+the same model ids.** Both answer to `gpt-5.5`, and they bill to entirely
+different places - one to an API balance, one to a ChatGPT subscription.
+
+So `id` is not a key. `provider` + `id` is:
+
+```json
+[
+  { "id": "gpt-5.5", "provider": "openai", "pricing": { "input": 1.25, "output": 10.0 } },
+  { "id": "gpt-5.5", "provider": "codex",  "pricing": { "input": 0.0,  "output": 0.0  } }
+]
+```
+
+A client keying a picker on `id` alone silently collapses those two into one
+row, and whichever it kept decides what the user pays. Build the key the way a
+blueprint names a model - `provider/id`, the same `codex/gpt-5.5` that goes in
+`models = [...]`.
+
+`?provider=` asks the server instead:
+
+```
+GET /api/models?provider=codex     only the subscription's models
+GET /api/models?provider=openai    only the keyed ones
+```
+
+A provider this machine has not configured lists nothing rather than 404ing:
+the set of providers is whatever the config has, so "no models" is the honest
+answer to asking about one it does not have.
+
+The `pricing` on a Codex entry is a real zero rather than an absent one - the
+marginal cost of a subscription call is nothing, and `null` there would mean
+"unknown", which is a different thing a console should draw differently.
 
 ## Signing in to a subscription provider
 

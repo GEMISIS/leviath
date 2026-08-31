@@ -2021,6 +2021,17 @@
     },
     "/api/models": {
       "get": {
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only models this provider serves. `openai` and `codex` serve the same model ids and bill to different places, so `provider` and `id` together are the key, not `id` alone. A provider this machine has not configured lists nothing rather than 404ing."
+          }
+        ],
         "tags": [
           "config"
         ],

@@ -381,6 +381,17 @@ impl ApiLimits {
     }
 }
 
+/// Query parameters for `GET /api/models`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ModelsQuery {
+    /// Only models this provider serves. Absent lists every provider's.
+    ///
+    /// A name nothing serves lists nothing, rather than 404ing: the set of
+    /// providers is whatever this machine has configured, so "no models" is
+    /// the honest answer to asking about one it has not.
+    pub(super) provider: Option<String>,
+}
+
 /// Body of `PUT /api/config` (admin-only). Every field is optional; a present
 /// field is written, an absent one is left untouched. Mirrors what `lev setup`
 /// writes, so a newcomer can configure providers entirely from the browser.
