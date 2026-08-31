@@ -29,6 +29,50 @@ pub enum Credential {
     Signin,
 }
 
+/// Where a provider's choice lives in a [`Config`], as the row itself
+/// declares it.
+///
+/// Adding a provider used to mean adding an arm to `stored_credential`, one
+/// to `set_credential`, sometimes one to `is_configured`, and an entry in
+/// `configured_providers` - four places, none of which the compiler would
+/// mention if you missed them, and one of which shipped missed. A row that
+/// carries its own accessors is one place instead, and the functions below
+/// are then written once against any provider rather than once per provider.
+#[derive(Clone, Copy)]
+pub enum Setting {
+    /// One `Option<String>` on the config: an API key, or a base URL.
+    /// `None` means "not configured".
+    Text {
+        /// Read the value.
+        read: fn(&Config) -> Option<String>,
+        /// Write it, or clear it with `None`.
+        write: fn(&mut Config, Option<String>),
+    },
+    /// A `bool` on the config. The credential, if there is one, lives
+    /// somewhere else entirely - a browser grant, or an installed CLI.
+    Switch {
+        /// Read the switch.
+        read: fn(&Config) -> bool,
+        /// Set it.
+        write: fn(&mut Config, bool),
+    },
+    /// Written as `[model_providers]` entries under a name the user picks, so
+    /// there is no single field to read: see `is_configured`.
+    Endpoints,
+}
+
+/// Hand-written: function pointers have no useful `Debug`, and the shape is
+/// what a reader wants anyway.
+impl std::fmt::Debug for Setting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Text { .. } => "Text",
+            Self::Switch { .. } => "Switch",
+            Self::Endpoints => "Endpoints",
+        })
+    }
+}
+
 /// One configurable provider.
 #[derive(Debug, Clone)]
 pub struct Provider {
@@ -51,6 +95,8 @@ pub struct Provider {
     /// For an endpoint preset, the address a fresh entry starts with. `None`
     /// for the custom preset, which asks.
     pub preset_url: Option<&'static str>,
+    /// Where this provider's choice lives in a [`Config`].
+    pub setting: Setting,
 }
 
 /// Every provider the wizard offers, in the order it offers them.
@@ -65,6 +111,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: Some("ANTHROPIC_API_KEY"),
             signup_url: Some("https://console.anthropic.com/settings/keys"),
             preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.anthropic_api_key.clone(),
+                write: |c, v| c.providers.anthropic_api_key = v,
+            },
         },
         Provider {
             id: "openai",
@@ -75,6 +125,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: Some("OPENAI_API_KEY"),
             signup_url: Some("https://platform.openai.com/api-keys"),
             preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.openai_api_key.clone(),
+                write: |c, v| c.providers.openai_api_key = v,
+            },
         },
         Provider {
             id: "google",
@@ -85,6 +139,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: Some("GOOGLE_API_KEY"),
             signup_url: Some("https://aistudio.google.com/app/apikey"),
             preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.google_api_key.clone(),
+                write: |c, v| c.providers.google_api_key = v,
+            },
         },
         Provider {
             id: "openrouter",
@@ -95,6 +153,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: Some("OPENROUTER_API_KEY"),
             signup_url: Some("https://openrouter.ai/keys"),
             preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.openrouter_api_key.clone(),
+                write: |c, v| c.openrouter_api_key = v,
+            },
         },
         Provider {
             id: "codex",
@@ -106,6 +168,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: None,
             signup_url: Some("https://chatgpt.com/codex"),
             preset_url: None,
+            setting: Setting::Switch {
+                read: |c| c.providers.codex_enabled,
+                write: |c, v| c.providers.codex_enabled = v,
+            },
         },
         Provider {
             id: "ollama",
@@ -116,6 +182,23 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: Some("OLLAMA_HOST"),
             signup_url: Some("https://ollama.com/download"),
             preset_url: None,
+            // Two config fields, one setting. `ollama_enabled` is "I chose
+            // Ollama" and the URL is "and it is not at the default address",
+            // so a config that names a URL counts as chosen even if it
+            // predates the switch. The default address is deliberately not
+            // stored: pinning it would stop `$OLLAMA_HOST` and the built-in
+            // default from applying.
+            setting: Setting::Text {
+                read: |c| {
+                    (c.providers.ollama_enabled || c.ollama_base_url.is_some())
+                        .then(|| c.ollama_base_url.clone().unwrap_or_default())
+                },
+                write: |c, v| {
+                    c.providers.ollama_enabled = v.is_some();
+                    c.ollama_base_url =
+                        v.filter(|url| !url.is_empty() && url != DEFAULT_OLLAMA_URL);
+                },
+            },
         },
         Provider {
             id: "llama-cpp",
@@ -127,6 +210,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: None,
             signup_url: Some("https://github.com/ggml-org/llama.cpp"),
             preset_url: Some(LLAMA_CPP_URL),
+            setting: Setting::Endpoints,
         },
         Provider {
             id: "lm-studio",
@@ -138,6 +222,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: None,
             signup_url: Some("https://lmstudio.ai"),
             preset_url: Some(LM_STUDIO_URL),
+            setting: Setting::Endpoints,
         },
         Provider {
             id: "openai-compatible",
@@ -149,6 +234,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             env_var: None,
             signup_url: None,
             preset_url: None,
+            setting: Setting::Endpoints,
         },
     ]
 }
@@ -190,56 +276,62 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 /// going faster.
 pub const OLLAMA_MAX_CONCURRENT_INFERENCES: usize = 1;
 
+/// The row for `id`, if the catalog has one.
+fn row(id: &str) -> Option<Provider> {
+    providers().into_iter().find(|p| p.id == id)
+}
+
 /// Read a provider's currently-configured credential out of a config.
 ///
-/// `openrouter_api_key` and `ollama_base_url` sit at the top level of `Config`
-/// while the other three live under `[providers]` - a legacy split this
-/// function hides from everything else.
+/// The `Switch` kinds answer a marker string rather than a secret: there is
+/// no credential in the config to read, and the wizard's "is this configured"
+/// and "did this change" both want a value that changes when the switch does.
 pub(crate) fn stored_credential(config: &Config, id: &str) -> Option<String> {
-    match id {
-        "anthropic" => config.providers.anthropic_api_key.clone(),
-        "openai" => config.providers.openai_api_key.clone(),
-        "google" => config.providers.google_api_key.clone(),
-        "openrouter" => config.openrouter_api_key.clone(),
-        "ollama" => config.ollama_base_url.clone(),
-        // Not a credential: the grant lives outside the config. The value is
-        // the on/off flag, so the wizard's "is this configured" and "did this
-        // change" both read the right thing.
-        "codex" => config
-            .providers
-            .codex_enabled
-            .then(|| "enabled".to_string()),
-        _ => None,
+    match row(id)?.setting {
+        Setting::Text { read, .. } => read(config),
+        Setting::Switch { read, .. } => read(config).then(|| "enabled".to_string()),
+        Setting::Endpoints => None,
     }
 }
 
 /// Write a provider's credential into a config. `None` clears it.
 pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String>) {
-    match id {
-        "anthropic" => config.providers.anthropic_api_key = value,
-        "openai" => config.providers.openai_api_key = value,
-        "google" => config.providers.google_api_key = value,
-        "openrouter" => config.openrouter_api_key = value,
-        "ollama" => config.ollama_base_url = value,
-        "codex" => config.providers.codex_enabled = value.is_some(),
-        // An unknown id has nowhere to go.
-        _ => {}
+    // An id the catalog does not have goes nowhere, which is what a
+    // `_ => {}` arm used to say.
+    let Some(row) = row(id) else {
+        return;
+    };
+    match row.setting {
+        Setting::Text { write, .. } => write(config, value),
+        Setting::Switch { write, .. } => write(config, value.is_some()),
+        Setting::Endpoints => {}
     }
 }
 
-/// Whether a provider counts as configured in this config: it has a credential.
+/// Whether a provider counts as configured in this config.
 pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
-    match id {
+    match row(id).map(|p| p.setting) {
         // An endpoint preset is "configured" when the file holds an endpoint
         // entry that sits under it.
-        "llama-cpp" | "lm-studio" | "openai-compatible" => config
+        Some(Setting::Endpoints) => config
             .model_providers
             .iter()
             .any(|(name, entry)| entry.is_endpoint() && preset_for(name, entry) == id),
-        // Ollama is always usable at its default endpoint, but "configured"
-        // here means "the user chose it", which is the stored URL.
         _ => stored_credential(config, id).is_some(),
     }
+}
+
+/// Every provider this config has configured, in catalog order.
+///
+/// Derived from the table rather than restated: the list that decides which
+/// providers can be the default used to be its own hard-coded tuple, and a
+/// provider missing from it was configured, usable, and not offered.
+pub(crate) fn configured(config: &Config) -> Vec<&'static str> {
+    providers()
+        .into_iter()
+        .filter(|p| is_configured(config, p.id))
+        .map(|p| p.id)
+        .collect()
 }
 
 /// Redact a credential for display.
@@ -263,6 +355,50 @@ mod tests {
     use super::*;
 
     // ─── the table ──────────────────────────────────────────────────────────
+
+    /// The hand-written `Debug` names the shape, which is the useful half:
+    /// function pointers print as addresses and tell a reader nothing.
+    #[test]
+    fn a_setting_debugs_as_its_shape() {
+        let shapes: Vec<String> = providers()
+            .iter()
+            .map(|p| format!("{:?}", p.setting))
+            .collect();
+        for shape in &shapes {
+            assert!(
+                ["Text", "Switch", "Endpoints"].contains(&shape.as_str()),
+                "{shape}"
+            );
+        }
+        assert!(shapes.iter().any(|s| s == "Text"));
+        assert!(shapes.iter().any(|s| s == "Switch"));
+        assert!(shapes.iter().any(|s| s == "Endpoints"));
+    }
+
+    /// An endpoint preset has no field of its own to write: its entries live
+    /// under names the user picks, and `is_configured` looks for those.
+    /// Writing to the preset is a no-op rather than a panic or a stray key.
+    #[test]
+    fn writing_to_an_endpoint_preset_changes_nothing() {
+        let mut config = Config::default();
+        set_credential(&mut config, "llama-cpp", Some("http://h/v1".to_string()));
+        assert!(config.model_providers.is_empty());
+        assert!(stored_credential(&config, "llama-cpp").is_none());
+        assert!(!is_configured(&config, "llama-cpp"));
+    }
+
+    /// And an id the catalog does not have goes nowhere at all.
+    #[test]
+    fn writing_to_an_unknown_provider_changes_nothing() {
+        let mut config = Config::default();
+        set_credential(&mut config, "not-a-provider", Some("x".to_string()));
+        assert!(stored_credential(&config, "not-a-provider").is_none());
+        assert!(!is_configured(&config, "not-a-provider"));
+        // And nothing landed in any of the fields a real provider writes.
+        assert!(config.providers.anthropic_api_key.is_none());
+        assert!(config.openrouter_api_key.is_none());
+        assert!(!config.providers.codex_enabled);
+    }
 
     #[test]
     fn every_provider_has_a_distinct_id_and_is_described() {
