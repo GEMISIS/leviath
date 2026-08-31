@@ -292,7 +292,17 @@ impl CodexProvider {
             .send()
             .await
             .map_err(|e| ProviderError::transport("reading the subscription quota", &e))?;
+        let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
+        // Read before the body is parsed, because a rejected request answers
+        // with a perfectly well-formed error document and parsing it first
+        // turns "your session was revoked" into "not in a known shape".
+        if status == 401 || status == 403 {
+            return Err(ProviderError::Unavailable {
+                reason: UnavailableReason::AuthFailed,
+                detail: format!("the quota route answered HTTP {status}"),
+            });
+        }
         usage::parse(&body).ok_or_else(|| {
             ProviderError::InvalidResponse(
                 "the quota response was not in a known shape".to_string(),
@@ -405,6 +415,27 @@ impl Provider for CodexProvider {
                     .named(Some((*display).to_string()))
             })
             .collect())
+    }
+
+    /// Ask the subscription about itself.
+    ///
+    /// [`Provider::list_models`] here reads a table compiled into this build,
+    /// so it answers the same list whether the user signed in this morning or
+    /// never signed in at all. The quota route is the cheapest call that the
+    /// account has to agree to: it is authenticated, it costs no model tokens,
+    /// and it comes back with the plan tier, which is also what decides which
+    /// of those models the account may actually use.
+    ///
+    /// Refreshing happens on the way in, because [`Self::quota`] asks for
+    /// credentials and that is where a lapsed access token is rotated. So a
+    /// check is also the thing that keeps a rarely-used sign-in alive.
+    async fn check_credential(&self) -> Result<Vec<ModelInfo>> {
+        let plan = self.quota().await?.plan_type.or_else(|| self.plan());
+        // Learned for real this time, so `served_catalog` can start answering
+        // and a later `list_models` shows this account's models rather than
+        // every account's.
+        *leviath_core::sync::lock(&self.served) = Some(catalog::served(plan.as_deref()));
+        self.list_models().await
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {

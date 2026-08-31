@@ -775,6 +775,90 @@ async fn a_quota_body_in_an_unknown_shape_is_reported() {
     assert!(err.to_string().contains("known shape"), "got {err}");
 }
 
+/// A refused session answers the quota route with a well-formed error
+/// document, so parsing it first would report the *shape* rather than the
+/// rejection. Status is read before the body for exactly that reason.
+#[tokio::test]
+async fn a_refused_session_is_an_auth_failure_not_an_unknown_shape() {
+    for status in [401, 403] {
+        let body = br#"{"detail":"Your authentication token is not from a valid issuer."}"#;
+        let url = spawn_mock_server(status, "Unauthorized", body.to_vec()).await;
+        let err = provider("http://x", Static::new("t"))
+            .with_usage_url(Some(url))
+            .quota()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ProviderError::Unavailable {
+                    reason: UnavailableReason::AuthFailed,
+                    ..
+                }
+            ),
+            "got {err} for HTTP {status}"
+        );
+    }
+}
+
+/// The wizard's check has to reach the network. `list_models` here is a
+/// compiled table, so a check answered from it would report a working
+/// subscription for a session that was revoked yesterday.
+#[tokio::test]
+async fn checking_the_credential_asks_the_account_rather_than_the_table() {
+    // No listener, so the check cannot possibly be answered locally.
+    let err = provider("http://x", Static::new("t"))
+        .with_usage_url(Some("http://127.0.0.1:1".to_string()))
+        .check_credential()
+        .await
+        .unwrap_err();
+    assert!(err.failure_kind().is_some(), "got {err:?}");
+
+    // And the table still answers when nobody asked for a check.
+    let listed = provider("http://x", Static::new("t"))
+        .list_models()
+        .await
+        .expect("the table needs no network");
+    assert!(!listed.is_empty());
+}
+
+/// A successful check learns the plan from the route, which is what lets
+/// `served_catalog` start answering and keeps a pro-only model off a plus
+/// account.
+#[tokio::test]
+async fn a_successful_check_learns_the_plan_it_was_told() {
+    let body = br#"{"plan_type":"plus","rate_limit":{}}"#.to_vec();
+    let url = spawn_mock_server(200, "OK", body).await;
+    // The grant claims nothing, so the plan can only have come from the route.
+    let p = provider("http://x", Static::with_plan("t", None)).with_usage_url(Some(url));
+    assert_eq!(p.served_catalog(), None, "nothing learned yet");
+
+    let models = p.check_credential().await.expect("the route answered");
+
+    let served = p.served_catalog().expect("the plan is known now");
+    assert_eq!(models.len(), served.len());
+    assert!(
+        !served.iter().any(|id| id == "gpt-5.3-codex-spark"),
+        "a pro-only model reached a plus account: {served:?}"
+    );
+}
+
+/// A route that answers without naming the plan falls back to the grant's own
+/// claim rather than forgetting the tier and offering every model.
+#[tokio::test]
+async fn a_check_falls_back_to_the_plan_in_the_grant() {
+    let url = spawn_mock_server(200, "OK", br#"{"rate_limit":{}}"#.to_vec()).await;
+    let p = provider("http://x", Static::with_plan("t", Some("plus"))).with_usage_url(Some(url));
+
+    p.check_credential().await.expect("the route answered");
+
+    let served = p.served_catalog().expect("the grant knew the plan");
+    assert!(
+        !served.iter().any(|id| id == "gpt-5.3-codex-spark"),
+        "the tier was forgotten: {served:?}"
+    );
+}
+
 #[test]
 fn an_empty_usage_url_leaves_the_default_alone() {
     let p = provider("http://x", Static::new("t")).with_usage_url(Some("  ".to_string()));
