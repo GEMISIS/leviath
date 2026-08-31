@@ -78,8 +78,44 @@ impl AuthArgs {
     }
 }
 
+/// What `lev auth login` needs from the outside world.
+///
+/// Injected the way [`crate::commands::doctor::execute`] takes its daemon: the
+/// binary supplies the real browser and the real issuer, and a test supplies a
+/// stub rather than launching one.
+pub struct AuthEnv {
+    /// Opens the sign-in page.
+    pub opener: leviath_mcp::BrowserOpener,
+    /// Where the grant is stored. `None` when no home could be resolved, which
+    /// is resolved here rather than inside the flow so the flow has one fewer
+    /// way to fail and one fewer thing to reach for.
+    pub grant_path: Option<std::path::PathBuf>,
+    /// The client the token exchange goes out on.
+    pub client: reqwest::Client,
+    /// The OAuth issuer. Overridden only in tests.
+    pub issuer: String,
+    /// The loopback ports to bind, in order.
+    pub ports: Vec<u16>,
+}
+
+impl AuthEnv {
+    /// The real browser, the real issuer, and this machine's paths.
+    pub fn real() -> Self {
+        Self {
+            opener: std::sync::Arc::new(leviath_sys::open_url),
+            grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+            // `leviath_net::client` rather than the provider builder: this is
+            // one OAuth exchange, not inference, and it cannot fail to build,
+            // so there is no error arm here that nothing could ever take.
+            client: leviath_net::client(leviath_net::ClientTimeouts::default()),
+            issuer: leviath_providers::codex::ISSUER.to_string(),
+            ports: leviath_providers::codex::CALLBACK_PORTS.to_vec(),
+        }
+    }
+}
+
 /// Run `lev auth`.
-pub async fn execute(args: AuthArgs) -> anyhow::Result<()> {
+pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
     let path = Config::config_path();
     match args.command {
         AuthCommand::Status => {
@@ -89,11 +125,11 @@ pub async fn execute(args: AuthArgs) -> anyhow::Result<()> {
         }
         AuthCommand::Login { provider } => {
             let config = Config::load_from_path_public(&path)?;
-            login(&config, &provider).await
+            login(&config, &provider, env).await
         }
         AuthCommand::Logout { provider } => {
             let config = Config::load_from_path_public(&path)?;
-            logout(&config, &provider)
+            logout(&config, &provider, env.grant_path)
         }
         AuthCommand::Migrate { to_file, dry_run } => migrate(&path, to_file, dry_run),
     }
@@ -111,35 +147,47 @@ fn not_an_oauth_provider(provider: &str) -> anyhow::Error {
     )
 }
 
-/// Where a provider grant lives.
-fn grant_store_path() -> anyhow::Result<std::path::PathBuf> {
-    leviath_providers::codex::ProviderAuthStore::default_path().ok_or_else(|| {
-        anyhow::anyhow!("no home directory, so there is nowhere to store the sign-in")
-    })
+/// The error for a machine with nowhere to put the grant.
+fn no_home() -> anyhow::Error {
+    anyhow::anyhow!("no home directory, so there is nowhere to store the sign-in")
 }
 
 /// Run the browser sign-in for `provider`.
-async fn login(config: &Config, provider: &str) -> anyhow::Result<()> {
+async fn login(config: &Config, provider: &str, env: AuthEnv) -> anyhow::Result<()> {
+    let resolved = crate::credentials::store_for(config.security.credential_store);
+    login_with(config, provider, env, resolved).await
+}
+
+/// Core of [`login`] with the credential backend already resolved - see
+/// [`status_with`] for why the resolution is the caller's.
+async fn login_with(
+    config: &Config,
+    provider: &str,
+    env: AuthEnv,
+    resolved: crate::credentials::Resolved,
+) -> anyhow::Result<()> {
     if provider != leviath_providers::codex::PROVIDER_NAME {
         return Err(not_an_oauth_provider(provider));
     }
-    let store = crate::credentials::store_for(config.security.credential_store)
+    let store = resolved
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .map(std::sync::Arc::from);
 
-    let env = codex::LoginEnv::new(
-        std::sync::Arc::new(leviath_sys::open_url),
-        grant_store_path()?,
+    let mut login_env = codex::LoginEnv::new(
+        env.opener,
+        env.grant_path.ok_or_else(no_home)?,
         store,
-        leviath_providers::build_http_client(None)?,
+        env.client,
         // Printed, not rendered: this path owns the terminal. The wizard
         // supplies its own announce for the same reason.
         std::sync::Arc::new(|url: &str| {
             println!("\nOpen this page to sign in:\n\n  {url}\n");
         }),
     );
+    login_env.issuer = env.issuer;
+    login_env.ports = env.ports;
 
-    let grant = codex::login(&env).await?;
+    let grant = codex::login(&login_env).await?;
     let who = grant.email.as_deref().unwrap_or("this account");
     match grant.plan_type.as_deref() {
         Some(plan) => println!("Signed in as {who} on the ChatGPT {plan} plan."),
@@ -155,13 +203,26 @@ async fn login(config: &Config, provider: &str) -> anyhow::Result<()> {
 }
 
 /// Forget a provider's stored sign-in.
-fn logout(config: &Config, provider: &str) -> anyhow::Result<()> {
+fn logout(
+    config: &Config,
+    provider: &str,
+    grant_path: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let resolved = crate::credentials::store_for(config.security.credential_store);
+    logout_with(provider, grant_path, resolved)
+}
+
+/// Core of [`logout`] with the credential backend already resolved.
+fn logout_with(
+    provider: &str,
+    grant_path: Option<std::path::PathBuf>,
+    resolved: crate::credentials::Resolved,
+) -> anyhow::Result<()> {
     if provider != leviath_providers::codex::PROVIDER_NAME {
         return Err(not_an_oauth_provider(provider));
     }
-    let store = crate::credentials::store_for(config.security.credential_store)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let removed = codex::logout(&grant_store_path()?, store.as_deref())?;
+    let store = resolved.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let removed = codex::logout(&grant_path.ok_or_else(no_home)?, store.as_deref())?;
     match removed {
         true => println!(
             "Signed out of {provider}. It is still enabled in config.toml, so runs will fail \
@@ -257,7 +318,10 @@ pub(crate) fn status_with(
     // Same policy as the MCP grants above: a load failure reads as "none"
     // rather than propagating, because this is the command someone runs when
     // something is already wrong.
-    let oauth_providers = oauth_provider_summaries(backend.as_deref());
+    let oauth_providers = oauth_provider_summaries(
+        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
+        backend.as_deref(),
+    );
 
     Status {
         kind,
@@ -275,31 +339,27 @@ pub(crate) fn status_with(
 ///
 /// `store` is the resolved credential backend, so a keychain-held grant is
 /// found rather than reported missing.
-fn oauth_provider_summaries(store: Option<&dyn CredentialStore>) -> Vec<(String, String)> {
-    let Some(path) = leviath_providers::codex::ProviderAuthStore::default_path() else {
+fn oauth_provider_summaries(
+    path: Option<&std::path::Path>,
+    store: Option<&dyn CredentialStore>,
+) -> Vec<(String, String)> {
+    let Some(all) =
+        path.and_then(|p| leviath_providers::codex::ProviderAuthStore::load_with(p, store).ok())
+    else {
         return Vec::new();
     };
-    let Ok(all) = leviath_providers::codex::ProviderAuthStore::load_with(&path, store) else {
-        return Vec::new();
-    };
-    all.names()
+    all.entries()
         .into_iter()
-        .map(|name| {
-            let detail = all.get(&name).map_or_else(
-                || "signed in".to_string(),
-                |grant| {
-                    let claims = grant.claims();
-                    let who = grant
-                        .email
-                        .clone()
-                        .or(claims.email)
-                        .unwrap_or_else(|| "signed in".to_string());
-                    match grant.plan_type.clone().or(claims.plan_type) {
-                        Some(plan) => format!("{who} ({plan} plan)"),
-                        None => who,
-                    }
-                },
-            );
+        .map(|(name, grant)| {
+            let claims = grant.claims();
+            let who = grant
+                .email
+                .or(claims.email)
+                .unwrap_or_else(|| "signed in".to_string());
+            let detail = match grant.plan_type.or(claims.plan_type) {
+                Some(plan) => format!("{who} ({plan} plan)"),
+                None => who,
+            };
             (name, detail)
         })
         .collect()
@@ -962,6 +1022,31 @@ mod tests {
         assert!(!err.to_string().is_empty());
     }
 
+    /// A corrupt MCP store fails the migration into the keychain too, not just
+    /// the one back out of it.
+    #[test]
+    fn a_corrupt_mcp_store_fails_the_migration_into_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mcp = dir.path().join("mcp-auth.json");
+        std::fs::write(&mcp, "not json").unwrap();
+
+        let config = config_with_keys(CredentialStoreKind::File);
+        config.save_to_path_public(&path).unwrap();
+        let store = leviath_core::MemoryStore::new();
+        assert!(
+            apply_migration_with(
+                &config,
+                &path,
+                false,
+                Ok(Some(Box::new(store))),
+                Some(&mcp),
+                None,
+            )
+            .is_err()
+        );
+    }
+
     /// And a migration to the file still works when there is no keychain at all
     /// to clean up.
     #[test]
@@ -1344,12 +1429,28 @@ mod tests {
     /// `std` guard across an `.await` is a deadlock the scheduler is free to
     /// arrange.
     fn run_auth(path: &std::path::Path, args: AuthArgs) -> anyhow::Result<()> {
+        run_auth_with(
+            path,
+            args,
+            AuthEnv {
+                // Never the real one: a test must not launch a browser.
+                opener: std::sync::Arc::new(|_| false),
+                grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                client: reqwest::Client::new(),
+                issuer: leviath_providers::codex::ISSUER.to_string(),
+                ports: vec![0],
+            },
+        )
+    }
+
+    /// [`run_auth`] with the outside world supplied by the caller.
+    fn run_auth_with(path: &std::path::Path, args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         temp_env::with_var("LEVIATH_CONFIG_PATH", Some(path.as_os_str()), || {
-            rt.block_on(execute(args))
+            rt.block_on(execute(args, env))
         })
     }
 
@@ -1507,6 +1608,112 @@ mod tests {
         );
     }
 
+    /// A grant file that will not parse fails the migration in either
+    /// direction rather than reporting a move that did not happen.
+    #[test]
+    fn a_corrupt_grant_file_fails_the_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let grants = dir.path().join("provider-auth.json");
+        std::fs::write(&grants, "{ not json").unwrap();
+        let config = config_with_keys(CredentialStoreKind::Keychain);
+        config.save_to_path_public(&path).unwrap();
+
+        for to_file in [true, false] {
+            let store = leviath_core::MemoryStore::new();
+            assert!(
+                apply_migration_with(
+                    &config,
+                    &path,
+                    to_file,
+                    Ok(Some(Box::new(store))),
+                    None,
+                    Some(&grants),
+                )
+                .is_err(),
+                "to_file={to_file}"
+            );
+        }
+    }
+
+    /// A keychain that will not give the sign-in up is a cleanup failure, not a
+    /// migration failure: the grant is safely in the file either way.
+    #[test]
+    fn a_sign_in_that_cannot_be_deleted_still_migrates_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let grants = dir.path().join("provider-auth.json");
+        let config = config_with_keys(CredentialStoreKind::Keychain);
+        config.save_to_path_public(&path).unwrap();
+
+        // Seeded through the very store the migration will read it back from,
+        // so the cleanup has a sign-in to try to delete. A different store
+        // would leave nothing there and the loop would never run.
+        let store = Undeletable::default();
+        let mut initial = leviath_providers::codex::ProviderAuthStore::default();
+        initial.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt-SECRET".to_string(),
+                ..Default::default()
+            },
+        );
+        initial.save_with(&grants, Some(&store)).unwrap();
+
+        apply_migration_with(
+            &config,
+            &path,
+            true,
+            Ok(Some(Box::new(store))),
+            None,
+            Some(&grants),
+        )
+        .expect("cleanup is best effort");
+    }
+
+    /// An ordinary in-memory store that refuses to delete.
+    ///
+    /// It has to read back what it was given: the migration verifies every key
+    /// it wrote before dropping the file copy, so a store that answered with
+    /// something else would fail for the wrong reason.
+    #[derive(Default)]
+    struct Undeletable(leviath_core::MemoryStore);
+
+    impl CredentialStore for Undeletable {
+        fn get(&self, account: &str) -> Result<Option<String>, String> {
+            self.0.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> Result<(), String> {
+            self.0.set(account, secret)
+        }
+        fn delete(&self, _: &str) -> Result<bool, String> {
+            Err("locked".to_string())
+        }
+    }
+
+    /// A store that accepts writes and refuses deletes still migrates into the
+    /// keychain: there is nothing to delete in that direction.
+    #[test]
+    fn a_store_that_refuses_deletes_still_migrates_into_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let grants = dir.path().join("provider-auth.json");
+        write_grant_store(&grants);
+        let config = config_with_keys(CredentialStoreKind::File);
+        config.save_to_path_public(&path).unwrap();
+
+        apply_migration_with(
+            &config,
+            &path,
+            false,
+            Ok(Some(Box::new(Undeletable::default()))),
+            None,
+            Some(&grants),
+        )
+        .expect("writing is all this direction needs");
+    }
+
     /// Nobody signed in is not a failed migration.
     #[test]
     fn a_migration_with_no_sign_in_is_fine() {
@@ -1548,6 +1755,426 @@ mod tests {
         let grants = dir.path().join("provider-auth.json");
         write_grant_store(&grants);
         assert_eq!(provider_grant_names(Some(&grants), None), vec!["codex"]);
+    }
+
+    impl AuthArgs {
+        /// A `login` invocation, for driving the command end to end.
+        fn login_for_test(provider: &str) -> Self {
+            Self {
+                command: AuthCommand::Login {
+                    provider: provider.to_string(),
+                },
+            }
+        }
+
+        /// A `logout` invocation.
+        fn logout_for_test(provider: &str) -> Self {
+            Self {
+                command: AuthCommand::Logout {
+                    provider: provider.to_string(),
+                },
+            }
+        }
+    }
+
+    /// A stub browser that plays the redirect, so the whole command runs
+    /// without launching anything or reaching the real issuer.
+    fn stub_browser() -> leviath_mcp::BrowserOpener {
+        std::sync::Arc::new(move |url: &str| {
+            let parsed = url::Url::parse(url).expect("a URL");
+            let pairs: std::collections::HashMap<_, _> =
+                parsed.query_pairs().into_owned().collect();
+            let redirect = pairs.get("redirect_uri").expect("a redirect").clone();
+            let state = pairs.get("state").expect("a state").clone();
+            let port: u16 = redirect
+                .rsplit(':')
+                .next()
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|p| p.parse().ok())
+                .expect("a port");
+            tokio::spawn(async move { play_the_redirect(port, &state).await });
+            true
+        })
+    }
+
+    /// Connect to the loopback callback and issue the redirect a browser would.
+    ///
+    /// Lifted out of the closure so the "nobody is listening" arm can be driven
+    /// directly rather than inside a spawned task nothing observes.
+    async fn play_the_redirect(port: u16, state: &str) -> bool {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let Ok(mut socket) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
+            return false;
+        };
+        let request = format!("GET /auth/callback?code=c&state={state} HTTP/1.1\r\n\r\n");
+        let _ = socket.write_all(request.as_bytes()).await;
+        let mut sink = Vec::new();
+        let _ = socket.read_to_end(&mut sink).await;
+        true
+    }
+
+    /// Port one never listens, so the redirect simply does not land.
+    #[tokio::test]
+    async fn a_redirect_nobody_is_listening_for_goes_nowhere() {
+        assert!(!play_the_redirect(1, "st8").await);
+    }
+
+    /// The whole command, from the argument to the stored grant.
+    ///
+    /// The mock issuer is spawned on the same runtime the command runs on: a
+    /// server spawned on a runtime that is then dropped stops answering, which
+    /// looks exactly like an unreachable issuer.
+    #[tokio::test]
+    async fn execute_login_signs_in_and_stores_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let issuer = leviath_testkit::spawn_mock_server(
+            200,
+            "OK",
+            br#"{"access_token":"at-1","refresh_token":"rt-1"}"#.to_vec(),
+        )
+        .await;
+
+        temp_env::async_with_vars(
+            [
+                ("LEVIATH_CONFIG_PATH", Some(path.as_os_str())),
+                ("LEVIATH_HOME", Some(dir.path().as_os_str())),
+            ],
+            async {
+                execute(
+                    AuthArgs::login_for_test("codex"),
+                    AuthEnv {
+                        opener: stub_browser(),
+                        grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                        client: reqwest::Client::new(),
+                        issuer,
+                        // Never the registered ports: a test must not fight the
+                        // developer's own Codex CLI for them.
+                        ports: vec![0],
+                    },
+                )
+                .await
+                .expect("sign-in succeeds");
+
+                let store = leviath_providers::codex::ProviderAuthStore::default_path()
+                    .and_then(|p| leviath_providers::codex::ProviderAuthStore::load(&p).ok())
+                    .expect("a store");
+                assert_eq!(store.get("codex").expect("a grant").refresh_token, "rt-1");
+            },
+        )
+        .await;
+    }
+
+    /// And signing out again, which is the other half of the pair.
+    #[test]
+    fn execute_logout_forgets_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let grants =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+            write_grant_store(&grants);
+
+            run_auth(&path, AuthArgs::logout_for_test("codex")).expect("logout succeeds");
+            let store =
+                leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
+            assert!(store.get("codex").is_none());
+
+            // And again, which reports there was nothing to do.
+            run_auth(&path, AuthArgs::logout_for_test("codex")).expect("a second logout is fine");
+        });
+    }
+
+    /// A provider that signs in with a key is refused by both halves.
+    #[test]
+    fn execute_refuses_a_key_based_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        for args in [
+            AuthArgs::login_for_test("anthropic"),
+            AuthArgs::logout_for_test("anthropic"),
+        ] {
+            let err = run_auth(&path, args).unwrap_err().to_string();
+            assert!(err.contains("does not sign in with a browser"), "{err}");
+        }
+    }
+
+    /// Signing in to a provider that is already enabled skips the reminder,
+    /// which is the other arm of that branch.
+    #[tokio::test]
+    async fn signing_in_to_an_enabled_provider_says_nothing_extra() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.save_to_path_public(&path).unwrap();
+        let issuer = leviath_testkit::spawn_mock_server(
+            200,
+            "OK",
+            br#"{"access_token":"at-1","refresh_token":"rt-1","id_token":"a.b.c"}"#.to_vec(),
+        )
+        .await;
+
+        temp_env::async_with_vars(
+            [
+                ("LEVIATH_CONFIG_PATH", Some(path.as_os_str())),
+                ("LEVIATH_HOME", Some(dir.path().as_os_str())),
+            ],
+            async {
+                execute(
+                    AuthArgs::login_for_test("codex"),
+                    AuthEnv {
+                        opener: stub_browser(),
+                        grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                        client: reqwest::Client::new(),
+                        issuer,
+                        ports: vec![0],
+                    },
+                )
+                .await
+                .expect("sign-in succeeds");
+            },
+        )
+        .await;
+    }
+
+    /// A machine with nowhere to put the grant says so rather than panicking
+    /// or writing somewhere surprising.
+    #[tokio::test]
+    async fn a_sign_in_with_nowhere_to_store_it_is_refused() {
+        let env = AuthEnv {
+            opener: std::sync::Arc::new(|_| false),
+            grant_path: None,
+            client: reqwest::Client::new(),
+            issuer: "http://127.0.0.1:1".to_string(),
+            ports: vec![0],
+        };
+        let err = login_with(&Config::default(), "codex", env, Ok(None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no home directory"), "{err}");
+
+        let err = logout_with("codex", None, Ok(None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no home directory"), "{err}");
+    }
+
+    /// A keychain that cannot be reached is reported rather than silently
+    /// falling back to the file, which would put a refresh token where the
+    /// user asked for it not to be.
+    #[tokio::test]
+    async fn an_unavailable_keychain_stops_both_halves() {
+        let env = AuthEnv {
+            opener: std::sync::Arc::new(|_| false),
+            grant_path: Some(std::path::PathBuf::from("/does/not/matter")),
+            client: reqwest::Client::new(),
+            issuer: "http://127.0.0.1:1".to_string(),
+            ports: vec![0],
+        };
+        let err = login_with(
+            &Config::default(),
+            "codex",
+            env,
+            Err("no credential store on this machine".to_string()),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no credential store"), "{err}");
+
+        let err = logout_with(
+            "codex",
+            Some(std::path::PathBuf::from("/does/not/matter")),
+            Err("no credential store on this machine".to_string()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no credential store"), "{err}");
+    }
+
+    /// A sign-in the issuer refuses is reported rather than stored.
+    #[tokio::test]
+    async fn a_refused_sign_in_stores_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let issuer = leviath_testkit::spawn_mock_server(400, "Bad Request", b"nope".to_vec()).await;
+        let env = AuthEnv {
+            opener: stub_browser(),
+            grant_path: Some(dir.path().join("provider-auth.json")),
+            client: reqwest::Client::new(),
+            issuer,
+            ports: vec![0],
+        };
+        let err = login_with(&Config::default(), "codex", env, Ok(None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("400"), "{err}");
+        assert!(!dir.path().join("provider-auth.json").exists());
+    }
+
+    /// The account and plan are named when the id token carries them, which is
+    /// the line a person reads to confirm they signed in as the right one.
+    #[tokio::test]
+    async fn a_sign_in_names_the_plan_when_the_token_carries_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = serde_json::json!({
+            "email": "someone@example.com",
+            "https://api.openai.com/auth": { "chatgpt_plan_type": "plus" },
+        })
+        .to_string();
+        let id_token = format!("aGVhZGVy.{}.c2ln", base64url(claims.as_bytes()));
+        let body = serde_json::json!({
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "id_token": id_token,
+        });
+        let issuer =
+            leviath_testkit::spawn_mock_server(200, "OK", body.to_string().into_bytes()).await;
+
+        let grants = dir.path().join("provider-auth.json");
+        let env = AuthEnv {
+            opener: stub_browser(),
+            grant_path: Some(grants.clone()),
+            client: reqwest::Client::new(),
+            issuer,
+            ports: vec![0],
+        };
+        login_with(&Config::default(), "codex", env, Ok(None))
+            .await
+            .expect("sign-in succeeds");
+        let store = leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
+        assert_eq!(
+            store.get("codex").expect("a grant").plan_type.as_deref(),
+            Some("plus")
+        );
+    }
+
+    /// Base64url, no padding. `base64` is not a CLI dependency and adding one
+    /// for a test fixture is a poor trade.
+    fn base64url(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut buf = [0u8; 3];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            let n = u32::from(buf[0]) << 16 | u32::from(buf[1]) << 8 | u32::from(buf[2]);
+            for i in 0..chunk.len() + 1 {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+
+    /// The real environment resolves this machine's paths and the real issuer.
+    #[test]
+    fn the_real_environment_points_at_this_machine() {
+        let env = AuthEnv::real();
+        assert_eq!(env.issuer, leviath_providers::codex::ISSUER);
+        assert_eq!(env.ports, leviath_providers::codex::CALLBACK_PORTS.to_vec());
+        assert!(env.grant_path.is_some(), "a home resolves in a test run");
+    }
+
+    /// A config the loader cannot read stops both halves before anything else.
+    #[test]
+    fn a_broken_config_stops_the_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not = = toml").unwrap();
+        for args in [
+            AuthArgs::login_for_test("codex"),
+            AuthArgs::logout_for_test("codex"),
+        ] {
+            assert!(run_auth(&path, args).is_err());
+        }
+    }
+
+    /// A grant file that cannot be read stops the sign-out rather than
+    /// reporting that nothing was there.
+    #[test]
+    fn a_corrupt_grant_file_fails_the_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = dir.path().join("provider-auth.json");
+        std::fs::write(&grants, "{ not json").unwrap();
+        assert!(logout_with("codex", Some(grants), Ok(None)).is_err());
+    }
+
+    /// The report reads the grant rather than inventing one, and falls back
+    /// through the id token when the stored fields are absent.
+    #[test]
+    fn the_summaries_read_the_stored_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let grants =
+                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+
+            // Nothing signed in yet, and nowhere to look at all.
+            assert!(oauth_provider_summaries(Some(&grants), None).is_empty());
+            assert!(oauth_provider_summaries(None, None).is_empty());
+
+            // The stored fields win when they are there.
+            write_grant_store(&grants);
+            assert_eq!(
+                oauth_provider_summaries(Some(&grants), None),
+                vec![(
+                    "codex".to_string(),
+                    "someone@example.com (plus plan)".to_string()
+                )]
+            );
+
+            // With none of them, the id token answers instead.
+            let claims = serde_json::json!({
+                "email": "from-token@example.com",
+                "https://api.openai.com/auth": { "chatgpt_plan_type": "pro" },
+            })
+            .to_string();
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    id_token: format!("aGVhZGVy.{}.c2ln", base64url(claims.as_bytes())),
+                    ..Default::default()
+                },
+            );
+            store.save(&grants).unwrap();
+            assert_eq!(
+                oauth_provider_summaries(Some(&grants), None),
+                vec![(
+                    "codex".to_string(),
+                    "from-token@example.com (pro plan)".to_string()
+                )]
+            );
+
+            // And with no account at all, the name alone.
+            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            store.set(
+                "codex",
+                leviath_providers::ProviderGrant {
+                    access_token: "at".to_string(),
+                    refresh_token: "rt".to_string(),
+                    ..Default::default()
+                },
+            );
+            store.save(&grants).unwrap();
+            assert_eq!(
+                oauth_provider_summaries(Some(&grants), None),
+                vec![("codex".to_string(), "signed in".to_string())]
+            );
+
+            // A file that will not parse reports nothing rather than failing:
+            // this is the command someone runs because something is wrong.
+            std::fs::write(&grants, "{ not json").unwrap();
+            assert!(oauth_provider_summaries(Some(&grants), None).is_empty());
+        });
     }
 
     /// A provider that signs in with a key is told where to go instead.

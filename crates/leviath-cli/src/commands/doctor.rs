@@ -970,9 +970,7 @@ pub(crate) async fn run_checks_with(
     checks.push(search_check(&config, identity.as_ref()));
     // Same shape and the same reason: it warns rather than failing, and it
     // runs before anything that could stop the report early.
-    if let Some(check) = codex_check(&config) {
-        checks.push(check);
-    }
+    checks.extend(codex_check(&config));
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
     checks.push(check);

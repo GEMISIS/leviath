@@ -130,7 +130,10 @@ mod tests {
         // A route that answers 403 with an HTML challenge page would otherwise
         // put the whole page in the log line.
         let message = forbidden_remedy("leviath", "ua", &"x".repeat(10_000));
-        assert!(message.len() < 1_200, "message was {} chars", message.len());
+        // Bound first: a method call inside the message is a region only a
+        // failing run would reach.
+        let len = message.len();
+        assert!(len < 1_200, "message was {len} chars");
     }
 
     #[test]

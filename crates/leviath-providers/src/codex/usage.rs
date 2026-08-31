@@ -119,16 +119,6 @@ struct WireCredits {
     balance: Option<serde_json::Value>,
 }
 
-impl From<WireWindow> for QuotaWindow {
-    fn from(w: WireWindow) -> Self {
-        Self {
-            window_secs: w.limit_window_seconds,
-            used_percent: w.used_percent,
-            reset_at: w.reset_at,
-        }
-    }
-}
-
 /// Read a usage payload.
 ///
 /// A body that does not parse is `None` rather than an error: quota is

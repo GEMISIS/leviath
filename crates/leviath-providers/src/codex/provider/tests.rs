@@ -175,6 +175,49 @@ async fn a_401_that_survives_the_refresh_is_reported_as_auth_failed() {
 }
 
 #[tokio::test]
+async fn a_401_whose_refresh_fails_reports_the_refresh_failure() {
+    // The retry never goes out: there is no token to send it with.
+    struct RefusesToRefresh;
+    #[async_trait]
+    impl TokenSource for RefusesToRefresh {
+        async fn credentials(&self) -> std::result::Result<Credentials, RefreshError> {
+            Ok(Credentials {
+                access_token: "stale".to_string(),
+                account_id: None,
+            })
+        }
+        async fn refresh_stale(&self, _: &str) -> std::result::Result<Credentials, RefreshError> {
+            Err(RefreshError::Terminal(
+                "the ChatGPT session has expired".to_string(),
+            ))
+        }
+        fn grant(&self) -> Option<ProviderGrant> {
+            None
+        }
+    }
+
+    let url = spawn_mock_server(401, "Unauthorized", b"expired".to_vec()).await;
+    let err = provider(&url, Arc::new(RefusesToRefresh))
+        .infer(&request())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("session has expired"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_retry_that_cannot_be_sent_is_a_transport_failure() {
+    // One response in the sequence, so the listener is gone by the time the
+    // refreshed request goes out.
+    let (url, _bodies) =
+        spawn_mock_sequence(vec![(401, "Unauthorized", b"expired".to_vec())]).await;
+    let err = provider(&url, Static::new("stale"))
+        .infer(&request())
+        .await
+        .unwrap_err();
+    assert!(err.failure_kind().is_some(), "got {err:?}");
+}
+
+#[tokio::test]
 async fn a_dead_grant_says_how_to_sign_in_again() {
     let url = spawn_mock_server(200, "OK", ok_stream()).await;
     let err = provider(&url, Arc::new(Dead))
@@ -288,17 +331,53 @@ async fn a_429_with_a_retry_after_uses_it() {
 }
 
 #[tokio::test]
-async fn a_429_with_no_retry_after_still_reports_a_rate_limit() {
-    // Without a header the quota route is consulted; against a mock that does
-    // not serve one there is simply nothing to add, and the error must still
-    // be a rate limit rather than a generic failure.
+async fn a_429_with_no_reachable_quota_still_reports_a_rate_limit() {
+    // Nothing to add about when to retry, but the error must still be a rate
+    // limit rather than a generic failure: the two are handled differently.
     let url = spawn_mock_server(429, "Too Many Requests", b"slow down".to_vec()).await;
     let err = provider(&url, Static::new("t"))
+        .with_usage_url(Some("http://127.0.0.1:1".to_string()))
         .infer(&request())
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ProviderError::RateLimitExceeded { .. }),
+        matches!(
+            err,
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: None
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_429_tells_the_rate_limiter_about_it() {
+    // The limiter backs off on the provider's own answer rather than on a
+    // guess, which is the whole point of carrying the header through.
+    let url = leviath_testkit::spawn_mock_server_with_headers(
+        429,
+        "Too Many Requests",
+        "Content-Type: application/json\r\nRetry-After: 7\r\n",
+        b"slow down".to_vec(),
+    )
+    .await;
+    let err = provider(&url, Static::new("t"))
+        .with_rate_limit(Some(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        }))
+        .with_usage_url(Some("http://127.0.0.1:1".to_string()))
+        .infer(&request())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: Some(7)
+            }
+        ),
         "got {err:?}"
     );
 }

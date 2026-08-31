@@ -70,16 +70,17 @@ pub fn build(
         push_message(&mut input, message, replay_reasoning);
     }
 
-    let mut body = json!({
-        "model": request.model,
-        // Mandatory. The backend rejects a stored thread on this route, which
-        // is what makes reasoning replay the caller's problem.
-        "store": false,
-        "stream": true,
-        "instructions": instructions,
-        "input": input,
-        "prompt_cache_key": cache_key(request),
-    });
+    // A map rather than a `Value`, so the removals below need no "is this an
+    // object" arm that nothing could ever take.
+    let mut body = serde_json::Map::new();
+    body.insert("model".to_string(), json!(request.model));
+    // Mandatory. The backend rejects a stored thread on this route, which is
+    // what makes reasoning replay the caller's problem.
+    body.insert("store".to_string(), json!(false));
+    body.insert("stream".to_string(), json!(true));
+    body.insert("instructions".to_string(), json!(instructions));
+    body.insert("input".to_string(), json!(input));
+    body.insert("prompt_cache_key".to_string(), json!(cache_key(request)));
 
     // Deliberately absent, both measured as `400 Unsupported parameter` on
     // every model this route serves:
@@ -88,44 +89,62 @@ pub fn build(
     // Sending either fails the whole request rather than being ignored.
 
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(request.tools.iter().map(tool_item).collect());
-        body["tool_choice"] = json!("auto");
-        body["parallel_tool_calls"] = json!(true);
+        body.insert(
+            "tools".to_string(),
+            Value::Array(request.tools.iter().map(tool_item).collect()),
+        );
+        body.insert("tool_choice".to_string(), json!("auto"));
+        body.insert("parallel_tool_calls".to_string(), json!(true));
     }
 
     if reasoning_effort != "none" {
-        body["reasoning"] = json!({ "effort": reasoning_effort, "summary": "auto" });
+        body.insert(
+            "reasoning".to_string(),
+            json!({ "effort": reasoning_effort, "summary": "auto" }),
+        );
         if replay_reasoning {
             // Only worth asking for when it will be handed back; the blob is
             // response bytes that buy nothing if the next turn drops it.
-            body["include"] = json!(["reasoning.encrypted_content"]);
+            body.insert(
+                "include".to_string(),
+                json!(["reasoning.encrypted_content"]),
+            );
         }
     }
-    body["text"] = json!({ "verbosity": verbosity });
+    body.insert("text".to_string(), json!({ "verbosity": verbosity }));
 
     // Per-stage `[model.parameters]`, plus the runtime's own overrides (the
     // titling lane turns reasoning down through here). Merged last so a caller
     // who named a field wins over the defaults above.
     if let Some(extra) = request.extra.as_object() {
         for (key, value) in extra {
-            body[key] = value.clone();
+            body.insert(key.clone(), value.clone());
         }
     }
 
-    // Removed after the merge, not before. Both are `400 Unsupported
-    // parameter` on this route, and a stage that sets one in its parameters
-    // would otherwise fail every request rather than have it ignored. The
-    // runtime writes `temperature` into every request unconditionally, so this
-    // is not a hypothetical.
-    if let Some(object) = body.as_object_mut() {
-        object.remove("temperature");
-        object.remove("max_output_tokens");
-        object.remove("max_tokens");
-        object.remove("prompt_cache_retention");
+    // Removed after the merge, not before. Each is `400 Unsupported parameter`
+    // on this route, and a stage that sets one in its parameters would
+    // otherwise fail every request rather than have it ignored. The runtime
+    // writes `temperature` into every request unconditionally, so this is not
+    // a hypothetical.
+    for rejected in REJECTED_PARAMETERS {
+        body.remove(*rejected);
     }
 
-    body
+    Value::Object(body)
 }
+
+/// Parameters this route answers `400 Unsupported parameter` to.
+///
+/// Stripped unconditionally rather than trusted not to appear: they arrive
+/// from `[stages.<n>.model.parameters]`, and `temperature` arrives from the
+/// runtime on every single request.
+const REJECTED_PARAMETERS: &[&str] = &[
+    "temperature",
+    "max_output_tokens",
+    "max_tokens",
+    "prompt_cache_retention",
+];
 
 /// Split the system side into the preamble and the region blocks.
 ///

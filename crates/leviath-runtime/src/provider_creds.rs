@@ -523,17 +523,17 @@ pub fn build_provider_registry_probing(
                 // "run `lev auth login codex`" rather than being skipped, and
                 // that is the better failure: a silently skipped provider is
                 // how a run quietly uses a model nobody chose.
-                let store_path = c
-                    .options
-                    .get("auth_store_path")
-                    .map(std::path::PathBuf::from)
-                    .or_else(leviath_providers::codex::ProviderAuthStore::default_path);
-                let Some(store_path) = store_path else {
+                // The path comes from the caller rather than being resolved
+                // here: the CLI owns where Leviath's files live, and a runtime
+                // that guessed could look somewhere the CLI never wrote.
+                let Some(store_path) = c.options.get("auth_store_path") else {
                     tracing::warn!(
-                        "no home directory, so the codex grant cannot be found; skipping it"
+                        "the codex provider was configured without a grant location, \
+                         so it is skipped; this is a bug in leviath rather than in the config"
                     );
                     continue;
                 };
+                let store_path = std::path::PathBuf::from(store_path);
                 let credential_store = c
                     .options
                     .get("credential_store")
@@ -1067,5 +1067,122 @@ mod tests {
             2,
             "expected one client per distinct timeout"
         );
+    }
+
+    // ─── codex ──────────────────────────────────────────────────────────────
+
+    /// A `codex` cred, with the store path pointed somewhere harmless.
+    fn codex_creds(dir: &std::path::Path, options: &[(&str, &str)]) -> Vec<ProviderCreds> {
+        let mut map: std::collections::HashMap<String, String> = options
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        map.insert(
+            "auth_store_path".to_string(),
+            dir.join("provider-auth.json").display().to_string(),
+        );
+        vec![ProviderCreds {
+            name: "codex".to_string(),
+            api_key: None,
+            base_url: None,
+            model_capabilities: Default::default(),
+            request_timeout_secs: Some(30),
+            rate_limit: None,
+            options: map,
+        }]
+    }
+
+    fn build(creds: &[ProviderCreds]) -> ProviderRegistry {
+        build_provider_registry_probing(
+            creds,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests")
+    }
+
+    /// Registered without probing for a grant. Probing would mean a
+    /// synchronous credential-store read during daemon start, which on the
+    /// keychain backend can raise a GUI prompt.
+    #[test]
+    fn codex_registers_even_before_anyone_has_signed_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = build(&codex_creds(dir.path(), &[]));
+        assert!(registry.has("codex"));
+    }
+
+    /// The options travel: they are the only way a config setting reaches the
+    /// provider, and a typo in one of these keys is a silent no-op.
+    #[test]
+    fn the_codex_options_reach_the_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = build(&codex_creds(
+            dir.path(),
+            &[
+                ("originator", "Codex Leviath"),
+                ("effort", "xhigh"),
+                ("verbosity", "high"),
+                ("replay_reasoning", "false"),
+                ("credential_store", "keychain"),
+            ],
+        ));
+        assert!(registry.has("codex"));
+        // The catalog is not promised until a plan tier is known, which is the
+        // observable consequence of the provider having been built at all.
+        let provider = registry.get("codex").expect("registered");
+        assert!(provider.served_catalog().is_none());
+        assert!(provider.explicit_route_only());
+    }
+
+    /// The file backend reaches no OS store at all, which is the default and
+    /// the arm a config that names it explicitly takes.
+    #[test]
+    fn a_file_credential_store_resolves_to_no_os_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = build(&codex_creds(dir.path(), &[("credential_store", "file")]));
+        assert!(registry.has("codex"));
+    }
+
+    /// A client factory that cannot build fails the registry rather than
+    /// registering a provider that could never send anything.
+    #[test]
+    fn codex_needs_a_client_like_every_other_http_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds = codex_creds(dir.path(), &[]);
+        let err = build_provider_registry_probing(&creds, &failing_client, &|_| true)
+            .err()
+            .expect("a failing client factory should fail the registry");
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&leviath_providers::ProviderError::ClientBuild(String::new()))
+        );
+    }
+
+    /// An unparsed `replay_reasoning` must not read as "off": the default is on,
+    /// and only the exact string turns it off.
+    #[test]
+    fn only_the_word_false_turns_reasoning_replay_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for value in ["true", "yes", "", "FALSE"] {
+            let registry = build(&codex_creds(dir.path(), &[("replay_reasoning", value)]));
+            assert!(registry.has("codex"), "{value}");
+        }
+    }
+
+    /// Without a grant location there is nowhere to look, so the provider is
+    /// skipped with a warning rather than registered pointing nowhere. The CLI
+    /// always supplies one, so reaching this is a bug rather than a config.
+    #[test]
+    fn codex_without_a_grant_location_is_skipped() {
+        let creds = vec![ProviderCreds {
+            name: "codex".to_string(),
+            api_key: None,
+            base_url: None,
+            model_capabilities: Default::default(),
+            request_timeout_secs: None,
+            rate_limit: None,
+            options: Default::default(),
+        }];
+        assert!(!build(&creds).has("codex"));
     }
 }

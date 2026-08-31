@@ -59,6 +59,11 @@ leviath-testkit = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # temp-env isolates process-env mutations in tests (edition 2024 set_var is unsafe)
 temp-env = { workspace = true }
+# An in-memory credential store installed as the process default, so the
+# keychain adapter is tested against the real `leviath_sys::keychain` path
+# rather than a stand-in. No CI runner has an unlocked login keychain, and
+# reaching a developer's real one would raise an OS prompt and hang.
+keyring-core = "1"
 
 [lints]
 workspace = true

@@ -38,10 +38,15 @@ pub struct CodexClaims {
 
 /// The payload of a JWT, or `None` if it is not one.
 fn payload(jwt: &str) -> Option<serde_json::Value> {
-    let mut parts = jwt.split('.');
-    let (header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
-    // All three segments must be present and non-empty. A two-segment string
-    // is not a JWT, and an empty payload decodes to nothing useful.
+    // Destructured rather than pulled off an iterator: `split` always yields at
+    // least one item, so taking the first with `?` would be a branch nothing
+    // can drive.
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let [header, payload, signature] = parts[..] else {
+        return None;
+    };
+    // All three segments must be non-empty. A two-segment string is not a JWT,
+    // and an empty payload decodes to nothing useful.
     if header.is_empty() || payload.is_empty() || signature.is_empty() {
         return None;
     }

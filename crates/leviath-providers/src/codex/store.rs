@@ -289,6 +289,20 @@ impl ProviderAuthStore {
         self.providers.remove(provider).is_some() || had_index
     }
 
+    /// Every provider and its grant, sorted by name.
+    ///
+    /// Paired rather than a name list the caller looks each one up in: the
+    /// lookup could not fail, so writing it costs a branch nothing can take.
+    pub fn entries(&self) -> Vec<(String, ProviderGrant)> {
+        let mut entries: Vec<(String, ProviderGrant)> = self
+            .providers
+            .iter()
+            .map(|(name, grant)| (name.clone(), grant.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
     /// Every provider with a grant, sorted, for `lev auth status`.
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.providers.keys().cloned().collect();
@@ -401,6 +415,43 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_that_cannot_be_made_fails_the_save() {
+        // The parent is a file, so there is nowhere to put the store.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("in-the-way");
+        std::fs::write(&blocker, b"").unwrap();
+        let mut store = ProviderAuthStore::default();
+        store.set("codex", grant_expiring_at(42));
+        let err = store
+            .save(&blocker.join("provider-auth.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("failed to create"), "got: {err}");
+    }
+
+    #[test]
+    fn a_path_with_no_parent_still_reports_the_write_failure() {
+        // The root has no parent, so the directory step is skipped and the
+        // write is what fails. Both arms in one path.
+        let mut store = ProviderAuthStore::default();
+        store.set("codex", grant_expiring_at(42));
+        let err = store.save(Path::new("/")).unwrap_err().to_string();
+        assert!(err.contains("failed to write"), "got: {err}");
+    }
+
+    #[test]
+    fn entries_come_back_paired_and_sorted() {
+        let mut store = ProviderAuthStore::default();
+        store.set("zeta", grant_expiring_at(1));
+        store.set("alpha", grant_expiring_at(2));
+        let entries = store.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "alpha");
+        assert_eq!(entries[1].0, "zeta");
+        assert_eq!(entries[0].1.refresh_token, "rt-secret");
+    }
+
+    #[test]
     fn removing_reports_whether_anything_went() {
         let mut store = ProviderAuthStore::default();
         store.set("codex", ProviderGrant::default());
@@ -475,6 +526,12 @@ mod tests {
             .to_string();
         assert!(err.contains("failed to store the grant"), "got: {err}");
         assert!(!path.exists(), "a refused save must not write the file");
+
+        // The other two are part of the same contract: a store that refuses a
+        // write still answers, so a load through it reports nothing rather
+        // than failing.
+        assert_eq!(Refusing.get("anything").expect("readable"), None);
+        assert!(!Refusing.delete("anything").expect("deletable"));
     }
 
     #[test]
@@ -503,12 +560,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
             let path = ProviderAuthStore::default_path().expect("home is set");
-            assert!(
-                path.ends_with("provider-auth.json"),
-                "got {}",
-                path.display()
-            );
+            let shown = path.display().to_string();
+            assert!(path.ends_with("provider-auth.json"), "got {shown}");
         });
+    }
+
+    /// Take the store lock, tolerating poisoning: a test that panicked while
+    /// holding it has already failed, and cascading into unrelated ones hides
+    /// the original.
+    fn with_mock_keychain() -> std::sync::MutexGuard<'static, ()> {
+        static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = STORE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        keyring_core::set_default_store(keyring_core::mock::Store::new().expect("mock store"));
+        guard
+    }
+
+    /// The adapter over the real `leviath_sys::keychain` path. No CI runner has
+    /// an unlocked login keychain, and reaching a developer's real one would
+    /// raise an OS prompt and hang, so an in-memory store stands in as the
+    /// process default.
+    #[test]
+    fn the_keychain_adapter_round_trips_a_grant() {
+        let _guard = with_mock_keychain();
+        let store = KeychainStore;
+        let account = grant_account("codex");
+
+        assert_eq!(store.get(&account).expect("a readable store"), None);
+        store.set(&account, "{}").expect("a writable store");
+        assert_eq!(
+            store.get(&account).expect("a readable store").as_deref(),
+            Some("{}")
+        );
+        assert!(store.delete(&account).expect("a deletable store"));
+        assert!(
+            !store
+                .delete(&account)
+                .expect("deleting twice is not an error")
+        );
+    }
+
+    /// `file` is the default and must reach no OS store at all.
+    #[test]
+    fn only_the_keychain_backend_resolves_to_a_store() {
+        assert!(store_for(leviath_core::CredentialStoreKind::File).is_none());
+        assert!(store_for(leviath_core::CredentialStoreKind::Keychain).is_some());
     }
 
     #[test]
