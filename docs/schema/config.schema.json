@@ -87,7 +87,7 @@
           ]
         },
         "codex_enabled": {
-          "description": "Offer the Codex transport, which bills inference to a ChatGPT subscription. Sign in with `lev auth login codex`.",
+          "description": "Offer the Codex transport, which bills inference to a ChatGPT subscription. Sign in from `lev setup`, or with `lev auth login codex` on a headless machine.",
           "type": "boolean",
           "default": false
         },

@@ -405,11 +405,21 @@ rewritten by the CLI and has no business holding a refresh token. With
 `[security] credential_store = "keychain"` the grant moves to the OS store like
 every other secret, and `lev auth migrate` moves it with them.
 
+You sign in from `lev setup`, on the provider's own screen. The commands below
+are for the times there is no wizard to run: a headless machine, a script, or a
+session someone revoked from the ChatGPT settings page.
+
 ```bash
-lev auth login codex     # sign in
 lev auth status          # which account, and on what plan
+lev auth login codex     # sign in again
 lev auth logout codex    # forget it (leaves the provider enabled)
 ```
+
+**The access token renews itself.** Leviath refreshes it a couple of minutes
+before it lapses, on whichever call needs it next, and writes the rotated token
+back before using it. Signing in again is for a session that was revoked or one
+left unused long enough for the refresh token itself to expire, not for
+ordinary use.
 
 ## Rate limits
 
@@ -441,13 +451,17 @@ inference to it instead of an API balance. Sign in once with a browser and no
 API key is involved at all.
 
 ```bash
-lev auth login codex     # opens your browser, stores the grant outside config.toml
-lev setup                # select "OpenAI Codex" to turn it on
+lev setup                # select "OpenAI Codex", then "Sign in with your browser"
 ```
 
-`lev setup` offers it as an ordinary provider row. The sign-in itself is the
-separate command above, because a browser round trip does not belong inside the
-wizard's screen.
+The whole thing happens on that screen. There is no key to paste, so instead of
+a field the card shows who is signed in, a button that opens your browser, and
+the same **Check this credential** button every other provider has. The check
+asks your subscription about itself rather than reading a table, so a green
+answer means the account really did agree.
+
+If your browser does not open (an SSH session, say), the card prints the URL to
+copy.
 
 This is a different provider from `openai`, not a mode of it. You can hold both
 credentials; a blueprint reaches this one as `codex/gpt-5.6-sol`.
