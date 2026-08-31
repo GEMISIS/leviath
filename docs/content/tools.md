@@ -195,7 +195,8 @@ model but executed by the engine's tool registry, since they act on the shared a
 
 A child reports whatever it submitted through [`submit_output`](/docs/outputs). A child that
 submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
-a particular shape, overriding what its blueprint declares.
+a particular shape, overriding what its blueprint declares. A label that differs retires the
+child's declared validator and schema, and the warning appears only in the daemon log.
 
 ## Environment
 

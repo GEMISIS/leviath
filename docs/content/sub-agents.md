@@ -59,7 +59,9 @@ child of the capacity it needs to finish.
 
 `seed_context` injects starting material into the child's first pinned region, and
 `output_format` / `output_instructions` ask it for a particular shape of answer, overriding its
-blueprint's.
+blueprint's. Override with care: an `output_format` that differs from what the child's blueprint
+declares retires any Rhai validator and JSON schema it declared, since a check written for one
+shape cannot judge another, and the only warning goes to the daemon log.
 
 ## Fan-out
 

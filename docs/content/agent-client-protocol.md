@@ -70,7 +70,7 @@ Flags (run `lev agent-client --help` for the authoritative list):
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run at spawn before any approval prompt. |
-| `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. |
+| `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. One that differs from the blueprint's retires its declared validator and schema. |
 | `--output-instructions <text>` | Extra guidance about that shape. |
 
 ## The agent's answer

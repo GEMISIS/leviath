@@ -89,6 +89,10 @@ whole budget against a check that can never pass. The setting works at both leve
 and `[stages.<name>.output]`, and the stage's value wins. Anything other than `reject` or `accept`
 refuses to load.
 
+The setting governs validators only. A declared JSON `schema` that fails to compile keeps its old
+fail-open behaviour: the check is skipped and the submission recorded unchecked, so one bad schema
+cannot make a run unable to finish.
+
 In both modes the run flags the script:
 
 | Surface | What you see |
@@ -111,8 +115,10 @@ own, so a script that will not load is something you can find before a run needs
 Only when the format it was written for is the one in effect.
 
 A validator describes one format. If a caller overrides the format at launch, your validator is
-retired along with any JSON Schema, because neither describes what is now being produced. The caller
-can supply their own checks with their own format.
+retired along with any JSON Schema, because neither describes what is now being produced. The
+caller can bring a JSON Schema of their own (`--output-schema`, or `output_schema` on the API); a
+replacement validator is the one check no request can supply, so a reshaped run keeps only whatever
+schema came with it.
 
 ```mermaid
 flowchart TB

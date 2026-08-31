@@ -264,6 +264,17 @@ errors. `tail` is a byte budget for how much of the end you get back.
 > in one shared world, so there is no process per run. If you are tracking slots from outside, read
 > [reconciling an external work queue](/docs/work-queues) first.
 
+### What a run flags about itself
+
+A run object carries a `flags` object: post-hoc diagnostics that tell an empty or degraded run
+from a healthy one without parsing its logs. Counters like `modified_file_count`, `searches_run`
+beside `searches_empty`, and `gates_forced` say whether the run actually did anything, and
+`empty_output` sums up the verdict. `flags.broken_scripts` names each Rhai script the run needed
+but could not use - an [output validator](/docs/rhai-validators#when-the-validator-itself-fails)
+that threw, say - and is the same list `lev ps` renders as `(broken script)`; the key is omitted
+while the list is empty. The flags live in the run's `meta.json`, so they come back wherever a
+run object does.
+
 ### How long a run has taken
 
 Three spans, and they answer different questions. A run paused overnight is hours old and spent

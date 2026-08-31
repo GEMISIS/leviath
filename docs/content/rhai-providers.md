@@ -394,7 +394,11 @@ The three optional functions each carry their own shape. `stream(state, request,
 `{ delta, tool_calls: [{index, id, name, arguments_delta}], tokens: {...}, finish_reason }`.
 `count_tokens(state, text, model)` returns an int (Leviath falls back to a local heuristic without
 it). `list_models(state)` returns an array of
-`{ id, display_name, max_context_tokens, max_output_tokens }`.
+`{ id, display_name, max_context_tokens, max_output_tokens }`. What it answers is treated as a
+real provider listing: `lev models list` counts the rows toward its "from the providers' own
+listings" line and marks them `"learned": true` under `--json`, exactly as it does a native
+provider's catalog. A `serves = [...]` or `[model_capabilities]` claim in the config is not - those
+feed validation and never become listing rows.
 
 ### Counting tokens remotely
 
