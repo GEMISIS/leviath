@@ -3,7 +3,7 @@ title: Agent catalog
 description: The seven pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
 group: Get started
 group_order: 1
-order: 2
+order: 4
 ---
 
 # Agent catalog

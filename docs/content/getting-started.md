@@ -233,5 +233,5 @@ scratch, a stage at a time, and is the natural next thing to read.
   a page starts using a word you have not met.
 - [Where Leviath sits](/docs/comparison) is for deciding whether you want Leviath at all, and what
   to run alongside it.
-- [Where Leviath fits](/docs/integrations) covers driving Leviath from a tool you already use, like
-  an orchestrator or a CI job.
+- [How Leviath integrates](/docs/integrations) covers driving Leviath from a tool you already use,
+  like an orchestrator or a CI job.

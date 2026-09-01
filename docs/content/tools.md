@@ -1,9 +1,9 @@
 ---
 title: Built-in tools
 description: The built-in tool catalog every agent can advertise, and how a stage decides which ones the model may call.
-group: Reference
-group_order: 3
-order: 4
+group: Get started
+group_order: 1
+order: 6
 ---
 
 # Built-in tools
