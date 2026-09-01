@@ -38,6 +38,9 @@ pub enum Commands {
     /// Configure API keys and defaults
     Setup(commands::setup::SetupArgs),
 
+    /// Show configured providers and set their priority order
+    Providers(commands::providers::ProvidersArgs),
+
     /// Check that provider wiring works, end to end
     #[command(long_about = commands::doctor::DOCTOR_LONG_ABOUT)]
     Doctor(commands::doctor::DoctorArgs),
@@ -161,6 +164,7 @@ Options:
 pub const COMMANDS_HELP: &str = "\
 Setup and configuration:
   setup         Configure API keys and defaults
+  providers     Show configured providers and set their priority order
   doctor        Check that provider wiring works, end to end
   models        List and inspect available models
   auth          Inspect and move the secrets Leviath holds
@@ -291,6 +295,11 @@ pub trait RiskyExecutors {
         &self,
         args: commands::mcp::McpArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+    /// `lev providers` - reads the config file and may rewrite `provider_order`.
+    fn providers(
+        &self,
+        args: commands::providers::ProvidersArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 
     /// `lev auth` - reads the config file and may write the OS credential store.
     fn auth(
@@ -352,6 +361,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Timeline(args) => commands::timeline::execute(args).await,
         Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
+        Commands::Providers(args) => ex.providers(args).await,
         Commands::Auth(args) => ex.auth(args).await,
         Commands::Update(args) => ex.update(args).await,
     }
@@ -445,6 +455,10 @@ mod tests {
         }
 
         async fn mcp(&self, _args: commands::mcp::McpArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn providers(&self, _args: commands::providers::ProvidersArgs) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -608,6 +622,15 @@ mod tests {
     async fn dispatch_mcp_variant_is_routed_through_the_executor() {
         let args = commands::mcp::McpArgs::list_for_test();
         let result = dispatch(Commands::Mcp(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_providers_variant_is_routed_through_the_executor() {
+        // Routed, not called directly: the real command reads and rewrites the
+        // config file, so a unit test must never reach it against the real one.
+        let args = commands::providers::ProvidersArgs::list_for_test();
+        let result = dispatch(Commands::Providers(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
