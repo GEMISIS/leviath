@@ -900,21 +900,154 @@ fn a_literal_redirect_names_its_target() {
 #[test]
 fn an_unreadable_line_is_unreadable_only_when_it_redirects() {
     assert_eq!(
-        write_targets("cat <<EOF > out.txt\nx\nEOF"),
-        WriteTargets::Unreadable
-    );
-    assert_eq!(
         write_targets("echo `id` > out.txt"),
         WriteTargets::Unreadable
     );
-    assert_eq!(
-        write_targets("cat <<EOF\nx\nEOF"),
-        WriteTargets::Known(Vec::new())
-    );
-    assert!(write_target_paths("cat <<EOF > out.txt\nx\nEOF").is_empty());
+    assert_eq!(write_targets("echo `id`"), WriteTargets::Known(Vec::new()));
+    assert!(write_target_paths("echo `id` > out.txt").is_empty());
     assert_eq!(
         write_targets("echo x > out.txt"),
         WriteTargets::Known(vec!["out.txt".to_string()])
+    );
+}
+
+/// A well-formed heredoc line is grantable now that it tokenizes: the body is
+/// stdin data, so `python3 - <<'EOF'` keys the same as any other `python3 -`,
+/// and nothing in the body leaks into the key.
+#[test]
+fn a_heredoc_line_is_keyed_by_its_command_alone() {
+    let segments = tokenize_for("python3 - <<'EOF'\nprint(1 > 0)\nEOF", true).expect("readable");
+    assert_eq!(keys_from_segments(&segments), ["shell:python3"]);
+}
+
+/// A heredoc's body is stdin data, so the redirect fence reads through it: a
+/// `>` beside the operator is a named target held to confinement, and a `>`
+/// inside the body is text. Before heredocs tokenized, `cat <<EOF > out.txt`
+/// was refused outright, and `python3 - <<'EOF'` with any comparison or `->`
+/// in the script was refused with it.
+#[test]
+fn a_heredoc_redirect_names_its_target_and_the_body_is_data() {
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\nx\nEOF", true),
+        WriteTargets::Known(vec!["out.txt".to_string()])
+    );
+    assert_eq!(
+        write_targets_for("cat <<EOF > /tmp/pwned\nx\nEOF", true),
+        WriteTargets::Known(vec!["/tmp/pwned".to_string()])
+    );
+    assert_eq!(
+        write_targets_for(
+            "python3 - <<'EOF'\ndef f(x) -> int:\n    return x > 3\nEOF",
+            true
+        ),
+        WriteTargets::Known(Vec::new())
+    );
+}
+
+/// `cmd.exe` has no heredocs: the lines a POSIX shell would read as a body
+/// really run as commands there, so swallowing them would hide their
+/// redirects. On that reading the construct stays unreadable, exactly as
+/// before heredocs tokenized.
+#[test]
+fn on_a_shell_without_heredocs_the_construct_stays_unreadable() {
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\nx\nEOF", false),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("python3 - <<'EOF'\nprint(1 > 0)\nEOF", false),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<EOF\nx\nEOF", false),
+        WriteTargets::Known(Vec::new())
+    );
+}
+
+/// The two heredoc shapes whose bodies cannot be trusted as data keep the
+/// line unreadable: a body that never ends (the shell would keep reading
+/// input that is not here), and an unquoted body holding a substitution,
+/// which the shell expands - `$(...)` or a backtick in it really runs, and
+/// could write. Quoting the delimiter makes the same body pure data.
+#[test]
+fn a_heredoc_body_that_could_run_something_stays_unreadable() {
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\n$(touch /tmp/pwned)\nEOF", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\n`touch /tmp/pwned`\nEOF", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<'EOF' > out.txt\n$(touch /tmp/pwned)\nEOF", true),
+        WriteTargets::Known(vec!["out.txt".to_string()])
+    );
+    // Never terminated: with a body (delimiter absent), and with none at all.
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\nstill going", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt", true),
+        WriteTargets::Unreadable
+    );
+}
+
+/// The delimiter grammar: quote concatenation ends at the assembled word, a
+/// double-quoted or backslash-escaped delimiter is as literal as a
+/// single-quoted one, `<<-` matches the delimiter behind leading tabs, and a
+/// delimiter as the input's last line needs no trailing newline. Two heredocs
+/// on one line stack in operator order.
+#[test]
+fn heredoc_delimiters_follow_the_word_grammar() {
+    for command in [
+        "cat <<'EO'F > out.txt\nx\nEOF",
+        "cat <<\"EOF\" > out.txt\nx\nEOF",
+        "cat <<\\EOF > out.txt\nx\nEOF",
+        "cat <<-EOF > out.txt\n\tx\n\t\tEOF",
+        "cat 3<<EOF > out.txt\nx\nEOF",
+        // No space before `<<`: the word attached to it ends, the same as any
+        // other operator terminates a word.
+        "cat<<EOF > out.txt\nx\nEOF",
+        "cat <<EOF > out.txt\nx\nEOF",
+        "cat <<A <<B > out.txt\na body\nA\nb body\nB",
+    ] {
+        assert_eq!(
+            write_targets_for(command, true),
+            WriteTargets::Known(vec!["out.txt".to_string()]),
+            "{command:?}"
+        );
+    }
+    // A quoted delimiter marks the body literal even when only part of the
+    // word was quoted, so a substitution in this body is data.
+    assert_eq!(
+        write_targets_for("cat <<'EO'F\n$(true)\nEOF", true),
+        WriteTargets::Known(Vec::new())
+    );
+    // No delimiter at all: `<< ;` and the here-string's third `<`.
+    assert_eq!(
+        write_targets_for("cat << ; echo hi > out.txt", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("grep x <<< data > out.txt", true),
+        WriteTargets::Unreadable
+    );
+    // A backslash as the input's final character escapes nothing, so the
+    // delimiter never completes and the line will not read.
+    assert_eq!(
+        write_targets_for("cat <<\\", true),
+        WriteTargets::Known(Vec::new())
+    );
+    // A delimiter whose quote never closes reads like any unterminated quote.
+    assert_eq!(
+        write_targets_for("cat <<'EOF > out.txt\nx\nEOF", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<\"EOF > out.txt\nx\nEOF", true),
+        WriteTargets::Unreadable
     );
 }
 

@@ -371,11 +371,22 @@ pub(crate) enum WriteTargets {
 /// A line that will not tokenize is different: it is
 /// [`WriteTargets::Unreadable`] when it holds a `>` at all, and the caller
 /// refuses it rather than guessing. Leaning on the prompt instead is not
-/// containment, because under `--yolo` a prompt is a yes, and `cat <<EOF >
-/// /tmp/pwned` would write outside the tree where `write_file` on the same
-/// path is refused.
+/// containment, because under `--yolo` a prompt is a yes, and a redirect the
+/// reader cannot place would write outside the tree where `write_file` on the
+/// same path is refused. A well-formed heredoc reads as commands on a POSIX
+/// shell - its body is stdin data, and a redirect beside it (`cat <<EOF >
+/// /tmp/pwned`) is a named target held to the same confinement - so what
+/// lands here is the rest: a backtick, an unterminated quote or `$(`, a
+/// heredoc that never ends or whose unquoted body holds a substitution, and
+/// every heredoc on `cmd.exe`, which has none.
 pub(crate) fn write_targets(command: &str) -> WriteTargets {
-    let Some(segments) = tokenize(command) else {
+    write_targets_for(command, BACKSLASH_ESCAPES)
+}
+
+/// [`write_targets`] with the escape rule supplied, so both platforms'
+/// readings are testable on either.
+pub(crate) fn write_targets_for(command: &str, backslash_escapes: bool) -> WriteTargets {
+    let Some(segments) = tokenize_for(command, backslash_escapes) else {
         return match command.contains('>') {
             true => WriteTargets::Unreadable,
             false => WriteTargets::Known(Vec::new()),
@@ -438,11 +449,14 @@ pub(crate) fn is_valid_prefix(entry: &str) -> bool {
 /// Split a line into its commands, or `None` when it cannot be read as a list
 /// of commands.
 ///
-/// The four `None` cases are all "this line contains a construct whose contents
+/// The `None` cases are all "this line contains a construct whose contents
 /// decide what runs, and reading it wrong would understate the grant": an
 /// unterminated quote, an unterminated `$(`, a backtick (same idea as `$(`, but
-/// nesting is ambiguous), and a heredoc (whose body has its own delimiter
-/// grammar).
+/// nesting is ambiguous), and the heredocs whose bodies cannot be trusted as
+/// data - one that never ends, one whose unquoted body holds a substitution
+/// that would run, and any heredoc on a shell that has none (`cmd.exe`), where
+/// the "body" lines would really execute. A well-formed heredoc on a POSIX
+/// shell reads as commands, with its body consumed as the stdin data it is.
 fn tokenize(command: &str) -> Option<Vec<Segment>> {
     tokenize_for(command, BACKSLASH_ESCAPES)
 }
@@ -458,7 +472,7 @@ fn tokenize(command: &str) -> Option<Vec<Segment>> {
 /// Matched to the platform rather than to the resolved shell. `BuiltinTools`
 /// picks `$SHELL` on Unix and `cmd.exe` on Windows, and a Unix user whose
 /// `$SHELL` is not POSIX-ish is already outside what this parser models.
-const BACKSLASH_ESCAPES: bool = cfg!(not(windows));
+pub(crate) const BACKSLASH_ESCAPES: bool = cfg!(not(windows));
 
 /// [`tokenize`] with the escape rule supplied, so both readings are testable on
 /// either platform.
@@ -519,9 +533,36 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 lex.begin_word();
                 lex.take_dollar(&mut chars, escapes)?;
             }
-            // A heredoc body has its own delimiter grammar, which is more than
-            // a grant key is worth reading.
-            '<' if chars.peek() == Some(&'<') => return None,
+            // `<<WORD` opens a heredoc: its body is stdin data that starts
+            // after the next newline, not part of this command line, so a `>`
+            // inside the body is text rather than a redirect. The delimiter is
+            // read here; the body is consumed when that newline arrives. On a
+            // shell without heredocs (`cmd.exe`) the construct stays
+            // unreadable, because there the "body" lines would really run as
+            // commands, and swallowing them would hide their redirects from
+            // the fence. `<<<` falls out as unreadable too: the delimiter
+            // scan stops at the third `<` with nothing read.
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                if !escapes {
+                    return None;
+                }
+                // A file descriptor written in front of the operator (`3<<`)
+                // is part of it, the same as on the other redirects.
+                if !lex.word.chars().all(|d| d.is_ascii_digit()) {
+                    lex.end_word();
+                }
+                lex.discard_word();
+                let strip_tabs = chars.peek() == Some(&'-');
+                if strip_tabs {
+                    chars.next();
+                }
+                while matches!(chars.peek(), Some(' ' | '\t')) {
+                    chars.next();
+                }
+                lex.pending_heredocs
+                    .push(take_heredoc_delimiter(&mut chars, escapes, strip_tabs)?);
+            }
             '>' | '<' => {
                 // A file descriptor written in front of the operator (`2>`) is
                 // part of it, not a word of its own.
@@ -571,6 +612,14 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 }
                 lex.end_word();
                 lex.end_segment();
+                // Heredoc bodies begin after the line's newline, however many
+                // commands sat on it, and stack in the order their operators
+                // appeared.
+                if c == '\n' {
+                    for heredoc in std::mem::take(&mut lex.pending_heredocs) {
+                        take_heredoc_body(&mut chars, &heredoc)?;
+                    }
+                }
             }
             c if c.is_whitespace() => lex.end_word(),
             _ => {
@@ -581,7 +630,126 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
     }
     lex.end_word();
     lex.end_segment();
+    // A heredoc still waiting for its body when the input ends never got one.
+    // The real shell would keep reading lines that are not here, so what runs
+    // is not knowable and the line stays unreadable.
+    if !lex.pending_heredocs.is_empty() {
+        return None;
+    }
     Some(lex.segments)
+}
+
+/// A heredoc a line has opened, waiting for the newline its body starts after.
+struct Heredoc {
+    /// The word that ends the body, matched against whole lines.
+    delimiter: String,
+    /// Whether the delimiter carried any quoting. A quoted delimiter makes the
+    /// body pure data; an unquoted one leaves it subject to expansion, so a
+    /// command substitution inside it would really run.
+    literal: bool,
+    /// `<<-`: the shell strips leading tabs from body and delimiter lines.
+    strip_tabs: bool,
+}
+
+/// Read the delimiter word after `<<`, with its quoting.
+///
+/// Quote concatenation applies the way it does to any word (`<<'EO'F` ends at
+/// `EOF`), and any quoted piece - or a backslash escape - marks the whole
+/// delimiter quoted. `None` for a quote that never closes, or for no word at
+/// all (`<< ;`, or the third `<` of a here-string), where the shell would be
+/// reading something this cannot.
+fn take_heredoc_delimiter(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    escapes: bool,
+    strip_tabs: bool,
+) -> Option<Heredoc> {
+    let mut delimiter = String::new();
+    let mut literal = false;
+    loop {
+        match chars.peek() {
+            Some('\'') => {
+                chars.next();
+                literal = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        q => delimiter.push(q),
+                    }
+                }
+            }
+            Some('"') => {
+                chars.next();
+                literal = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        q => delimiter.push(q),
+                    }
+                }
+            }
+            Some('\\') if escapes => {
+                chars.next();
+                literal = true;
+                delimiter.push(chars.next()?);
+            }
+            Some(&c)
+                if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') =>
+            {
+                break;
+            }
+            Some(&c) => {
+                chars.next();
+                delimiter.push(c);
+            }
+            None => break,
+        }
+    }
+    match delimiter.is_empty() {
+        true => None,
+        false => Some(Heredoc {
+            delimiter,
+            literal,
+            strip_tabs,
+        }),
+    }
+}
+
+/// Consume one heredoc's body, leaving `chars` just past the delimiter line.
+///
+/// `None` in the two cases where the line has to stay unreadable: the body
+/// never ends (the shell would keep reading input that is not here), and an
+/// unquoted body holding a `` ` `` or `$(` (the shell expands such a body, so
+/// a substitution inside it really runs - and could write - which is exactly
+/// what this reader exists to not guess about). A quoted body is data whatever
+/// it contains.
+fn take_heredoc_body(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    heredoc: &Heredoc,
+) -> Option<()> {
+    loop {
+        let mut line = String::new();
+        let mut line_ended = false;
+        for c in chars.by_ref() {
+            if c == '\n' {
+                line_ended = true;
+                break;
+            }
+            line.push(c);
+        }
+        let candidate = match heredoc.strip_tabs {
+            true => line.trim_start_matches('\t'),
+            false => line.as_str(),
+        };
+        if candidate == heredoc.delimiter {
+            return Some(());
+        }
+        if !heredoc.literal && (line.contains('`') || line.contains("$(")) {
+            return None;
+        }
+        if !line_ended {
+            return None;
+        }
+    }
 }
 
 /// The tokenizer's mutable state, gathered so the character loop reads as the
@@ -599,6 +767,10 @@ struct Lexer {
     quoted: bool,
     /// Set by a redirect operator: the next word names a file, not a program.
     swallow: Option<Swallow>,
+    /// Heredocs the current line has opened, in operator order. Their bodies
+    /// are consumed at the line's newline; input ending first makes the whole
+    /// line unreadable.
+    pending_heredocs: Vec<Heredoc>,
 }
 
 /// What the word a redirect claimed is going to be used for.

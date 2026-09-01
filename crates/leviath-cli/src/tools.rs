@@ -368,11 +368,27 @@ pub(crate) fn escaping_write_refusal(
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
 ) -> Option<String> {
+    escaping_write_refusal_for(
+        tool_name,
+        arguments,
+        workdir,
+        crate::shell_keys::BACKSLASH_ESCAPES,
+    )
+}
+
+/// [`escaping_write_refusal`] with the shell reading supplied, so both
+/// platforms' fences are testable on either.
+pub(crate) fn escaping_write_refusal_for(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+    backslash_escapes: bool,
+) -> Option<String> {
     if leviath_tools::canonical_tool_name(tool_name) != "shell" {
         return None;
     }
     let command = arguments.get("command").and_then(|v| v.as_str())?;
-    let targets = match crate::shell_keys::write_targets(command) {
+    let targets = match crate::shell_keys::write_targets_for(command, backslash_escapes) {
         crate::shell_keys::WriteTargets::Known(targets) => targets,
         // Refused even when the redirect would land inside the tree: "inside"
         // is a judgement about a path this could not read, and the fence is
@@ -380,9 +396,10 @@ pub(crate) fn escaping_write_refusal(
         crate::shell_keys::WriteTargets::Unreadable => {
             return Some(
                 "[denied] This shell line redirects with `>` inside a construct that cannot be \
-                 read ahead of time (a heredoc, a backtick, an unterminated quote or an \
-                 unbalanced `$(`), so where it writes cannot be checked against the working \
-                 directory. Use the `write_file` tool, or rewrite the line without that construct."
+                 read ahead of time (a backtick, an unterminated quote, an unbalanced `$(`, or \
+                 a heredoc whose body never ends or would expand a substitution), so where it \
+                 writes cannot be checked against the working directory. Use the `write_file` \
+                 tool, or rewrite the line without that construct."
                     .to_string(),
             );
         }
@@ -1006,33 +1023,99 @@ mod policy_tests {
 
     /// A redirect the tokenizer cannot read past is refused outright.
     ///
-    /// A heredoc, a backtick, an unterminated quote and an unbalanced `$(`
-    /// each stop the line being read as commands. Answering "no targets found"
-    /// there would let `cat <<EOF > /tmp/pwned` through under `--yolo` while
-    /// the same path in `write_file` is refused. Every redirect operator, under
-    /// every construct, against a path outside.
+    /// A backtick, an unterminated quote and an unbalanced `$(` each stop the
+    /// line being read as commands. Answering "no targets found" there would
+    /// let the redirect through under `--yolo` while the same path in
+    /// `write_file` is refused. Every redirect operator, under every
+    /// construct, against a path outside.
     #[test]
     fn no_unreadable_redirect_escapes_the_workdir() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let constructs: [(&str, &str); 6] = [
-            ("cat <<EOF", "\nx\nEOF"),
-            ("cat <<'EOF'", "\nx\nEOF"),
-            ("echo `id`", ""),
-            ("echo 'unterminated", ""),
-            ("echo \"unterminated", ""),
-            ("echo $(id", ""),
+        let constructs: [&str; 4] = [
+            "echo `id`",
+            "echo 'unterminated",
+            "echo \"unterminated",
+            "echo $(id",
         ];
         let mut checked = 0;
-        for (head, tail) in constructs {
+        for head in constructs {
             for op in [">", ">>", "2>", "&>", ">|", "<>"] {
-                let command = format!("{head} {op} /tmp/escaped.txt{tail}");
+                let command = format!("{head} {op} /tmp/escaped.txt");
                 let refusal = escaping_write_refusal("shell", &shell_call(&command), dir.path());
                 let refusal = refusal.unwrap_or_default();
                 assert!(refusal.contains("cannot be read"), "{command:?}: {refusal}");
                 checked += 1;
             }
         }
-        assert_eq!(checked, 36);
+        assert_eq!(checked, 24);
+    }
+
+    /// A heredoc no longer hides a redirect beside it: on a POSIX shell the
+    /// line reads as commands, the body is stdin data, and the `>` target is
+    /// named and held to the same confinement as `write_file`. On `cmd.exe`,
+    /// which has no heredocs, the construct stays unreadable and is refused
+    /// outright. Refused either way - what changed is only how precisely.
+    #[test]
+    fn a_heredoc_redirect_outside_the_workdir_is_refused_on_both_shells() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for head in ["cat <<EOF", "cat <<'EOF'"] {
+            for op in [">", ">>", "2>", "&>", ">|", "<>"] {
+                let command = format!("{head} {op} /tmp/escaped.txt\nx\nEOF");
+                let posix =
+                    escaping_write_refusal_for("shell", &shell_call(&command), dir.path(), true)
+                        .unwrap_or_default();
+                assert!(
+                    posix.contains("outside the working directory"),
+                    "{command:?}: {posix}"
+                );
+                let cmd_exe =
+                    escaping_write_refusal_for("shell", &shell_call(&command), dir.path(), false)
+                        .unwrap_or_default();
+                assert!(cmd_exe.contains("cannot be read"), "{command:?}: {cmd_exe}");
+            }
+        }
+    }
+
+    /// The fix this fence's precision buys: a heredoc that writes nowhere, or
+    /// redirects inside the tree, runs on a POSIX shell instead of being
+    /// refused for the `>` characters inside its body. Inline python is the
+    /// motivating case - any script of substance holds a `->` or a
+    /// comparison, and every one was refused. On `cmd.exe` the same lines
+    /// stay refused, since there the body lines would really run as commands.
+    #[test]
+    fn a_posix_heredoc_with_an_inside_or_no_redirect_is_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in [
+            "python3 - <<'EOF'\ndef f(x) -> int:\n    return x > 3\nEOF",
+            "cat <<EOF > inside.txt\na > b\nEOF",
+        ] {
+            assert_eq!(
+                escaping_write_refusal_for("shell", &shell_call(command), dir.path(), true),
+                None,
+                "{command:?} stays inside and must not be refused"
+            );
+            let cmd_exe =
+                escaping_write_refusal_for("shell", &shell_call(command), dir.path(), false)
+                    .unwrap_or_default();
+            assert!(cmd_exe.contains("cannot be read"), "{command:?}: {cmd_exe}");
+        }
+    }
+
+    /// The body of an unquoted heredoc expands, so a substitution inside it
+    /// really runs and could write; with a redirect somewhere on the line, the
+    /// whole construct is refused rather than read as data.
+    #[test]
+    fn an_unquoted_heredoc_body_with_a_substitution_is_still_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in [
+            "cat <<EOF > inside.txt\n$(touch /tmp/pwned)\nEOF",
+            "cat <<EOF > inside.txt\n`touch /tmp/pwned`\nEOF",
+        ] {
+            let refusal =
+                escaping_write_refusal_for("shell", &shell_call(command), dir.path(), true)
+                    .unwrap_or_default();
+            assert!(refusal.contains("cannot be read"), "{command:?}: {refusal}");
+        }
     }
 
     /// The controls. A line the tokenizer cannot read but that redirects
@@ -1060,12 +1143,9 @@ mod policy_tests {
     #[test]
     fn an_unreadable_redirect_inside_the_workdir_is_refused_too() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let refusal = escaping_write_refusal(
-            "shell",
-            &shell_call("cat <<EOF > inside.txt\nx\nEOF"),
-            dir.path(),
-        )
-        .unwrap_or_default();
+        let refusal =
+            escaping_write_refusal("shell", &shell_call("echo `id` > inside.txt"), dir.path())
+                .unwrap_or_default();
         assert!(refusal.contains("cannot be read"), "{refusal}");
         assert!(refusal.contains("write_file"), "{refusal}");
     }
