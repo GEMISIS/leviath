@@ -2427,7 +2427,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviath"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "leviath-agent-client",
  "leviath-core",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-agent-client"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "leviath-core",
  "leviath-tools",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-alloc"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "libmimalloc-sys",
  "temp-env",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-cli"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-core"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "chrono",
  "dirs",
@@ -2543,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-mcp"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-net"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "encoding_rs",
  "leviath-testkit",
@@ -2583,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-package"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-providers"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-runtime"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "async-trait",
  "bevy_ecs",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-scripting"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "base64 0.23.1",
  "leviath-core",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-sys"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "fs4",
  "keyring",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-telemetry"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "leviath-core",
  "leviath-testkit",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-testkit"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "tokio",
  "tracing",
@@ -2707,7 +2707,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-tools"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "chrono",
