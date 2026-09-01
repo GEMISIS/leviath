@@ -3,7 +3,7 @@ title: Where Leviath sits
 description: Where Leviath sits among other agent tools, and which are worth running alongside it rather than instead of it.
 group: Get started
 group_order: 1
-order: 3
+order: 2
 ---
 
 # Where Leviath sits
@@ -19,7 +19,7 @@ runtime. So this page is about layers, not scores, and several of the tools belo
 
 ```mermaid
 flowchart TD
-  ORCH["Orchestrators<br/>Gas Town / Gas City"]
+  ORCH["Orchestrators<br/>Gas Town / Gas City / OpenClaw / Hermes"]
   ORCH --> AGENTS["Agent layer"]
   subgraph AGENTS["Agent layer: pick one"]
     CC["Coding agents<br/>Claude Code, Codex, OpenHands"]

@@ -1,9 +1,9 @@
 ---
 title: Build your first agent
 description: Build a release-notes agent from an empty directory: stages, models, context regions, an error edge, and a structured answer.
-group: Concepts
-group_order: 2
-order: 2
+group: Get started
+group_order: 1
+order: 5
 ---
 
 # Build your first agent

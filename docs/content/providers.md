@@ -1,9 +1,9 @@
 ---
 title: Providers
-description: Configure Anthropic, OpenAI, Google, OpenRouter, Ollama, or Claude Code from a key or an env var, and pick which model each stage uses.
-group: Reference
-group_order: 3
-order: 6
+description: Configure Anthropic, OpenAI, OpenAI Codex, Google, OpenRouter, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
+group: Get started
+group_order: 1
+order: 3
 ---
 
 # Providers
@@ -18,6 +18,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 |---|---|---|
 | Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
+| OpenAI Codex | none (ChatGPT subscription; browser sign-in) | [see below](#openai-codex-chatgpt-subscription) |
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
@@ -41,14 +42,17 @@ provider verbatim, so it has to be spelled the way the provider spells it:
 |---|---|---|
 | Anthropic | the bare model name | `claude-sonnet-5` |
 | OpenAI | the bare model name | `gpt-5.4-mini` |
+| OpenAI Codex | `codex/model` (prefix required) | `codex/gpt-5.5` |
 | Google | the bare model name | `gemini-2.5-pro` |
 | OpenRouter | `vendor/model` | `deepseek/deepseek-v4-flash` |
 | Ollama | `model:tag` | `qwen3.5:9b` |
 
 OpenRouter is the one that trips people up: its identifiers carry a vendor prefix, and the prefix is
 part of the name. `deepseek-v4-flash` is not a valid OpenRouter model; `deepseek/deepseek-v4-flash`
-is. Browse the full catalog at [openrouter.ai/models](https://openrouter.ai/models), or ask your
-install:
+is. OpenAI Codex carries a prefix for a different reason: `gpt-5.5` is the model, and the `codex/`
+in front of it names the provider, required because a bare model name never routes to Codex on its
+own (see [OpenAI Codex](#openai-codex-chatgpt-subscription)). Browse the full OpenRouter catalog at
+[openrouter.ai/models](https://openrouter.ai/models), or ask your install:
 
 ```bash
 lev models list --provider openrouter        # live from the gateway, with dates and prices
