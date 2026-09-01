@@ -32,6 +32,49 @@ pub struct ModelDefaults {
     /// single OpenRouter model, so there is nothing to fall back to when the
     /// account runs out of credits.
     pub fallback_order: Vec<ModelEntry>,
+    /// The user's ordered provider preference, from `[providers] provider_order`,
+    /// best first (e.g. `["codex", "openrouter", "openai"]`).
+    ///
+    /// This is what decides, for a bare model name that more than one configured
+    /// provider serves, which one wins - generalizing [`provider`](Self::provider)
+    /// from a single front-runner into a full ordering. Empty means "use
+    /// [`provider`](Self::provider) alone", which is the historical behavior. Naming a provider
+    /// here is also a deliberate choice to route bare names through it, so a
+    /// subscription transport that is otherwise reachable only by an explicit
+    /// `provider/model` becomes eligible at the priority it is listed.
+    pub provider_order: Vec<String>,
+}
+
+impl ModelDefaults {
+    /// The provider preference, best first: [`provider_order`](Self::provider_order)
+    /// when the user set one, otherwise the single [`provider`](Self::provider).
+    ///
+    /// Every routing decision reads the preference through here, so the
+    /// empty-`provider_order` case reduces to exactly the single-default
+    /// behavior that shipped before an order could be configured.
+    fn order(&self) -> Vec<&str> {
+        match self.provider_order.is_empty() {
+            true => vec![self.provider.as_str()],
+            false => self.provider_order.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Where `name` sits in the preference, or [`usize::MAX`] when it is not
+    /// named - so a stable sort by this key puts preferred providers first, in
+    /// order, and leaves the rest in their existing order behind them.
+    fn rank(&self, name: &str) -> usize {
+        self.order()
+            .iter()
+            .position(|p| *p == name)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Whether `name` is named in the preference at all. A provider reachable
+    /// only by an explicit route (a subscription transport) is exempt from that
+    /// restriction for a bare name exactly when the user named it here.
+    fn is_preferred(&self, name: &str) -> bool {
+        self.order().contains(&name)
+    }
 }
 
 /// Resolve a stage's [`ModelConfig`] to a concrete `(provider, model)` against
@@ -185,22 +228,28 @@ pub(crate) fn resolve_stage_candidates(
             continue;
         }
         let key = model_key(&model);
-        // Default provider first, so an open route follows the same preference
-        // a named model's routes do.
+        // Preferred providers first, in the user's order, so an open route
+        // follows the same preference a named model's routes do. A stable sort
+        // by rank leaves everything not named in the preference in its existing
+        // order behind the named ones.
         let mut candidates_for_model = registry.native_providers();
-        candidates_for_model.sort_by_key(|(name, _)| *name != defaults.provider);
+        candidates_for_model.sort_by_key(|(name, _)| defaults.rank(name));
         // A script provider is not in `native_providers` - it is compiled on
         // demand rather than enumerated - so without this an open route can
         // never land on one, and a local box serving one fast model is
-        // unreachable however the machine sets `default_provider`. The *default*
-        // provider is asked as well, which costs one compile of a script this
-        // machine has explicitly chosen, and leaves every other script on disk
-        // untouched. Put first, because being the default is what it means.
-        if let Some(script) = registry
-            .script_provider_named(&defaults.provider)
-            .filter(|_| model_cfg.allow_user_default)
-        {
-            candidates_for_model.insert(0, (defaults.provider.as_str(), script));
+        // unreachable however the machine prefers it. Each script provider named
+        // in the preference is asked as well, which costs one compile of a
+        // script this machine has explicitly chosen and leaves every other
+        // script on disk untouched. Sorted in with the rest by rank below, so a
+        // preferred script lands at the priority it was listed.
+        if model_cfg.allow_user_default {
+            for name in defaults.order() {
+                let already = candidates_for_model.iter().any(|(n, _)| *n == name);
+                if let Some(script) = registry.script_provider_named(name).filter(|_| !already) {
+                    candidates_for_model.push((name, script));
+                }
+            }
+            candidates_for_model.sort_by_key(|(name, _)| defaults.rank(name));
         }
         let mut routed = false;
         for (name, provider) in candidates_for_model {
@@ -209,9 +258,9 @@ pub(crate) fn resolve_stage_candidates(
             // transport spends a plan rather than an API balance - so enabling
             // it must not silently move every bare-named stage onto it. It is
             // still reachable by an explicit `provider/model`, a fallback
-            // entry, or being the default, which is why the default-provider
-            // case is exempt.
-            if provider.explicit_route_only() && name != defaults.provider {
+            // entry, or being named in the preference, which is the deliberate
+            // choice that exempts it.
+            if provider.explicit_route_only() && !defaults.is_preferred(name) {
                 continue;
             }
             if let Some(id) = provider.serves_model(key) {
@@ -259,9 +308,9 @@ pub(crate) fn resolve_stage_candidates(
     // blueprint's model, which they may never have pulled. A blueprint that
     // must pin its own provider already has the way to say so -
     // `allow_user_default = false` - and that suppresses this too.
-    if model_cfg.allow_user_default && registry.has(&defaults.provider) {
-        // Grouped by MODEL, not by provider. `default_provider` says where a
-        // run should go, which is a statement about routes; letting it reorder
+    if model_cfg.allow_user_default && defaults.order().iter().any(|p| registry.has(p)) {
+        // Grouped by MODEL, not by provider. The provider preference says where
+        // a run should go, which is a statement about routes; letting it reorder
         // across models turns it into a statement about which model to use, and
         // a blueprint that deliberately chose one per stage silently gets
         // another.
@@ -290,9 +339,9 @@ pub(crate) fn resolve_stage_candidates(
                 .filter(|c| model_key(&c.model) == key)
                 .cloned()
                 .collect();
-            // Stable: the default provider's route to this model first, the
-            // blueprint's order behind it.
-            group.sort_by_key(|c| c.provider != defaults.provider);
+            // Stable: within a model, the routes run in the preference order,
+            // and the blueprint's order behind the preferred ones.
+            group.sort_by_key(|c| defaults.rank(&c.provider));
             grouped.extend(group);
         }
         candidates = grouped;
@@ -826,6 +875,7 @@ mod tests {
             provider: "spark".to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
 
         let picked = resolve_stage_candidates(
@@ -853,6 +903,7 @@ mod tests {
             provider: "spark".to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
 
         for model in ["cheap-model", "costly-model"] {
@@ -875,6 +926,7 @@ mod tests {
             provider: "spark".to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let mut cfg = model_cfg_open(vec!["local-fast"]);
         cfg.allow_user_default = false;
@@ -1041,6 +1093,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: Some("claude-default".to_string()),
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -1060,6 +1113,7 @@ mod tests {
             provider: "ollama".to_string(),
             model: Some("ollama/qwen3.8:latest".to_string()),
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -1120,6 +1174,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -1138,6 +1193,7 @@ mod tests {
             provider: "ghost-default".to_string(),
             model: Some("dm".to_string()),
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -1168,6 +1224,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: Some("would-be-default".to_string()),
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(&cfg, None, &defaults, &registry_with(&["anthropic"]));
         assert_eq!((p.as_str(), m.as_str()), ("ghost", "g"));
@@ -1386,6 +1443,7 @@ mod tests {
             provider: "fallback".to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         };
         let cfg = model_cfg(vec![("one", "m"), ("two", "m")]);
         assert_eq!(providers_tried(&cfg, None, &defaults), "one, two, fallback");
@@ -1582,6 +1640,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: Some("sonnet".to_string()),
             fallback_order: vec![ModelEntry::new("openai".to_string(), "gpt".to_string())],
+            provider_order: Vec::new(),
         };
         let registry = registry_with(&["openrouter", "anthropic", "openai"]);
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
@@ -1734,6 +1793,7 @@ mod tests {
                 "anthropic".to_string(),
                 "sonnet".to_string(),
             )],
+            provider_order: Vec::new(),
         };
         let registry = registry_with(&["anthropic"]);
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
@@ -2464,6 +2524,7 @@ mod tests {
             provider: provider.to_string(),
             model: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         }
     }
 
@@ -2580,5 +2641,96 @@ mod tests {
             picked.iter().all(|e| e.provider != "openai"),
             "got {picked:?}"
         );
+    }
+
+    fn defaults_ordered(default_provider: &str, order: &[&str]) -> ModelDefaults {
+        ModelDefaults {
+            provider: default_provider.to_string(),
+            model: None,
+            fallback_order: Vec::new(),
+            provider_order: order.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A subscription transport listed first in `provider_order` wins a bare
+    /// name. Naming it is the deliberate choice the exclusion waits for, so a
+    /// user who prefers their ChatGPT plan gets it used first.
+    #[test]
+    fn a_subscription_first_in_the_order_wins_a_bare_name() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_ordered("openai", &["codex", "openai"]),
+            &two_providers(true),
+        );
+        assert_eq!(picked[0].provider, "codex", "{picked:?}");
+    }
+
+    /// The order decides which of two providers serving the same bare name
+    /// wins, in the order listed - so putting the API key first keeps billing
+    /// there even with the subscription configured.
+    #[test]
+    fn the_order_ranks_two_providers_that_both_serve_the_name() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_ordered("openai", &["openai", "codex"]),
+            &two_providers(true),
+        );
+        assert_eq!(picked[0].provider, "openai", "{picked:?}");
+        assert!(
+            picked.iter().any(|e| e.provider == "codex"),
+            "codex is still a candidate once named: {picked:?}"
+        );
+    }
+
+    /// A subscription NOT named in the order stays excluded from a bare name,
+    /// even though the order is non-empty. The opt-in is naming it, not merely
+    /// having set an order.
+    #[test]
+    fn a_subscription_absent_from_the_order_stays_excluded() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_ordered("openai", &["openrouter", "openai"]),
+            &two_providers(true),
+        );
+        assert!(
+            picked.iter().all(|e| e.provider != "codex"),
+            "codex joined a bare route without being named: {picked:?}"
+        );
+        assert_eq!(picked[0].provider, "openai");
+    }
+
+    /// Two open providers, ranked by the order across a bare name - the general
+    /// case that `default_provider` alone could not express.
+    #[test]
+    fn the_order_ranks_open_providers() {
+        let registry = registry_serving(&[
+            ("openai", &["shared-model"]),
+            ("openrouter", &["shared-model"]),
+        ]);
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["shared-model"]),
+            None,
+            &defaults_ordered("anthropic", &["openrouter", "openai"]),
+            &registry,
+        );
+        assert_eq!(picked[0].provider, "openrouter", "{picked:?}");
+        assert_eq!(picked[1].provider, "openai", "{picked:?}");
+    }
+
+    /// An empty order is exactly the historical single-default behavior: the
+    /// subscription is still excluded from a bare name.
+    #[test]
+    fn an_empty_order_is_the_old_single_default_behavior() {
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gpt-5.6-sol"]),
+            None,
+            &defaults_ordered("openai", &[]),
+            &two_providers(true),
+        );
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].provider, "openai");
     }
 }

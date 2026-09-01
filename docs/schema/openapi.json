@@ -1952,6 +1952,13 @@
                       "type": "string"
                     },
                     "description": "Gateways to delete, by name. Applied after the edits above."
+                  },
+                  "provider_order": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Ordered provider preference for a bare model name, best first (e.g. [\"codex\", \"openrouter\", \"openai\"]). Absent leaves it untouched; a present list replaces it whole; an empty list clears it back to default_provider alone. Naming a subscription transport here opts it into bare-name routing at that priority."
                   }
                 }
               }
@@ -3181,6 +3188,7 @@
         "required": [
           "default_provider",
           "default_model",
+          "provider_order",
           "has_anthropic_key",
           "has_openai_key",
           "has_google_key",
@@ -3202,6 +3210,13 @@
               "null"
             ],
             "description": "The model every stage runs on while it is set, as a bare model id on `default_provider`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
+          },
+          "provider_order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered provider preference for a bare model name, best first. Empty when the user set none, in which case `default_provider` alone decides. Always sent (empty array, not omitted) so a console can tell \"no order set\" from an old daemon that cannot report it."
           },
           "has_anthropic_key": {
             "type": "boolean"
