@@ -740,8 +740,10 @@ This is a warning, not an error. Every command reads `config.toml`, so one stale
 the CLI down. A blueprint is different: it is authored and validated deliberately, and it fails on
 an unknown key.
 
-The one place unrecognized keys are *kept*: `[model_providers.<name>]` forwards anything it does not
-recognize to the Rhai script, so those are read and never reported.
+The one place unrecognized keys are *kept*: a **script** `[model_providers.<name>]` entry forwards
+anything it does not recognize to the Rhai script, so those are read and never reported. An
+`openai-compatible` endpoint entry has no script to forward to, so it refuses an unknown key
+instead (see [OpenAI-compatible endpoints](#openai-compatible-endpoints)).
 
 <a id="model_capabilitiesmodel_id"></a>
 
