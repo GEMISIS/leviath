@@ -671,6 +671,13 @@ entry to leave it. A `0` on either key means no limit on that side:
 `requests_per_minute = 0` leaves only the token window in force, and
 `tokens_per_minute = 0` only the request window.
 
+A throttle is visible, not silent. The first time a run waits on the token
+window the daemon logs a `warn` naming the limit, `lev doctor` (and
+`GET /api/doctor`) flags a `tokens_per_minute` low enough to throttle almost
+every call, and both point at the same fix: raise it, or set `0`. This matters
+because the limit was parsed but not enforced in older versions, so a value set
+back then now shapes a run for the first time.
+
 This shapes request *rate*. `[limits] max_concurrent_inferences` and
 `[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers
 configure their rate limit under `[model_providers.<name>.rate_limit]` instead; their concurrency

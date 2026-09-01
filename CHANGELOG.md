@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- A `tokens_per_minute` rate limit that throttles a run now says so. The first
+  time a run waits on the token window the daemon logs a `warn` naming the
+  limit, and `lev doctor` (with `GET /api/doctor`) flags a `tokens_per_minute`
+  low enough to throttle almost every call. The limit was enforced for the
+  first time in an earlier release after being parsed-but-inert, so a stale or
+  placeholder value could silently serialize a run to about one call a minute,
+  indistinguishable from a slow model. The fix each surface names is the same:
+  raise it, or set `0` to disable the token window.
+
 ### Fixed
 
 - A shell heredoc no longer hides a redirect from the write fence, and no
