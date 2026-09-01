@@ -657,9 +657,18 @@ So a request that could be near the window is measured before it goes out. When 
 estimate plus the reply budget reaches half the model's window, the runtime asks the provider's own
 tokenizer what the request costs (`/messages/count_tokens` on Anthropic, `:countTokens` on Gemini,
 tiktoken locally on OpenAI, a script's `count_tokens` on a [Rhai provider](/docs/rhai-providers))
-and refuses to send one that would not fit, naming the count and the window in the error. A request
-under that line is sent as it is, so a short turn pays nothing. Every lane is guarded the same
-way: the stage's own call, the routing call at a stage boundary, compaction and titling.
+and refuses to send one that would not fit. The refusal names all three numbers it was computed
+from - the prompt count, the `max_output_tokens` reply budget, and the window - because the reply
+budget is usually the one that tipped the sum, and an error that only showed the prompt against the
+window pointed at the wrong number. A request under that line is sent as it is, so a short turn
+pays nothing. Every lane is guarded the same way: the stage's own call, the routing call at a
+stage boundary, compaction and titling.
+
+The window in that refusal is whatever the provider declares for the model, and a declared window
+that is too small refuses everything a real one would have carried. The common case is a
+[Rhai provider](/docs/rhai-providers#the-script-contract) left on its 8192-token
+`@max_context_tokens` default: a stage asking for an 8192-token reply can then never send anything,
+and the fix is the script's annotation (or a `[model_capabilities]` entry), not the stage.
 
 The count is also fed back into the correction, so a refused request tightens the estimate for the
 retry rather than being rediscovered by it.

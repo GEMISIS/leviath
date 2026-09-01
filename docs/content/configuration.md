@@ -736,6 +736,8 @@ an unknown key.
 The one place unrecognized keys are *kept*: `[model_providers.<name>]` forwards anything it does not
 recognize to the Rhai script, so those are read and never reported.
 
+<a id="model_capabilitiesmodel_id"></a>
+
 ## `[model_capabilities.<model_id>]`
 
 Per-model corrections to the provider's built-in capability table. Useful for a local or

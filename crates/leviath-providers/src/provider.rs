@@ -191,12 +191,24 @@ pub enum ProviderError {
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
-    /// Token limit exceeded
-    #[error("Token limit exceeded: {used} > {max}")]
+    /// The prompt plus the reply budget cannot fit the model's context window.
+    ///
+    /// `used` is the prompt alone: the pre-flight guard refuses when
+    /// `used + reply_budget` overflows `max`, so the message names all three
+    /// numbers. A refusal that printed only the prompt against the window
+    /// read as false ("430 > 8192") whenever the reply budget was what
+    /// tipped the sum.
+    #[error(
+        "Token limit exceeded: the prompt's {used} tokens plus the \
+         {reply_budget}-token reply budget (max_output_tokens) exceed the \
+         model's {max}-token context window"
+    )]
     TokenLimitExceeded {
-        /// Tokens the request would have sent.
+        /// Prompt tokens the request would have sent, without the reply budget.
         used: usize,
-        /// The model's context limit.
+        /// The reply budget the request asked for (`max_tokens`).
+        reply_budget: usize,
+        /// The model's context window.
         max: usize,
     },
 
@@ -1259,7 +1271,14 @@ mod tests {
         assert!(!ProviderError::ApiError("401 unauthorized".into()).is_transient());
         assert!(!ProviderError::ApiError("400 bad request".into()).is_transient());
         assert!(!ProviderError::InvalidResponse("garbage".into()).is_transient());
-        assert!(!ProviderError::TokenLimitExceeded { used: 9, max: 8 }.is_transient());
+        assert!(
+            !ProviderError::TokenLimitExceeded {
+                used: 9,
+                reply_budget: 0,
+                max: 8
+            }
+            .is_transient()
+        );
         assert!(!ProviderError::Other("mystery".into()).is_transient());
         // An unusable provider is permanent: retrying just burns the job
         // timeout against an account that has no money in it.
@@ -1294,7 +1313,11 @@ mod tests {
             ProviderError::ApiError("HTTP 502 Bad Gateway".into()),
             ProviderError::RequestFailed("connection reset".into()),
             ProviderError::Other("mystery".into()),
-            ProviderError::TokenLimitExceeded { used: 9, max: 8 },
+            ProviderError::TokenLimitExceeded {
+                used: 9,
+                reply_budget: 0,
+                max: 8,
+            },
         ] {
             assert!(!err.retry_advice().capacity, "{err}");
         }
@@ -1659,7 +1682,11 @@ mod tests {
         // Everything that is genuinely about the request stays put.
         for err in [
             ProviderError::InvalidResponse("garbage".into()),
-            ProviderError::TokenLimitExceeded { used: 9, max: 8 },
+            ProviderError::TokenLimitExceeded {
+                used: 9,
+                reply_budget: 0,
+                max: 8,
+            },
             ProviderError::RateLimitExceeded {
                 retry_after_secs: Some(5),
             },
@@ -1741,13 +1768,22 @@ mod tests {
         assert_eq!(err.to_string(), "Invalid response: missing field");
     }
 
+    /// The message names all three numbers the refusal was computed from. An
+    /// earlier shape printed only the prompt against the window, which read as
+    /// false ("430 > 8192") whenever the reply budget tipped the sum.
     #[test]
     fn provider_error_token_limit_display() {
         let err = ProviderError::TokenLimitExceeded {
-            used: 500,
-            max: 100,
+            used: 430,
+            reply_budget: 8192,
+            max: 8192,
         };
-        assert_eq!(err.to_string(), "Token limit exceeded: 500 > 100");
+        assert_eq!(
+            err.to_string(),
+            "Token limit exceeded: the prompt's 430 tokens plus the 8192-token \
+             reply budget (max_output_tokens) exceed the model's 8192-token \
+             context window"
+        );
     }
 
     #[test]

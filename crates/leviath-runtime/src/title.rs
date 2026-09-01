@@ -1338,7 +1338,12 @@ mod tests {
         .await;
         let outcome = rx.recv().await.expect("an outcome is always reported");
         let err = outcome.result.expect_err("600 + 512 does not fit in 1,000");
-        assert_eq!(err.to_string(), "Token limit exceeded: 600 > 1000");
+        assert_eq!(
+            err.to_string(),
+            "Token limit exceeded: the prompt's 600 tokens plus the 512-token \
+             reply budget (max_output_tokens) exceed the model's 1000-token \
+             context window"
+        );
         assert!(
             !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),
             "refused before the call, not after it"
