@@ -43,6 +43,12 @@ enum Admission {
         wait: Duration,
         requests: u32,
         tokens: usize,
+        /// The token window is (part of) why this call is waiting, and it is
+        /// the first time this limiter has throttled on it. Surfaced once at
+        /// `warn` so a `tokens_per_minute` that was inert before it was
+        /// enforced does not slow a run invisibly; later waits stay at
+        /// `debug`.
+        first_tpm_wait: bool,
     },
 }
 
@@ -50,6 +56,8 @@ struct RateLimiterState {
     request_timestamps: VecDeque<Instant>,
     token_counts: VecDeque<(Instant, usize)>,
     consecutive_429s: u32,
+    /// Whether the one-time `tokens_per_minute` throttle notice has fired.
+    tpm_wait_announced: bool,
 }
 
 impl RateLimiter {
@@ -69,6 +77,7 @@ impl RateLimiter {
                 request_timestamps: VecDeque::new(),
                 token_counts: VecDeque::new(),
                 consecutive_429s: 0,
+                tpm_wait_announced: false,
             })),
         }
     }
@@ -87,7 +96,7 @@ impl RateLimiter {
             // The lock lives in this block and is gone before the sleep: a
             // guard still in scope across the await would make the future
             // `!Send`, even after an explicit drop.
-            let (wait, current_rpm, current_tpm) = {
+            let (wait, current_rpm, current_tpm, first_tpm_wait) = {
                 let mut state = self.state();
                 match self.admit(&mut state) {
                     Admission::Now => return Ok(()),
@@ -95,9 +104,24 @@ impl RateLimiter {
                         wait,
                         requests,
                         tokens,
-                    } => (wait, requests, tokens),
+                        first_tpm_wait,
+                    } => (wait, requests, tokens, first_tpm_wait),
                 }
             };
+            // The first time a run waits on the token window, say so at `warn`.
+            // The limit was documented as inert before it was enforced, so a
+            // stale or placeholder `tokens_per_minute` throttles silently
+            // otherwise, indistinguishable from a slow model. Once per limiter;
+            // the debug line still carries every wait.
+            if first_tpm_wait {
+                tracing::warn!(
+                    tokens_per_minute = self.tpm_limit,
+                    tokens_in_window = current_tpm,
+                    "Throttling on a configured tokens_per_minute limit: calls are waiting for the \
+                     token window to clear. This is a client-side rate limit; raise it or set \
+                     tokens_per_minute = 0 to disable it."
+                );
+            }
             tracing::debug!(
                 wait_ms = wait.as_millis(),
                 requests = current_rpm,
@@ -156,14 +180,22 @@ impl RateLimiter {
             let oldest = state.request_timestamps.front().copied().unwrap_or(now);
             until = until.max(oldest + window);
         }
+        let mut first_tpm_wait = false;
         if !tpm_ok {
             let oldest = state.token_counts.front().map(|(t, _)| *t).unwrap_or(now);
             until = until.max(oldest + window);
+            // Latch the one-time notice here, while the lock is held, so it
+            // fires exactly once however many callers are waiting at once.
+            if !state.tpm_wait_announced {
+                state.tpm_wait_announced = true;
+                first_tpm_wait = true;
+            }
         }
         Admission::Wait {
             wait: until.saturating_duration_since(now) + Duration::from_millis(50),
             requests: current_rpm,
             tokens: current_tpm,
+            first_tpm_wait,
         }
     }
 
@@ -295,6 +327,53 @@ mod tests {
         });
         // Should be able to acquire at least once
         limiter.acquire().await.unwrap();
+    }
+
+    /// The first time a call waits on the token window, the one-time notice
+    /// latches; it does not before any wait, and a second wait does not
+    /// re-arm it. The `warn!` fires under a real subscriber so its fields run.
+    #[tokio::test]
+    async fn the_first_tpm_wait_announces_once() {
+        let _guard = always_on_tracing_guard();
+        let limiter = short_window(60, 100);
+        assert!(
+            !limiter.state().tpm_wait_announced,
+            "nothing waited yet, so nothing announced"
+        );
+        limiter.record_tokens(100);
+        // First throttled acquire: waits, then announces as it goes.
+        tokio::time::timeout(Duration::from_secs(5), limiter.acquire())
+            .await
+            .expect("released once the window turned over")
+            .expect("acquire succeeds");
+        assert!(
+            limiter.state().tpm_wait_announced,
+            "the first token-window wait announced"
+        );
+        // A second throttle does not re-arm the latch.
+        limiter.record_tokens(100);
+        tokio::time::timeout(Duration::from_secs(5), limiter.acquire())
+            .await
+            .expect("released again")
+            .expect("acquire succeeds");
+        assert!(limiter.state().tpm_wait_announced, "still latched, once");
+    }
+
+    /// A wait driven only by the request window never arms the token notice:
+    /// the two limits are separate, and the notice is about the one that was
+    /// documented inert.
+    #[tokio::test]
+    async fn an_rpm_only_wait_does_not_announce_a_tpm_throttle() {
+        let limiter = short_window(1, 0);
+        limiter.acquire().await.expect("first request admitted");
+        tokio::time::timeout(Duration::from_secs(5), limiter.acquire())
+            .await
+            .expect("released once the request window turned over")
+            .expect("acquire succeeds");
+        assert!(
+            !limiter.state().tpm_wait_announced,
+            "an rpm wait is not a tpm throttle"
+        );
     }
 
     /// A limiter over a short window, so a wait is observable in real time.

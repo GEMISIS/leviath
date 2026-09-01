@@ -394,6 +394,48 @@ fn misdirected_rate_limits(config: &Config) -> Vec<String> {
     misdirected
 }
 
+/// The floor below which a `tokens_per_minute` is almost certainly a mistake.
+///
+/// A single inference's prompt alone runs to thousands of tokens, so a limit
+/// under this throttles nearly every call to about one a minute. `tokens_per_minute`
+/// was documented as parsed-but-inert before it was enforced, so a value set
+/// then - a placeholder, or a guess at "some small number" - now silently
+/// serializes a run. The check names it; the fix is to raise it or set `0`.
+const IMPLAUSIBLE_TPM_FLOOR: u32 = 1_000;
+
+/// Configured `tokens_per_minute` values low enough to throttle almost every
+/// call, from `[rate_limits.<provider>]` and each `[model_providers.<name>]
+/// rate_limit`, each rendered as one report line.
+///
+/// A `0` is "no token limit" and is skipped. Above the floor is the user's
+/// call and left alone. Sorted, so a map's arbitrary order does not reorder
+/// the report.
+fn low_token_rate_limits(config: &Config) -> Vec<String> {
+    let mut low: Vec<String> = Vec::new();
+    let mut consider = |label: String, tpm: u32| {
+        if tpm != 0 && tpm < IMPLAUSIBLE_TPM_FLOOR {
+            low.push(format!(
+                "{label} tokens_per_minute = {tpm} is below one call's usual size, so runs \
+                 throttle to about one call a minute - raise it, or set 0 to disable the token \
+                 limit"
+            ));
+        }
+    };
+    for (name, rl) in &config.rate_limits {
+        consider(format!("rate_limits.{name}:"), rl.tokens_per_minute);
+    }
+    for (name, provider) in &config.model_providers {
+        if let Some(rl) = &provider.rate_limit {
+            consider(
+                format!("model_providers.{name}.rate_limit:"),
+                rl.tokens_per_minute,
+            );
+        }
+    }
+    low.sort_unstable();
+    low
+}
+
 /// `[model_providers.<name>]` script entries whose `.rhai` file is nowhere on
 /// disk, each rendered as one report line.
 ///
@@ -486,6 +528,10 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // Same posture as the unread keys, and reported beside them: the config
     // deserializes fine and one entry of it does nothing.
     let mut notes = missing_script_providers(config, crate::config::providers_dir().as_deref());
+    // A token limit low enough to throttle every call reads the same as a slow
+    // model from the outside, so it is worth naming here where the rest of the
+    // config is explained rather than left to a warn line as a run crawls.
+    notes.extend(low_token_rate_limits(config));
     if !unread.is_empty() {
         let subject = match unread.len() {
             1 => "1 key in config.toml is".to_string(),

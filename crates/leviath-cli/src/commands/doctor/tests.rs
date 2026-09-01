@@ -578,6 +578,86 @@ fn config_check_counts_more_than_one_unread_key() {
     );
 }
 
+/// A `tokens_per_minute` below one call's usual size throttles nearly every
+/// call, which reads as a slow model from the outside. The config check names
+/// it - the value was documented inert before it was enforced, so a stale one
+/// now serializes a run silently. A `0` (no token limit) and a plausible cap
+/// stay quiet, or the note would just report every limit anyone set.
+#[test]
+fn config_check_names_an_implausibly_low_tokens_per_minute() {
+    let mut config = Config::default();
+    config.rate_limits.insert(
+        "openrouter".to_string(),
+        leviath_providers::RateLimitConfig {
+            requests_per_minute: 10,
+            tokens_per_minute: 100,
+        },
+    );
+    // A script provider's own `rate_limit` is read the same way.
+    config.model_providers.insert(
+        "groq".to_string(),
+        crate::config::ModelProviderConfig {
+            rate_limit: Some(leviath_providers::RateLimitConfig {
+                requests_per_minute: 30,
+                tokens_per_minute: 50,
+            }),
+            ..Default::default()
+        },
+    );
+    let check = checked(
+        "doctor-config_check_names_an_implausibly_low_tokens_per_minute",
+        &config,
+        &ProviderRegistry::new(),
+    );
+    assert_eq!(check.status, CheckStatus::Ok, "not broken wiring");
+    assert!(
+        check
+            .detail
+            .contains("rate_limits.openrouter: tokens_per_minute = 100")
+            && check.detail.contains("about one call a minute"),
+        "got: {}",
+        check.detail
+    );
+    assert!(
+        check
+            .detail
+            .contains("model_providers.groq.rate_limit: tokens_per_minute = 50"),
+        "got: {}",
+        check.detail
+    );
+}
+
+/// A `0` token limit means no limit, and a plausible cap is the user's call:
+/// neither is flagged.
+#[test]
+fn config_check_is_quiet_on_a_zero_or_ample_tokens_per_minute() {
+    let mut config = Config::default();
+    config.rate_limits.insert(
+        "openrouter".to_string(),
+        leviath_providers::RateLimitConfig {
+            requests_per_minute: 10,
+            tokens_per_minute: 0,
+        },
+    );
+    config.rate_limits.insert(
+        "anthropic".to_string(),
+        leviath_providers::RateLimitConfig {
+            requests_per_minute: 10,
+            tokens_per_minute: 40_000,
+        },
+    );
+    let check = checked(
+        "doctor-config_check_is_quiet_on_a_zero_or_ample_tokens_per_minute",
+        &config,
+        &ProviderRegistry::new(),
+    );
+    assert!(
+        !check.detail.contains("about one call a minute"),
+        "got: {}",
+        check.detail
+    );
+}
+
 #[test]
 fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
     let mut config = Config::default();
