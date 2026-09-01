@@ -234,6 +234,13 @@ impl RiskyExecutors for RealExecutors {
         commands::mcp::execute_with(args, &env).await
     }
 
+    async fn providers(&self, args: commands::providers::ProvidersArgs) -> anyhow::Result<()> {
+        let env = commands::providers::ProvidersEnv {
+            config_path: leviath_cli::config::Config::config_path(),
+        };
+        commands::providers::execute_with(args, &env).await
+    }
+
     async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {
         real_update(args)
     }

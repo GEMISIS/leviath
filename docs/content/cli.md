@@ -817,6 +817,24 @@ Inside the wizard, the keys work the same way on every screen:
 Nothing is written until you confirm on the Review screen. Leaving the provider screen with
 nothing selected asks before letting you continue, since an agent cannot run without one.
 
+### `lev providers`
+
+Show the configured providers and set their **priority order** - the
+[`[providers] provider_order`](/docs/configuration#provider-preference-order) that decides which
+provider serves a bare model name (one a blueprint lists with no provider) when more than one
+serves it.
+
+| Command | Options | Purpose |
+|---|---|---|
+| `lev providers` (or `lev providers list`) | `--json` | List configured providers and the current priority order |
+| `lev providers order <NAME>...` | | Set the order, best first (e.g. `lev providers order codex openrouter openai`) |
+| `lev providers order --clear` | | Remove the order, so `default_provider` alone decides |
+
+Naming a provider in the order is also how a subscription transport (Codex, Claude Code) becomes
+eligible for a bare model name - it is otherwise reachable only by an explicit `provider/model`, so
+that enabling it never silently moves billing. A name that is not a configured provider is refused
+rather than written, since it could never win a route.
+
 ### `lev mcp`
 
 Manage [MCP tool servers](/docs/mcp).

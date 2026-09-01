@@ -48,6 +48,7 @@ pub mod mcp;
 pub(crate) mod models;
 pub(crate) mod pack;
 pub(crate) mod policy;
+pub mod providers;
 pub mod ps;
 pub(crate) mod remove;
 pub(crate) mod result;
