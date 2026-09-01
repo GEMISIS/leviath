@@ -2113,6 +2113,7 @@ fn collect_learns_from_a_refused_request_too() {
         entity: e,
         result: Err(leviath_providers::ProviderError::TokenLimitExceeded {
             used: 1_300,
+            reply_budget: 100,
             max: 1_350,
         }),
         pricing: None,

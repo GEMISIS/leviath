@@ -335,6 +335,7 @@ impl OllamaProvider {
         }
         ProviderError::TokenLimitExceeded {
             used: estimated_request_tokens(request),
+            reply_budget: request.max_tokens,
             max: self.max_context_tokens(&request.model),
         }
     }
@@ -2530,6 +2531,7 @@ mod tests {
         assert!(
             !ProviderError::TokenLimitExceeded {
                 used: 33_000,
+                reply_budget: 0,
                 max: 32_768
             }
             .is_transient(),

@@ -235,7 +235,11 @@ pub async fn guard_context_window(
     }
     let used = provider.count_tokens(&text, &request.model).await;
     if used.saturating_add(request.max_tokens) > max {
-        return Err(ProviderError::TokenLimitExceeded { used, max });
+        return Err(ProviderError::TokenLimitExceeded {
+            used,
+            reply_budget: request.max_tokens,
+            max,
+        });
     }
     tracing::debug!(
         model = %request.model,
@@ -900,7 +904,12 @@ mod tests {
         let err = outcome.result.expect_err("should be rejected");
         // Assert on the Display string (branch-free) rather than `matches!`,
         // whose non-matching arm would be an uncovered region.
-        assert_eq!(err.to_string(), "Token limit exceeded: 950 > 1000");
+        assert_eq!(
+            err.to_string(),
+            "Token limit exceeded: the prompt's 950 tokens plus the 100-token \
+             reply budget (max_output_tokens) exceed the model's 1000-token \
+             context window"
+        );
     }
 
     /// A refusal is a fact about the request, not the network: it is reported
@@ -1408,7 +1417,11 @@ mod tests {
         assert_eq!(
             backoff_after(
                 &RetryPolicy::default(),
-                &ProviderError::TokenLimitExceeded { used: 9, max: 8 },
+                &ProviderError::TokenLimitExceeded {
+                    used: 9,
+                    reply_budget: 0,
+                    max: 8
+                },
                 1,
                 Duration::ZERO
             ),

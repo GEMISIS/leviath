@@ -11,6 +11,20 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Fixed
+
+- The pre-flight refusal for a request that cannot fit the model's context
+  window now names all three numbers it was computed from: the prompt count,
+  the `max_output_tokens` reply budget, and the window. It used to print only
+  the prompt against the window ("Token limit exceeded: 430 > 8192"), which
+  read as false whenever the reply budget was what tipped the sum - the
+  common case on a Rhai provider script left on its 8192-token
+  `@max_context_tokens` default, where any stage asking for an 8192-token
+  reply was refused with a message pointing at the wrong number. The docs now
+  carry the script annotation table with its defaults and call the trap out.
+
 ## 0.5.7 - 2026-08-31
 
 ### Breaking

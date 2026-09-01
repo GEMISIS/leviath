@@ -80,6 +80,29 @@ A provider defines `initialize` and `inference` (required) and may add `stream`,
 checked when the script loads, so one that is missing or takes the wrong number of parameters is
 skipped with a warning, the same as a syntax error, rather than failing part-way into a run.
 
+The metadata directives, all optional:
+
+| directive | default | meaning |
+|---|---|---|
+| `// @provider <name>` | none | informational; activation is by config key / filename |
+| `// @description <text>` | empty | one line shown in listings |
+| `// @default_model <id>` | none | fills a stage that names no model |
+| `// @max_context_tokens <int>` | 8192 | the model's whole context window |
+| `// @max_output_tokens <int>` | 4096 | the largest reply the model can produce |
+| `// @supports_streaming <bool>` | false | advisory; real streaming needs a `stream` function |
+
+> [!IMPORTANT]
+> `@max_context_tokens` is the window the
+> [pre-flight guard](/docs/context#requests-are-measured-before-they-are-sent) holds every request
+> against: one whose prompt plus its `max_tokens` reply budget would overflow it is refused before
+> it is sent. Left at the 8192 default, a stage that asks for an 8192-token reply can never run,
+> whatever its prompt - the refusal reads
+> `Token limit exceeded: the prompt's N tokens plus the 8192-token reply budget (max_output_tokens)
+> exceed the model's 8192-token context window`, and the number to fix is this annotation, not the
+> stage's `max_output_tokens`. Declare the backing model's real window here, or override it
+> per model with a [`[model_capabilities]`](/docs/configuration#model_capabilitiesmodel_id) entry;
+> a `list_models` answer is a listing, and does not feed the guard.
+
 `initialize(config)` runs once when the provider loads. It runs **offline**, so no HTTP host
 functions are available here. Return a state map that is persisted and passed to every later call.
 
