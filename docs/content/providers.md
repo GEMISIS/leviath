@@ -22,7 +22,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
-| Claude Code | none (subscription; terms caveat below; not in the wizard) | see below |
+| Claude Code | none (subscription; terms caveat below; not in the wizard) | [see below](#claude-code-transport) |
 
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
