@@ -68,6 +68,8 @@ pub(crate) fn draw(frame: &mut Frame, wizard: &Wizard) {
         pending.dialog.draw(frame, frame.area());
     } else if let Some(picker) = &wizard.picker {
         picker.draw(frame, frame.area());
+    } else if let Some(reorder) = &wizard.reorder {
+        reorder.draw(frame, frame.area());
     } else if wizard.show_help {
         draw_help(frame, frame.area(), &help_sections(), &wizard.help_scroll);
     }
@@ -769,6 +771,7 @@ fn build_fields(wizard: &Wizard) -> Screen {
         let hint = match &field.value {
             FieldValue::Bool(_) => "enter/space",
             FieldValue::Choice { .. } => "enter/← →",
+            FieldValue::Order(_) => "enter to reorder",
             _ => "enter",
         };
         let mut spans = vec![
@@ -970,6 +973,14 @@ fn footer_hints(wizard: &Wizard) -> Vec<Hint> {
             hint("↑↓", "move"),
             hint("enter/click", "choose"),
             hint("esc", "keep what it was"),
+        ];
+    }
+    if wizard.reorder.is_some() {
+        return vec![
+            hint("drag ⠿", "move a row"),
+            hint("shift+↑↓", "move"),
+            hint("enter", "keep the order"),
+            hint("esc", "cancel"),
         ];
     }
     if wizard.edit.is_some() {
@@ -1317,6 +1328,23 @@ mod tests {
         assert!(rendered(&w).contains("Nothing matches that."));
     }
 
+    /// The reorder modal draws over the screen, and the footer switches to its
+    /// bindings while it is open.
+    #[test]
+    fn the_reorder_modal_and_its_footer_draw() {
+        let (_dir, mut w) = wizard();
+        w.providers[0].selected = true;
+        w.enter(Step::Defaults);
+        w.cursor = 0;
+        w.open_reorder();
+        let screen = rendered(&w);
+        assert!(screen.contains("Provider priority"), "{screen}");
+        assert!(
+            screen.contains("keep the order"),
+            "the footer switched: {screen}"
+        );
+    }
+
     /// The chooser fills most of the window, so a short one still gets a list
     /// rather than only a heading.
     #[test]
@@ -1325,7 +1353,7 @@ mod tests {
         w.enter(Step::Defaults);
         w.open_picker(
             "Default provider",
-            w.defaults[0].value.options().to_vec(),
+            vec!["anthropic".to_string(), "openai".to_string()],
             0,
         );
 
@@ -1341,7 +1369,7 @@ mod tests {
         w.enter(Step::Defaults);
         w.open_picker(
             "Default provider",
-            w.defaults[0].value.options().to_vec(),
+            vec!["anthropic".to_string(), "openai".to_string()],
             0,
         );
         let picker = w.picker.as_ref().expect("open");

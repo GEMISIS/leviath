@@ -12,4 +12,5 @@ pub(crate) mod line_edit;
 pub(crate) mod markdown_edit;
 pub(crate) mod picker;
 pub(crate) mod popup;
+pub(crate) mod reorder;
 pub(crate) mod scroll;

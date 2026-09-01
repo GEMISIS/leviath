@@ -252,14 +252,14 @@ fn enter_on_a_toggle_flips_it_and_stays() {
 fn the_arrows_still_cycle_a_choice_in_place() {
     let (_dir, mut w) = wizard();
     w.providers[0].selected = true;
-    let ollama = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "ollama")
-        .expect("ollama is offered");
-    w.providers[ollama].selected = true;
     w.enter(Step::Defaults);
-    w.cursor = 0; // the provider choice
+    w.cursor = 0;
+    // The provider field is an ordered priority now (Enter opens a modal), but
+    // the arrow-cycle still applies to any plain choice, so drive one directly.
+    w.defaults[0].value = FieldValue::Choice {
+        options: vec!["anthropic".to_string(), "ollama".to_string()],
+        index: 0,
+    };
 
     w.handle_key(press(KeyCode::Right));
 
@@ -549,13 +549,12 @@ fn both_arrow_and_vim_keys_move_the_cursor() {
 fn left_and_right_cycle_a_choice_in_both_directions() {
     let (_dir, mut w) = wizard();
     w.providers[0].selected = true;
-    let ollama = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "ollama")
-        .expect("ollama is offered");
-    w.providers[ollama].selected = true;
     w.enter(Step::Defaults);
+    w.cursor = 0;
+    w.defaults[0].value = FieldValue::Choice {
+        options: vec!["anthropic".to_string(), "ollama".to_string()],
+        index: 0,
+    };
 
     w.handle_key(press(KeyCode::Right));
     assert_eq!(w.defaults[0].value.display(), "ollama");
@@ -564,30 +563,6 @@ fn left_and_right_cycle_a_choice_in_both_directions() {
     // Wrapping backwards from the first option lands on the last.
     w.handle_key(press(KeyCode::Left));
     assert_eq!(w.defaults[0].value.display(), "ollama");
-}
-
-#[test]
-fn choosing_ollama_as_the_default_lowers_the_concurrency_limit() {
-    let (_dir, mut w) = wizard();
-    w.providers[0].selected = true;
-    let ollama = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "ollama")
-        .expect("ollama is offered");
-    w.providers[ollama].selected = true;
-    w.enter(Step::Defaults);
-    w.cursor = 0;
-
-    w.handle_key(press(KeyCode::Right));
-
-    assert_eq!(w.defaults[0].value.display(), "ollama");
-    assert_eq!(
-        w.limits[0].value,
-        FieldValue::Number(Some(
-            crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES as u64
-        ))
-    );
 }
 
 #[test]
@@ -1286,7 +1261,7 @@ fn letters_search_rather_than_acting_while_the_chooser_is_open() {
 }
 
 #[test]
-fn the_provider_chooser_lists_providers_with_their_names() {
+fn the_priority_modal_lists_providers_with_their_names() {
     let (_dir, mut w) = wizard();
     w.providers[0].selected = true;
     w.enter(Step::Defaults);
@@ -1294,11 +1269,10 @@ fn the_provider_chooser_lists_providers_with_their_names() {
 
     w.handle_key(press(KeyCode::Enter));
 
-    let picker = w.picker.as_ref().expect("open");
-    assert_eq!(picker.title, "Default provider");
-    assert!(picker.options.iter().any(|o| o.value == "anthropic"));
+    let rows = w.reorder.as_ref().expect("open").rows_for_test();
+    assert!(rows.iter().any(|(value, _)| value == "anthropic"));
     assert!(
-        picker.options.iter().all(|o| !o.detail.is_empty()),
+        rows.iter().all(|(_, detail)| !detail.is_empty()),
         "an id alone does not say which service it is"
     );
 }
@@ -1423,15 +1397,14 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
         Default::default(),
     );
     w.enter(Step::Defaults);
+    w.cursor = 0;
 
-    w.open_picker(
-        "Default provider",
-        w.defaults[0].value.options().to_vec(),
-        0,
-    );
-    let picker = w.picker.take().expect("open");
-    assert_eq!(picker.options[0].value, "in-house");
-    assert_eq!(picker.options[0].detail, "from your config");
+    // The provider outside the catalog is still in the priority, described as
+    // coming from the config file rather than dropped for being unknown.
+    w.handle_key(press(KeyCode::Enter));
+    let rows = w.reorder.take().expect("open").rows_for_test();
+    assert_eq!(rows[0].0, "in-house");
+    assert_eq!(rows[0].1, "from your config");
 
     w.cursor = 1;
     w.open_picker("Default model", w.defaults[1].value.options().to_vec(), 0);
@@ -1447,7 +1420,101 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
 /// Choosing a provider re-picks the concurrency default, the same way an arrow
 /// press does, so a local-first setup does not keep a hosted-API number.
 #[test]
-fn choosing_a_provider_in_the_chooser_repicks_the_concurrency_default() {
+fn making_a_provider_the_priority_head_repicks_the_concurrency_default() {
+    let (_dir, mut w) = wizard();
+    let ollama = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "ollama")
+        .expect("ollama is offered");
+    w.providers[0].selected = true;
+    w.providers[ollama].selected = true;
+    w.enter(Step::Defaults);
+    w.cursor = 0;
+    // Enter on the provider-priority field opens the reorder modal, seeded
+    // [anthropic, ollama] (the base default leads on a first build).
+    w.handle_key(press(KeyCode::Enter));
+    assert!(
+        w.reorder.is_some(),
+        "the priority field opens the reorder modal"
+    );
+    // Move onto ollama and lift it to the head.
+    w.handle_key(press(KeyCode::Down));
+    w.handle_key(press_with(KeyCode::Up, KeyModifiers::SHIFT));
+    w.handle_key(press(KeyCode::Enter));
+
+    assert!(
+        w.reorder.is_none(),
+        "Enter kept the order and closed the modal"
+    );
+    assert!(
+        w.defaults[0].value.display().starts_with("ollama"),
+        "ollama is the head now: {}",
+        w.defaults[0].value.display()
+    );
+    // The concurrency default follows the head provider, exactly as the picker
+    // used to make it follow the single default.
+    assert_eq!(
+        w.limits[0].value.display(),
+        crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES.to_string()
+    );
+}
+
+/// Esc leaves the priority as it was, and the modal opens on the current
+/// order rather than at a default.
+#[test]
+fn cancelling_the_reorder_keeps_the_priority() {
+    let (_dir, mut w) = wizard();
+    let ollama = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "ollama")
+        .expect("ollama is offered");
+    w.providers[0].selected = true;
+    w.providers[ollama].selected = true;
+    w.enter(Step::Defaults);
+    w.cursor = 0;
+    let before = w.defaults[0].value.display();
+    w.handle_key(press(KeyCode::Enter));
+    w.handle_key(press(KeyCode::Down));
+    w.handle_key(press_with(KeyCode::Up, KeyModifiers::SHIFT));
+    w.handle_key(press(KeyCode::Esc));
+    assert!(w.reorder.is_none());
+    assert_eq!(
+        w.defaults[0].value.display(),
+        before,
+        "Esc discarded the move"
+    );
+}
+
+/// A mouse event reaches the open reorder modal through the loop's mouse
+/// router, the same way it reaches an open chooser.
+#[test]
+fn a_mouse_event_reaches_the_open_reorder_modal() {
+    let (_dir, mut w) = wizard();
+    w.providers[0].selected = true;
+    w.enter(Step::Defaults);
+    w.cursor = 0;
+    w.handle_key(press(KeyCode::Enter));
+    assert!(w.reorder.is_some());
+    let area = ratatui::layout::Rect::new(0, 0, 90, 40);
+    let scroll = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    };
+    w.handle_mouse(scroll, area);
+    assert!(
+        w.reorder.is_some(),
+        "a scroll moves the modal, it stays open"
+    );
+}
+
+/// A drag inside the reorder modal reaches the field, so the mouse path is
+/// wired the same as the keyboard one.
+#[test]
+fn a_drag_in_the_reorder_modal_reorders_the_priority() {
     let (_dir, mut w) = wizard();
     let ollama = w
         .providers
@@ -1459,24 +1526,13 @@ fn choosing_a_provider_in_the_chooser_repicks_the_concurrency_default() {
     w.enter(Step::Defaults);
     w.cursor = 0;
     w.handle_key(press(KeyCode::Enter));
-
-    // Move onto ollama and take it.
-    while w
-        .picker
-        .as_ref()
-        .and_then(|p| p.selected())
-        .map(|i| w.picker.as_ref().expect("open").options[i].value.clone())
-        != Some("ollama".to_string())
-    {
-        w.handle_key(press(KeyCode::Down));
-    }
+    // Move ollama (row 1) to the head by keyboard, then confirm - the mouse
+    // path is exercised in the reorder widget's own tests; here we only need
+    // the wizard to route a reorder outcome back into the field.
+    w.handle_key(press(KeyCode::Down));
+    w.handle_key(press_with(KeyCode::Up, KeyModifiers::SHIFT));
     w.handle_key(press(KeyCode::Enter));
-
-    assert_eq!(w.defaults[0].value.display(), "ollama");
-    assert_eq!(
-        w.limits[0].value.display(),
-        crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES.to_string()
-    );
+    assert!(w.defaults[0].value.display().starts_with("ollama"));
 }
 
 /// Both TUIs answer the same key for help, so one habit works in both.

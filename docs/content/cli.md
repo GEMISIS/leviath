@@ -744,6 +744,13 @@ has a flag, so headless setup is scriptable. The wizard's Limits screen edits th
 only appears once you turn on **Show advanced tuning** on the Defaults screen. Skipping it changes
 nothing about what gets written.
 
+The Defaults screen leads with **Provider priority** - the order a bare model name prefers, whose
+head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
+move the one under the cursor with `Shift+↑`/`Shift+↓`. It writes the same
+[`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order` and
+`PUT /api/config` set, so putting a subscription like Codex first there is how you route bare model
+names onto your plan.
+
 | Flag | Purpose |
 |---|---|
 | `--non-interactive` | Use only flag values, ask nothing |
