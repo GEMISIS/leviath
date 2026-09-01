@@ -45,6 +45,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[command(name = "lev")]
 #[command(about = "Leviath agent framework CLI", long_about = None)]
 #[command(version)]
+// clap cannot group subcommands under headings, so `lev --help` renders the
+// categorized `COMMANDS_HELP` (via `after_help` in `HELP_TEMPLATE`) instead of
+// clap's flat list. The library owns both, held to the `Commands` enum by a test.
+#[command(help_template = leviath_cli::dispatch::HELP_TEMPLATE)]
+#[command(after_help = leviath_cli::dispatch::COMMANDS_HELP)]
 struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
