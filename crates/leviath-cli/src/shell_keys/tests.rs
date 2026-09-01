@@ -1034,6 +1034,14 @@ fn heredoc_delimiters_follow_the_word_grammar() {
         write_targets_for("grep x <<< data > out.txt", true),
         WriteTargets::Unreadable
     );
+    // A delimiter word that runs to the end of input opens a heredoc whose
+    // body never arrives, so the line will not read. Pinned with the POSIX
+    // reading explicitly, since the platform default skips heredocs entirely
+    // where `\` is not an escape.
+    assert_eq!(
+        write_targets_for("grep x <<END", true),
+        WriteTargets::Known(Vec::new())
+    );
     // A backslash as the input's final character escapes nothing, so the
     // delimiter never completes and the line will not read.
     assert_eq!(
