@@ -949,7 +949,11 @@ mod tests {
         w.endpoints[0].default_model = Some("qwen".to_string());
         w.enter(Step::Defaults);
 
-        let providers = w.defaults[Wizard::PROVIDER_FIELD].value.options().to_vec();
+        let providers = w.defaults[Wizard::PROVIDER_FIELD]
+            .value
+            .order()
+            .expect("the provider field is an ordered priority")
+            .to_vec();
         assert_eq!(providers, vec!["llama-cpp".to_string()]);
         assert_eq!(w.build_config().default_provider, "llama-cpp");
         assert_eq!(

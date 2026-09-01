@@ -21,6 +21,7 @@ use crate::config::Config;
 // Sections of the former single-file wizard state. Glob re-exported so every
 // existing `state::Wizard` path keeps working.
 mod endpoints;
+mod priority;
 pub(crate) use endpoints::*;
 mod lanes;
 mod limits;
@@ -114,6 +115,10 @@ pub struct Wizard {
     pub(crate) picker: Option<Picker>,
     /// Which Defaults field the open chooser is choosing for.
     pub(crate) picker_field: usize,
+    /// The open reorder modal for the provider priority, if one is open.
+    pub(crate) reorder: Option<crate::tui::widgets::reorder::Reorder>,
+    /// Which Defaults field the open reorder modal is arranging.
+    pub(crate) reorder_field: usize,
 }
 
 /// The environment variables the wizard reports as already-supplying a
@@ -280,6 +285,8 @@ impl Wizard {
             help_scroll: std::cell::Cell::new(0),
             picker: None,
             picker_field: 0,
+            reorder: None,
+            reorder_field: 0,
         };
         wizard.rebuild_defaults();
         wizard
@@ -701,13 +708,35 @@ impl Wizard {
         } else {
             providers
         };
-        let index = providers.iter().position(|p| *p == chosen).unwrap_or(0);
+        // The provider field is an ordered priority now, its head the default
+        // provider. Preserve whatever arrangement the form (or the config it
+        // loaded) already holds for still-configured providers, append any that
+        // are newly configured, and on a first build lead with the chosen
+        // default so nothing about the single-default behavior is lost.
+        let prior = match self.current_provider_order().is_empty() {
+            false => self.current_provider_order(),
+            true => self.base.providers.provider_order.clone(),
+        };
+        let mut order: Vec<String> = prior
+            .into_iter()
+            .filter(|p| providers.contains(p))
+            .collect();
+        let seeded = order.is_empty();
+        for p in &providers {
+            if !order.contains(p) {
+                order.push(p.clone());
+            }
+        }
+        if seeded && let Some(at) = order.iter().position(|p| *p == chosen) {
+            let head = order.remove(at);
+            order.insert(0, head);
+        }
 
         let mut models = vec![Self::NO_DEFAULT_MODEL.to_string()];
         models.extend(self.discovered_models());
-        // An endpoint entry chosen as the default provider brings the model
-        // picked on its own screen, unless a model was already chosen here.
-        let chosen_provider = providers.get(index).cloned().unwrap_or_default();
+        // An endpoint entry at the head of the priority brings the model picked
+        // on its own screen, unless a model was already chosen here.
+        let chosen_provider = order.first().cloned().unwrap_or_default();
         let current_model = self
             .current_default_model()
             .filter(|m| m != Self::NO_DEFAULT_MODEL)
@@ -724,13 +753,10 @@ impl Wizard {
         let timeout = self.current_request_timeout();
         self.defaults = vec![
             Field {
-                label: "Default provider",
-                help: "Preferred by any stage that allows a user default. Takes effect once a \
-                       default model is set below.",
-                value: FieldValue::Choice {
-                    options: providers,
-                    index,
-                },
+                label: "Provider priority",
+                help: "The order a bare model name prefers, best first. Its head is your default \
+                       provider. Enter opens a modal to drag the order.",
+                value: FieldValue::Order(order),
             },
             Field {
                 label: "Default model",
@@ -854,23 +880,10 @@ impl Wizard {
         // and nothing rebuilds the form while one is on screen.
         self.defaults[self.picker_field].value.set_index(chosen);
         self.dirty = true;
-        // The concurrency default follows the provider, so an Ollama-first
-        // setup does not inherit a number meant for hosted APIs.
-        if self.picker_field == Self::PROVIDER_FIELD {
-            self.apply_provider_concurrency_default();
-        }
-    }
-
-    /// The default provider as it currently stands in the form, or the base
-    /// config's value before the form exists.
-    fn current_default_provider(&self) -> String {
-        match self.defaults.first().map(|f| &f.value) {
-            Some(FieldValue::Choice { options, index }) => match options.get(*index) {
-                Some(chosen) => chosen.clone(),
-                None => self.base.default_provider.clone(),
-            },
-            _ => self.base.default_provider.clone(),
-        }
+        // The provider field is an ordered priority now and opens the reorder
+        // modal, not the chooser, so the only field this commits is the default
+        // model - the concurrency-follows-provider adjustment lives in
+        // `commit_reorder`.
     }
 
     fn current_default_model(&self) -> Option<String> {
@@ -984,8 +997,10 @@ impl Wizard {
                                 trimmed.parse().ok().or(*n)
                             };
                         }
-                        // Booleans and choices are never text-edited.
-                        FieldValue::Bool(_) | FieldValue::Choice { .. } => {}
+                        // Booleans, choices and ordered lists are never
+                        // text-edited: they change by toggle, picker, or the
+                        // reorder modal.
+                        FieldValue::Bool(_) | FieldValue::Choice { .. } | FieldValue::Order(_) => {}
                     }
                 }
             }
@@ -1031,7 +1046,17 @@ impl Wizard {
 
         self.write_endpoints(&mut config);
 
-        config.default_provider = self.current_default_provider();
+        // The head of the priority is the default provider, and the whole
+        // order is `provider_order`. Written only when the user arranged more
+        // than one: a single-provider order says nothing `default_provider`
+        // does not, and leaving it empty keeps a config that never wanted an
+        // order from growing a one-entry one.
+        let order = self.current_provider_order();
+        config.default_provider = order
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.current_default_provider());
+        config.providers.provider_order = if order.len() > 1 { order } else { Vec::new() };
         config.default_model = self
             .current_default_model()
             .filter(|m| m != Self::NO_DEFAULT_MODEL);
@@ -1983,7 +2008,13 @@ pub(super) mod tests {
         wizard.providers[ollama].selected = true;
         wizard.enter(Step::Defaults);
 
-        assert_eq!(wizard.defaults[0].value.options(), ["ollama".to_string()]);
+        assert_eq!(
+            wizard.defaults[0]
+                .value
+                .order()
+                .expect("an ordered priority"),
+            ["ollama".to_string()]
+        );
     }
 
     #[test]
@@ -2043,6 +2074,69 @@ pub(super) mod tests {
         );
         assert!(FieldValue::Number(Some(1)).options().is_empty());
         assert!(FieldValue::Bool(true).options().is_empty());
+        assert!(FieldValue::Order(vec!["a".into()]).options().is_empty());
+    }
+
+    /// `order` answers only for an ordered list, and its display is the values
+    /// joined best-first (or "(none)" when empty).
+    #[test]
+    fn only_an_order_field_has_an_order() {
+        let order = FieldValue::Order(vec!["codex".into(), "openai".into()]);
+        assert_eq!(
+            order.order(),
+            Some(["codex".to_string(), "openai".to_string()].as_slice())
+        );
+        assert_eq!(order.display(), "codex > openai");
+        assert_eq!(FieldValue::Order(Vec::new()).display(), "(none)");
+        assert!(FieldValue::Number(Some(1)).order().is_none());
+        assert!(FieldValue::Bool(true).order().is_none());
+    }
+
+    /// If the provider field somehow is not an ordered list, the helpers fall
+    /// back to the base config rather than reading an order that is not there.
+    #[test]
+    fn the_provider_helpers_fall_back_when_the_field_is_not_an_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Defaults);
+        wizard.defaults[0].value = FieldValue::Number(Some(1));
+        assert_eq!(
+            wizard.current_default_provider(),
+            wizard.base.default_provider
+        );
+        assert!(wizard.current_provider_order().is_empty());
+    }
+
+    /// Opening the reorder modal on a field that is not an ordered list does
+    /// nothing, the guard that lets `activate` route only order fields to it.
+    #[test]
+    fn open_reorder_on_a_non_order_field_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Defaults);
+        wizard.cursor = 3; // the "Show advanced tuning" bool
+        wizard.open_reorder();
+        assert!(wizard.reorder.is_none());
+    }
+
+    /// `commit_reorder` for a field index that is not there writes nothing, and
+    /// a field that is not the provider one skips the concurrency adjustment -
+    /// the alternate arms of the field write and the head-follows-provider tweak.
+    #[test]
+    fn commit_reorder_out_of_range_and_off_the_provider_field_are_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Defaults);
+        wizard.reorder_field = 99; // no such field, and not the provider one
+        wizard.commit_reorder(vec!["x".to_string()]);
+        assert!(wizard.dirty, "the edit is still marked dirty");
+        assert!(
+            wizard
+                .defaults
+                .iter()
+                .all(|f| f.value != FieldValue::Order(vec!["x".to_string()])),
+            "nothing was written to a field that does not exist"
+        );
     }
 
     #[test]

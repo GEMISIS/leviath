@@ -222,6 +222,10 @@ pub enum FieldValue {
         /// Which one is selected, by position in `options`.
         index: usize,
     },
+    /// An ordered list the user arranges in a reorder modal, best first. Its
+    /// head is what a single-value setting derived from it takes (the provider
+    /// priority's head is the default provider).
+    Order(Vec<String>),
 }
 
 impl FieldValue {
@@ -235,6 +239,10 @@ impl FieldValue {
             Self::Choice { options, index } => match options.get(*index) {
                 Some(chosen) => chosen.clone(),
                 None => "(none)".to_string(),
+            },
+            Self::Order(items) => match items.is_empty() {
+                true => "(none)".to_string(),
+                false => items.join(" > "),
             },
         }
     }
@@ -250,12 +258,22 @@ impl FieldValue {
         }
     }
 
+    /// The ordered list of an [`Order`](Self::Order) field, or `None` for any
+    /// other kind. The caller reads it to seed the reorder modal and to write
+    /// the value back.
+    pub(crate) fn order(&self) -> Option<&[String]> {
+        match self {
+            Self::Order(items) => Some(items),
+            _ => None,
+        }
+    }
+
     /// The options of a choice field; empty for any other kind.
     #[cfg(test)]
     pub(crate) fn options(&self) -> &[String] {
         match self {
             Self::Choice { options, .. } => options,
-            Self::Number(_) | Self::Bool(_) => &[],
+            Self::Number(_) | Self::Bool(_) | Self::Order(_) => &[],
         }
     }
 }

@@ -26,6 +26,7 @@ use crate::tui::widgets::confirm::ConfirmOutcome;
 use crate::tui::widgets::help::handle_help_key;
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
 use crate::tui::widgets::picker::PickerOutcome;
+use crate::tui::widgets::reorder::{Reorder, ReorderOutcome};
 
 /// What the loop should do after a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,10 @@ impl Wizard {
             self.handle_picker_key(key, picker);
             return Action::Continue;
         }
+        if let Some(reorder) = self.reorder.take() {
+            self.handle_reorder_key(key, reorder);
+            return Action::Continue;
+        }
         if let Some(edit) = self.edit.take() {
             self.handle_edit_key(key, edit);
             return Action::Continue;
@@ -96,6 +101,10 @@ impl Wizard {
         }
         if let Some(picker) = self.picker.take() {
             self.handle_picker_mouse(mouse, area, picker);
+            return Action::Continue;
+        }
+        if let Some(reorder) = self.reorder.take() {
+            self.handle_reorder_mouse(mouse, area, reorder);
             return Action::Continue;
         }
         match mouse.kind {
@@ -158,6 +167,29 @@ impl Wizard {
             PickerOutcome::Pending => self.picker = Some(picker),
             PickerOutcome::Chosen(index) => self.commit_picker(index),
             PickerOutcome::Cancelled | PickerOutcome::ChosenMany(_) => {}
+        }
+    }
+
+    /// The mouse while the reorder modal is open: the widget drags or moves,
+    /// and a confirmed order is written back to the field.
+    fn handle_reorder_mouse(&mut self, mouse: MouseEvent, area: Rect, mut reorder: Reorder) {
+        let outcome = reorder.handle_mouse(&mouse, area);
+        self.settle_reorder(reorder, outcome);
+    }
+
+    /// Keys while the reorder modal is open.
+    fn handle_reorder_key(&mut self, key: KeyEvent, mut reorder: Reorder) {
+        let outcome = reorder.handle_key(&key);
+        self.settle_reorder(reorder, outcome);
+    }
+
+    /// What the reorder modal decided: keep it open, keep the new order, or
+    /// discard it.
+    fn settle_reorder(&mut self, reorder: Reorder, outcome: ReorderOutcome) {
+        match outcome {
+            ReorderOutcome::Pending => self.reorder = Some(reorder),
+            ReorderOutcome::Confirmed(order) => self.commit_reorder(order),
+            ReorderOutcome::Cancelled => {}
         }
     }
 
@@ -330,6 +362,10 @@ impl Wizard {
             }
             FieldValue::Number(_) => {
                 self.open_field_editor();
+                return;
+            }
+            FieldValue::Order(_) => {
+                self.open_reorder();
                 return;
             }
             FieldValue::Choice { options, index } => (options.clone(), *index),
