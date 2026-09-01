@@ -354,8 +354,8 @@ that collapses to one model everywhere, with the blueprint's own choice printed 
 substitution it is.
 
 > [!WARNING]
-> Ollama needs no key, so it is registered whether or not a server is running. Leave
-> `default_model` unset on a machine with no Ollama and every stage that lists it starts against
+> Once Ollama is enabled, it is registered whether or not a server is running. Leave `default_model`
+> unset on such a machine with no Ollama server up and every stage that lists it starts against
 > `http://localhost:11434`. The run moves on to its next candidate rather than dying there, but
 > it still spends the attempts finding out. This is why the bundled agents pin their Ollama entry
 > explicitly and put it last.

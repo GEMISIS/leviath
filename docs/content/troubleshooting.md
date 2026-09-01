@@ -68,8 +68,9 @@ would succeed anonymously), and retry.
 
 ## No provider configured
 
-An agent needs at least one [provider](/docs/providers). Run `lev setup`, or point Leviath at a
-local [Ollama](https://ollama.com) for a no-key start.
+An agent needs at least one [provider](/docs/providers). Run `lev setup`: an API key, a ChatGPT or
+Claude subscription you sign in to, or a local [Ollama](https://ollama.com) all count, and the last
+two need no key.
 
 `lev doctor` says which provider your defaults actually resolve to, and which ones it tried to get
 there. That matters because a stage naming no model of its own falls back to `anthropic`. So a
@@ -117,13 +118,16 @@ one run, and copying the blueprint does it per stage. See
 
 ## My run went to Ollama and I never asked for it
 
-Ollama needs no key, so it is registered whether or not a server is running, and every bundled agent
-lists it last. With nothing else configured that is the first entry that matches, and the run starts
-against `http://localhost:11434`.
+If a run started on Ollama when you did not mean it to, Ollama is enabled in your config: either
+`[providers] ollama_enabled = true` or an `ollama_base_url` is set. One of them may have carried
+over from before Ollama became opt-in, since an address that used to configure it still does. Once
+it is on, every bundled agent lists it last, so on a stage that names no model of its own it is the
+first entry that matches, and the run starts against `http://localhost:11434`.
 
-Set `default_model` alongside your `default_provider`. Without a model to send, `default_provider`
-is never consulted and Ollama wins by default. `lev doctor` says so in its `resolve` line when your
-configured provider is being passed over.
+Two ways to stop it. Turn Ollama off if you did not mean to enable it. Or set `default_model`
+alongside your `default_provider`: without a model to send, `default_provider` is never consulted
+and Ollama wins by default. `lev doctor` says so in its `resolve` line when your configured provider
+is being passed over.
 
 A run that starts on a dead Ollama does not die there. An unreachable provider is treated the
 same as one out of credits, so the stage moves to its next candidate. You will see the swap in the

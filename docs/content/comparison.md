@@ -77,7 +77,8 @@ language against an SDK, that model is not here. Other languages drive Leviath t
 yourself. [`lev serve`](/docs/api) and [The Lair](https://leviath.dev/lair) reach it from anywhere,
 but there is no hosted service and no multi-machine scheduling.
 
-You also need a model provider either way: an API key or a local Ollama.
+You also need a model provider either way: an API key, a ChatGPT or Claude subscription you sign in
+to, or a local Ollama.
 
 One current limit worth knowing before you choose. Every agent has its own state, workdir fence,
 tool policy, and panic boundary, so one agent's crash stays its own. The opt-in

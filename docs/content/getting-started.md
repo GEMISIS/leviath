@@ -115,8 +115,9 @@ To embed the runtime in your own application instead of running the CLI, add the
 
 ## Configure a provider
 
-One provider is all you need: an API key from Anthropic, OpenAI, Google AI, or OpenRouter,
-or a local [Ollama](https://ollama.com) with no key at all.
+One provider is all you need: an API key from Anthropic, OpenAI, Google AI, or OpenRouter; a
+ChatGPT subscription you sign in to (OpenAI Codex, no key); or a local [Ollama](https://ollama.com)
+with no key at all.
 
 ```bash
 lev setup
@@ -126,8 +127,9 @@ The wizard detects keys already in your environment, sets a default model, and i
 pre-built agents.
 
 > [!TIP]
-> No API key handy? Point Leviath at a local [Ollama](https://ollama.com) install and run
-> entirely offline. `lev setup` will detect it. See [Providers](/docs/providers) for the full list.
+> No API key handy? Two paths need none: sign in to a ChatGPT or Claude subscription, or point
+> Leviath at a local [Ollama](https://ollama.com) install and run entirely offline. `lev setup`
+> sets up either. See [Providers](/docs/providers) for the full list.
 
 <details>
 <summary>Script the setup instead</summary>
