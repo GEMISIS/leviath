@@ -57,6 +57,7 @@ fn redact(
         config_mtime,
         default_provider: c.default_provider.clone(),
         default_model: c.default_model.clone(),
+        provider_order: c.providers.provider_order.clone(),
         has_anthropic_key: c.providers.anthropic_api_key.is_some(),
         has_openai_key: c.providers.openai_api_key.is_some(),
         has_google_key: c.providers.google_api_key.is_some(),
@@ -140,6 +141,12 @@ pub(super) async fn put_config(
 
     if let Some(v) = req.default_provider {
         config.default_provider = v;
+    }
+    // A present list replaces the order whole; an empty one clears it back to
+    // `default_provider` alone. Absent leaves it untouched, like every other
+    // partial field here.
+    if let Some(order) = req.provider_order {
+        config.providers.provider_order = order;
     }
     // Three states rather than the two every field around it has: absent
     // leaves the pin alone, `null` removes it so each blueprint picks its own
@@ -1097,6 +1104,7 @@ mod tests {
         let config = RedactedConfig {
             default_provider: "anthropic".to_string(),
             default_model: None,
+            provider_order: Vec::new(),
             has_anthropic_key: true,
             has_openai_key: false,
             has_google_key: false,
@@ -1129,6 +1137,7 @@ mod tests {
         let config = RedactedConfig {
             default_provider: "ollama".to_string(),
             default_model: None,
+            provider_order: Vec::new(),
             has_anthropic_key: false,
             has_openai_key: false,
             has_google_key: false,
@@ -1332,6 +1341,46 @@ mod tests {
                 .unwrap()
                 .providers
                 .ollama_enabled
+        );
+    }
+
+    /// `provider_order` round-trips: a present list is written whole and
+    /// reported back, and an empty list clears it. Absent is covered by the
+    /// empty-body test that asserts nothing else moves.
+    #[tokio::test]
+    async fn put_config_writes_and_clears_the_provider_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        let body =
+            serde_json::json!({ "provider_order": ["codex", "openrouter", "openai"] }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rc: RedactedConfig = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rc.provider_order, ["codex", "openrouter", "openai"]);
+        assert_eq!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .providers
+                .provider_order,
+            ["codex", "openrouter", "openai"]
+        );
+
+        // An empty list clears it back to default_provider alone.
+        let empty: [&str; 0] = [];
+        let body = serde_json::json!({ "provider_order": empty }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .providers
+                .provider_order
+                .is_empty()
         );
     }
 

@@ -136,6 +136,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "provider_order": {
+          "type": "array",
+          "description": "Ordered provider preference for a bare model name, best first, as plain provider names. Decides which configured provider serves a model a blueprint lists with no provider; generalizes default_provider into a full ordering. Naming a subscription transport here opts it into bare-name routing at that priority.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

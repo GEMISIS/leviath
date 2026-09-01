@@ -394,6 +394,28 @@ fn misdirected_rate_limits(config: &Config) -> Vec<String> {
     misdirected
 }
 
+/// `[providers] provider_order` entries naming a provider that is not
+/// configured, each rendered as one report line.
+///
+/// The order is only a preference, so a name nothing serves is not an error -
+/// it just never wins anything, silently. A provider counts as known if it is
+/// one of the built-ins the wizard offers or a `[model_providers.<name>]`
+/// script entry, so a real custom provider does not read as a typo.
+fn misdirected_provider_order(config: &Config) -> Vec<String> {
+    let mut known: Vec<&str> = crate::commands::setup::catalog::providers()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    known.extend(config.model_providers.keys().map(String::as_str));
+    config
+        .providers
+        .provider_order
+        .iter()
+        .filter(|name| !known.contains(&name.as_str()))
+        .map(|name| format!("provider_order entry \"{name}\" names no configured provider"))
+        .collect()
+}
+
 /// The floor below which a `tokens_per_minute` is almost certainly a mistake.
 ///
 /// A single inference's prompt alone runs to thousands of tokens, so a limit
@@ -532,6 +554,9 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // model from the outside, so it is worth naming here where the rest of the
     // config is explained rather than left to a warn line as a run crawls.
     notes.extend(low_token_rate_limits(config));
+    // A provider_order entry that names nothing configured never wins a route
+    // and says nothing about it, the same silent kind of misconfiguration.
+    notes.extend(misdirected_provider_order(config));
     if !unread.is_empty() {
         let subject = match unread.len() {
             1 => "1 key in config.toml is".to_string(),

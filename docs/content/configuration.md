@@ -106,6 +106,7 @@ codex_verbosity        = "medium"   # low | medium | high
 codex_replay_reasoning = true       # replay each turn's reasoning on the next request
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
+provider_order      = ["codex", "openrouter", "openai"]   # a bare name's route preference
 ```
 
 `ollama_enabled` turns Ollama on. It is opt-in like every other provider: it needs no key and
@@ -154,6 +155,26 @@ credits, or a rejected key. Entries are `provider/model` pairs, best first, trie
 own model list and your default model. One naming a provider you have not configured is skipped.
 It is read per run, so a change takes effect on the next `lev run` with no restart. See
 [Providers](/docs/providers#a-host-wide-fallback-chain).
+
+### Provider preference order
+
+`provider_order` decides which provider serves a **bare** model name - one a blueprint lists with no
+provider - when more than one you have configured serves it. Entries are plain provider names, best
+first. It generalizes `default_provider` from a single front-runner into a full ordering; leave it
+empty and `default_provider` alone decides, exactly as before.
+
+Naming a provider here is also how you route a bare name onto a subscription transport. A ChatGPT
+(Codex) or Claude subscription is normally reachable only by an explicit `codex/...` or being your
+sole `default_provider`, so that enabling it never silently moves billing. Listing it in
+`provider_order` is the deliberate opt-in: put `codex` first and a stage that names `gpt-5.6-sol`
+with no provider runs on your plan, ahead of an OpenAI key that also serves that name. A provider
+you did not list stays at its old priority, and a subscription you did not list stays excluded from
+bare names.
+
+It shapes routes, not models: a blueprint that chose a different model per stage keeps each stage's
+model, the same way `default_provider` does. `lev doctor` flags an entry naming a provider that is
+not configured. Like the rest of `[providers]`, it is read per run, so a change takes effect on the
+next `lev run` with no restart.
 
 ## `[limits]`
 

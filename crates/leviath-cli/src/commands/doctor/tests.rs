@@ -658,6 +658,41 @@ fn config_check_is_quiet_on_a_zero_or_ample_tokens_per_minute() {
     );
 }
 
+/// A `provider_order` entry naming nothing configured never wins a route and
+/// says nothing about it, so the config check names it. A real built-in and a
+/// `[model_providers]` script entry both count as configured and stay quiet.
+#[test]
+fn config_check_names_a_provider_order_entry_for_no_configured_provider() {
+    let mut config = Config::default();
+    config.providers.provider_order = vec![
+        "codex".to_string(),
+        "opennrouter".to_string(),
+        "my-gateway".to_string(),
+    ];
+    config.model_providers.insert(
+        "my-gateway".to_string(),
+        crate::config::ModelProviderConfig::default(),
+    );
+    let check = checked(
+        "doctor-config_check_names_a_provider_order_entry_for_no_configured_provider",
+        &config,
+        &ProviderRegistry::new(),
+    );
+    assert_eq!(check.status, CheckStatus::Ok, "not broken wiring");
+    assert!(
+        check
+            .detail
+            .contains("provider_order entry \"opennrouter\""),
+        "the typo is named: {}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("\"codex\"") && !check.detail.contains("\"my-gateway\""),
+        "a built-in and a configured gateway stay quiet: {}",
+        check.detail
+    );
+}
+
 #[test]
 fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
     let mut config = Config::default();

@@ -16,6 +16,7 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
         provider: config.default_provider.clone(),
         model: config.default_model.clone(),
         fallback_order: parse_fallback_order(&config.providers.fallback_order),
+        provider_order: config.providers.provider_order.clone(),
     }
 }
 

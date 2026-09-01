@@ -151,6 +151,25 @@ pub struct ProviderConfig {
     /// once.
     #[serde(default)]
     pub fallback_order: Vec<String>,
+
+    /// Ordered provider preference for a bare model name, best first, as plain
+    /// provider names (e.g. `["codex", "openrouter", "openai"]`).
+    ///
+    /// When a blueprint names a model with no provider and more than one
+    /// configured provider serves it, this decides which one wins. It
+    /// generalizes [`default_provider`](super::Config::default_provider) from a
+    /// single front-runner into a full ordering; leave it empty and
+    /// `default_provider` alone decides, exactly as before.
+    ///
+    /// Naming a provider here is also a deliberate choice to route bare names
+    /// through it, so a subscription transport (Codex, Claude Code) that is
+    /// otherwise reachable only by an explicit `provider/model` becomes eligible
+    /// at the priority it is listed - which is how a user who prefers their
+    /// subscription gets it used first. Bare provider names, not
+    /// `provider/model`, because this is a preference over routes, not a
+    /// failover target that needs a model to send (that is `fallback_order`).
+    #[serde(default)]
+    pub provider_order: Vec<String>,
 }
 
 /// Hand-written so the API keys can never be printed.
@@ -211,6 +230,7 @@ impl Default for ProviderConfig {
             codex_replay_reasoning: default_true(),
             anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
+            provider_order: Vec::new(),
         }
     }
 }

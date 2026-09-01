@@ -1289,6 +1289,7 @@ mod tests {
         let config = RedactedConfig {
             default_provider: "anthropic".to_string(),
             default_model: Some("claude-sonnet-5".to_string()),
+            provider_order: Vec::new(),
             has_anthropic_key: true,
             has_openai_key: false,
             has_google_key: false,

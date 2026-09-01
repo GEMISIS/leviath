@@ -43,6 +43,12 @@ pub(super) struct RedactedConfig {
     /// "nothing is set" - without the field, a picker drew an empty box over
     /// a machine that had a model pinned.
     pub(super) default_model: Option<String>,
+    /// `[providers] provider_order`: the ordered provider preference for a bare
+    /// model name, best first. Empty when the user set none, in which case
+    /// `default_provider` alone decides. Always serialized (empty array, not
+    /// omitted) so a console can tell "no order set" from an old daemon that
+    /// cannot report it.
+    pub(super) provider_order: Vec<String>,
     pub(super) has_anthropic_key: bool,
     pub(super) has_openai_key: bool,
     pub(super) has_google_key: bool,
@@ -461,6 +467,14 @@ pub(super) struct WriteConfigReq {
     /// and reintroducing the read-modify-write hazard this endpoint avoids.
     #[serde(default)]
     pub(super) remove_gateways: Option<Vec<String>>,
+    /// The ordered provider preference for a bare model name (`[providers]
+    /// provider_order`), best first. Absent leaves it untouched; a present list
+    /// replaces it whole, and an empty list clears it back to
+    /// `default_provider` alone. A whole-list replace rather than an add/remove
+    /// pair because an order is short and a console edits it as one field, so
+    /// the read-modify-write hazard the gateway split avoids does not arise.
+    #[serde(default)]
+    pub(super) provider_order: Option<Vec<String>>,
 }
 
 /// One custom gateway as `GET /api/config` reports it.
