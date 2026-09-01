@@ -15,6 +15,17 @@ same list.
 
 ### Fixed
 
+- A shell heredoc no longer hides a redirect from the write fence, and no
+  longer has its own body mistaken for one. The fence reads a POSIX heredoc
+  as the command it is: the body is stdin data, so a `>` inside it is text,
+  while a real redirect beside the operator (`cat <<EOF > out`) keeps its
+  target and stays held to the working directory. The regression it fixes:
+  every `python3 - <<'EOF'` script of any substance held a `->` or a
+  comparison and so was refused outright for "a redirect that cannot be
+  read", even when it wrote nothing. Containment is unchanged - a heredoc
+  whose body never ends or whose unquoted body would expand a `$(...)` is
+  still refused, as is any heredoc on a shell that has none (`cmd.exe`),
+  where the body lines would really run.
 - The pre-flight refusal for a request that cannot fit the model's context
   window now names all three numbers it was computed from: the prompt count,
   the `max_output_tokens` reply budget, and the window. It used to print only

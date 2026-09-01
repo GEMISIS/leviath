@@ -87,6 +87,20 @@ Some targets the parser cannot name at all, such as `> $OUT` or bash's `/dev/tcp
 have no path to check, so they are ungrantable: they prompt every time, and no approval makes them
 reusable.
 
+A line the parser cannot read as commands at all is different again. A backtick, an unterminated
+quote or an unbalanced `$(` could put a redirect anywhere, so a line carrying one is refused
+outright the moment it also carries a `>` - guessing where it writes is exactly what the fence
+exists not to do. Rewrite the line without the construct, or use the `write_file` tool.
+
+A **heredoc is read**, not refused: its body is standard input, so `python3 - <<'EOF' ... EOF`
+runs with the whole script on stdin, and a `>` or a `->` inside that body is text rather than a
+redirect. A real redirect beside the operator still counts - `cat <<EOF > report.md` writes
+`report.md` and is confined to the workspace like any other. The two heredoc shapes that could
+still hide a command keep the old refusal: a body that never reaches its delimiter, and an
+**unquoted** heredoc (`<<EOF`, not `<<'EOF'`) whose body contains a `$(...)` or backtick the shell
+would expand and run. Quoting the delimiter makes the body pure data. On Windows there are no
+heredocs, so the construct stays unreadable there and is refused.
+
 ### How much output comes back
 
 At most 1 MB of stdout and 1 MB of stderr per call. Past that the bytes are counted and dropped,
