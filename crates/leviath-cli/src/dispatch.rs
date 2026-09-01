@@ -21,15 +21,72 @@
 
 use crate::commands;
 
-/// Every `lev` subcommand. Each variant's doc comment is what `--help` prints.
+/// Every `lev` subcommand. Each variant's doc comment is what its own
+/// `lev <command> --help` prints.
+///
+/// The variants are ordered by section - setup, blueprints, running agents,
+/// inspecting runs, servers - matching the categorized top-level help in
+/// [`COMMANDS_HELP`]. Clap cannot group subcommands under headings itself (its
+/// `help_heading` is args-only), so the top-level `lev --help` renders that
+/// categorized block instead of clap's flat list, via [`HELP_TEMPLATE`]. A
+/// section is not a namespace: every command is still invoked as a flat
+/// `lev <command>`, and a test holds every variant to a line in
+/// `COMMANDS_HELP` so a new command cannot be added without categorizing it.
 #[derive(clap::Subcommand)]
 pub enum Commands {
-    /// Create a new agent blueprint
-    Create(commands::create::CreateArgs),
-
+    // ─── Setup and configuration ──────────────────────────────────────────────
     /// Configure API keys and defaults
     Setup(commands::setup::SetupArgs),
 
+    /// Check that provider wiring works, end to end
+    #[command(long_about = commands::doctor::DOCTOR_LONG_ABOUT)]
+    Doctor(commands::doctor::DoctorArgs),
+
+    /// List and inspect available models
+    Models(commands::models::ModelsArgs),
+
+    /// Inspect and move the secrets Leviath holds
+    Auth(commands::auth::AuthArgs),
+
+    /// Manage MCP tool servers and their authentication
+    Mcp(commands::mcp::McpArgs),
+
+    /// Show what runs without an approval prompt, and why
+    Approvals(commands::approvals::ApprovalsArgs),
+
+    /// Manage taint tracking policy rules
+    Policy(commands::policy::PolicyArgs),
+
+    /// Update Leviath, then everything that shipped with it
+    #[command(long_about = commands::update::UPDATE_LONG_ABOUT)]
+    Update(commands::update::UpdateArgs),
+
+    // ─── Blueprints ───────────────────────────────────────────────────────────
+    /// Create a new agent blueprint
+    Create(commands::create::CreateArgs),
+
+    /// List available and installed blueprints
+    List(commands::list::ListArgs),
+
+    /// Install a blueprint
+    Add(commands::add::AddArgs),
+
+    /// Remove an installed blueprint
+    Remove(commands::remove::RemoveArgs),
+
+    /// Validate an agent blueprint
+    Validate(commands::validate::ValidateArgs),
+
+    /// Run blueprint tests
+    Test(commands::test::TestArgs),
+
+    /// Bundle a blueprint for distribution
+    Pack(commands::pack::PackArgs),
+
+    /// List and validate the global Rhai script tools
+    Tools(commands::tools::ToolsArgs),
+
+    // ─── Running agents ───────────────────────────────────────────────────────
     /// Run an agent
     Run(commands::run::RunArgs),
 
@@ -53,53 +110,13 @@ pub enum Commands {
     /// Answer a pending interaction (or list open ones with no request id)
     Respond(commands::ctl::RespondArgs),
 
-    /// Check that provider wiring works, end to end
-    #[command(long_about = commands::doctor::DOCTOR_LONG_ABOUT)]
-    Doctor(commands::doctor::DoctorArgs),
-
-    /// List available and installed blueprints
-    List(commands::list::ListArgs),
-
-    /// Install a blueprint
-    Add(commands::add::AddArgs),
-
-    /// Remove an installed blueprint
-    Remove(commands::remove::RemoveArgs),
-
-    /// Run blueprint tests
-    Test(commands::test::TestArgs),
-
-    /// Bundle a blueprint for distribution
-    Pack(commands::pack::PackArgs),
-
     /// Interactive agent dashboard
     #[command(name = "dash")]
     Dashboard(commands::dashboard::DashboardArgs),
 
-    /// List and inspect available models
-    Models(commands::models::ModelsArgs),
-
-    /// Validate an agent blueprint
-    Validate(commands::validate::ValidateArgs),
-
-    /// List and validate the global Rhai script tools
-    Tools(commands::tools::ToolsArgs),
-
-    /// Show what runs without an approval prompt, and why
-    Approvals(commands::approvals::ApprovalsArgs),
-
-    /// Manage taint tracking policy rules
-    Policy(commands::policy::PolicyArgs),
-
-    /// Start the REST + WebSocket API server
-    Serve(commands::serve::ServeArgs),
-
-    /// Serve this agent over the Agent Client Protocol (JSON-RPC over stdio)
-    #[command(name = "agent-client")]
-    AgentClient(commands::agent_client::AgentClientArgs),
-
-    /// Run the shared-world daemon in the foreground
-    Daemon(commands::daemon::DaemonArgs),
+    // ─── Inspecting runs ──────────────────────────────────────────────────────
+    /// Print what an agent handed back when a run finished
+    Result(commands::result::ResultArgs),
 
     /// Show a run's context-window history (from its run.lvr archive)
     Context(commands::context::ContextArgs),
@@ -110,19 +127,80 @@ pub enum Commands {
     /// Show where a run's wall-clock time went: model calls, tools, waiting on children
     Timeline(commands::timeline::TimelineArgs),
 
-    /// Print what an agent handed back when a run finished
-    Result(commands::result::ResultArgs),
+    // ─── Servers ──────────────────────────────────────────────────────────────
+    /// Start the REST + WebSocket API server
+    Serve(commands::serve::ServeArgs),
 
-    /// Manage MCP tool servers and their authentication
-    Mcp(commands::mcp::McpArgs),
+    /// Serve this agent over the Agent Client Protocol (JSON-RPC over stdio)
+    #[command(name = "agent-client")]
+    AgentClient(commands::agent_client::AgentClientArgs),
 
-    /// Inspect and move the secrets Leviath holds
-    Auth(commands::auth::AuthArgs),
-
-    /// Update Leviath, then everything that shipped with it
-    #[command(long_about = commands::update::UPDATE_LONG_ABOUT)]
-    Update(commands::update::UpdateArgs),
+    /// Run the shared-world daemon in the foreground
+    Daemon(commands::daemon::DaemonArgs),
 }
+
+/// The top-level `lev --help` layout. Renders the categorized [`COMMANDS_HELP`]
+/// (through `{after-help}`) in place of clap's flat subcommand list, which is
+/// why the template names `{options}` rather than the usual `{all-args}` - the
+/// latter would print the flat `Commands:` section this replaces.
+pub const HELP_TEMPLATE: &str = "\
+{about-with-newline}
+{usage-heading} {usage}
+{after-help}
+
+Options:
+{options}";
+
+/// The categorized top-level command list, shown in place of clap's flat one.
+///
+/// Hand-maintained because clap cannot group subcommands, and held to the enum
+/// by a test: every [`Commands`] variant must appear here, so a
+/// command cannot be added without giving it a section. The descriptions match
+/// each variant's doc comment; the test checks the names, and a reader keeps
+/// the text in step.
+pub const COMMANDS_HELP: &str = "\
+Setup and configuration:
+  setup         Configure API keys and defaults
+  doctor        Check that provider wiring works, end to end
+  models        List and inspect available models
+  auth          Inspect and move the secrets Leviath holds
+  mcp           Manage MCP tool servers and their authentication
+  approvals     Show what runs without an approval prompt, and why
+  policy        Manage taint tracking policy rules
+  update        Update Leviath, then everything that shipped with it
+
+Blueprints:
+  create        Create a new agent blueprint
+  list          List available and installed blueprints
+  add           Install a blueprint
+  remove        Remove an installed blueprint
+  validate      Validate an agent blueprint
+  test          Run blueprint tests
+  pack          Bundle a blueprint for distribution
+  tools         List and validate the global Rhai script tools
+
+Running agents:
+  run           Run an agent
+  ps            List agent runs in the shared-world daemon
+  msg           Send a message to a running agent
+  cancel        Cancel a running agent (alias: `kill`)
+  pause         Pause a running agent (it finishes its in-flight step, then holds)
+  resume        Resume a paused agent
+  respond       Answer a pending interaction (or list open ones with no request id)
+  dash          Interactive agent dashboard
+
+Inspecting runs:
+  result        Print what an agent handed back when a run finished
+  context       Show a run's context-window history (from its run.lvr archive)
+  stages        Show a run's per-stage token ledger, where a staged agent's cost lives
+  timeline      Show where a run's wall-clock time went: model calls, tools, waiting on children
+
+Servers:
+  serve         Start the REST + WebSocket API server
+  agent-client  Serve this agent over the Agent Client Protocol (JSON-RPC over stdio)
+  daemon        Run the shared-world daemon in the foreground
+
+Run 'lev <command> --help' for detail on any command, or 'lev help <command>'.";
 
 /// The subset of commands whose real execution performs I/O that a unit test
 /// must never trigger. `dispatch()` routes these through this trait so its
@@ -282,6 +360,37 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every command clap knows about is categorized in [`COMMANDS_HELP`], so a
+    /// new subcommand cannot be added without giving it a section - the whole
+    /// point of a hand-maintained list is that it not silently fall behind the
+    /// enum. `augment_subcommands` yields the enum's own variants, not clap's
+    /// auto `help` (added only when a top-level command is built), so every name
+    /// here has an indented, described line in the list.
+    #[test]
+    fn every_command_is_listed_in_the_categorized_help() {
+        use clap::{Command, Subcommand};
+        let augmented = Commands::augment_subcommands(Command::new("lev"));
+        for sub in augmented.get_subcommands() {
+            let name = sub.get_name();
+            assert!(
+                COMMANDS_HELP.contains(&format!("  {name} ")),
+                "`{name}` is not listed in COMMANDS_HELP - add it to a section"
+            );
+        }
+    }
+
+    /// The template renders the categorized list, not clap's flat one: it must
+    /// carry `{after-help}` (where the list goes) and not `{subcommands}` or
+    /// `{all-args}` (which would print the flat section this replaces).
+    #[test]
+    fn the_help_template_replaces_the_flat_command_list() {
+        assert!(HELP_TEMPLATE.contains("{after-help}"), "{HELP_TEMPLATE}");
+        assert!(
+            !HELP_TEMPLATE.contains("{subcommands}") && !HELP_TEMPLATE.contains("{all-args}"),
+            "{HELP_TEMPLATE}"
+        );
+    }
 
     /// Test double for [`RiskyExecutors`]: every method is a no-op returning
     /// `Ok(())`, so `dispatch()`'s risky routing arms are exercised without
