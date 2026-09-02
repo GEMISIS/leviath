@@ -369,7 +369,7 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("i", "respond, or send a message to a running agent run"),
                 (
                     "enter on Deny with feedback",
-                    "open a box for what the run should do instead; ^Enter or the Send button sends it with the deny, esc goes back to the prompt",
+                    "open a box for what the run should do instead; ^S or the Send button sends it with the deny, esc goes back to the prompt",
                 ),
                 ("g", "the stage graph explorer"),
                 ("t", "the band: the run's path, or the whole blueprint"),
@@ -424,7 +424,11 @@ fn detail_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Writing a response (i)",
             entries: vec![
-                ("ctrl+enter", "send (needs the kitty keyboard protocol)"),
+                ("ctrl+s", "send"),
+                (
+                    "ctrl+enter",
+                    "also sends (needs the kitty keyboard protocol)",
+                ),
                 ("enter", "insert a newline; so does alt+enter"),
                 ("tab", "move to the Send button; enter or space there sends"),
                 ("pgup / pgdn", "scroll the document above the prompt"),
@@ -462,9 +466,10 @@ fn new_run_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "New run: task",
             entries: vec![
+                ("ctrl+s", "start the run"),
                 (
                     "ctrl+enter",
-                    "start the run (needs the kitty keyboard protocol)",
+                    "also starts it (needs the kitty keyboard protocol)",
                 ),
                 ("enter", "insert a newline; so does alt+enter"),
                 ("@", "reference a file from the working directory"),

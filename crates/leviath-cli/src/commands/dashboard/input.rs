@@ -363,11 +363,12 @@ impl Dashboard {
     /// Keys in the long-form response box and on the Send button under it.
     ///
     /// Enter breaks the line, the way it does in the new-run task and every
-    /// other text box, and Ctrl+Enter sends. Ctrl+Enter reaches the program
-    /// only under the kitty keyboard protocol; elsewhere it arrives as a plain
-    /// Enter, which is a newline here, and the Send button (Tab, then Enter
-    /// or Space, or a click) is how such a terminal sends. `/quit` on its own
-    /// line still ends the conversation when sent.
+    /// other text box, and Ctrl+S or Ctrl+Enter sends. Ctrl+Enter reaches the
+    /// program only under the kitty keyboard protocol; elsewhere it arrives
+    /// as a plain Enter, which is a newline here, so Ctrl+S - an ordinary
+    /// control byte every terminal delivers - is the chord that always works,
+    /// with the Send button (Tab, then Enter or Space, or a click) for the
+    /// mouse. `/quit` on its own line still ends the conversation when sent.
     fn handle_response_box_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyModifiers;
         if self.response_focus_send {
@@ -381,6 +382,9 @@ impl Dashboard {
         }
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.submit_input();
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.submit_input();
             }
             KeyCode::Tab => self.response_focus_send = true,
@@ -3435,6 +3439,21 @@ mod tests {
 
         dash.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(!dash.input_mode, "Ctrl+Enter sent");
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    /// Ctrl+S sends too - the chord for terminals where Ctrl+Enter never
+    /// arrives - while a bare `s` is just a letter in the answer.
+    #[test]
+    fn response_box_ctrl_s_sends_and_a_plain_s_is_text() {
+        let mut dash = dash_answering_free_text();
+
+        dash.handle_key(key(KeyCode::Char('s')));
+        assert!(dash.input_mode, "a bare s did not send");
+        assert_eq!(dash.input_textarea.text(), "answers");
+
+        dash.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(!dash.input_mode, "Ctrl+S sent");
         assert!(dash.agents[0].pending_request.is_none());
     }
 

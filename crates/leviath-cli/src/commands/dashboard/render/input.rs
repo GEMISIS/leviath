@@ -116,11 +116,11 @@ impl Dashboard {
             // specific question - label it accordingly for consistent UX.
             let is_message_mode = pending_req.is_none() && agent.waiting_prompt.is_none();
             let hint = if self.deny_feedback_open {
-                " Deny with feedback: what should it do instead?  [^Enter] send  [Enter] newline  [Tab] Send  [Esc] back "
+                " Deny with feedback: what should it do instead?  [^S] send  [Enter] newline  [Tab] Send  [Esc] back "
             } else if is_message_mode {
-                " Provide input while this is running  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
+                " Provide input while this is running  [^S] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             } else {
-                " Response  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
+                " Response  [^S] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             };
             // The response box is a long-form field: it wraps, and it carries
             // the same formatting toolbar as the task editor. Enter breaks the
