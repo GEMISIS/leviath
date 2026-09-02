@@ -1238,9 +1238,17 @@ async fn a_host_cancellation_stops_the_waiting_and_not_the_run() {
         h.send_json(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled" }))
             .await;
         // The server is still answering, and the call itself never answers.
+        // A progress notification for the scripted status event may still be
+        // in flight when the ping is answered, so read past notifications to
+        // the next response rather than asserting on frame order.
         h.send_json(json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }))
             .await;
-        let next = h.recv().await;
+        let next = loop {
+            let frame = h.recv().await;
+            if frame.id.is_some() {
+                break frame;
+            }
+        };
         assert_eq!(next.id, Some(json!(2)), "{next:?}");
         assert!(daemon.requests().iter().all(|r| matches!(r, ControlRequest::Spawn { .. })), "the run was cancelled");
 
