@@ -19,9 +19,10 @@ same list.
   (Claude Code, Grok, Codex, Gemini, Hermes) delegates a task with a tool call
   instead of hunting for the `lev` binary. The `run` tool starts an agent and
   waits for its final output; `wait`, `status`, `result`, `cancel`, `message`,
-  and `respond` steer a run the host already started; `list_runs`,
-  `list_agents`, `list_tools`, and `install_tool` answer without a daemon. A
-  host timeout or cancellation only stops the waiting, never the run.
+  and `respond` steer a run the host already started; `list_runs` merges the
+  daemon's view with the runs on disk; `list_agents`, `list_tools`, and
+  `install_tool` answer without a daemon. A host timeout or cancellation only
+  stops the waiting, never the run.
   `--attended` makes host-started runs ask before effectful tool calls (they
   run unattended by default); `--allow`, `--default-agent`, and `--workdir`
   set the defaults every call inherits.
