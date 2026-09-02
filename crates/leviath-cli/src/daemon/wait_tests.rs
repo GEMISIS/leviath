@@ -116,8 +116,16 @@ impl ScriptedDaemon {
                 });
             }
         });
+        // A short reconnect grace, for the same reason `lev run --wait` and
+        // `lev mcp serve` use a long-lived client: `spawn_and_wait` subscribes
+        // and then spawns back to back, and on Windows the second dial can land
+        // before this accept loop has created the next pipe instance, which
+        // the client sees as `ERROR_PIPE_BUSY`. A zero-grace client reports
+        // that at once; one second is enough to ride out the accept and short
+        // enough that the tests which shut the daemon down still fail fast.
         Self {
-            client: ControlClient::new(control_id(dir.path())),
+            client: ControlClient::new(control_id(dir.path()))
+                .with_reconnect_grace(std::time::Duration::from_secs(1)),
             dir,
             requests,
             _accept: AbortOnDrop(accept),
