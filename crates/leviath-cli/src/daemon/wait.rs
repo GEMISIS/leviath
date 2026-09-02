@@ -12,6 +12,11 @@
 //! watched run's descendants count too: a fan-out worker parked on an approval
 //! has its own run id, and a caller that only watched the parent would see a
 //! silent hang instead of the question.
+//!
+//! A question asked before the caller started waiting never arrives as an
+//! event either, so a run whose record says `waiting_input` is asked about
+//! through `ListInteractions`, before the loop and on every tick, and the
+//! first open request in the run's family is returned as the outcome.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -20,7 +25,9 @@ use std::time::Duration;
 use leviath_core::interaction::InteractionRequest;
 use leviath_core::output::FinalOutput;
 use leviath_core::run_meta::RunStatus;
-use leviath_runtime::control_socket::{ControlClient, WorldEventStream};
+use leviath_runtime::control_socket::{
+    ControlClient, ControlRequest, ControlResponse, WorldEventStream,
+};
 use leviath_runtime::host::WorldEvent;
 use leviath_runtime::persistence::run_status_for_label;
 
@@ -126,14 +133,21 @@ pub(crate) async fn wait_for_run_with(
     on_event: &mut (dyn FnMut(&WorldEvent) + Send),
     timing: &WaitTiming,
 ) -> WaitOutcome {
-    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    // A timeout the clock cannot represent is no deadline at all, rather than
+    // an overflow: the tool layer clamps its argument, and this is the
+    // backstop for every other caller.
+    let deadline = timeout.and_then(|t| tokio::time::Instant::now().checked_add(t));
     let mut lineage = Lineage::new(runs_dir, run_id);
     let mut tools_installed: Vec<String> = Vec::new();
     let mut silent_drops = 0u32;
     // A run that finished before the caller started waiting is answered from
-    // disk at once rather than after the first tick.
+    // disk at once rather than after the first tick, and one already parked
+    // on a question is answered with the question.
     if let Some(done) = finished_on_disk(runs_dir, run_id, &tools_installed, timing).await {
         return done;
+    }
+    if let Some(asked) = parked_on_disk(control, runs_dir, run_id, &mut lineage).await {
+        return asked;
     }
     loop {
         tokio::select! {
@@ -200,6 +214,9 @@ pub(crate) async fn wait_for_run_with(
                 if let Some(done) = finished_on_disk(runs_dir, run_id, &tools_installed, timing).await {
                     return done;
                 }
+                if let Some(asked) = parked_on_disk(control, runs_dir, run_id, &mut lineage).await {
+                    return asked;
+                }
             }
             _ = until(deadline) => {
                 return WaitOutcome::TimedOut { status: read_status(runs_dir, run_id) };
@@ -249,6 +266,33 @@ async fn finished_on_disk(
         )
         .await,
     )
+}
+
+/// `Interaction` when the run's record says it is waiting for input and the
+/// daemon lists an open request for it or one of its descendants, else
+/// `None`.
+///
+/// The stream only carries questions asked while the caller was listening. A
+/// run that parked before the wait began - the usual case for the `wait` tool
+/// after a host timeout, or after `respond` answered one question of several -
+/// would otherwise hang until the daemon gave up on it. A daemon that does not
+/// answer, or answers with something else, leaves the loop to its other clocks.
+async fn parked_on_disk(
+    control: &ControlClient,
+    runs_dir: &Path,
+    run_id: &str,
+    lineage: &mut Lineage<'_>,
+) -> Option<WaitOutcome> {
+    if read_status(runs_dir, run_id) != Some(RunStatus::WaitingInput) {
+        return None;
+    }
+    match control.request(&ControlRequest::ListInteractions).await {
+        Ok(ControlResponse::Interactions { interactions }) => interactions
+            .into_iter()
+            .find(|(asker, _)| lineage.accepts(asker))
+            .map(|(run_id, request)| WaitOutcome::Interaction { run_id, request }),
+        _ => None,
+    }
 }
 
 /// Build the `Finished` outcome, reading the answer off disk when the event

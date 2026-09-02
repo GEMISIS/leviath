@@ -3,8 +3,11 @@
 use super::*;
 
 /// The bundled agents `run` installs before resolving `agent`: the agent
-/// itself when it is bundled and not installed, and `coder` alongside the
-/// orchestrator, whose fan-out workers are coders.
+/// itself when it is bundled and not installed, and every bundled agent its
+/// fan-out stages name as a worker, recursively (the orchestrator's workers
+/// are coders; the deep and wide researchers fan out to `researcher`). Read
+/// off the bundled manifests, so a new bundled agent with workers needs no
+/// entry here.
 pub(crate) fn missing_bundled(
     agent: &str,
     agents_dir: Option<&Path>,
@@ -12,9 +15,20 @@ pub(crate) fn missing_bundled(
     let Some(agents_dir) = agents_dir else {
         return Vec::new();
     };
-    let mut wanted = vec![agent];
-    if agent == "orchestrator" {
-        wanted.push("coder");
+    let mut wanted: Vec<&str> = Vec::new();
+    let mut pending = vec![agent.to_string()];
+    while let Some(name) = pending.pop() {
+        let Some(bundled) = crate::bundled::BUNDLED_AGENTS
+            .iter()
+            .find(|b| b.name == name)
+        else {
+            continue; // not bundled: nothing to install for it
+        };
+        if wanted.contains(&bundled.name) {
+            continue; // seen already (`researcher` names itself as a worker)
+        }
+        wanted.push(bundled.name);
+        pending.extend(bundled_workers(bundled));
     }
     crate::bundled::BUNDLED_AGENTS
         .iter()
@@ -26,6 +40,63 @@ pub(crate) fn missing_bundled(
                 .exists()
         })
         .collect()
+}
+
+/// The `worker_agent` names a bundled blueprint's fan-out stages declare.
+///
+/// Combinators rather than early returns: every bundled manifest is present
+/// and parses (the bundle's own tests hold it to that), so a branch for a
+/// missing or broken one would be one nothing can reach.
+fn bundled_workers(bundled: &crate::bundled::BundledAgent) -> Vec<String> {
+    bundled
+        .files
+        .iter()
+        .find(|(rel, _)| *rel == leviath_core::files::MANIFEST_FILENAME)
+        .and_then(|(_, content)| leviath_core::manifest::parse_manifest(content).ok())
+        .map(|blueprint| {
+            blueprint
+                .stages
+                .iter()
+                .filter_map(|stage| match &stage.mode {
+                    leviath_core::blueprint::StageMode::FanOut { config } => {
+                        config.worker_agent.clone()
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The wait deadline for a `timeout_secs` argument: none for 0, else the
+/// duration, clamped so the deadline is always representable. The schema
+/// admits any non-negative integer, and `u64::MAX` seconds added to now is
+/// an overflow, not a very long wait.
+pub(crate) fn timeout_from_secs(secs: u64) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs.min(u64::from(u32::MAX))))
+}
+
+/// The `isError` text for a task handed to an agent that takes none, naming
+/// what it takes instead, so the host can fix the call rather than give up.
+/// `None` when `e` is some other refusal, or the agent cannot be read.
+fn task_refusal_hint(agent: &str, e: &anyhow::Error) -> Option<String> {
+    let source = crate::daemon::client::load_agent_source(agent).ok()?;
+    if source.blueprint.accepts_task() || e.to_string() != source.blueprint.task_refusal() {
+        return None;
+    }
+    let inputs = source.blueprint.caller_inputs();
+    Some(match inputs.first() {
+        Some(first) => format!(
+            "{} takes no task; pass regions: {{\"{first}\": ...}} (its caller inputs are {}) \
+             and leave `task` out",
+            source.blueprint.name,
+            inputs.join(", ")
+        ),
+        None => format!(
+            "{} takes no task and no caller inputs; leave `task` out",
+            source.blueprint.name
+        ),
+    })
 }
 
 /// Whether the blueprint behind `spawn` declares `[read_paths]` the config
@@ -187,7 +258,7 @@ pub(crate) async fn run(
     progress: &Progress,
     run_slot: &Arc<Mutex<Option<String>>>,
 ) -> CallOutcome {
-    let task = str_arg(args, "task").unwrap_or_default();
+    let task = str_arg(args, "task");
     let agent = str_arg(args, "agent").unwrap_or_else(|| shared.args.default_agent.clone());
     let workdir_raw = str_arg(args, "workdir")
         .map(PathBuf::from)
@@ -284,9 +355,12 @@ pub(crate) async fn run(
     }
 
     let workdir_text = workdir.to_string_lossy().to_string();
+    // No task for an agent that wants one is a clean error from the resolver
+    // (`never_interactive` keeps it from opening an editor); a task for an
+    // agent that takes none gets the hint about `regions` instead.
     let spawn_args = match resolve_spawn_args(LaunchRequest {
         path: &agent,
-        task: Some(&task),
+        task: task.as_deref(),
         stdin_is_terminal: &never_interactive,
         model,
         workdir: &workdir_text,
@@ -299,6 +373,12 @@ pub(crate) async fn run(
     }) {
         Ok(spawn_args) => spawn_args,
         Err(e) => {
+            if let Some(hint) = task_refusal_hint(&agent, &e) {
+                return fail(
+                    format!("could not start agent '{agent}': {hint}"),
+                    json!({ "agent": agent, "refused": "task" }),
+                );
+            }
             return fail(
                 format!("could not start agent '{agent}': {e}"),
                 json!({ "agent": agent }),
@@ -362,7 +442,7 @@ pub(crate) async fn run(
             None,
         );
     }
-    let timeout = (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs));
+    let timeout = timeout_from_secs(timeout_secs);
     let outcome = wait_with_heartbeat(shared, stream, &run_id, timeout, progress).await;
     outcome_result(shared, &run_id, outcome, &preface, warnings)
 }
@@ -399,7 +479,7 @@ pub(crate) async fn wait(
             );
         }
     };
-    let timeout = (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs));
+    let timeout = timeout_from_secs(timeout_secs);
     let outcome = wait_with_heartbeat(shared, stream, &run_id, timeout, progress).await;
     outcome_result(shared, &run_id, outcome, "", Vec::new())
 }

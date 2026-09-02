@@ -579,6 +579,131 @@ async fn a_deadline_ends_the_wait_with_the_status_on_disk_and_cancels_nothing() 
 }
 
 #[tokio::test]
+async fn a_timeout_the_clock_cannot_hold_is_no_deadline_and_no_panic() {
+    let runs = tempfile::tempdir().unwrap();
+    let daemon = ScriptedDaemon::new(
+        vec![StreamScript::Hold(vec![completed_with_answer("Done.")])],
+        spawn_ok,
+    );
+    let mut seen = Vec::new();
+    match wait_fast(
+        &daemon,
+        runs.path(),
+        Some(Duration::from_secs(u64::MAX)),
+        &mut seen,
+    )
+    .await
+    {
+        WaitOutcome::Finished { final_output, .. } => {
+            assert_eq!(final_output.unwrap().content, "Done.");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The daemon lists `interactions` for `ListInteractions` and says yes to
+/// everything else.
+fn listing(
+    interactions: Vec<(String, InteractionRequest)>,
+) -> impl Fn(ControlRequest) -> ControlResponse + Send + Sync + 'static {
+    move |req| match req {
+        ControlRequest::ListInteractions => ControlResponse::Interactions {
+            interactions: interactions.clone(),
+        },
+        _ => ControlResponse::Ok { ok: true },
+    }
+}
+
+/// The request inside an `Interaction` event.
+fn request_of(event: WorldEvent) -> InteractionRequest {
+    match event {
+        WorldEvent::Interaction { request, .. } => request,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_run_already_parked_on_a_question_is_answered_from_the_daemons_listing() {
+    let runs = tempfile::tempdir().unwrap();
+    write_meta(
+        runs.path(),
+        &meta_for(RUN_ID, RunStatus::WaitingInput, None),
+    );
+    write_meta(
+        runs.path(),
+        &meta_for("worker", RunStatus::WaitingInput, Some(RUN_ID)),
+    );
+    // A stranger's question is listed first; the family's is the answer.
+    let daemon = ScriptedDaemon::new(
+        vec![StreamScript::Hold(vec![])],
+        listing(vec![
+            (
+                "stranger".to_string(),
+                request_of(interaction_for("stranger", "q-s")),
+            ),
+            (
+                "worker".to_string(),
+                request_of(interaction_for("worker", "q-w")),
+            ),
+        ]),
+    );
+    let mut seen = Vec::new();
+    match wait_fast(&daemon, runs.path(), None, &mut seen).await {
+        WaitOutcome::Interaction { run_id, request } => {
+            assert_eq!(run_id, "worker");
+            assert_eq!(request.id, "q-w");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(seen.is_empty(), "no event was needed");
+    assert!(
+        daemon
+            .requests()
+            .iter()
+            .any(|r| matches!(r, ControlRequest::ListInteractions))
+    );
+}
+
+#[tokio::test]
+async fn the_tick_asks_a_parked_run_about_its_question_until_the_daemon_lists_one() {
+    let runs = tempfile::tempdir().unwrap();
+    write_meta(
+        runs.path(),
+        &meta_for(RUN_ID, RunStatus::WaitingInput, None),
+    );
+    // The first answer is not a listing at all, the second lists nothing,
+    // the third has the question.
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = asked.clone();
+    let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![])], move |req| match req {
+        ControlRequest::ListInteractions => {
+            match counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => ControlResponse::Ok { ok: true },
+                1 => ControlResponse::Interactions {
+                    interactions: vec![],
+                },
+                _ => ControlResponse::Interactions {
+                    interactions: vec![(
+                        RUN_ID.to_string(),
+                        request_of(interaction_for(RUN_ID, "q-3")),
+                    )],
+                },
+            }
+        }
+        _ => ControlResponse::Ok { ok: true },
+    });
+    let mut seen = Vec::new();
+    match wait_fast(&daemon, runs.path(), None, &mut seen).await {
+        WaitOutcome::Interaction { run_id, request } => {
+            assert_eq!(run_id, RUN_ID);
+            assert_eq!(request.id, "q-3");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn a_dropped_stream_is_resubscribed_and_the_run_followed_to_its_end() {
     let runs = tempfile::tempdir().unwrap();
     let daemon = ScriptedDaemon::new(

@@ -18,7 +18,8 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 use super::super::serve_tools::{
-    build_interaction_response, cap_text, has_granted_read_paths, missing_bundled, wire_status,
+    build_interaction_response, cap_text, has_granted_read_paths, missing_bundled,
+    timeout_from_secs, wire_status,
 };
 use crate::daemon::wait::tests::{
     RUN_ID, ScriptedDaemon, StreamScript, completed, completed_with_answer, fast, interaction_for,
@@ -354,7 +355,14 @@ async fn the_handshake_ping_and_tool_list_need_no_daemon() {
             .unwrap()
             .contains("the run continues")
     );
-    assert_eq!(run["inputSchema"]["required"], json!(["task"]));
+    // `task` is optional: an agent that takes named inputs gets `regions`.
+    assert_eq!(run["inputSchema"]["required"], json!([]));
+    assert!(
+        run["inputSchema"]["properties"]["task"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Omit it for an agent that takes named inputs")
+    );
 }
 
 #[tokio::test]
@@ -432,11 +440,14 @@ async fn bad_lines_unknown_methods_and_malformed_calls_are_refused_with_the_righ
 
     // A missing required argument likewise, as is a wrong type, an unknown
     // key, a negative count and a word outside an enum: the schema says so.
-    h.call(7, "run", json!({})).await;
+    h.call(7, "wait", json!({})).await;
     let (_, msg) = h.response(7).await;
     let message = msg.error.unwrap().message;
-    assert!(message.contains("invalid arguments for 'run'"), "{message}");
-    assert!(message.contains("task"), "{message}");
+    assert!(
+        message.contains("invalid arguments for 'wait'"),
+        "{message}"
+    );
+    assert!(message.contains("run_id"), "{message}");
     h.call(8, "run", json!({ "task": "t", "yolo": "yes" }))
         .await;
     let (_, msg) = h.response(8).await;
@@ -1190,9 +1201,228 @@ fn the_bundled_agents_a_run_installs_are_the_missing_ones_it_needs() {
         .map(|b| b.name)
         .collect();
     assert!(orchestrator.contains(&"coder"), "{orchestrator:?}");
+    // The researchers fan out to `researcher`, which names itself as its own
+    // worker: read off the manifests, and no loop.
+    let names = |agent: &str| -> Vec<&str> {
+        missing_bundled(agent, Some(dir.path()))
+            .iter()
+            .map(|b| b.name)
+            .collect()
+    };
+    let deep = names("deep-researcher");
+    assert!(deep.contains(&"researcher"), "{deep:?}");
+    assert!(deep.contains(&"deep-researcher"), "{deep:?}");
+    assert_eq!(deep.len(), 2, "{deep:?}");
+    assert!(names("wide-researcher").contains(&"researcher"));
+    assert_eq!(names("researcher"), ["researcher"]);
+    // A fan-out to one of the agent's own stages brings nothing along.
+    assert_eq!(names("reviewer"), ["reviewer"]);
     std::fs::create_dir_all(dir.path().join("coder")).unwrap();
     std::fs::write(dir.path().join("coder").join("agent.leviath"), "").unwrap();
     assert!(missing_bundled("coder", Some(dir.path())).is_empty());
+    // An installed worker is not installed again, but the agent itself is.
+    assert_eq!(names("orchestrator"), ["orchestrator"]);
+}
+
+#[test]
+fn the_wait_deadline_is_none_for_zero_and_clamped_for_a_huge_timeout() {
+    assert_eq!(timeout_from_secs(0), None);
+    assert_eq!(timeout_from_secs(5), Some(Duration::from_secs(5)));
+    assert_eq!(
+        timeout_from_secs(u64::MAX),
+        Some(Duration::from_secs(u64::from(u32::MAX)))
+    );
+}
+
+#[tokio::test]
+async fn run_takes_named_inputs_without_a_task_and_explains_a_task_an_agent_cannot_take() {
+    let machine = Machine::new();
+    let coder = machine.install_agent("coder", "");
+    // A blueprint with neither a task region nor any caller input.
+    let notask_dir = machine.agents_dir().join("notask");
+    std::fs::create_dir_all(&notask_dir).unwrap();
+    std::fs::write(
+        notask_dir.join("agent.leviath"),
+        crate::test_support::inline_coder_manifest()
+            .replace("task = { kind = \"pinned\", max_tokens = 2000 }\n", ""),
+    )
+    .unwrap();
+    temp_env::async_with_vars(isolation(&machine), async {
+        let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![])], spawn_ok);
+        let mut h = Harness::usual(&daemon, &machine);
+
+        // The bundled reviewer takes a diff, not a task: the refusal names
+        // the `regions` argument and the inputs it takes.
+        h.call(
+            1,
+            "run",
+            json!({ "task": "review this", "agent": "reviewer", "wait": false }),
+        )
+        .await;
+        let (is_error, text, structured) = h.call_result(1).await;
+        assert!(is_error);
+        assert!(
+            text.contains("reviewer takes no task; pass regions: {\"diff\": ...}"),
+            "{text}"
+        );
+        assert!(
+            text.contains("its caller inputs are diff, criteria"),
+            "{text}"
+        );
+        assert_eq!(structured["refused"], "task");
+
+        // Named inputs and no task: the run starts.
+        h.call(
+            2,
+            "run",
+            json!({ "agent": "reviewer", "regions": { "diff": "--- a\n+++ b" }, "wait": false }),
+        )
+        .await;
+        let (is_error, text, structured) = h.call_result(2).await;
+        assert!(!is_error, "{text}");
+        assert_eq!(structured["status"], "starting");
+
+        // An agent that wants a task and gets none: the resolver's own words,
+        // with no editor opened.
+        h.call(
+            3,
+            "run",
+            json!({ "agent": coder.to_string_lossy(), "wait": false }),
+        )
+        .await;
+        let (is_error, text, structured) = h.call_result(3).await;
+        assert!(is_error);
+        assert!(text.contains("could not start agent"), "{text}");
+        assert!(text.contains("No task provided"), "{text}");
+        assert!(structured.get("refused").is_none());
+
+        // No task region and no caller inputs either.
+        h.call(
+            4,
+            "run",
+            json!({ "task": "t", "agent": "notask", "wait": false }),
+        )
+        .await;
+        let (is_error, text, _) = h.call_result(4).await;
+        assert!(is_error);
+        assert!(
+            text.contains("coder takes no task and no caller inputs; leave `task` out"),
+            "{text}"
+        );
+
+        // A different refusal for a task-less agent is passed through as is.
+        h.call(
+            5,
+            "run",
+            json!({ "task": "t", "agent": "notask", "regions": { "nope": "x" }, "wait": false }),
+        )
+        .await;
+        let (is_error, text, structured) = h.call_result(5).await;
+        assert!(is_error);
+        assert!(text.contains("unknown region"), "{text}");
+        assert!(structured.get("refused").is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_duplicate_request_id_is_refused_and_the_first_call_left_alone() {
+    let machine = Machine::new();
+    let manifest = machine.install_agent("coder", "");
+    temp_env::async_with_vars(isolation(&machine), async {
+        let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![status_event()])], spawn_ok);
+        let mut h = Harness::usual(&daemon, &machine);
+        h.send_json(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "run", "arguments": { "task": "t", "agent": manifest.to_string_lossy() }, "_meta": { "progressToken": "t" } },
+        }))
+        .await;
+        let started = h.recv().await;
+        assert_eq!(started.method.as_deref(), Some("notifications/progress"));
+
+        // The same id again, while the run is still being waited on.
+        h.call(1, "list_tools", json!({})).await;
+        let refused = loop {
+            let frame = h.recv().await;
+            if frame.id.is_some() {
+                break frame;
+            }
+        };
+        assert_eq!(refused.id, Some(json!(1)));
+        let error = refused.error.expect("an error, not a result");
+        assert_eq!(error.code, error_codes::INVALID_REQUEST);
+        assert!(
+            error.message.contains("duplicate request id"),
+            "{}",
+            error.message
+        );
+
+        // The server still answers, and nothing was spawned twice.
+        h.send_json(json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }))
+            .await;
+        let next = loop {
+            let frame = h.recv().await;
+            if frame.id.is_some() {
+                break frame;
+            }
+        };
+        assert_eq!(next.id, Some(json!(2)), "{next:?}");
+        assert_eq!(
+            daemon
+                .requests()
+                .iter()
+                .filter(|r| matches!(r, ControlRequest::Spawn { .. }))
+                .count(),
+            1
+        );
+        // The first call is still in flight when the host goes away, and the
+        // server still ends.
+        h.close_input().await;
+        h.finished().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_daemon_is_started_again_after_it_went_away() {
+    let machine = Machine::new();
+    let daemon = ScriptedDaemon::new(vec![], spawn_ok);
+    let (ready, calls) = flaky_ready(0);
+    let mut h = Harness::start(
+        daemon.client(),
+        McpServeArgs::default(),
+        machine.env(ready),
+        fast_timing(),
+    );
+    h.call(1, "message", json!({ "run_id": RUN_ID, "content": "hi" }))
+        .await;
+    let (is_error, _, _) = h.call_result(1).await;
+    assert!(!is_error);
+    h.call(2, "message", json!({ "run_id": RUN_ID, "content": "hi" }))
+        .await;
+    let (is_error, _, _) = h.call_result(2).await;
+    assert!(!is_error);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "success is remembered");
+
+    // `lev daemon stop`: the next call finds nobody, and the one after that
+    // asks the factory again instead of failing for the rest of the session.
+    daemon.shutdown();
+    h.call(3, "message", json!({ "run_id": RUN_ID, "content": "hi" }))
+        .await;
+    let (is_error, text, _) = h.call_result(3).await;
+    assert!(is_error);
+    assert!(text.contains("not reachable"), "{text}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    h.call(4, "message", json!({ "run_id": RUN_ID, "content": "hi" }))
+        .await;
+    let (is_error, text, _) = h.call_result(4).await;
+    assert!(is_error);
+    assert!(text.contains("not reachable"), "{text}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the daemon was started again"
+    );
 }
 
 #[tokio::test]
@@ -1327,6 +1557,32 @@ async fn wait_follows_an_existing_run_and_refuses_one_it_does_not_know() {
     assert!(!is_error);
     assert_eq!(text, "Waited for.");
     assert_eq!(structured["status"], "complete");
+
+    // A long answer is cut at the host cap and says where the rest is; the
+    // largest timeout the schema admits is no problem for the clock.
+    write_run(
+        &machine.runs_dir(),
+        "long",
+        RunStatus::Complete,
+        Some(&"w".repeat(MCP_TEXT_CAP + 1)),
+    );
+    h.call(
+        5,
+        "wait",
+        json!({ "run_id": "long", "timeout_secs": u64::MAX }),
+    )
+    .await;
+    let (is_error, text, structured) = h.call_result(5).await;
+    assert!(!is_error);
+    let (body, note) = text.rsplit_once('\n').unwrap();
+    assert_eq!(body.len(), MCP_TEXT_CAP);
+    assert!(
+        note.starts_with("output truncated for the host; full text with `result`"),
+        "{note}"
+    );
+    assert!(note.contains("final_output"), "{note}");
+    assert_eq!(structured["host_truncated"], true);
+    assert_eq!(structured["final_output"]["host_truncated"], true);
 
     let (ready, _) = flaky_ready(usize::MAX);
     let mut h = Harness::start(
@@ -1475,9 +1731,10 @@ async fn result_pages_the_answer_on_character_boundaries_and_caps_it_for_the_hos
     assert_eq!(text, "");
     assert_eq!(structured["next_offset"], Value::Null);
 
-    // A long answer is cut at the cap, on a character boundary, and says so:
-    // one ASCII byte then two-byte characters puts every boundary at an odd
-    // offset, and the cap is even.
+    // A `max_bytes` above what one result carries is clamped to it, so the
+    // page is never cut after the fact and `bytes`/`next_offset` describe
+    // what the host received. One ASCII byte then two-byte characters puts
+    // every boundary at an odd offset, and the cap is even.
     let long = format!("x{}", "é".repeat(MCP_TEXT_CAP));
     write_run(
         &machine.runs_dir(),
@@ -1488,20 +1745,29 @@ async fn result_pages_the_answer_on_character_boundaries_and_caps_it_for_the_hos
     h.call(
         6,
         "result",
-        json!({ "run_id": "long", "max_bytes": 1_000_000 }),
+        json!({ "run_id": "long", "max_bytes": u64::MAX }),
     )
     .await;
     let (_, text, structured) = h.call_result(6).await;
-    let (body, note) = text.rsplit_once('\n').unwrap();
-    assert_eq!(body.len(), MCP_TEXT_CAP - 1, "cut off a character boundary");
-    assert!(body.chars().skip(1).all(|c| c == 'é'));
-    assert!(
-        note.starts_with("output truncated for the host; full text with `result`"),
-        "{note}"
-    );
-    assert!(note.contains("final_output"), "{note}");
-    assert_eq!(structured["host_truncated"], true);
-    assert_eq!(structured["final_output"]["host_truncated"], true);
+    assert_eq!(text.len(), MCP_TEXT_CAP - 1, "cut off a character boundary");
+    assert!(text.chars().skip(1).all(|c| c == 'é'));
+    assert_eq!(structured["bytes"], MCP_TEXT_CAP - 1);
+    assert_eq!(structured["next_offset"], MCP_TEXT_CAP - 1);
+    assert!(structured.get("host_truncated").is_none());
+    assert_eq!(structured["final_output"]["host_truncated"], false);
+    // The next page picks up exactly where that one ended.
+    h.call(
+        7,
+        "result",
+        json!({ "run_id": "long", "offset": MCP_TEXT_CAP - 1 }),
+    )
+    .await;
+    let (_, text, structured) = h.call_result(7).await;
+    assert_eq!(structured["offset"], MCP_TEXT_CAP - 1);
+    assert_eq!(text.len(), MCP_TEXT_CAP);
+    assert!(text.chars().all(|c| c == 'é'));
+    assert_eq!(structured["next_offset"], 2 * MCP_TEXT_CAP - 1);
+    assert!(structured.get("host_truncated").is_none());
 }
 
 #[test]

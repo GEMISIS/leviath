@@ -93,7 +93,7 @@ The server key is `leviath`, so the host prefixes every name below with its own 
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `run` | `task`, `agent`, `workdir`, `wait`, `timeout_secs`, `yolo`, `model`, `allow`, `regions`, output options | Starts a run; with `wait: true` returns its final output |
+| `run` | `task`, `agent`, `workdir`, `wait`, `timeout_secs`, `yolo`, `model`, `allow`, `regions`, output options | Starts a run; with `wait: true` returns its final output. An agent that takes named inputs (`reviewer` takes `diff`) gets them as `regions` and no `task` |
 | `wait` | `run_id`, `timeout_secs` | Waits for an existing run |
 | `status` | `run_id` | Status, stage, iteration and tokens, from disk first |
 | `result` | `run_id`, `offset`, `max_bytes` | Pages the final output without the daemon |

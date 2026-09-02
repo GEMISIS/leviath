@@ -67,8 +67,11 @@ pub(crate) async fn status(shared: &Shared, args: &Args) -> CallOutcome {
 pub(crate) fn result(shared: &Shared, args: &Args) -> CallOutcome {
     let run_id = str_arg(args, "run_id").unwrap_or_default();
     let offset = uint_arg(args, "offset").unwrap_or(0) as usize;
+    // Clamped to what one result can carry, so `bytes` and `next_offset`
+    // describe the page the host actually receives: a page `finish` had to
+    // cut would report bytes the host never saw.
     let max_bytes = uint_arg(args, "max_bytes")
-        .map(|n| n as usize)
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX).min(MCP_TEXT_CAP))
         .unwrap_or(MCP_TEXT_CAP);
     let dir = run_dir_in(&shared.env.runs_dir, &run_id);
     let meta = match read_meta_from(&dir) {

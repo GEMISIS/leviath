@@ -52,10 +52,11 @@ type Args = Map<String, Value>;
 const RUN_DESCRIPTION: &str = "Delegate a task to the Leviath agent runtime and wait for its \
     final output. Use this instead of spawning a subagent when the user says leviath. Pass an \
     absolute `workdir` (the project directory). The default agent runs multi-stage work with \
-    verification; `list_agents` shows the others. A host timeout or cancellation only stops \
-    waiting; the run continues (list_runs, wait, status, cancel). With `wait: false` the call \
-    returns the run_id at once for `wait`. A result with status waiting_input needs `respond` \
-    with its request_id, then `wait`.";
+    verification; `list_agents` shows the others, and which take a `task` or named inputs: an \
+    agent that takes named inputs (reviewer takes `diff`) gets them as `regions` and no `task`. \
+    A host timeout or cancellation only stops waiting; the run continues (list_runs, wait, \
+    status, cancel). With `wait: false` the call returns the run_id at once for `wait`. A result \
+    with status waiting_input needs `respond` with its request_id, then `wait`.";
 
 /// The `wait` tool's description.
 const WAIT_DESCRIPTION: &str = "Wait for an existing Leviath run to finish and return its \
@@ -86,7 +87,7 @@ pub(super) fn tool_table() -> Vec<ServerTool> {
             RUN_DESCRIPTION,
             object(
                 json!({
-                    "task": string("The task, self-contained: goal, constraints, and what done looks like."),
+                    "task": string("The task, self-contained: goal, constraints, and what done looks like. Omit it for an agent that takes named inputs instead (see `regions`)."),
                     "agent": string("The agent: an installed name (orchestrator, coder, deep-researcher, ...), a directory, or an agent.leviath path. Default: the server's default agent."),
                     "workdir": string("Absolute path of the project directory the agent works in. Strongly recommended; a relative path is refused."),
                     "wait": boolean("Wait for the run and return its final output (default true). false returns the run_id at once."),
@@ -96,12 +97,12 @@ pub(super) fn tool_table() -> Vec<ServerTool> {
                     "allow": { "type": "array", "items": { "type": "string" }, "description": "Tools to allow outright." },
                     "max_depth": integer("Cap on the sub-agent tree depth."),
                     "no_seed_commands": boolean("Refuse the blueprint's command seeds (shell commands run at spawn)."),
-                    "regions": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Caller-input regions by name, for agents that take them (a reviewer's `diff`, say)." },
+                    "regions": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Caller-input regions by name, for agents that take them instead of a task (reviewer: {\"diff\": \"...\"}); `list_agents` lists each agent's caller_inputs." },
                     "output_format": string("Ask for the final output in this shape (markdown, json, a house format)."),
                     "output_instructions": string("Extra guidance about that shape."),
                     "output_schema": { "type": "object", "description": "A JSON Schema the final output must satisfy." },
                 }),
-                &["task"],
+                &[],
             ),
             ToolAnnotations::OPEN_WORLD,
         ),
@@ -133,7 +134,7 @@ pub(super) fn tool_table() -> Vec<ServerTool> {
                 json!({
                     "run_id": run_id(),
                     "offset": integer("Byte offset to start from (default 0); cut to a character boundary."),
-                    "max_bytes": integer("At most this many bytes (default 49152)."),
+                    "max_bytes": integer("At most this many bytes (default and maximum 49152, the most one result carries)."),
                 }),
                 &["run_id"],
             ),
@@ -395,4 +396,4 @@ mod scripts;
 #[cfg(test)]
 pub(crate) use control::build_interaction_response;
 #[cfg(test)]
-pub(crate) use run::{has_granted_read_paths, missing_bundled};
+pub(crate) use run::{has_granted_read_paths, missing_bundled, timeout_from_secs};

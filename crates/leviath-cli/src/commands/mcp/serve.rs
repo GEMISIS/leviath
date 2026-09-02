@@ -20,10 +20,17 @@
 //! The daemon is started lazily, by the first call that needs it, through the
 //! injected [`DaemonReady`] factory; only success is remembered, so a cold
 //! start that missed its window is retried on the next call rather than
-//! poisoning the host's whole session. `initialize`, `tools/list`, `ping`,
-//! `list_agents`, `list_tools` and `install_tool` never touch it; `status` and
-//! `result` read the run's record first and only ask the daemon about a run
-//! that is still going.
+//! poisoning the host's whole session, and the memory is dropped again when
+//! the daemon stops answering (`lev daemon stop` under a live host session),
+//! so the next call that needs it starts it afresh. `initialize`,
+//! `tools/list`, `ping`, `list_agents`, `list_tools` and `install_tool` never
+//! touch it; `status` and `result` read the run's record first and only ask
+//! the daemon about a run that is still going.
+//!
+//! A `tools/call` whose id is still in flight is refused with `-32600`
+//! (duplicate request id) and the first call is left alone: two calls under
+//! one id would be two replies the host cannot tell apart, and the first is
+//! the one it is waiting on.
 //!
 //! stdout is the protocol channel. Nothing here prints; diagnostics go to
 //! `tracing` (stderr).
@@ -242,9 +249,13 @@ pub(super) struct Shared {
     pub(super) reserved: Vec<String>,
     /// The tool table, built once.
     pub(super) tools: Vec<ServerTool>,
-    /// Set once the daemon has been confirmed up. Only success is stored: a
-    /// failed attempt leaves the cell empty for the next call to try again.
-    ready: tokio::sync::OnceCell<()>,
+    /// Whether the daemon has been confirmed up. Only success is stored, and
+    /// it counts only while the control link still reaches a daemon: a
+    /// failed attempt leaves it unset for the next call to try again, and a
+    /// daemon that has since stopped answering is started again. An async
+    /// mutex, held across the factory's future, so concurrent first calls
+    /// start one daemon between them.
+    ready: tokio::sync::Mutex<bool>,
 }
 
 impl Shared {
@@ -271,17 +282,25 @@ impl Shared {
             timing,
             reserved,
             tools: tool_table(),
-            ready: tokio::sync::OnceCell::new(),
+            ready: tokio::sync::Mutex::new(false),
         }
     }
 
     /// Make sure the daemon is up, starting it on the first call that needs
-    /// it. An `Err` is returned to the caller as text and not remembered.
+    /// it and again after it has gone away. An `Err` is returned to the
+    /// caller as text and not remembered.
+    ///
+    /// `ControlClient::link` is refreshed by every request and subscription,
+    /// so a daemon stopped since the last success reads as unreachable here
+    /// once one call has failed against it, and the factory runs again.
     pub(super) async fn daemon_ready(&self) -> Result<(), String> {
-        self.ready
-            .get_or_try_init(|| (self.env.daemon_ready)())
-            .await
-            .map(|_| ())
+        let mut ready = self.ready.lock().await;
+        if *ready && self.control.link().reachable {
+            return Ok(());
+        }
+        (self.env.daemon_ready)().await?;
+        *ready = true;
+        Ok(())
     }
 }
 
@@ -403,7 +422,19 @@ impl Server {
     }
 
     /// Start a tool call in its own task; its reply arrives on the channel.
+    ///
+    /// An id still in flight is refused, and the call under it left alone:
+    /// replacing the entry would detach the first task (dropping a
+    /// `JoinHandle` aborts nothing) and leave two replies racing for one id.
     fn on_tools_call(&mut self, id: Value, params: Option<Value>) {
+        if self.in_flight.contains_key(&id) {
+            self.send(JsonRpcMessage::error_response(
+                id,
+                error_codes::INVALID_REQUEST,
+                "duplicate request id: a call with this id is still in flight",
+            ));
+            return;
+        }
         let call = match parse_call(params) {
             Ok(call) => call,
             Err(message) => {
