@@ -31,10 +31,11 @@ fn global_tools_dir() -> Option<PathBuf> {
     leviath_core::tools_dir()
 }
 
-/// The outcome of scanning a tools directory: the tools that compiled and the
-/// files that were skipped (with the reason each failed).
+/// The outcome of scanning a tools directory: the tools that compiled (each
+/// with the file it came from) and the files that were skipped (with the
+/// reason each failed).
 struct ToolsReport {
-    valid: Vec<ScriptToolMeta>,
+    valid: Vec<(ScriptToolMeta, PathBuf)>,
     skipped: Vec<SkippedTool>,
 }
 
@@ -44,10 +45,34 @@ struct ToolsReport {
 fn scan_tools(dir: Option<&Path>) -> ToolsReport {
     let dirs: Vec<PathBuf> = dir.map(Path::to_path_buf).into_iter().collect();
     let (set, skipped) = ScriptToolSet::discover(&dirs);
-    let mut valid = set.metas();
-    valid.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut valid = set.sources();
+    valid.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     ToolsReport { valid, skipped }
 }
+
+/// The `// installed by leviath: ...` line a script starts with, when it does.
+/// Shared with the MCP server's `list_tools`.
+///
+/// `install_tool` is the audited way into the global directory and the only
+/// one that writes this line, so a file without it was hand-written or put
+/// there by something else (a `shell` call no sandbox confined, say). The
+/// line is the whole record of who installed what: `lev tools` prints it
+/// under each tool, and says so when a file has none.
+///
+/// Combinators rather than `?`: the path was just compiled from, so it is
+/// readable and non-empty, and an early return for either would be a branch
+/// nothing can reach.
+pub(crate) fn provenance_line(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok().and_then(|text| {
+        text.lines()
+            .next()
+            .filter(|first| first.starts_with("// installed by leviath:"))
+            .map(str::to_string)
+    })
+}
+
+/// What `lev tools` prints under a tool whose file has no provenance line.
+const NO_PROVENANCE: &str = "no provenance line (hand-written, or written outside install_tool)";
 
 /// A parameter's type label: the scalar `type` for a flat param, or the `type`
 /// inside a raw `schema` fragment (falling back to `schema` when the fragment has
@@ -82,7 +107,7 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
     let tools: Vec<serde_json::Value> = report
         .valid
         .iter()
-        .map(|m| {
+        .map(|(m, path)| {
             let params: Vec<serde_json::Value> = m
                 .params
                 .iter()
@@ -111,6 +136,8 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
                 "requires": m.required_caps,
                 "available": crate::daemon::spawn::current_platform_satisfies(&m.required_caps),
                 "params": params,
+                // `null` for a file `install_tool` did not write.
+                "provenance": provenance_line(path),
             })
         })
         .collect();
@@ -127,16 +154,17 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
     serde_json::json!({ "dir": dir_label, "tools": tools, "skipped": skipped })
 }
 
-/// Print a report in human-readable form. Valid tools are `✓`, skipped files are
-/// `✗` with their reason (non-fatal - invalid scripts are simply not advertised,
-/// exactly as the daemon treats them).
-fn print_human(dir_label: &str, report: &ToolsReport) {
-    println!("Global script tools ({dir_label}):");
+/// The human-readable report, one entry per line. Valid tools are `✓`, skipped
+/// files are `✗` with their reason (non-fatal - invalid scripts are simply not
+/// advertised, exactly as the daemon treats them). Built as lines rather than
+/// printed so the rendering is testable.
+fn human_lines(dir_label: &str, report: &ToolsReport) -> Vec<String> {
+    let mut lines = vec![format!("Global script tools ({dir_label}):")];
     if report.valid.is_empty() && report.skipped.is_empty() {
-        println!("  (none)");
-        return;
+        lines.push("  (none)".to_string());
+        return lines;
     }
-    for meta in &report.valid {
+    for (meta, path) in &report.valid {
         let desc = if meta.description.is_empty() {
             String::new()
         } else {
@@ -147,20 +175,34 @@ fn print_human(dir_label: &str, report: &ToolsReport) {
         // which also catches an unknown/typo'd capability name.
         let available = crate::daemon::spawn::current_platform_satisfies(&meta.required_caps);
         let marker = if available { "✓" } else { "⚠" };
-        println!("  {marker} {}{desc}", meta.name);
+        lines.push(format!("  {marker} {}{desc}", meta.name));
         if !available {
-            println!("      unavailable on this platform (unsatisfiable @requires)");
+            lines.push("      unavailable on this platform (unsatisfiable @requires)".to_string());
         }
         let params = params_summary(meta);
         if !params.is_empty() {
-            println!("      params: {params}");
+            lines.push(format!("      params: {params}"));
         }
         if !meta.required_caps.is_empty() {
-            println!("      requires: {}", meta.required_caps.join(", "));
+            lines.push(format!("      requires: {}", meta.required_caps.join(", ")));
         }
+        // Where the file came from, as the file itself records it: the audit
+        // this command exists for.
+        lines.push(format!(
+            "      {}",
+            provenance_line(path).unwrap_or_else(|| NO_PROVENANCE.to_string())
+        ));
     }
     for s in &report.skipped {
-        println!("  ✗ {}: {}", s.path.display(), s.reason);
+        lines.push(format!("  ✗ {}: {}", s.path.display(), s.reason));
+    }
+    lines
+}
+
+/// Print a report in human-readable form.
+fn print_human(dir_label: &str, report: &ToolsReport) {
+    for line in human_lines(dir_label, report) {
+        println!("{line}");
     }
 }
 
@@ -213,8 +255,9 @@ mod tests {
         let dir = dir_with_mixed_tools();
         let report = scan_tools(Some(dir.path()));
         assert_eq!(report.valid.len(), 1);
-        assert_eq!(report.valid[0].name, "upper");
-        assert_eq!(report.valid[0].required_caps, ["network"]);
+        assert_eq!(report.valid[0].0.name, "upper");
+        assert_eq!(report.valid[0].0.required_caps, ["network"]);
+        assert_eq!(report.valid[0].1, dir.path().join("upper.rhai"));
         assert_eq!(report.skipped.len(), 1);
         assert!(report.skipped[0].reason.to_lowercase().contains("tool"));
     }
@@ -288,7 +331,7 @@ mod tests {
         .unwrap();
         let report = scan_tools(Some(dir.path()));
         // params_summary reads the fragment's type.
-        assert_eq!(params_summary(&report.valid[0]), "choice:string!");
+        assert_eq!(params_summary(&report.valid[0].0), "choice:string!");
         let v = report_json("d", &report);
         let param = &v["tools"][0]["params"][0];
         assert_eq!(param["schema"]["enum"][1], "y");
@@ -309,7 +352,76 @@ mod tests {
         // `network` is satisfiable on this (desktop) platform.
         assert_eq!(v["tools"][0]["available"], true);
         assert_eq!(v["tools"][0]["params"][0]["required"], true);
+        // Hand-written: no provenance line, and the JSON says so with `null`.
+        assert!(v["tools"][0]["provenance"].is_null());
         assert!(v["skipped"][0]["reason"].as_str().is_some());
+    }
+
+    /// One file `install_tool` wrote (its first line is the provenance) and one
+    /// written by hand: both renderings show where each came from.
+    fn dir_with_installed_and_handwritten() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("fetch.rhai"),
+            "// installed by leviath: mcp host, workdir /work/proj at 1700000000\n\
+             // @tool fetch\n// @description Fetch a page\nparams.url",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("mine.rhai"),
+            "// @tool mine\n// @description Hand-written\n1",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn provenance_line_reads_the_first_line_only_when_it_is_one() {
+        let dir = dir_with_installed_and_handwritten();
+        assert_eq!(
+            provenance_line(&dir.path().join("fetch.rhai")).as_deref(),
+            Some("// installed by leviath: mcp host, workdir /work/proj at 1700000000")
+        );
+        assert_eq!(provenance_line(&dir.path().join("mine.rhai")), None);
+        // An empty file has no first line; a missing one cannot be read.
+        std::fs::write(dir.path().join("empty.rhai"), "").unwrap();
+        assert_eq!(provenance_line(&dir.path().join("empty.rhai")), None);
+        assert_eq!(provenance_line(&dir.path().join("absent.rhai")), None);
+    }
+
+    #[test]
+    fn human_lines_print_each_tools_provenance_or_say_it_has_none() {
+        let dir = dir_with_installed_and_handwritten();
+        let report = scan_tools(Some(dir.path()));
+        let lines = human_lines("d", &report);
+        let fetch = lines
+            .iter()
+            .position(|l| l.contains("fetch - Fetch a page"))
+            .unwrap();
+        assert_eq!(
+            lines[fetch + 1],
+            "      // installed by leviath: mcp host, workdir /work/proj at 1700000000"
+        );
+        let mine = lines
+            .iter()
+            .position(|l| l.contains("mine - Hand-written"))
+            .unwrap();
+        assert_eq!(lines[mine + 1], format!("      {NO_PROVENANCE}"));
+        assert!(lines[mine + 1].contains("written outside install_tool"));
+    }
+
+    #[test]
+    fn report_json_carries_the_provenance_line_or_null() {
+        let dir = dir_with_installed_and_handwritten();
+        let report = scan_tools(Some(dir.path()));
+        let v = report_json("d", &report);
+        assert_eq!(v["tools"][0]["name"], "fetch");
+        assert_eq!(
+            v["tools"][0]["provenance"],
+            "// installed by leviath: mcp host, workdir /work/proj at 1700000000"
+        );
+        assert_eq!(v["tools"][1]["name"], "mine");
+        assert!(v["tools"][1]["provenance"].is_null());
     }
 
     #[test]

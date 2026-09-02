@@ -34,20 +34,6 @@ pub(crate) fn install_tool(shared: &Shared, args: &Args) -> CallOutcome {
     }
 }
 
-/// The `// installed by leviath: ...` line a script starts with, when it does.
-///
-/// Combinators rather than `?`: the path was just compiled from, so it is
-/// readable and non-empty, and an early return for either would be a branch
-/// nothing can reach.
-fn provenance_line(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().and_then(|text| {
-        text.lines()
-            .next()
-            .filter(|first| first.starts_with("// installed by leviath:"))
-            .map(str::to_string)
-    })
-}
-
 pub(crate) fn list_tools(shared: &Shared) -> CallOutcome {
     let dirs: Vec<PathBuf> = shared.env.tools_dir.iter().cloned().collect();
     let (set, skipped) = leviath_scripting::ScriptToolSet::discover(&dirs);
@@ -62,7 +48,7 @@ pub(crate) fn list_tools(shared: &Shared) -> CallOutcome {
                 "params": crate::commands::tools::params_summary(meta),
                 "requires": meta.required_caps,
                 "source": path.display().to_string(),
-                "provenance": provenance_line(path),
+                "provenance": crate::commands::tools::provenance_line(path),
             })
         })
         .collect();
