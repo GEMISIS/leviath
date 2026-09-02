@@ -53,8 +53,9 @@ pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
 }
 
 /// Render the answer, or `None` when the run never gave one. Pure, so the
-/// formatting is directly testable.
-fn render(
+/// formatting is directly testable. `pub(crate)` because `lev run --wait`
+/// prints a finished run's answer in exactly this shape.
+pub(crate) fn render(
     run_id: &str,
     output: Option<&leviath_core::FinalOutput>,
     json: bool,

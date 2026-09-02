@@ -298,3 +298,57 @@ pub(super) fn discover_script_tools(
     let reserved = reserved_tool_names(builtin_names, mcp_tool_defs);
     discover_script_tools_in(&dirs, &reserved)
 }
+
+/// The names a stage's `available_global_tools` grant expands to: every tool in
+/// `set` whose source file lives under `tools_dir` (the global
+/// `~/.leviath/tools/`) and that `surviving` still routes (not dropped for a
+/// reserved-name collision or an unsatisfiable `@requires`).
+///
+/// The file location is the test, not the name. Scan order lets an agent's own
+/// `tools/` or, for a `dynamic_tools` run, the workdir's `tools/` shadow a
+/// global script under the same name, and that shadow is repository content.
+/// Granting it because a trusted global tool happens to share the name would
+/// let a checked-out repo put its own code behind a name the blueprint never
+/// wrote, so a shadowed name is left out here and stays reachable only by an
+/// explicit `available_tools` entry. No global directory (no home) means no
+/// global grants. Sorted, so the model sees the same order every run.
+pub(crate) fn global_tool_names(
+    set: &leviath_scripting::ScriptToolSet,
+    surviving: &HashSet<String>,
+    tools_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let Some(global) = tools_dir else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = set
+        .sources()
+        .into_iter()
+        .filter(|(meta, path)| path.starts_with(global) && surviving.contains(&meta.name))
+        .map(|(meta, _)| meta.name)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// A stage's Layer-1 grant list with its global grant applied: `available` as
+/// written, followed by every name in `global_names` it did not already hold,
+/// when `allow_global` is set; `available` unchanged otherwise.
+///
+/// Appending rather than merging keeps the blueprint's own order at the front,
+/// and the de-duplication means a tool a stage names explicitly *and* has
+/// installed globally is advertised once.
+pub(crate) fn expand_global_grants(
+    available: &[String],
+    allow_global: bool,
+    global_names: &[String],
+) -> Vec<String> {
+    let mut granted = available.to_vec();
+    if allow_global {
+        for name in global_names {
+            if !granted.contains(name) {
+                granted.push(name.clone());
+            }
+        }
+    }
+    granted
+}

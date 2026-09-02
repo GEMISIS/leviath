@@ -80,9 +80,18 @@ pub struct RunArgs {
 
     /// Print the spawned run as JSON instead of a sentence, for a caller that
     /// has to parse the run id back out and poll `lev ps --json`. With
-    /// `--count` above 1 the JSON is an array, one object per run.
+    /// `--count` above 1 the JSON is an array, one object per run. With
+    /// `--wait` the JSON is instead one object describing the finished run:
+    /// `{run_id, status, final_output}`.
     #[arg(long)]
     pub json: bool,
+
+    /// Stay in the foreground until the run finishes, then print its final
+    /// output (what `lev result <run-id>` would print) and exit non-zero when
+    /// it ended in error or was cancelled. Without it `lev run` hands the run
+    /// to the daemon and returns at once. Not combinable with `--count` above 1.
+    #[arg(long)]
+    pub wait: bool,
 
     /// Start this many runs of the same agent and task, each under its own run
     /// id, from one invocation. One process launch and one socket dial per run
@@ -142,6 +151,7 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     // swallows the token after it.
     "json",
     "count",
+    "wait",
     "verbose",
     "help",
     "version",

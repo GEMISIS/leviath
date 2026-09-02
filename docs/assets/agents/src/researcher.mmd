@@ -3,10 +3,15 @@ flowchart LR
     analyze{{analyze}}
     summarize(summarize)
     summary(summary)
+    dig(dig)
+    dig_workers[["researcher (sub-agent)"]]
+    gather --> dig
     gather --> analyze
-    gather --> summarize
+    gather -. dead_end .-> summarize
     analyze --> gather
     analyze --> summarize
     summarize --> summary
+    dig ==>|×3 workers| dig_workers
+    dig --> analyze
     classDef entry stroke-width:3px
     class gather entry

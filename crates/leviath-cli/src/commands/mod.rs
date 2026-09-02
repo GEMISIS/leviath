@@ -43,6 +43,7 @@ pub mod daemon;
 pub mod daemon_service;
 pub mod dashboard;
 pub mod doctor;
+pub mod integrate;
 pub(crate) mod list;
 pub mod mcp;
 pub(crate) mod models;

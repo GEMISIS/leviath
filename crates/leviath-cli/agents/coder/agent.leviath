@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.1.3"
+version = "0.1.4"
 description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 entry_stage = "discover"
 
@@ -339,6 +339,10 @@ mode = "autonomous"
 model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append", "context_read"]
+# Also offers every Rhai tool installed in ~/.leviath/tools/: a mechanical step
+# an earlier run persisted (the orchestrator's crystallize stage does this) is
+# there to be called rather than worked out again by hand.
+available_global_tools = true
 max_iterations = 50
 max_revisits = 5
 # The ask_user_* tools suspend the run until a person answers, which is
@@ -466,6 +470,7 @@ mode = "autonomous"
 model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir", "bash", "context_read"]
+available_global_tools = true
 max_iterations = 20
 max_revisits = 3
 # Lets the run end here (via "DONE") when the review approves the work,

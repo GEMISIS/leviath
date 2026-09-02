@@ -350,6 +350,10 @@
           "type": "boolean",
           "default": false
         },
+        "available_global_tools": {
+          "type": "boolean",
+          "default": false
+        },
         "batch_tool_hint": {
           "type": "boolean"
         },

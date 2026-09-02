@@ -48,7 +48,13 @@ const MAX_DELAY: Duration = Duration::from_millis(50);
 /// however many callers there are. Same reason `run/task.rs`'s
 /// `resolve_task_with` takes one, and the cost is a vtable dispatch on a loop
 /// that sleeps between iterations.
-pub async fn poll_until(done: &mut dyn FnMut() -> bool) -> bool {
+///
+/// `+ Send` because the predicate is held across the sleep: without it this
+/// future is `!Send`, and so is every future awaiting it, which is what kept
+/// the daemon auto-start out of a `tokio::spawn`ed task (`lev mcp serve` runs
+/// it from one). The production predicates capture a `&PathBuf` and were
+/// always `Send`; only the signature said otherwise.
+pub async fn poll_until(done: &mut (dyn FnMut() -> bool + Send)) -> bool {
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     let mut delay = FIRST_DELAY;
     while !done() {
@@ -64,7 +70,7 @@ pub async fn poll_until(done: &mut dyn FnMut() -> bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Drive the backoff against a virtual clock: `tokio::time::pause` makes
     /// `sleep` return as soon as nothing else can run, so a five-second
@@ -88,15 +94,21 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn it_returns_as_soon_as_the_predicate_flips() {
-        let calls = Cell::new(0);
+        // Atomics rather than `Cell`s: the predicate has to be `Send` now, and
+        // a `Cell` captured by reference is not.
+        let calls = AtomicUsize::new(0);
         assert!(
             poll_until(&mut || {
-                calls.set(calls.get() + 1);
-                calls.get() == 4
+                calls.fetch_add(1, Ordering::SeqCst);
+                calls.load(Ordering::SeqCst) == 4
             })
             .await
         );
-        assert_eq!(calls.get(), 4, "it kept polling after the flip");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "it kept polling after the flip"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -104,19 +116,18 @@ mod tests {
         // Record the gap between polls by reading the virtual clock inside the
         // predicate. Asserting on the sequence is what pins the backoff; a
         // test that only checked the total would pass on a fixed tick.
-        let gaps = std::cell::RefCell::new(Vec::new());
-        let last = Cell::new(tokio::time::Instant::now());
-        let calls = Cell::new(0);
+        let mut gaps = Vec::new();
+        let mut last = tokio::time::Instant::now();
+        let mut calls = 0;
         poll_until(&mut || {
             let now = tokio::time::Instant::now();
-            gaps.borrow_mut().push(now - last.get());
-            last.set(now);
-            calls.set(calls.get() + 1);
-            calls.get() == 8
+            gaps.push(now - last);
+            last = now;
+            calls += 1;
+            calls == 8
         })
         .await;
 
-        let gaps = gaps.borrow();
         // gaps[0] is the first call, before any sleep.
         assert_eq!(gaps[0], Duration::ZERO);
         assert_eq!(gaps[1], FIRST_DELAY);

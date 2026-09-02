@@ -219,17 +219,22 @@ mod tests {
     ///
     /// Found in the buffer rather than computed from the layout, so the test
     /// clicks the cell a person would click and not the cell the test thinks
-    /// the renderer should have used. The row reads `" B  i  S  U "`, so a `B`
-    /// with an `i` three columns later is the toolbar and nothing else is.
+    /// the renderer should have used. The row reads `" B  i  S  U "`, and all
+    /// four letters at that spacing are the toolbar and nothing else: the
+    /// output pane's border above it prints the run's path, whose temp-dir
+    /// suffix is random, and `rs-22643f03-B0aiU6` once matched a `B` with an
+    /// `i` three columns on, so the click landed on a border instead.
     fn find_bold_button(dash: &mut Dashboard, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
         (0..height)
-            .flat_map(|y| (0..width.saturating_sub(3)).map(move |x| (x, y)))
+            .flat_map(|y| (0..width.saturating_sub(9)).map(move |x| (x, y)))
             .find(|&(x, y)| {
-                at(x, y).as_deref() == Some("B") && at(x + 3, y).as_deref() == Some("i")
+                [(0, "B"), (3, "i"), (6, "S"), (9, "U")]
+                    .iter()
+                    .all(|&(dx, glyph)| at(x + dx, y).as_deref() == Some(glyph))
             })
             .expect("a formatting toolbar was drawn")
     }

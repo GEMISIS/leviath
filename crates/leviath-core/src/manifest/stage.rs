@@ -14,6 +14,7 @@ pub(super) const STAGE_KEYS: &[&str] = &[
     "allow_blocking_tools",
     "allow_complete",
     "available_connectors",
+    "available_global_tools",
     "available_tools",
     "batch_tool_hint",
     "context",
@@ -450,6 +451,13 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // stops warning about it.
     if let Some(ab) = bool_of(stage_value, "allow_blocking_tools") {
         stage.allow_blocking_tools = ab;
+    }
+
+    // Parse available_global_tools flag: says this stage also advertises every
+    // Rhai tool installed in the global `~/.leviath/tools/` directory, so a
+    // tool an earlier run installed is offered without the blueprint naming it.
+    if let Some(ag) = bool_of(stage_value, "available_global_tools") {
+        stage.available_global_tools = ag;
     }
 
     // Parse per-stage security override: [stages.<name>.security]

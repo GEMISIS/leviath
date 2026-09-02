@@ -1,6 +1,6 @@
 flowchart TD
     discover(discover)
-    scan{{scan}}
+    scan(scan)
     split_review(split review)
     review_worker(review worker)
     deep_review(deep review)
@@ -9,8 +9,8 @@ flowchart TD
     summary(summary)
     discover --> scan
     scan --> split_review
-    scan --> report
-    split_review ==>|×4 workers| review_worker
+    scan -. dead_end .-> report
+    split_review ==>|×30 workers| review_worker
     review_worker ==>|merge| deep_review
     deep_review --> report
     report --> summary

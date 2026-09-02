@@ -1,22 +1,26 @@
 flowchart TD
-    survey{{survey}}
+    survey(survey)
     investigate(investigate)
     compare{{compare}}
     deep_dive{{deep dive}}
     summarize(summarize)
     summary(summary)
+    challenge{{challenge}}
+    polish(polish)
     investigate_workers[["researcher (sub-agent)"]]
     survey --> investigate
-    survey --> compare
-    survey --> summarize
-    investigate ==>|×4 workers| investigate_workers
+    survey -. dead_end .-> challenge
+    investigate ==>|×12 workers| investigate_workers
     investigate_workers ==>|merge| compare
-    investigate --> summarize
-    compare --> survey
+    investigate -. dead_end .-> challenge
     compare --> deep_dive
-    compare --> summarize
+    compare --> challenge
     deep_dive --> compare
-    deep_dive --> summarize
-    summarize --> summary
+    deep_dive --> survey
+    deep_dive --> challenge
+    summarize --> polish
+    challenge --> survey
+    challenge --> summarize
+    polish --> summary
     classDef entry stroke-width:3px
     class survey entry

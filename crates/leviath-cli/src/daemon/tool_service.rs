@@ -427,6 +427,13 @@ pub(crate) struct DynamicToolCtx {
     /// run), by stage index. Paired with `unattended` so a re-scan can't hand a
     /// `--yolo` agent back the prompting tools spawn resolution took away.
     pub stage_required: Vec<Vec<String>>,
+    /// Which stages set `available_global_tools`, by stage index. A refresh
+    /// re-expands those stages' grants against the global tools rediscovered
+    /// from disk, so a tool installed mid-run reaches a stage that opted in.
+    pub stage_global: Vec<bool>,
+    /// The global tools directory (`~/.leviath/tools/`), the only origin a
+    /// global grant accepts; `None` when no home resolves, which grants nothing.
+    pub tools_dir: Option<PathBuf>,
     /// Whether this run is unattended (`--yolo`).
     pub unattended: bool,
     /// Set when the agent writes a tool file; drained by `wants_refresh`.
@@ -482,22 +489,22 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
 }
 
 /// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
-/// file (via `write_file`/`edit_file`), so the next tick re-scans + re-advertises.
-/// A no-op for static agents. The path lives in the tool args; the actual
-/// discovery is workdir-confined, so an off-`tools/` write just yields a no-op
-/// re-scan.
+/// file (via `write_file`/`edit_file`) or installs one (via `install_tool`), so
+/// the next tick re-scans + re-advertises. A no-op for static agents. The path
+/// lives in the tool args; the actual discovery is workdir-confined, so an
+/// off-`tools/` write just yields a no-op re-scan. An install always lands in
+/// the global directory, which is one of the scan dirs, so it needs no path.
 fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
     let Some(ctx) = &state.dynamic else { return };
-    let writes = matches!(
-        leviath_tools::canonical_tool_name(&tc.name),
-        "write_file" | "edit_file"
-    );
+    let canonical = leviath_tools::canonical_tool_name(&tc.name);
+    let installs = canonical == "install_tool";
+    let writes = matches!(canonical, "write_file" | "edit_file");
     let is_rhai = tc
         .arguments
         .get("path")
         .and_then(|p| p.as_str())
         .is_some_and(|p| p.ends_with(".rhai"));
-    if writes && is_rhai {
+    if installs || (writes && is_rhai) {
         ctx.dirty.store(true, Ordering::SeqCst);
     }
 }
@@ -958,6 +965,12 @@ impl ToolService for CliToolService {
         // live set so a new tool is both advertised *and* dispatchable.
         let (set, names, script_defs) =
             crate::daemon::spawn::discover_script_tools_in(&ctx.scan_dirs, &ctx.reserved_names);
+        // A stage holding a global grant also takes every global tool the
+        // re-scan found, computed exactly as spawn did (by source directory,
+        // never by name alone), so a tool installed since spawn is advertised
+        // to it and to no stage that did not opt in.
+        let global =
+            crate::daemon::spawn::global_tool_names(&set, &names, ctx.tools_dir.as_deref());
         *state
             .script_tools
             .lock()
@@ -967,7 +980,12 @@ impl ToolService for CliToolService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = names;
         // Re-filter this stage's advertised tools = static defs + fresh script defs.
-        let available = ctx.stage_available.get(stage_index)?;
+        let allow_global = ctx.stage_global.get(stage_index).copied().unwrap_or(false);
+        let available = crate::daemon::spawn::expand_global_grants(
+            ctx.stage_available.get(stage_index)?,
+            allow_global,
+            &global,
+        );
         // A stage that named no `required_tools` keeps none through an
         // unattended run - the absence is an empty list, not a missing stage,
         // so it must not turn the whole refresh into a no-op.
@@ -979,7 +997,7 @@ impl ToolService for CliToolService {
         all.extend(script_defs);
         Some(leviath_runtime::pipeline::filter_tools_for_stage(
             &all,
-            available,
+            &available,
             required,
             ctx.unattended,
         ))
@@ -1506,16 +1524,64 @@ mod tests {
         stage_required: Vec<Vec<String>>,
         unattended: bool,
     ) -> Arc<AgentToolState> {
+        dynamic_state_with(
+            workdir,
+            DynamicToolCtx {
+                scan_dirs: vec![scan_dir],
+                reserved_names: HashSet::new(),
+                static_defs,
+                stage_available,
+                stage_required,
+                stage_global: Vec::new(),
+                tools_dir: None,
+                unattended,
+                dirty: Arc::new(AtomicBool::new(false)),
+            },
+        )
+    }
+
+    /// A `DynamicToolCtx` for a global-grant test: `scan_dirs` is the full
+    /// precedence-ordered scan list, `tools_dir` the one directory a
+    /// `stage_global` grant draws from, and every stage names `read_file`.
+    fn global_ctx(
+        scan_dirs: Vec<PathBuf>,
+        stage_global: Vec<bool>,
+        tools_dir: Option<PathBuf>,
+    ) -> DynamicToolCtx {
+        DynamicToolCtx {
+            scan_dirs,
+            reserved_names: HashSet::new(),
+            static_defs: vec![tool_def("read_file")],
+            stage_available: vec![vec!["read_file".to_string()]; stage_global.len()],
+            stage_required: Vec::new(),
+            stage_global,
+            tools_dir,
+            unattended: false,
+            dirty: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The state every dynamic-tools test hangs off: attended, write tools
+    /// allowed, and `dynamic` exactly as handed in.
+    fn dynamic_state_with(workdir: PathBuf, dynamic: DynamicToolCtx) -> Arc<AgentToolState> {
         let hub = InteractionHub::new();
+        // `install_tool` writes into the ctx's global tools dir when a test
+        // names one, else into its first scan dir, never the real
+        // `~/.leviath/tools`, so a test install is what the next refresh finds.
+        let install_dir = dynamic
+            .tools_dir
+            .clone()
+            .or_else(|| dynamic.scan_dirs.first().cloned());
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-            leviath_tools::ToolContext::new(workdir),
+            leviath_tools::ToolContext::new(workdir).with_tools_dir(install_dir),
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let mut allow = HashMap::new();
-        // Both write tools default to Ask; allow them so tests don't block on an
-        // approval prompt no one answers.
+        // The write tools and the installer default to Ask; allow them so tests
+        // don't block on an approval prompt no one answers.
         allow.insert("write_file".to_string(), ToolPolicy::Allow);
         allow.insert("edit_file".to_string(), ToolPolicy::Allow);
+        allow.insert("install_tool".to_string(), ToolPolicy::Allow);
         Arc::new(AgentToolState {
             writes: Arc::new(unlimited_writes()),
             builtins,
@@ -1541,15 +1607,7 @@ mod tests {
             script_tools: Arc::new(StdMutex::new(leviath_scripting::ScriptToolSet::default())),
             script_tool_names: Arc::new(StdMutex::new(HashSet::new())),
             script_host: no_script_fields().2,
-            dynamic: Some(Arc::new(DynamicToolCtx {
-                scan_dirs: vec![scan_dir],
-                reserved_names: HashSet::new(),
-                static_defs,
-                stage_available,
-                stage_required,
-                unattended,
-                dirty: Arc::new(AtomicBool::new(false)),
-            })),
+            dynamic: Some(Arc::new(dynamic)),
             config_source: test_config_source(),
         })
     }
@@ -1576,6 +1634,98 @@ mod tests {
         // The live script set + names now include the freshly discovered tool.
         assert!(state.script_tool_names.lock().unwrap().contains("echo"));
         assert!(state.script_tools.lock().unwrap().contains("echo"));
+    }
+
+    /// A tool that lands in the global directory mid-run is advertised on the
+    /// next refresh to a stage that set `available_global_tools`, and to no
+    /// stage that did not: the second stage's list is exactly what spawn gave
+    /// it.
+    #[test]
+    fn refresh_tools_extends_an_opted_in_stage_with_new_global_tools() {
+        let workdir = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let state = dynamic_state_with(
+            workdir.path().to_path_buf(),
+            global_ctx(
+                vec![global.path().to_path_buf()],
+                vec![true, false],
+                Some(global.path().to_path_buf()),
+            ),
+        );
+        let svc = CliToolService::new();
+        let e =
+            Entity::from_raw_u32(11).expect("a small literal index is always a valid entity id");
+        svc.register(e, state.clone());
+
+        // Nothing installed yet: the opted-in stage sees only what it named.
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file"]);
+
+        // The run installs a tool into the global directory.
+        std::fs::write(
+            global.path().join("echo.rhai"),
+            "// @tool echo\n// @description say it back\nparams.x",
+        )
+        .unwrap();
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let mut names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["echo", "read_file"]);
+        // Dispatchable too, not only advertised.
+        assert!(state.script_tool_names.lock().unwrap().contains("echo"));
+
+        // The stage without the grant is unchanged.
+        let defs = svc.refresh_tools(e, 1).unwrap();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file"]);
+    }
+
+    /// A global grant is about where a script lives, not what it is called: a
+    /// `<workdir>/tools/echo.rhai` that shadows a global `echo` (the workdir
+    /// scans first) is repository content, and the refresh does not advertise
+    /// it under the grant. An agent with no home at all has no global directory
+    /// and so no global grants.
+    #[test]
+    fn refresh_tools_does_not_grant_a_shadowed_global_name() {
+        let workdir = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let workdir_tools = workdir.path().join("tools");
+        std::fs::create_dir(&workdir_tools).unwrap();
+        std::fs::write(workdir_tools.join("echo.rhai"), "// @tool echo\n\"repo\"").unwrap();
+        std::fs::write(global.path().join("echo.rhai"), "// @tool echo\n\"global\"").unwrap();
+        std::fs::write(global.path().join("lint.rhai"), "// @tool lint\n\"ok\"").unwrap();
+        let state = dynamic_state_with(
+            workdir.path().to_path_buf(),
+            global_ctx(
+                vec![workdir_tools.clone(), global.path().to_path_buf()],
+                vec![true],
+                Some(global.path().to_path_buf()),
+            ),
+        );
+        let svc = CliToolService::new();
+        let e =
+            Entity::from_raw_u32(12).expect("a small literal index is always a valid entity id");
+        svc.register(e, state.clone());
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let mut names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        // `lint` is global and granted; `echo` resolved to the workdir copy and
+        // is not, though it stays dispatchable for a stage naming it outright.
+        assert_eq!(names, vec!["lint", "read_file"]);
+        assert!(state.script_tool_names.lock().unwrap().contains("echo"));
+
+        // No global directory: the same scan grants nothing beyond the list.
+        let homeless = dynamic_state_with(
+            workdir.path().to_path_buf(),
+            global_ctx(vec![global.path().to_path_buf()], vec![true], None),
+        );
+        let h =
+            Entity::from_raw_u32(13).expect("a small literal index is always a valid entity id");
+        svc.register(h, homeless);
+        let defs = svc.refresh_tools(h, 0).unwrap();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file"]);
     }
 
     /// A `dynamic_tools` agent re-filters its advertised set mid-run. That
@@ -1709,9 +1859,35 @@ mod tests {
             workdir.path().to_path_buf(),
             tools.path().to_path_buf(),
             vec![],
-            vec![vec![]],
+            vec![vec!["shout".to_string()]],
         );
         let dirty = state.dynamic.as_ref().unwrap().dirty.clone();
+        // An install always flags a re-scan: it lands in the global tools
+        // directory, which is a scan dir, and carries no `path` argument.
+        dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c0",
+                "install_tool",
+                serde_json::json!({
+                    "name": "shout",
+                    "source": "// @tool shout\n// @description Shout text\n// @param text string required \"input\"\nparams.text.to_upper()\n",
+                }),
+            )],
+            noop_progress(),
+        )
+        .await;
+        assert!(dirty.load(Ordering::SeqCst));
+        assert!(tools.path().join("shout.rhai").exists());
+        // The refresh that follows the flag finds and advertises the new tool.
+        let svc = CliToolService::new();
+        let e = Entity::from_raw_u32(7).expect("a small literal index is always a valid entity id");
+        svc.register(e, state.clone());
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["shout"]);
+        assert!(state.script_tool_names.lock().unwrap().contains("shout"));
+        dirty.store(false, Ordering::SeqCst);
         // Writing a non-.rhai file does not flag a re-scan.
         dispatch_tools(
             state.clone(),

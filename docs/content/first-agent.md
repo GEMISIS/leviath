@@ -393,5 +393,5 @@ Small changes worth trying, each of which reaches for one more idea:
   limits, and what happens at a dead end.
 - [Structured context](/docs/context) covers the other region kinds, including one that compacts
   instead of dropping and one that tracks a checklist.
-- [The agent catalog](/docs/agent-catalog) has seven shipped blueprints, each with its graph drawn,
+- [The agent catalog](/docs/agent-catalog) has eight shipped blueprints, each with its graph drawn,
   which are worth reading now that the syntax means something.

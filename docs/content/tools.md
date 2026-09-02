@@ -28,6 +28,7 @@ Read and modify files relative to the agent's working directory.
 | `write_file` | Write content to a file, creating parent directories as needed. | `path`, `content` |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
+| `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, where every future run on the machine can call it. Refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run). | `name`, `source`, `overwrite` (optional, default false) |
 
 > [!TIP]
 > `read_files` is cheaper than repeated `read_file` calls; reach for it after `list_dir` when you
@@ -338,6 +339,14 @@ stage control access:
   value is a load error, because a misspelled `deny` that quietly resolved to `ask` would hand
   the author of the typo a prompt where they had written a refusal.
 
+A third, optional setting widens the first. `available_global_tools = true` appends every
+[Rhai tool](/docs/rhai-tools) installed in the global `~/.leviath/tools/` directory to the stage's
+allowlist when the run spawns, so a tool an earlier run installed is offered without the blueprint
+naming it. Only files in that directory qualify; a same-named script in the agent's own `tools/` or
+the run's working directory is never granted this way. The permission gate is unchanged, so an
+installed tool still resolves to `ask` unless something says otherwise. See
+[which tools a stage gets](/docs/agents#which-tools-a-stage-gets).
+
 ```toml
 [stages.implement]
 available_tools = ["read_file", "read_files", "edit_file", "shell"]
@@ -360,6 +369,7 @@ With nothing configured, tools fall back to these:
 |---|---|
 | `read_file`, `read_files`, `list_dir` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
+| `install_tool` | `ask` |
 | `context_read`, `context_write`, `context_append`, `context_delete`, `context_list` | `allow` |
 | `todo_add`, `todo_done`, `todo_note` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |

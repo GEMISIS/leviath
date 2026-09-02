@@ -53,7 +53,10 @@ def blueprint_to_mermaid(path: Path) -> str:
         if stage.get("interaction_points"):
             decisions.add(name)
         if stage.get("mode") == "fan_out":
-            merge = stage["merge_stage"]
+            # A fan-out stage without `merge_stage` (researcher's `dig`) takes
+            # its own transitions after the workers return, so it has no merge
+            # edge to draw.
+            merge = stage.get("merge_stage")
             per = f"×{stage['max_workers']} workers" if "max_workers" in stage else "workers"
             # A worker is either a stage of this blueprint (`worker_stage`) or a
             # separate installed agent (`worker_agent`). The first is a real node
@@ -65,7 +68,8 @@ def blueprint_to_mermaid(path: Path) -> str:
                 worker = f"{name}_workers"
                 external[worker] = f"{agent} (sub-agent)"
             edges.append((name, worker, per, "fanout"))
-            edges.append((worker, merge, "merge", "fanout"))
+            if merge is not None:
+                edges.append((worker, merge, "merge", "fanout"))
 
         plain = 0
         for target, spec in stage.get("transitions", {}).items():

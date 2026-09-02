@@ -119,6 +119,7 @@ somewhere else.
 | `allow_as_worker` | `false` | Lets this stage be the target of a [fan-out](/docs/sub-agents) |
 | `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
 | `allow_blocking_tools` | `false` | Marks an autonomous stage as deliberately offering the tools that wait on a person |
+| `available_global_tools` | `false` | Also advertises every Rhai tool installed in `~/.leviath/tools/` at spawn. See [which tools a stage gets](/docs/agents#which-tools-a-stage-gets) |
 
 Three of those need a sentence more.
 
