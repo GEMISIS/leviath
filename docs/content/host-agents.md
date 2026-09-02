@@ -82,7 +82,9 @@ leviath to ..."), and says to use it instead of spawning a subagent.
 The body is the procedure: pick an agent (`orchestrator` by default, `coder` for one code change,
 the researchers for questions, `reviewer` when there is a diff), call `run` with a self-contained
 `task`, an absolute `workdir` and `wait: true`, handle a background move or a `waiting_input`
-result, then report the final output. It ends with the rule for the self-improvement loop below and
+result, then report the final output. `reviewer` is the one agent that takes no `task`: the skill
+says to omit it and pass the diff as `regions: {"diff": "<the diff text>"}`, with a `criteria`
+entry when the user named what to focus on. It ends with the rule for the self-improvement loop below and
 the strict conditions for installing a tool. Each copy spells the tools the way its host does:
 `mcp__leviath__run` in Claude Code, `leviath__run` in Grok, `mcp_leviath_run` in Gemini and Hermes,
 and "the `run` tool on the `leviath` MCP server" in Codex.

@@ -120,11 +120,16 @@ to use it, and is named `<domain>_<verb>`. Judgement never qualifies. `install_t
 default, so an attended run confirms each install and `--yolo` waives it; `lev tools` lists what
 has landed, with a provenance line in each file.
 
-The loop closes on the next run. `intake`, `plan`, `verify` and `crystallize` set
-`available_global_tools = true`, as do `coder`'s `implement` and `review` stages, so
+The loop closes on the next run. `intake` and `verify` set `available_global_tools = true`, as do
+`coder`'s `implement` and `review` stages, so
 [every installed tool is offered](/docs/agents#which-tools-a-stage-gets) to them without a
-blueprint naming it. The prompts tell the model that any tool in its list that is not a built-in
+blueprint naming it. Their prompts tell the model that any tool in its list that is not a built-in
 came from an earlier run, to prefer it, and to report in `learnings` when it is missing or wrong.
+`plan` and `crystallize` do not set it: an installed Rhai tool may call `shell()` or
+`write_file()`, and those two stages must not change the machine, so they see only the read-only
+built-ins they name (plus `install_tool` in `crystallize`). `crystallize` still avoids duplicates,
+because `verify` reports an existing tool in `learnings` and `install_tool` refuses a name that is
+already taken unless `overwrite` is set.
 
 This is also the agent a host such as Claude Code or Grok reaches for when you say "use leviath
 to ...": see [Claude Code, Grok and other agents](/docs/host-agents) for the one command that wires

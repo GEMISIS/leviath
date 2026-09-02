@@ -80,12 +80,16 @@ condition = "dead_end"
 # alone. Autonomous on purpose: this is the agent a host calls from a tool
 # schema with nobody watching, and a checkpoint here would park every such run.
 # Re-entered from `verify` when items fail, so it is capped.
+#
+# No `available_global_tools`: an installed Rhai tool may call shell() or
+# write_file(), and under `--yolo` (which an MCP-launched run implies) it would
+# run without a prompt. This stage must not change the machine, so it sees only
+# the read-only built-ins it names.
 [stages.plan]
 mode = "autonomous"
 model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Split the goal into independent, verifiable work items"
 available_tools = ["read_file", "list_dir", "context_write", "context_append", "context_read"]
-available_global_tools = true
 max_iterations = 15
 max_revisits = 3
 system_prompt = """
@@ -101,10 +105,6 @@ worker can run, taken from or consistent with the VERIFY line in `workflow`.
 If `verification` reports failures you are here to replan: plan only the items
 that did not land, using what `verification` says went wrong, and leave the
 items that passed alone.
-
-Any tool in your list that is not a built-in is a Rhai tool an earlier run
-installed; prefer it for the step it describes, and when it is missing or wrong
-say so in `learnings`.
 
 Write the list to `plan` with context_write, one item per line:
   <id> | <files> | <what to change> | <done when>
@@ -213,14 +213,16 @@ condition = "dead_end"
 # Turns what `verify` wrote down into Rhai tools in ~/.leviath/tools/, which
 # every later run of any agent can call. No bash and no write tools: the only
 # way to change the machine here is `install_tool`, which compiles the script
-# first and refuses one that would not run. Sees the global inventory so it
-# can compare before adding.
+# first and refuses one that would not run. It does not see the global
+# inventory either: an installed Rhai tool may call shell() or write_file(),
+# which would reopen the door this stage keeps shut. Duplicates still surface,
+# because `verify` saw the inventory and noted it in `learnings`, and
+# install_tool refuses a name that is already taken unless `overwrite` is set.
 [stages.crystallize]
 mode = "autonomous"
 model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Turn repeatable learnings into Rhai tools every future run can call"
 available_tools = ["install_tool", "read_file", "list_dir", "context_read", "context_write"]
-available_global_tools = true
 max_iterations = 15
 max_revisits = 1
 system_prompt = """
@@ -239,11 +241,11 @@ tool. Install one only when ALL of these hold:
 - It is named `<domain>_<verb>`, for example `cargo_test_summary` or
   `pytest_failures`.
 
-Any tool in your list that is not a built-in is a Rhai tool an earlier run
-installed; prefer it for the step it describes, and when it is missing or wrong
-say so in `learnings`. Check that list first: when an installed tool already
-does most of what a learning describes, call install_tool with `overwrite`
-set and its name, and improve it, rather than adding a near-duplicate under a
+The tools earlier runs installed are not in your list; `verify` saw them and
+wrote in `learnings` when one was missing or wrong. When a learning says an
+installed tool already does most of what it describes, or install_tool refuses
+a name because a tool of that name exists, call install_tool with `overwrite`
+set and that name, and improve it, rather than adding a near-duplicate under a
 new name.
 
 A script begins with `// @tool <name>` and `// @description <one line>`, one

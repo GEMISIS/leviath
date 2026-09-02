@@ -128,7 +128,10 @@ fn the_body_carries_every_step_and_the_install_criteria() {
         "1. Pick the agent",
         "`orchestrator`",
         "`reviewer`",
-        "2. Call `mcp__leviath__run` with `task`",
+        "takes no `task`",
+        "regions: {\"diff\": \"<the diff text>\"}",
+        "`\"criteria\"` entry",
+        "2. For every other agent, call `mcp__leviath__run` with `task`",
         "`wait: true`",
         "3. If the host moves the call to the background",
         "`wait: false`",
@@ -150,6 +153,9 @@ fn the_body_carries_every_step_and_the_install_criteria() {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
     assert!(!text.to_lowercase().contains("leviathan"));
+    // The reviewer takes its input as a region, so the skill must never tell
+    // the model to hand it a task.
+    assert!(!text.contains("needs a `diff` region"), "{text}");
 }
 
 #[test]

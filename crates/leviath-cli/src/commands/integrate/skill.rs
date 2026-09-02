@@ -94,9 +94,12 @@ below instead of doing the work here or spawning a subagent.\n\n\
 ## Steps\n\n\
 1. Pick the agent. `orchestrator` is the default: multi-step work with verification. `coder` \
 makes one code change. `deep-researcher` and `wide-researcher` research a question. `reviewer` \
-needs a `diff` region and takes no task. Call {list_agents} if unsure.\n\
-2. Call {run} with `task` (self-contained: the goal, the constraints, and what done looks like), \
-`workdir` (the absolute project path), `agent`, and `wait: true`.\n\
+reviews a diff and takes no `task`: omit `task` and pass `regions: {{\"diff\": \"<the diff text>\"}}` \
+instead, adding a `\"criteria\"` entry to `regions` when the user named what to focus on. Call \
+{list_agents} if unsure.\n\
+2. For every other agent, call {run} with `task` (self-contained: the goal, the constraints, and \
+what done looks like), `workdir` (the absolute project path), `agent`, and `wait: true`. The \
+`reviewer` call takes the same `workdir`, `agent` and `wait: true` beside its `regions`.\n\
 3. If the host moves the call to the background, wait for its result; to check earlier, call \
 {list_runs} (newest first) and use that run_id with {status} or {wait}. If your host has a short \
 tool timeout (Codex and Gemini defaults), call {run} with `wait: false` and then {wait}. A host \
