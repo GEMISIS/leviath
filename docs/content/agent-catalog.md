@@ -126,6 +126,10 @@ The loop closes on the next run. `intake`, `plan`, `verify` and `crystallize` se
 blueprint naming it. The prompts tell the model that any tool in its list that is not a built-in
 came from an earlier run, to prefer it, and to report in `learnings` when it is missing or wrong.
 
+This is also the agent a host such as Claude Code or Grok reaches for when you say "use leviath
+to ...": see [Claude Code, Grok and other agents](/docs/host-agents) for the one command that wires
+that up.
+
 ## reviewer
 
 Review only: a fast scan pass, then a deeper look at correctness, security, and architecture,
