@@ -28,6 +28,17 @@ pub struct ToolContext {
     /// Resolved from `[security]` at spawn; the default withholds
     /// credential-shaped names.
     pub(crate) shell_env: ShellEnvPolicy,
+    /// Where `install_tool` writes: the global tools directory every agent
+    /// scans at spawn, [`leviath_core::tools_dir`] by default. `None` when no
+    /// home directory resolves, in which case `install_tool` refuses. Not the
+    /// workdir and not under the workdir fence: this is the one built-in that
+    /// legitimately writes outside the run.
+    pub tools_dir: Option<PathBuf>,
+    /// Names `install_tool` refuses on top of this platform's built-ins and the
+    /// sub-agent tools: the MCP tools the run offers, filled at spawn. A script
+    /// under any of these is dropped at discovery, so installing one would
+    /// report a tool that never runs.
+    pub reserved_names: Vec<String>,
 }
 
 /// The resolved `[security] shell_env` decision for one run.
@@ -89,7 +100,25 @@ impl ToolContext {
             read_paths: Mutex::new(leviath_core::ReadPathPolicy::inactive()),
             file_locks: Arc::new(Mutex::new(HashMap::new())),
             shell_env: ShellEnvPolicy::default(),
+            tools_dir: leviath_core::tools_dir(),
+            reserved_names: Vec::new(),
         }
+    }
+
+    /// Point `install_tool` at a directory other than the data root's
+    /// `tools/`, or at nothing at all. Builder-style. Tests use it to install
+    /// into a temporary directory and to reach the no-home refusal without
+    /// touching the environment.
+    pub fn with_tools_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.tools_dir = dir;
+        self
+    }
+
+    /// The names `install_tool` refuses beyond the built-ins it can see for
+    /// itself: at spawn, the run's MCP tool names. Builder-style.
+    pub fn with_reserved_names(mut self, names: Vec<String>) -> Self {
+        self.reserved_names = names;
+        self
     }
 
     /// Attach a `[read_paths]` policy resolved at spawn. Builder-style, like

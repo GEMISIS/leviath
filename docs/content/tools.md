@@ -28,6 +28,7 @@ Read and modify files relative to the agent's working directory.
 | `write_file` | Write content to a file, creating parent directories as needed. | `path`, `content` |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
+| `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, where every future run on the machine can call it. Refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run). | `name`, `source`, `overwrite` (optional, default false) |
 
 > [!TIP]
 > `read_files` is cheaper than repeated `read_file` calls; reach for it after `list_dir` when you
@@ -360,6 +361,7 @@ With nothing configured, tools fall back to these:
 |---|---|
 | `read_file`, `read_files`, `list_dir` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
+| `install_tool` | `ask` |
 | `context_read`, `context_write`, `context_append`, `context_delete`, `context_list` | `allow` |
 | `todo_add`, `todo_done`, `todo_note` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |

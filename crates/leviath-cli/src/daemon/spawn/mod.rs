@@ -532,8 +532,18 @@ fn build_agent_inner(
         builtins =
             builtins.with_shell_executor(mgr.clone() as Arc<dyn leviath_tools::ShellExecutor>);
     }
-    let builtins = Arc::new(builtins);
     let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+    // `install_tool` refuses every name discovery would drop a script for: the
+    // built-ins, the sub-agent tools, and this run's MCP tools. The same set
+    // the dynamic re-scan below reserves, so an install never reports a tool
+    // that the next scan silently ignores.
+    let builtins = Arc::new(
+        builtins.with_reserved_names(
+            reserved_tool_names(&builtin_names, deps.mcp_tool_defs)
+                .into_iter()
+                .collect(),
+        ),
+    );
     let mut all_tool_defs = builtins.tool_defs();
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
     all_tool_defs.extend(deps.mcp_tool_defs.iter().cloned());
@@ -2135,6 +2145,61 @@ system = { kind = "pinned", max_tokens = 1000 }
         // The agent's tool state carries a sandbox manager.
         let state = cli.take(entity).expect("state registered");
         assert!(state.sandbox.is_some(), "sandbox manager attached");
+    }
+
+    /// The spawn hands `install_tool` the run's MCP tool names as reserved: a
+    /// script under one of them is dropped at every discovery, so installing
+    /// it would tell the model a tool exists that it can never call. Refused
+    /// before anything is compiled or written, so no tools directory is
+    /// touched here.
+    #[tokio::test]
+    async fn build_agent_reserves_mcp_tool_names_for_install_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"rs\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mcp_defs = vec![Tool {
+            name: "acme_search".to_string(),
+            description: "d".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }];
+        let entity = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &mcp_defs,
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &spawn_args(&manifest.to_string_lossy()),
+        )
+        .expect("spawn succeeds");
+        let state = cli.take(entity).expect("state registered");
+        let out = state
+            .builtins
+            .execute(
+                "install_tool",
+                serde_json::json!({
+                    "name": "acme_search",
+                    "source": "// @tool acme_search\n// @description d\n1\n",
+                }),
+            )
+            .await;
+        assert!(
+            out.contains("'acme_search' is the name of a built-in tool"),
+            "{out}"
+        );
     }
 
     #[tokio::test]

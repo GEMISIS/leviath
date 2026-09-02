@@ -249,7 +249,10 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         // *values*: a credential-shaped name comes back listed, not read.
         "current_time" | "system_info" | "locale_info" | "environment_info" | "which_command"
         | "runtime_info" => ToolPolicy::Allow,
-        "write_file" | "edit_file" | "shell" => ToolPolicy::Ask,
+        // `install_tool` is listed rather than left to the fall-through because
+        // it is the persistence primitive: an unprompted install puts
+        // model-authored code in front of every future run on this machine.
+        "write_file" | "edit_file" | "shell" | "install_tool" => ToolPolicy::Ask,
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
         //
@@ -427,6 +430,11 @@ pub(crate) fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Valu
     let field = match leviath_tools::canonical_tool_name(tool_name) {
         "write_file" => "content",
         "edit_file" => "new_str",
+        // The script lands in the global tools directory, not the workdir, so
+        // the free-space probe (which looks at the workdir's volume) is an
+        // approximation when the two are on different disks. The byte ceiling
+        // is exact either way.
+        "install_tool" => "source",
         _ => return None,
     };
     arguments
@@ -1205,6 +1213,12 @@ mod policy_tests {
             declared_write_bytes("edit_file", &serde_json::json!({"new_str": "abc"})),
             Some(3)
         );
+        // An install is charged for the script it writes, so a run's write
+        // ceiling covers the global tools directory too.
+        assert_eq!(
+            declared_write_bytes("install_tool", &serde_json::json!({"source": "// @tool t"})),
+            Some(10)
+        );
         // A shell redirect's bytes never pass through Leviath, so there is
         // nothing to declare - `None` means "measure afterwards", not "writes
         // nothing".
@@ -1556,6 +1570,7 @@ mod policy_tests {
         assert_eq!(default_tool_policy("write_file", true), ToolPolicy::Ask);
         assert_eq!(default_tool_policy("edit_file", true), ToolPolicy::Ask);
         assert_eq!(default_tool_policy("bash", true), ToolPolicy::Ask);
+        assert_eq!(default_tool_policy("install_tool", true), ToolPolicy::Ask);
     }
 
     #[test]
@@ -2590,16 +2605,17 @@ mod policy_tests {
         }
     }
 
-    /// The two tools that touch the filesystem, and the one that runs code, are
-    /// never `Allow` by default under any spelling.
+    /// The tools that touch the filesystem, the one that runs code, and the
+    /// one that installs code for every future run are never `Allow` by
+    /// default under any spelling.
     ///
-    /// Spelled out separately from the list above because these three are the
-    /// ones an aliasing mistake would quietly promote: `default_tool_policy`
+    /// Spelled out separately from the list above because these are the ones
+    /// an aliasing mistake would quietly promote: `default_tool_policy`
     /// matches on the *canonical* name, so a call arriving as `bash` has to land
     /// on the same arm as `shell`.
     #[test]
     fn the_effectful_tools_ask_under_every_spelling() {
-        for name in ["write_file", "edit_file", "shell"] {
+        for name in ["write_file", "edit_file", "shell", "install_tool"] {
             for spelling in leviath_tools::tool_name_spellings(name) {
                 assert_eq!(
                     default_tool_policy(spelling, true),
