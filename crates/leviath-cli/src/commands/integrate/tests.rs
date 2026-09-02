@@ -328,6 +328,9 @@ fn write_text_replaces_an_existing_file_atomically() {
     let path = fx.path("host/.claude.json");
     write_text(&path, "{\"a\": 1}\n", false, &mut report).unwrap();
     assert_eq!(read(&path), "{\"a\": 1}\n");
+    // The inode check is Unix-only, so the `before` snapshot lives with it:
+    // an unused binding on Windows fails clippy under `-D warnings`.
+    #[cfg(unix)]
     let before = std::fs::metadata(&path).unwrap();
     write_text(&path, "{\"a\": 2}\n", false, &mut report).unwrap();
     assert_eq!(read(&path), "{\"a\": 2}\n");
