@@ -182,7 +182,7 @@ impl Dashboard {
         // in place rather than in the bottom input bar.
         if self.editing_document() {
             let view = MdEditView::new(
-                " ✎ Editing this document - your changes replace it  ·  [^Enter] save  \
+                " ✎ Editing this document - your changes replace it  ·  [^S] save  \
                  [Enter] newline  [Tab] Save button  [Esc] cancel ",
                 C_SUCCESS,
                 !self.response_focus_send,

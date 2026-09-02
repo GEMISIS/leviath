@@ -244,7 +244,7 @@ impl Dashboard {
             // and only there: on the picker it would be a key that does
             // nothing.
             (false, NewRunPane::Task) => format!(
-                " ^Enter start · Enter newline · Tab Start button · @ file · {} bold · {MODE_CHORD} preview · ^Y {unattended} · F1 help · Esc back ",
+                " ^S start · Enter newline · Tab Start button · @ file · {} bold · {MODE_CHORD} preview · ^Y {unattended} · F1 help · Esc back ",
                 chord_label(MdAction::Bold)
             ),
             (false, NewRunPane::Start) => format!(
@@ -385,7 +385,7 @@ mod tests {
         let mut dash = screen();
         dash.new_run_focus = NewRunPane::Task;
         let out = rendered(&mut dash);
-        assert!(out.contains("^Enter start"), "{out}");
+        assert!(out.contains("^S start"), "{out}");
         assert!(out.contains("Enter newline"), "{out}");
         assert!(out.contains("@ file"), "{out}");
     }

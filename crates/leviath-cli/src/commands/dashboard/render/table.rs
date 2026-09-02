@@ -425,7 +425,7 @@ impl Dashboard {
                 // box's keys, and Esc is back to the choices, not out.
                 _ if self.deny_feedback_open => Line::from(vec![
                     Span::styled(
-                        "[^Enter]",
+                        "[^S]",
                         Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" send with the deny  "),
@@ -436,14 +436,15 @@ impl Dashboard {
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" back to the prompt"),
                 ]),
-                // The response box: Enter breaks the line and
-                // Ctrl+Enter sends, with the Send button for a terminal
-                // that cannot tell the two apart. An in-place edit is the
-                // same box with a Save button, so it takes the same bar.
+                // The response box: Enter breaks the line and Ctrl+S sends
+                // (Ctrl+Enter too, on a terminal that can tell it from
+                // Enter), with the Send button for the mouse. An in-place
+                // edit is the same box with a Save button, so it takes the
+                // same bar.
                 Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
                     Line::from(vec![
                         Span::styled(
-                            "[^Enter]",
+                            "[^S]",
                             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(" send  "),
@@ -1216,7 +1217,7 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         // Enter is a newline in the box; the bar must not say it sends.
-        assert!(buf.contains("[^Enter] send"), "{buf}");
+        assert!(buf.contains("[^S] send"), "{buf}");
         assert!(buf.contains("[Enter] newline"), "{buf}");
         assert!(buf.contains("[Tab] Send button"), "{buf}");
         assert!(!buf.contains("[Enter] send"), "{buf}");
@@ -1283,7 +1284,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("[^Enter] send with the deny"), "{buf}");
+        assert!(buf.contains("[^S] send with the deny"), "{buf}");
         assert!(buf.contains("[Esc] back to the prompt"), "{buf}");
         assert!(!buf.contains("select"), "{buf}");
     }
@@ -1883,7 +1884,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("[^Enter] send"), "{buf}");
+        assert!(buf.contains("[^S] send"), "{buf}");
         assert!(buf.contains("[Enter] newline"), "{buf}");
         assert!(buf.contains("[Tab] Send button"), "{buf}");
         assert!(!buf.contains("[Enter] confirm"), "{buf}");

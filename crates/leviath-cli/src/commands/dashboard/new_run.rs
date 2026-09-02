@@ -394,13 +394,16 @@ impl Dashboard {
     }
 
     /// Task editor keys. Enter breaks the line, the way it does in any other
-    /// text box, and Ctrl+Enter starts the run.
+    /// text box, and Ctrl+S or Ctrl+Enter starts the run.
     ///
-    /// Ctrl+Enter reaches the program only under the kitty keyboard protocol;
-    /// a terminal without it sends Ctrl+Enter as a plain Enter, which is a
-    /// newline here. That is what the Start button under the editor is for.
-    /// The response box in the detail view works the same way, with a Send
-    /// button in place of Start.
+    /// Two chords because Ctrl+Enter reaches the program only under the kitty
+    /// keyboard protocol; a terminal without it sends Ctrl+Enter as a plain
+    /// Enter (a newline here), and on macOS some terminals swallow it
+    /// entirely. Ctrl+S is an ordinary control byte every terminal delivers,
+    /// and it rhymes with the ^S that commits work elsewhere in the TUI. The
+    /// Start button under the editor remains for the mouse. The response box
+    /// in the detail view works the same way, with a Send button in place of
+    /// Start.
     fn handle_new_run_task_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
@@ -408,6 +411,9 @@ impl Dashboard {
             KeyCode::Tab => self.new_run_focus = NewRunPane::Start,
             KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.submit_new_run();
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.submit_new_run();
             }
             KeyCode::Char('@') => {
@@ -1306,6 +1312,45 @@ mod tests {
         assert_eq!(cmd.task, "ship it", "the task is trimmed");
         assert!(cmd.agent_path.ends_with("alpha"), "got: {}", cmd.agent_path);
         assert_eq!(cmd.workdir, dir.path().join("work").display().to_string());
+    }
+
+    /// Ctrl+S is the submit chord that works on every terminal: Ctrl+Enter
+    /// only arrives under the kitty keyboard protocol, and on macOS some
+    /// terminals swallow it outright.
+    #[test]
+    fn ctrl_s_submits_like_ctrl_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+        dash.new_run_task.area_mut().insert_str("ship it");
+
+        dash.handle_new_run_key(ctrl(KeyCode::Char('s')));
+
+        assert!(!dash.new_run_screen, "the screen closes on dispatch");
+        let cmd = dash
+            .spawn_cmd_rx_for_test()
+            .try_recv()
+            .expect("a spawn was dispatched");
+        assert_eq!(cmd.task, "ship it");
+    }
+
+    /// A bare `s` is text, not a submit: only the chord dispatches.
+    #[test]
+    fn a_plain_s_is_typed_not_submitted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+
+        dash.handle_new_run_key(key(KeyCode::Char('s')));
+        assert!(dash.new_run_screen, "still writing the task");
+        assert_eq!(dash.new_run_task.text(), "s");
+        assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
     }
 
     #[test]
