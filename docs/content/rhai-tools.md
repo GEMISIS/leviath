@@ -20,15 +20,23 @@ Per-agent tools live in that agent's own `tools/` directory instead, and are che
 
 > [!WARNING]
 > The directory is `~/.leviath/tools/`, inside Leviath's data root next to `providers/` and
-> `agents/`. It is not `$HOME/tools/`. Every `.rhai` file here becomes a tool for every agent, so
-> treat it as a trusted location.
+> `agents/`. It is not `$HOME/tools/`. Every `.rhai` file here becomes a tool for every agent, and
+> not every file in it was written by you: once a run uses the `install_tool` built-in, the
+> directory holds model-authored code as well. Each installed file starts with a
+> `// installed by leviath: agent run in <workdir> at <unix seconds>` line naming where it came
+> from, and every call to any tool here is still gated by the tool policy (`ask` by default, waived
+> only by `--yolo`). Audit the directory with `lev tools`, which lists each tool with its
+> description and parameters, and remove a tool by deleting its `.rhai` file (and any sibling
+> `.toml`): the next spawn no longer sees it.
 
 ## Declaring a tool
 
 A tool declares itself with leading `// @` directives and reads its arguments from the `params`
 object. The recognized directives:
 
-- `// @tool <name>` is required and names the tool (must match a stage's `available_tools` entry).
+- `// @tool <name>` is required and names the tool. A stage sees it when its `available_tools`
+  lists that name, or when the stage sets `available_global_tools = true` and the script lives in
+  `~/.leviath/tools/`.
 - `// @description <text>` is an optional one-liner shown to the model.
 - `// @param <name> <type> <required|optional> "<description>"` is repeatable. `<type>` is a JSON
   schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`. A typo here produces a
@@ -113,6 +121,41 @@ name     = "format"
 required = true
 schema   = { type = "string", enum = ["json", "yaml"], description = "output format" }
 ```
+
+## Installing a tool from a run
+
+A running agent can add to the global inventory itself with the `install_tool` built-in. It takes
+the tool's `name`, the complete `.rhai` `source`, and an optional `overwrite` flag, compiles the
+script, and writes it to `~/.leviath/tools/<name>.rhai`. This is the persist path for mechanical
+learnings: a step an agent worked out by hand once (a parsing routine, a repeated lookup, a fixed
+transformation) becomes a tool every later run can call instead of rediscovering it.
+
+The install is refused, and nothing is written, when the script does not compile, has no
+`// @tool` or `// @description`, declares a `// @tool` name that differs from `name`, takes the
+name of a built-in, sub-agent or MCP tool (a script under one of those is dropped at discovery, so
+it would never run), exceeds 256 KiB, or would replace an existing script without `overwrite`.
+A sibling `<name>.toml` that declares a different `[tool] name` is refused too, since the TOML
+would win and the tool would appear under the other name. The result the model reads back names
+the file, the description, the parameters and the required capabilities.
+
+Three things keep the directory yours:
+
+- Every installed file starts with a `// installed by leviath: agent run in <workdir> at <unix
+  seconds>` comment, so `cat` and `lev tools` show which run wrote it. The comment carries no `@`
+  directive and compiles as an ordinary comment.
+- `install_tool` is `ask` by default, like `write_file` and `shell`. A blueprint or `config.toml`
+  can set `install_tool = "allow"` under `[tool_permissions]`, and `--yolo` waives the prompt for
+  an unattended run. See [Security](/docs/security) for what an unattended run can persist.
+- The script's own calls are still gated when it runs: an installed tool reads the same
+  [`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) as a hand-written one.
+
+A tool is meant for repeatable mechanical steps, never for judgement. A script that encodes a
+decision the model should be making each time ages badly and is hard to notice from the outside.
+
+To use an installed tool in the same run, the agent must be a `dynamic_tools` agent, which picks
+the new tool up on its next turn. Any later run sees it at spawn, and a stage advertises it when its
+`available_tools` names it or it sets `available_global_tools = true`. See [Tools](/docs/tools) for
+how a stage's tool set is put together.
 
 ## Inspecting the inventory
 

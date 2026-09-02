@@ -553,6 +553,28 @@ impl BuiltinTools {
                     "required": []
                 }),
             },
+            Tool {
+                name: "install_tool".to_string(),
+                description: "Compile a Rhai tool script and install it into the global tools directory so every future agent run can call it. Refuses a script that does not compile, lacks `// @tool <name>` or `// @description`, or collides with an existing tool name. Use for repeatable mechanical steps, never for judgement.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The tool's name. Must equal the script's `// @tool` directive and be a plain file stem: letters, digits, '.', '_' or '-' only"
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "The complete .rhai source, starting with `// @tool <name>` and `// @description <text>`, then `// @param <name> <type> <required|optional> \"<description>\"` per parameter and an optional `// @requires <network|shell|filesystem>`. Arguments arrive in `params`; the script's value is the tool result"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Replace an existing script of the same name (default false)"
+                        }
+                    },
+                    "required": ["name", "source"]
+                }),
+            },
         ];
         defs.retain(|t| self.available(&t.name));
         defs
@@ -713,6 +735,7 @@ impl BuiltinTools {
             "environment_info",
             "which_command",
             "runtime_info",
+            "install_tool",
             crate::SUBMIT_OUTPUT_TOOL,
             crate::FAN_OUT_TOOL,
         ]
