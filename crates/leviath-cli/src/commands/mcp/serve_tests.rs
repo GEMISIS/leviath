@@ -54,34 +54,42 @@ fn flaky_ready(failures: usize) -> (DaemonReady, Arc<AtomicUsize>) {
 
 /// The machine a test server runs on.
 struct Machine {
-    root: tempfile::TempDir,
+    /// Held for its `Drop`, which removes the directory; every path is read
+    /// from `path`.
+    _root: tempfile::TempDir,
+    /// The root's canonical path, which every derived path is built from.
+    ///
+    /// `lev run` canonicalises the manifest it resolves, and the stale-install
+    /// note fires only when that path `starts_with` the agents directory the
+    /// environment names. On Linux a temp dir is already canonical, but macOS
+    /// keeps its temp dirs behind a symlink (`/var` is `/private/var`) and
+    /// Windows canonicalises to a verbatim `\\?\` path, so a home spelled
+    /// the way `tempdir()` gave it never matches there.
+    path: PathBuf,
 }
 
 impl Machine {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("project")).unwrap();
-        std::fs::create_dir_all(root.path().join("runs")).unwrap();
-        Self { root }
+        let path = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(path.join("project")).unwrap();
+        std::fs::create_dir_all(path.join("runs")).unwrap();
+        Self { _root: root, path }
     }
     fn runs_dir(&self) -> PathBuf {
-        self.root.path().join("runs")
+        self.path.join("runs")
     }
     fn project(&self) -> PathBuf {
-        std::fs::canonicalize(self.root.path().join("project")).unwrap()
+        self.path.join("project")
     }
     fn agents_dir(&self) -> PathBuf {
-        self.root
-            .path()
-            .join("home")
-            .join(".leviath")
-            .join("agents")
+        self.path.join("home").join(".leviath").join("agents")
     }
     fn tools_dir(&self) -> PathBuf {
-        self.root.path().join("home").join(".leviath").join("tools")
+        self.path.join("home").join(".leviath").join("tools")
     }
     fn home(&self) -> PathBuf {
-        self.root.path().join("home")
+        self.path.join("home")
     }
     /// Write the inline coder blueprint under `<agents>/<name>/agent.leviath`
     /// and return the manifest path.
@@ -882,12 +890,12 @@ async fn run_reports_a_failed_run_a_question_and_a_lost_daemon() {
 async fn run_refuses_bad_workdirs_before_touching_anything() {
     let machine = Machine::new();
     let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![])], spawn_ok);
-    let home = std::fs::canonicalize(machine.root.path()).unwrap();
+    let home = machine.path.clone();
     let mut env = machine.env(always_ready());
     env.home = Some(home.clone());
     let mut h = Harness::start(daemon.client(), McpServeArgs::default(), env, fast_timing());
 
-    let missing = machine.root.path().join("nowhere");
+    let missing = machine.path.join("nowhere");
     h.call(
         1,
         "run",
@@ -898,7 +906,7 @@ async fn run_refuses_bad_workdirs_before_touching_anything() {
     assert!(is_error);
     assert!(text.contains("not a usable directory"), "{text}");
 
-    let file = machine.root.path().join("a-file");
+    let file = machine.path.join("a-file");
     std::fs::write(&file, "x").unwrap();
     h.call(
         2,
@@ -935,9 +943,9 @@ async fn run_refuses_bad_workdirs_before_touching_anything() {
 async fn run_refuses_a_symlinked_home_given_as_its_real_path() {
     let machine = Machine::new();
     let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![])], spawn_ok);
-    let real = machine.root.path().join("real-home");
+    let real = machine.path.join("real-home");
     std::fs::create_dir_all(&real).unwrap();
-    let link = machine.root.path().join("home-link");
+    let link = machine.path.join("home-link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let mut env = machine.env(always_ready());
     env.home = Some(link);
@@ -1097,7 +1105,7 @@ async fn run_installs_a_missing_bundled_agent_first_and_says_so() {
         assert_eq!(structured["installed_agents"], json!([]));
 
         // An agents dir that is a file: the install fails and says how to fix it.
-        let file = machine.root.path().join("agents-file");
+        let file = machine.path.join("agents-file");
         std::fs::write(&file, "x").unwrap();
         let mut env = machine.env(always_ready());
         env.agents_dir = Some(file);
@@ -2296,7 +2304,7 @@ async fn list_agents_shows_installed_blueprints_and_bundled_ones_not_yet_install
             .all(|a| a["installed"] == false)
     );
     let mut env = machine.env(always_ready());
-    env.agents_dir = Some(machine.root.path().join("no-such-dir"));
+    env.agents_dir = Some(machine.path.join("no-such-dir"));
     let mut h = Harness::start(
         no_daemon_client(),
         McpServeArgs::default(),
