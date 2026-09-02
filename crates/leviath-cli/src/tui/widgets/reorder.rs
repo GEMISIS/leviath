@@ -126,6 +126,12 @@ impl Reorder {
     }
 
     /// Keys while the modal is open.
+    ///
+    /// `K`/`J` move the row exactly as Shift+↑/↓ do, because several terminals
+    /// (Apple Terminal among them) drop the Shift modifier from arrow keys, so
+    /// Shift+↑ arrives here as a plain ↑. A capital letter is an ordinary
+    /// character every terminal delivers. Their lowercase pair moves the
+    /// cursor, mirroring the arrows.
     pub(crate) fn handle_key(&mut self, key: &KeyEvent) -> ReorderOutcome {
         use crossterm::event::KeyModifiers as Mods;
         let shifted = key.modifiers.contains(Mods::SHIFT);
@@ -134,6 +140,14 @@ impl Reorder {
             KeyCode::Down if shifted => self.move_row(1),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
+            // Shift+k may arrive as 'K', or as 'k' with the modifier set,
+            // depending on the terminal's encoding; both mean the row.
+            KeyCode::Char('K') => self.move_row(-1),
+            KeyCode::Char('J') => self.move_row(1),
+            KeyCode::Char('k') if shifted => self.move_row(-1),
+            KeyCode::Char('j') if shifted => self.move_row(1),
+            KeyCode::Char('k') => self.move_cursor(-1),
+            KeyCode::Char('j') => self.move_cursor(1),
             KeyCode::Enter => return ReorderOutcome::Confirmed(self.values()),
             KeyCode::Esc => return ReorderOutcome::Cancelled,
             _ => {}
@@ -238,7 +252,7 @@ impl Reorder {
             .map(|text| Line::from(Span::styled(text.clone(), Style::default().fg(C_MUTED))))
             .collect();
         lines.push(Line::from(Span::styled(
-            "Drag ⠿, or Shift+↑/↓ to move a row. Enter keeps the order, Esc cancels.",
+            "Drag ⠿, or Shift+↑/↓ or K/J to move a row. Enter keeps the order, Esc cancels.",
             Style::default().fg(C_DIM),
         )));
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[0]);
@@ -335,6 +349,31 @@ mod tests {
         // And back up one: b, c, a -> b, a, c.
         r.handle_key(&shift(KeyCode::Up));
         assert_eq!(r.values(), ["b", "a", "c"]);
+    }
+
+    /// The letters exist because a terminal that drops Shift from the arrows
+    /// (Apple Terminal does) leaves Shift+↑/↓ meaning "move the cursor". They
+    /// arrive either as a capital, or as the lowercase letter with the Shift
+    /// flag; both spellings move the row, and the bare letters mirror the
+    /// arrows.
+    #[test]
+    fn capital_j_and_k_move_the_row_and_lowercase_move_the_cursor() {
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Char('J')));
+        r.handle_key(&shift(KeyCode::Char('j')));
+        assert_eq!(r.values(), ["b", "c", "a"]);
+        assert_eq!(r.cursor, 2, "the cursor rode with the row");
+        r.handle_key(&key(KeyCode::Char('K')));
+        assert_eq!(r.values(), ["b", "a", "c"]);
+        r.handle_key(&shift(KeyCode::Char('k')));
+        assert_eq!(r.values(), ["a", "b", "c"]);
+
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Char('j')));
+        assert_eq!(r.cursor, 1, "bare j is the cursor");
+        r.handle_key(&key(KeyCode::Char('k')));
+        assert_eq!(r.cursor, 0, "bare k is the cursor");
+        assert_eq!(r.values(), ["a", "b", "c"], "neither moved a row");
     }
 
     #[test]
