@@ -128,9 +128,15 @@ pub fn tool_list_result(tools: &[ServerTool]) -> Value {
 /// server could not even attempt (an unknown tool, a malformed argument) is a
 /// JSON-RPC error instead, and never comes through here. `structured` is the
 /// same answer as data, for hosts that surface `structuredContent`.
-pub fn text_result(text: impl Into<String>, is_error: bool, structured: Option<Value>) -> Value {
+///
+/// `text` is a concrete `String` rather than `impl Into<String>`: a generic
+/// here is instantiated once per caller type, and llvm-cov counts each
+/// instantiation's regions separately, so a `&str` caller that never passes
+/// `structured` leaves that branch uncovered in its copy even though the
+/// merged line coverage reads 100%.
+pub fn text_result(text: String, is_error: bool, structured: Option<Value>) -> Value {
     let mut result = json!({
-        "content": [{ "type": "text", "text": text.into() }],
+        "content": [{ "type": "text", "text": text }],
         "isError": is_error,
     });
     if let Some(structured) = structured {
@@ -241,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_text_result_carries_one_text_block_and_optional_structured_content() {
-        let plain = text_result("done", false, None);
+        let plain = text_result(String::from("done"), false, None);
         assert_eq!(plain["content"][0]["type"], "text");
         assert_eq!(plain["content"][0]["text"], "done");
         assert_eq!(plain["isError"], false);
