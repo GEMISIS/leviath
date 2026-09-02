@@ -538,7 +538,7 @@ fn target_path(target: &str, workdir: &std::path::Path) -> std::path::PathBuf {
 /// The justification for allowing *any* loosening is real but narrow: a
 /// shipped agent should be able to pre-approve the tools that are its whole
 /// point, so the researcher does not prompt for every page it reads. Checking
-/// the ten bundled agents, the only policies any of them loosens relative to
+/// the eight bundled agents, the only policies any of them loosens relative to
 /// the default are these two - the rest of their `[tool_permissions]` lines
 /// are `ask`, or `allow` on tools that already default to `allow`.
 ///

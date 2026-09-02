@@ -1,0 +1,355 @@
+[agent]
+name = "orchestrator"
+version = "0.1.0"
+description = "The agent to hand a goal to when nothing more specific fits, and the one a host agent reaches for by default: map the repository, split the goal into independent work items, fan them out to coder workers, verify what came back, and crystallize the mechanical steps into Rhai tools every later run can call"
+entry_stage = "intake"
+# Coder workers are one level down. They do not fan out themselves, so a second
+# level is never used, but the ceiling is what stops a mistaken split from
+# recursing.
+max_child_depth = 2
+
+# Global tool permissions for this agent: everything that changes the machine
+# requires approval by default. `lev run orchestrator --yolo` skips the prompts,
+# and an MCP-launched run is unattended, so its coder workers inherit that.
+# `install_tool` writes code every future run can execute, which is why it sits
+# with the write tools rather than the read ones.
+[tool_permissions]
+read_file    = "allow"
+list_dir     = "allow"
+bash         = "ask"
+install_tool = "ask"
+
+# ─── Stage 1: Intake ─────────────────────────────────────────────────────────
+# Orient before planning: what is this repository and how is work in it
+# verified? Cheap model, hard iteration cap, one non-error edge out. The two
+# `required` regions it fills are the commitment every later stage is held to.
+#
+# `available_global_tools = true`: an earlier run may have installed a Rhai tool
+# for exactly the discovery this stage is about to redo by hand. The prompt says
+# what those extra names in the tool list are, so the model reaches for them.
+[stages.intake]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Map the repository and decide how work here is verified"
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
+available_global_tools = true
+max_iterations = 10
+max_revisits = 2
+system_prompt = """
+Before anything is planned, answer two questions about THIS repository: what
+is it, and how is work in it verified? Do not plan or edit here.
+
+Read the goal in `task` and any limits in `constraints`. `repo_files` holds the
+tracked file list, so do not list the tree again. If `.leviath/discovery.md`,
+`CLAUDE.md`, `AGENTS.md` or `.github/copilot-instructions.md` exist, read them
+first and treat them as authoritative. Fill the gaps with list_dir and
+read_file, and use bash ONLY to interrogate the toolchain read-only: a version
+flag, a dry-run, a test list. Never install, build or edit here.
+
+Any tool in your list that is not a built-in is a Rhai tool an earlier run
+installed; prefer it for the step it describes, and when it is missing or wrong
+say so in `learnings`.
+
+Write two regions with context_write before you leave:
+
+- `discovery`: language and toolchain, build system, test runner, layout,
+  and the conventions a change here must follow.
+- `workflow`: how the work will be checked, ending in three literal lines:
+  BASELINE: <the command that shows the state before any change>
+  VERIFY: <the command that must pass after the change>
+  DONE WHEN: <the bar the whole goal is held to>
+
+Both are read by every later stage and by the coder workers' brief, so write
+them as facts, not as impressions.
+"""
+
+[stages.intake.transitions.plan]
+hint = "Repository mapped and the verification workflow is written"
+
+[stages.intake.transitions.error_recovery]
+condition = "error"
+
+[stages.intake.transitions.done]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+# ─── Stage 2: Plan ───────────────────────────────────────────────────────────
+# Read-only. Splits the goal into work items a separate coder can each finish
+# alone. Autonomous on purpose: this is the agent a host calls from a tool
+# schema with nobody watching, and a checkpoint here would park every such run.
+# Re-entered from `verify` when items fail, so it is capped.
+[stages.plan]
+mode = "autonomous"
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Split the goal into independent, verifiable work items"
+available_tools = ["read_file", "list_dir", "context_write", "context_append", "context_read"]
+available_global_tools = true
+max_iterations = 15
+max_revisits = 3
+system_prompt = """
+Turn the goal in `task` into work items that a separate coder can each finish
+alone, honouring `discovery`, `workflow` and `constraints`. Read whatever
+files you need to make each item precise; you may not edit anything here.
+
+A work item is a set of files and one change to them. Two items whose files
+overlap are one item, because two workers editing the same file produce a
+conflict rather than a change. Each item must carry its own bar: a check the
+worker can run, taken from or consistent with the VERIFY line in `workflow`.
+
+If `verification` reports failures you are here to replan: plan only the items
+that did not land, using what `verification` says went wrong, and leave the
+items that passed alone.
+
+Any tool in your list that is not a built-in is a Rhai tool an earlier run
+installed; prefer it for the step it describes, and when it is missing or wrong
+say so in `learnings`.
+
+Write the list to `plan` with context_write, one item per line:
+  <id> | <files> | <what to change> | <done when>
+A goal that needs no code change is a plan of zero items; write that and say why.
+"""
+
+[stages.plan.transitions.execute]
+hint = "The plan is written and every item is independent"
+gate = { require_region_updated = "plan", message = "Write or revise `plan` before handing work out." }
+
+[stages.plan.transitions.error_recovery]
+condition = "error"
+
+[stages.plan.transitions.done]
+condition = "dead_end"
+
+# ─── Stage 3: Execute ────────────────────────────────────────────────────────
+# One coder worker per work item, all at once. `coder` is a separate installed
+# blueprint: `lev setup` and `lev integrate` install the bundled set together,
+# so it is there in the normal case; installing this agent on its own leaves
+# the workers with nothing to run, and `on_worker_failure = "continue"` means
+# the run reports that rather than dying. The merge edge into `verify` is
+# implicit in `merge_stage`. Capped at three visits because
+# verify -> plan -> execute is the replan loop, and a cap of one would let the
+# second replan write a plan nothing can carry out.
+[stages.execute]
+mode = "fan_out"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Hand each work item to a coder worker"
+available_tools = []
+max_iterations = 4
+max_revisits = 3
+worker_agent = "coder"
+merge_stage = "verify"
+max_workers = 8
+max_items = 12
+results_region = "worker_results"
+on_worker_failure = "continue"
+split_prompt = """
+Call `fan_out` with one entry in `items` per line of `plan`:
+
+  items: [{"id": "<the item's id>", "context": {"task": "<the change, self-contained>", "files": ["<paths>"], "done_when": "<the item's bar>", "verify": "<the VERIFY line from `workflow`>", "conventions": "<the conventions from `discovery`, verbatim>"}}]
+
+A worker is a separate coder run that shares only the working directory with
+you, never this context, so every item must stand alone: name the files, say
+exactly what changes, and give the check that proves it. Items whose files
+overlap are one item. If `plan` holds no items, reply with items: [].
+"""
+
+[stages.execute.transitions.error_recovery]
+condition = "error"
+
+[stages.execute.transitions.done]
+condition = "dead_end"
+
+# ─── Stage 4: Verify ─────────────────────────────────────────────────────────
+# The merge stage. Runs the workflow the intake stage committed to over what
+# the workers produced, then decides: persist the learnings, or replan the
+# items that failed. This is also where mechanical repetition gets noticed and
+# written down, which is the raw material the crystallize stage works from.
+[stages.verify]
+mode = "autonomous"
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Run the verification workflow over what the workers produced"
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
+available_global_tools = true
+max_iterations = 20
+max_revisits = 3
+system_prompt = """
+`worker_results` holds one block per work item, in the workers' own words. A
+block marked FAILED means that item is still undone; a block that claims
+success is a claim, not a result. Run the VERIFY and DONE WHEN lines from
+`workflow` yourself, and read the files an item named when the command does
+not settle it.
+
+Write the outcome to `verification` with context_write: one line per item,
+PASS or FAIL with the evidence, then one line on whether the goal in `task` is
+met. If `error_report` has content, account for it there too.
+
+Then look back over this run for steps that were mechanical and repeated: a
+command sequence run more than once, a file transform, a check with fixed
+arguments. Append each to `learnings` with context_append as
+  <name> | <what it does> | <inputs> | <the exact commands>
+Judgement is not a learning; only what a script could do the same way every
+time.
+
+Any tool in your list that is not a built-in is a Rhai tool an earlier run
+installed; prefer it for the step it describes, and when it is missing or wrong
+say so in `learnings`.
+"""
+
+[stages.verify.transitions.crystallize]
+hint = "Every item passed DONE WHEN - persist the mechanical learnings"
+
+[stages.verify.transitions.plan]
+hint = "Some items failed verification - replan only those"
+transform = "compact"
+
+[stages.verify.transitions.error_recovery]
+condition = "error"
+
+[stages.verify.transitions.done]
+condition = "dead_end"
+
+# ─── Stage 5: Crystallize ────────────────────────────────────────────────────
+# Turns what `verify` wrote down into Rhai tools in ~/.leviath/tools/, which
+# every later run of any agent can call. No bash and no write tools: the only
+# way to change the machine here is `install_tool`, which compiles the script
+# first and refuses one that would not run. Sees the global inventory so it
+# can compare before adding.
+[stages.crystallize]
+mode = "autonomous"
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Turn repeatable learnings into Rhai tools every future run can call"
+available_tools = ["install_tool", "read_file", "list_dir", "context_read", "context_write"]
+available_global_tools = true
+max_iterations = 15
+max_revisits = 1
+system_prompt = """
+Go through `learnings` and decide, entry by entry, what deserves to become a
+tool. Install one only when ALL of these hold:
+
+- The step recurred: it appears more than once in `learnings`, or a prior
+  run's report shows the same step.
+- It is not a single command already available through `shell`. Wrapping
+  one command adds nothing.
+- The script encodes an invariant: fixed arguments, parses the output, fails
+  loudly on what it does not expect. A script that runs `shell(params.cmd)`
+  is not a tool, it is a hole.
+- It has a `// @description` that says when to use it, so a model that has
+  never seen this repository knows what the name means.
+- It is named `<domain>_<verb>`, for example `cargo_test_summary` or
+  `pytest_failures`.
+
+Any tool in your list that is not a built-in is a Rhai tool an earlier run
+installed; prefer it for the step it describes, and when it is missing or wrong
+say so in `learnings`. Check that list first: when an installed tool already
+does most of what a learning describes, call install_tool with `overwrite`
+set and its name, and improve it, rather than adding a near-duplicate under a
+new name.
+
+A script begins with `// @tool <name>` and `// @description <one line>`, one
+`// @param <name> <type> <required|optional> "<what it is>"` per input, and
+`// @requires shell` or `// @requires filesystem` for what its body calls. The
+body reads `params.<name>` and returns a string. install_tool compiles the
+script and refuses one that does not compile, lacks its directives, or takes a
+name a built-in already has; read the refusal, fix the script, and try again.
+
+Write `tools_installed` with context_write: one line per tool, its name and
+what it does, or a line saying nothing was worth persisting and why. A
+learning that is judgement rather than mechanics is not a tool; leave it out
+and say so.
+"""
+
+[stages.crystallize.transitions.done]
+hint = "Learnings persisted, or none were worth persisting"
+
+[stages.crystallize.transitions.error_recovery]
+condition = "error"
+
+# ─── Error recovery ──────────────────────────────────────────────────────────
+# Reached only on an `error` edge, so it never appears on the model's menu.
+# Reads what the runtime captured, notes it where the verify stage will see it,
+# and hands over to verify so the run still reports what exists.
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed stage"
+available_tools = ["read_file", "bash", "context_append"]
+max_iterations = 8
+max_revisits = 2
+system_prompt = """
+A stage failed. `error_report` holds the error text the runtime captured, or
+the note that a stage hit its iteration cap: read it first. Work out what it
+means for the goal in `task`, append one line to `verification` with
+context_append saying what failed and any workaround you can see, and then
+continue to verify what exists. Do not retry the failed stage's work here.
+"""
+
+[stages.error_recovery.transitions.verify]
+hint = "Recovered - verify what exists"
+
+[stages.error_recovery.transitions.done]
+condition = "dead_end"
+
+[compaction]
+provider = "anthropic"
+model    = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.done]
+mode = "output"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what was done, what was verified, and which tools were installed"
+max_iterations = 8
+system_prompt = """
+Report for whoever asked, who may be another agent reading a tool result: the
+goal in `task`, each work item's outcome from `verification`, anything left
+undone, and the tools listed in `tools_installed`. If the run arrived here
+without finishing, say what was and was not done rather than rounding up.
+Your only tool is submit_output.
+"""
+
+[stages.done.output]
+format = "markdown"
+instructions = "Lead with whether the goal was met. Then one line per work item, then the installed tools by name, then loose ends."
+
+[stages.done.transitions]
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window, and the percentage is
+# the whole answer: every region scales with whatever model the stage runs on.
+# Percentages are ceilings, not reservations, so they may sum past 100%.
+[context.regions]
+# ── Inputs (pinned, stable, cacheable) ──
+task            = { kind = "pinned", budget = "2%", required = true, required_message = "Describe the goal via --task (or the API/ACP task field).", volatility = "stable" }
+# Optional caller limits: --constraints "must stay on Node 18, no new deps".
+constraints     = { kind = "pinned", budget = "1%", seed = "constraints", volatility = "stable" }
+# Deterministic repo scan, run once at spawn. Outside a git repo it fails and is
+# left empty (non-fatal). Refuse it with `--no-seed-commands` or
+# `[security] allow_seed_commands = false`.
+repo_files      = { kind = "pinned", budget = "3%", seed = { command = "git ls-files" }, volatility = "stable" }
+
+# ── Discovery: written by intake, read by every later stage and by the workers'
+# brief. `required` puts the runtime's own gate behind them.
+discovery       = { kind = "pinned", budget = "3%", required = true, required_message = "Populate `discovery` (context_write) with this project's toolchain, build system, test runner, layout and conventions before leaving intake.", volatility = "grows" }
+workflow        = { kind = "pinned", budget = "2%", required = true, required_message = "Populate `workflow` (context_write) with the literal BASELINE / VERIFY / DONE WHEN lines before leaving intake.", volatility = "grows" }
+
+# ── The plan and what came of it ──
+plan            = { kind = "pinned", budget = "5%" }
+# One block per work item, written by the runtime as the workers finish.
+worker_results  = { kind = "clearable", budget = "20%" }
+verification    = { kind = "pinned", budget = "5%", volatility = "grows" }
+# Mechanical steps noticed along the way, in the shape crystallize turns into
+# tools. Append-only.
+learnings       = { kind = "pinned", budget = "5%", volatility = "grows" }
+tools_installed = { kind = "pinned", budget = "2%", volatility = "grows" }
+
+# ── Conversation (bulk eviction for caching) ──
+conversation    = { kind = "sliding_window", max_items = 30, budget = "15%", strategy = "bulk", overflow = 10 }
+# Written by the RUNTIME on an abnormal stage ending: a failed inference call's
+# error text, or a note that a stage hit its iteration cap. Pinned so it
+# survives the edge into `error_recovery`. Declared last so it is never the
+# first pinned region, where stage instructions are injected.
+error_report    = { kind = "pinned", budget = "1%" }
