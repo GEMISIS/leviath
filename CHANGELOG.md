@@ -11,10 +11,36 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.9 - 2026-09-02
 
 ### Added
 
+- `[providers] provider_order`, an ordered list of provider names, best
+  first, that decides which configured provider serves a blueprint model
+  named without one. It generalizes `default_provider` into a full ordering;
+  left empty, resolution is exactly what it was. Naming a subscription
+  transport (Codex, Claude Code) in the order is the deliberate opt-in that
+  lets a plan win a bare model name at the priority it is listed. Every
+  surface that writes config learned it: `GET /api/config` reports the
+  order and `PUT` replaces it, `lev doctor` flags an entry naming no
+  configured provider, and the config and OpenAPI schemas describe it.
+- `lev providers`, which lists the configured providers with the current
+  order, and `lev providers order <name>...` / `--clear` to set or drop it
+  from the command line. An unknown name is refused with the known list
+  rather than persisted as a silent no-op.
+- The setup wizard's Defaults screen replaces the single "Default provider"
+  chooser with a "Provider priority" list arranged in a drag-to-reorder
+  modal (drag a row by its grip, or move it with Shift+arrows or K/J); the
+  head of the order is written as `default_provider`.
+- `install_tool`, a built-in that persists a Rhai tool to `~/.leviath/tools`
+  so every future run can use it. Nothing an agent could do reached that
+  directory before. It compiles the script first and refuses a reserved or
+  malformed name, a `@tool` directive that disagrees with the name, an empty
+  `@description`, an oversized source, an existing script without
+  `overwrite`, a symlinked destination, or a `<name>.toml` sibling whose
+  `[tool]` name differs. The written file leads with a provenance line
+  naming who installed it and when. Like `write_file` and `shell` it
+  defaults to `ask`.
 - Tool groups in `available_tools`. An entry that starts with `@` grants a
   whole kind of tool rather than one: `@builtin` (every compiled-in tool),
   `@subagent`, `@scripts` (every Rhai tool, the agent's own and the global
@@ -33,8 +59,25 @@ same list.
   tool by where it comes from, and `GET /api/tools` carries the same
   `groups` list for other clients.
 
+### Changed
+
+- `lev --help` groups the commands under Setup and configuration,
+  Blueprints, Running agents, Inspecting runs, and Servers instead of one
+  flat list of thirty. Every command is still `lev <command>`; only the help
+  reads differently.
+
 ### Fixed
 
+- The dashboard's task editor, response box, deny-with-feedback prompt and
+  in-place document edit all submit on Ctrl+S. Ctrl+Enter reaches a program
+  only under the kitty keyboard protocol; elsewhere it arrives as a plain
+  Enter, and some macOS terminals swallow it or open a context menu on it,
+  which left the keyboard no way to start a run. Ctrl+Enter still works
+  where it arrives, and the hint bars name ^S.
+- The provider-priority modal accepts K and J to move a row. Apple Terminal
+  and others strip Shift from an arrow key before it reaches the
+  application, so Shift+Up/Down was the only keyboard reorder and it was
+  unreachable there.
 - The `install_tool` summary and the Rhai tools page pointed at an
   `available_global_tools` stage key that does not exist. Both now say
   `@scripts`, which does what that key claimed to.
