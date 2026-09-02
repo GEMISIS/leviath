@@ -5,14 +5,15 @@
 //! cannot touch the filesystem by design, a script tool's `write_file` is
 //! confined to the run's workdir, and this is the one built-in that writes to
 //! `~/.leviath/tools/` on purpose, checking the script and recording who put
-//! it there. It is not the only way bytes can land in that directory: `shell`
-//! is confined to the workdir only when a `[sandbox]` is configured, so an
-//! unattended run with a shell can drop a `.rhai` file there directly, with
-//! none of the checks below. A file without a provenance line did not come
-//! through here. The function is deliberately pure over its inputs: the
-//! destination directory, the reserved-name set, the provenance and the
-//! filesystem predicates are all parameters, so the built-in tool, the MCP
-//! server and the tests call the same code with nothing ambient.
+//! it there. It is not the only way bytes can land in that directory: a shell
+//! redirect outside the workdir is refused, but the programs a shell line runs
+//! (`cp`, `tee`) are confined only by a `[sandbox]`, so an unattended run with
+//! `shell` and no sandbox can put a `.rhai` file there with none of the checks
+//! below. A file without a provenance line did not come through here. The
+//! function is deliberately pure over its inputs: the destination directory,
+//! the reserved-name set, the provenance and the filesystem predicates are all
+//! parameters, so the built-in tool, the MCP server and the tests call the same
+//! code with nothing ambient.
 //!
 //! Every refusal happens before anything is written. A script that does not
 //! compile, a name that collides with a built-in, a name that is not a plain

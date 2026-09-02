@@ -25,10 +25,11 @@ Per-agent tools live in that agent's own `tools/` directory instead, and are che
 > directory holds model-authored code as well. `install_tool` is the audited way in: it compiles
 > the script, refuses a colliding name, and starts each file with a
 > `// installed by leviath: agent run in <workdir> at <unix seconds>` line naming where it came
-> from. It is not the only way in. `shell` is confined to the workdir only when a
-> [`[sandbox]`](/docs/security#sandboxes) is configured, so an unattended run with `shell` can
-> write a `.rhai` file here directly; a file without a provenance line was not installed through
-> `install_tool`. Every call to any tool here is still gated by the tool policy (`ask` by default,
+> from. It is not the only way in. A shell redirect outside the workdir is
+> [refused](/docs/tools#where-a-redirect-may-write), but a program the shell runs (`cp`, `tee`) is
+> confined only by a [`[sandbox]`](/docs/security#sandboxes), so an unattended run with `shell` and
+> no sandbox can still put a `.rhai` file here; a file without a provenance line was not installed
+> through `install_tool`. Every call to any tool here is still gated by the tool policy (`ask` by default,
 > waived only by `--yolo`). Audit the directory with `lev tools`, which lists each tool with its
 > description and parameters and prints its provenance line under it (or says the file has none),
 > and remove a tool by deleting its `.rhai` file (and any sibling `.toml`): the next spawn no
@@ -149,7 +150,7 @@ Three things keep the directory yours:
   seconds>` comment, so `cat` and `lev tools` show which run wrote it. The comment carries no `@`
   directive and compiles as an ordinary comment. Only `install_tool` writes it: a file in the
   directory without one was hand-written, or put there by something that bypassed the install
-  (a `shell` call in a run with no `[sandbox]`, for instance).
+  (a `cp` from a `shell` call in a run with no `[sandbox]`, for instance).
 - `install_tool` is `ask` by default, like `write_file` and `shell`. A blueprint or `config.toml`
   can set `install_tool = "allow"` under `[tool_permissions]`, and `--yolo` waives the prompt for
   an unattended run. See [Security](/docs/security) for what an unattended run can persist.
