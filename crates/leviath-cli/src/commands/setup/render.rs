@@ -978,7 +978,7 @@ fn footer_hints(wizard: &Wizard) -> Vec<Hint> {
     if wizard.reorder.is_some() {
         return vec![
             hint("drag ⠿", "move a row"),
-            hint("shift+↑↓", "move"),
+            hint("shift+↑↓/K J", "move"),
             hint("enter", "keep the order"),
             hint("esc", "cancel"),
         ];
