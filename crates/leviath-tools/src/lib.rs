@@ -19,10 +19,12 @@ mod env;
 mod exec;
 pub use exec::is_null_device;
 pub use exec::resolve_within;
+mod install;
 mod platform;
 pub mod validate;
 pub use context::*;
 pub use defs::{SUBAGENT_TOOLS, is_subagent_tool, submit_output_description};
+pub use install::{InstalledTool, install_script_tool, install_script_tool_with};
 pub use platform::*;
 pub use validate::*;
 
