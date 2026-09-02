@@ -1,22 +1,26 @@
 flowchart TD
-    gather{{gather}}
+    gather(gather)
     investigate(investigate)
     analyze{{analyze}}
-    follow_citations{{follow citations}}
+    follow_citations(follow citations)
     synthesize(synthesize)
     summary(summary)
+    challenge{{challenge}}
+    polish(polish)
     investigate_workers[["researcher (sub-agent)"]]
     gather --> investigate
-    gather --> analyze
-    gather --> synthesize
-    investigate ==>|×4 workers| investigate_workers
+    gather -. dead_end .-> challenge
+    investigate ==>|×12 workers| investigate_workers
     investigate_workers ==>|merge| analyze
-    investigate --> synthesize
+    investigate -. dead_end .-> challenge
     analyze --> gather
     analyze --> follow_citations
-    analyze --> synthesize
+    analyze --> challenge
     follow_citations --> analyze
-    follow_citations --> synthesize
-    synthesize --> summary
+    follow_citations -. dead_end .-> challenge
+    synthesize --> polish
+    challenge --> gather
+    challenge --> synthesize
+    polish --> summary
     classDef entry stroke-width:3px
     class gather entry

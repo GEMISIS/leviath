@@ -34,7 +34,7 @@ An agent is a directory holding an `agent.leviath` file, a TOML **blueprint**. I
 the agent moves through, the model and tools each stage gets, and the shape of its memory. There is
 no agent code to write, and nothing is compiled.
 
-Seven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
+Eight [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
 See [Agent blueprints](/docs/agents).
 
 ## Work happens in stages

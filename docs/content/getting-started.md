@@ -157,7 +157,7 @@ The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key
 First `cd` into the directory you want the agent working in. That directory becomes the run's
 **workdir**: its file tools are confined to it, and its output lands there.
 
-Then pick one of the seven [pre-built agents](/docs/agent-catalog) and give it a task:
+Then pick one of the eight [pre-built agents](/docs/agent-catalog) and give it a task:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
@@ -222,7 +222,7 @@ scratch, a stage at a time, and is the natural next thing to read.
 
 ## Where to go next
 
-- The [Agent catalog](/docs/agent-catalog) tours the seven pre-built agents and what each is for.
+- The [Agent catalog](/docs/agent-catalog) tours the eight pre-built agents and what each is for.
 - [Build your first agent](/docs/first-agent) writes one from an empty directory, explaining each
   piece as it goes.
 - [Overview](/docs/overview) explains what Leviath is doing underneath: stages, context regions,

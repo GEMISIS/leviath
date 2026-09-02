@@ -1,5 +1,5 @@
 flowchart TD
-    ingest{{ingest}}
+    ingest(ingest)
     split_logs(split logs)
     scan_worker(scan worker)
     analyze{{analyze}}
@@ -7,14 +7,14 @@ flowchart TD
     report(report)
     summary(summary)
     ingest --> split_logs
-    ingest --> report
-    split_logs ==>|×4 workers| scan_worker
+    ingest -. dead_end .-> report
+    split_logs ==>|×30 workers| scan_worker
     scan_worker ==>|merge| analyze
     analyze --> script
     analyze --> report
     script --> script
     script --> analyze
-    script --> report
+    script -. dead_end .-> report
     report --> summary
     classDef entry stroke-width:3px
     class ingest entry

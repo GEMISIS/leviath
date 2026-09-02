@@ -1,0 +1,21 @@
+flowchart TD
+    intake(intake)
+    plan(plan)
+    execute(execute)
+    verify{{verify}}
+    crystallize(crystallize)
+    done(done)
+    execute_workers[["coder (sub-agent)"]]
+    intake --> plan
+    intake -. dead_end .-> done
+    plan --> execute
+    plan -. dead_end .-> done
+    execute ==>|×8 workers| execute_workers
+    execute_workers ==>|merge| verify
+    execute -. dead_end .-> done
+    verify --> crystallize
+    verify --> plan
+    verify -. dead_end .-> done
+    crystallize --> done
+    classDef entry stroke-width:3px
+    class intake entry

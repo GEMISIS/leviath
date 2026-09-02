@@ -1,6 +1,6 @@
 ---
 title: Agent catalog
-description: The seven pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
+description: The eight pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
 group: Get started
 group_order: 1
 order: 4
@@ -8,7 +8,7 @@ order: 4
 
 # Agent catalog
 
-Leviath ships with seven pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
+Leviath ships with eight pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
 (scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.leviath`
 [blueprint](/docs/agents). Run any of them by name:
 
@@ -27,11 +27,12 @@ these. `lev validate <agent>` prints every one of them.
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
-> sources (the research agents), or a recurring chore like triaging logs. Not sure? Run `coder`.
+> sources (the research agents), or a recurring chore like triaging logs. Not sure? Run `coder`
+> for one change, or `orchestrator` for a goal that is several.
 >
 > `coder` aside, every agent that has more than one thing to cover
-> [fans out](/docs/sub-agents): `data-analyst`, `deep-researcher`, `log-analyzer`, `reviewer`,
-> and `wide-researcher` all work on several at once instead of one after another.
+> [fans out](/docs/sub-agents): `data-analyst`, `deep-researcher`, `log-analyzer`, `orchestrator`,
+> `reviewer`, and `wide-researcher` all work on several at once instead of one after another.
 
 ## coder
 
@@ -72,6 +73,58 @@ resolves as approved rather than stranding the run, so `--yolo` in CI still work
 the approach is uncertain, and `reassess` is reached only on a `stuck` edge. `discover` and `plan`
 run on Sonnet; `implement`, `review`, and `reassess` step up to Opus, so it is a
 [multi-model](/docs/stages) blueprint.
+
+## orchestrator
+
+Hand it a goal rather than a single change. It maps the repository, splits the goal into
+independent work items, runs one `coder` per item at the same time, verifies what came back, and
+persists the mechanical steps it noticed as Rhai tools for every later run. This is the agent a
+host agent such as Claude Code is handed by default when it delegates to Leviath, and the one to
+reach for when nothing more specific fits.
+
+```mermaid
+flowchart TD
+    intake --> plan
+    plan --> execute
+    execute -->|"fan out: one coder per work item"| verify
+    verify -->|"items failed"| plan
+    verify --> crystallize
+    crystallize --> done
+    verify -->|error| error_recovery
+    error_recovery --> verify
+```
+
+```bash
+lev run orchestrator --task "Move the service from Express 4 to Express 5 without changing its routes"
+```
+
+`intake` does what `coder`'s `discover` does: it writes down what the repository is and how work
+in it is verified, ending in literal BASELINE, VERIFY and DONE WHEN lines. `plan` then splits the
+goal into items whose files do not overlap, each with its own check. Both run without a checkpoint,
+because a host calls this agent from a tool schema with nobody watching a prompt.
+
+`execute` is a [fan-out](/docs/sub-agents) stage whose workers are full `coder` runs, one per work
+item, sharing only the working directory. `coder` is a separate installed blueprint; `lev setup`
+installs the bundled set together, and a run on a machine without it reports the missing worker per
+item rather than failing outright. `verify` merges the results, runs the VERIFY and DONE WHEN lines
+itself rather than trusting a worker's claim, and either moves on or sends the failed items, and
+only those, back to `plan`.
+
+`crystallize` is what makes the second run cheaper than the first. While verifying, the agent
+appends every step that was mechanical and repeated to a `learnings` region. `crystallize` turns
+the ones that qualify into Rhai scripts and installs them with the
+[`install_tool`](/docs/rhai-tools#installing-a-tool-from-a-run) built-in, which compiles a script
+before writing it to `~/.leviath/tools/`. A step qualifies when it recurred, is more than one
+`shell` command, encodes fixed arguments and parses its output, carries a description saying when
+to use it, and is named `<domain>_<verb>`. Judgement never qualifies. `install_tool` is `ask` by
+default, so an attended run confirms each install and `--yolo` waives it; `lev tools` lists what
+has landed, with a provenance line in each file.
+
+The loop closes on the next run. `intake`, `plan`, `verify` and `crystallize` set
+`available_global_tools = true`, as do `coder`'s `implement` and `review` stages, so
+[every installed tool is offered](/docs/agents#which-tools-a-stage-gets) to them without a
+blueprint naming it. The prompts tell the model that any tool in its list that is not a built-in
+came from an earlier run, to prefer it, and to report in `learnings` when it is missing or wrong.
 
 ## reviewer
 
