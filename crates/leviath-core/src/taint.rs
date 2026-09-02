@@ -497,7 +497,9 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
             ToolDirection::Inbound,
             TaintLevel::Public,
         ),
-        "write_file" => ToolClassification::new(
+        // `install_tool` writes one file to the local tools directory the way
+        // `write_file` writes one to the workdir; nothing leaves the machine.
+        "write_file" | "install_tool" => ToolClassification::new(
             TaintLevel::Internal,
             ToolDirection::Internal,
             TaintLevel::Public,
@@ -1084,6 +1086,21 @@ mod tests {
     fn builtin_write_file_classification() {
         let tc = builtin_tool_classification("write_file");
         assert_eq!(tc.direction, ToolDirection::Internal);
+    }
+
+    /// `install_tool` writes a file on the local machine, like `write_file`;
+    /// without an arm of its own it would fall to the outbound default and
+    /// every taint-tracking run would gate the persist path as a leak.
+    #[test]
+    fn install_tool_is_classified_like_write_file() {
+        assert_eq!(
+            classified_builtin("install_tool"),
+            classified_builtin("write_file")
+        );
+        let tc = builtin_tool_classification("install_tool");
+        assert_eq!(tc.sensitivity, TaintLevel::Internal);
+        assert_eq!(tc.direction, ToolDirection::Internal);
+        assert_eq!(tc.clearance, TaintLevel::Public);
     }
 
     /// An unknown tool is almost always MCP or a Rhai script - third-party code

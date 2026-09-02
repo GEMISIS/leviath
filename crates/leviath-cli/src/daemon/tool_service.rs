@@ -482,22 +482,22 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
 }
 
 /// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
-/// file (via `write_file`/`edit_file`), so the next tick re-scans + re-advertises.
-/// A no-op for static agents. The path lives in the tool args; the actual
-/// discovery is workdir-confined, so an off-`tools/` write just yields a no-op
-/// re-scan.
+/// file (via `write_file`/`edit_file`) or installs one (via `install_tool`), so
+/// the next tick re-scans + re-advertises. A no-op for static agents. The path
+/// lives in the tool args; the actual discovery is workdir-confined, so an
+/// off-`tools/` write just yields a no-op re-scan. An install always lands in
+/// the global directory, which is one of the scan dirs, so it needs no path.
 fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
     let Some(ctx) = &state.dynamic else { return };
-    let writes = matches!(
-        leviath_tools::canonical_tool_name(&tc.name),
-        "write_file" | "edit_file"
-    );
+    let canonical = leviath_tools::canonical_tool_name(&tc.name);
+    let installs = canonical == "install_tool";
+    let writes = matches!(canonical, "write_file" | "edit_file");
     let is_rhai = tc
         .arguments
         .get("path")
         .and_then(|p| p.as_str())
         .is_some_and(|p| p.ends_with(".rhai"));
-    if writes && is_rhai {
+    if installs || (writes && is_rhai) {
         ctx.dirty.store(true, Ordering::SeqCst);
     }
 }
@@ -1507,15 +1507,18 @@ mod tests {
         unattended: bool,
     ) -> Arc<AgentToolState> {
         let hub = InteractionHub::new();
+        // `install_tool` writes into the scan dir rather than the real
+        // `~/.leviath/tools`, so a test install is what the next refresh finds.
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-            leviath_tools::ToolContext::new(workdir),
+            leviath_tools::ToolContext::new(workdir).with_tools_dir(Some(scan_dir.clone())),
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let mut allow = HashMap::new();
-        // Both write tools default to Ask; allow them so tests don't block on an
-        // approval prompt no one answers.
+        // The write tools and the installer default to Ask; allow them so tests
+        // don't block on an approval prompt no one answers.
         allow.insert("write_file".to_string(), ToolPolicy::Allow);
         allow.insert("edit_file".to_string(), ToolPolicy::Allow);
+        allow.insert("install_tool".to_string(), ToolPolicy::Allow);
         Arc::new(AgentToolState {
             writes: Arc::new(unlimited_writes()),
             builtins,
@@ -1709,9 +1712,35 @@ mod tests {
             workdir.path().to_path_buf(),
             tools.path().to_path_buf(),
             vec![],
-            vec![vec![]],
+            vec![vec!["shout".to_string()]],
         );
         let dirty = state.dynamic.as_ref().unwrap().dirty.clone();
+        // An install always flags a re-scan: it lands in the global tools
+        // directory, which is a scan dir, and carries no `path` argument.
+        dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c0",
+                "install_tool",
+                serde_json::json!({
+                    "name": "shout",
+                    "source": "// @tool shout\n// @description Shout text\n// @param text string required \"input\"\nparams.text.to_upper()\n",
+                }),
+            )],
+            noop_progress(),
+        )
+        .await;
+        assert!(dirty.load(Ordering::SeqCst));
+        assert!(tools.path().join("shout.rhai").exists());
+        // The refresh that follows the flag finds and advertises the new tool.
+        let svc = CliToolService::new();
+        let e = Entity::from_raw_u32(7).expect("a small literal index is always a valid entity id");
+        svc.register(e, state.clone());
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["shout"]);
+        assert!(state.script_tool_names.lock().unwrap().contains("shout"));
+        dirty.store(false, Ordering::SeqCst);
         // Writing a non-.rhai file does not flag a re-scan.
         dispatch_tools(
             state.clone(),

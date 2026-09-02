@@ -135,7 +135,9 @@ impl Default for PlatformCapabilities {
 pub fn tool_required_capabilities(canonical_name: &str) -> &'static [ToolCapability] {
     match canonical_name {
         "shell" => &[ToolCapability::ProcessSpawn],
-        "read_file" | "read_files" | "write_file" | "edit_file" | "list_dir" => {
+        // `install_tool` writes the global tools directory: a filesystem write
+        // like `write_file`, outside the workdir but on the same disk.
+        "read_file" | "read_files" | "write_file" | "edit_file" | "list_dir" | "install_tool" => {
             &[ToolCapability::FileSystem]
         }
         _ => &[],

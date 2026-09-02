@@ -24,7 +24,10 @@ mod platform;
 pub mod validate;
 pub use context::*;
 pub use defs::{SUBAGENT_TOOLS, is_subagent_tool, submit_output_description};
-pub use install::{InstalledTool, install_script_tool, install_script_tool_with};
+pub use install::{
+    InstallProbes, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
+    install_script_tool_with,
+};
 pub use platform::*;
 pub use validate::*;
 
@@ -88,6 +91,16 @@ impl BuiltinTools {
     /// namespace sandbox) instead of the host.
     pub fn with_shell_executor(mut self, executor: Arc<dyn ShellExecutor>) -> Self {
         self.shell_executor = Some(executor);
+        self
+    }
+
+    /// The names `install_tool` refuses beyond the built-ins it can see for
+    /// itself, set once the built-ins exist. The spawn computes the reserved
+    /// set from [`names`](Self::names), which needs the constructed tools, so
+    /// this is [`ToolContext::with_reserved_names`] reachable after
+    /// construction.
+    pub fn with_reserved_names(mut self, names: Vec<String>) -> Self {
+        self.ctx.reserved_names = names;
         self
     }
 
@@ -185,7 +198,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 27);
+        assert_eq!(defs.len(), 28);
     }
 
     #[test]
@@ -209,6 +222,37 @@ mod tests {
         assert!(names.contains(&"context_read".to_string()));
         assert!(names.contains(&"context_delete".to_string()));
         assert!(names.contains(&"context_list".to_string()));
+        assert!(names.contains(&"install_tool".to_string()));
+    }
+
+    /// The def a model reads before deciding to persist a learning: `name`
+    /// and `source` are required, `overwrite` is not, and the description
+    /// says what gets refused so the model can write a script that is not.
+    #[test]
+    fn tool_defs_install_tool_requires_name_and_source() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let def = tools
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == "install_tool")
+            .expect("install_tool tool def must exist");
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "name"));
+        assert!(required.iter().any(|v| v == "source"));
+        assert!(!required.iter().any(|v| v == "overwrite"));
+        assert_eq!(def.parameters["properties"]["overwrite"]["type"], "boolean");
+        assert!(
+            def.description.contains("@description"),
+            "{}",
+            def.description
+        );
+        assert!(
+            def.description.contains("never for judgement"),
+            "{}",
+            def.description
+        );
+        assert!(tools.names().contains(&"install_tool".to_string()));
     }
 
     #[test]
@@ -452,7 +496,7 @@ mod tests {
     fn names_returns_every_tool_and_alias() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 28);
+        assert_eq!(tools.names().len(), 29);
     }
 
     /// The taint gate's fallback arm is the third-party default: outbound,
@@ -2200,6 +2244,12 @@ mod tests {
             tool_required_capabilities("read_file"),
             &[ToolCapability::FileSystem]
         );
+        // Writing the global tools directory is a filesystem write like any
+        // other, so the tool disappears with the rest of them.
+        assert_eq!(
+            tool_required_capabilities("install_tool"),
+            &[ToolCapability::FileSystem]
+        );
         // Runtime-handled / platform-agnostic tools require nothing.
         assert!(tool_required_capabilities("context_write").is_empty());
         assert!(tool_required_capabilities("present_for_review").is_empty());
@@ -2212,11 +2262,39 @@ mod tests {
         let tools = make_mobile_tools(&dir);
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
-        // The rest remain.
-        assert_eq!(tools.tool_defs().len(), 26);
+        // The rest remain, `install_tool` included: mobile has a filesystem.
+        assert_eq!(tools.tool_defs().len(), 27);
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"install_tool".to_string()));
         assert!(names.contains(&"context_write".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));
+    }
+
+    /// A platform without a filesystem loses `install_tool` with the file
+    /// tools: it is neither advertised nor recognized, and a direct dispatch
+    /// is refused before any argument is read.
+    #[tokio::test]
+    async fn a_platform_without_a_filesystem_has_no_install_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = BuiltinTools::with_capabilities(
+            ToolContext::new(dir.path().to_path_buf()),
+            PlatformCapabilities::from_capabilities([
+                ToolCapability::ProcessSpawn,
+                ToolCapability::Network,
+            ]),
+        );
+        let defs: Vec<String> = tools.tool_defs().into_iter().map(|t| t.name).collect();
+        assert!(!defs.contains(&"install_tool".to_string()));
+        assert!(!defs.contains(&"write_file".to_string()));
+        assert!(defs.contains(&"shell".to_string()));
+        assert!(!tools.names().contains(&"install_tool".to_string()));
+        let out = tools
+            .execute(
+                "install_tool",
+                json!({"name": "x", "source": "// @tool x\n1"}),
+            )
+            .await;
+        assert!(out.contains("not available on this platform"), "{out}");
     }
 
     #[test]
