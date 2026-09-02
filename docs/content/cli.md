@@ -746,7 +746,8 @@ nothing about what gets written.
 
 The Defaults screen leads with **Provider priority** - the order a bare model name prefers, whose
 head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
-move the one under the cursor with `Shift+↑`/`Shift+↓`. It writes the same
+move the one under the cursor with `Shift+↑`/`Shift+↓`, or with `K`/`J` on a terminal that keeps
+Shift+arrows for itself (Apple Terminal does). It writes the same
 [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order` and
 `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare model
 names onto your plan.

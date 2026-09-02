@@ -156,7 +156,7 @@ rather than back into the form.
 |---|---|
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
 | `Tab` / `Enter` | Move from the agent list to the task |
-| `Ctrl+Enter` (in the task) | Start the run. Only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and the Start button is the way to submit |
+| `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` also starts it, but only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and `Ctrl+S` or the Start button is the way to submit |
 | `Enter` / `Alt+Enter` | Newline |
 | `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |
 | `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed |
@@ -213,16 +213,16 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `Ctrl-C` | Quit. `q` is unbound here, so a stray keystroke cannot close the dashboard mid-run |
 
 While you are typing a response, `Enter` inserts a newline, the way it does in the new-run task
-box, and `Ctrl+Enter` sends. Only a terminal with the kitty keyboard protocol can tell
-`Ctrl+Enter` from `Enter`; elsewhere `Tab` moves to the Send button under the box, where `Enter`
-or `Space` sends, as does a click on it. `PgUp` / `PgDn` scroll the document above the prompt, and
+box, and `Ctrl+S` sends. `Ctrl+Enter` sends too on a terminal with the kitty keyboard protocol,
+which is what it takes to tell `Ctrl+Enter` from `Enter`; `Tab` moves to the Send button under
+the box, where `Enter` or `Space` sends, as does a click on it. `PgUp` / `PgDn` scroll the document above the prompt, and
 `Esc` cancels. `/quit` or `/exit` on its own line ends the conversation when sent. An in-place
 document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
 rename, a filter, a server URL) still submit on `Enter`.
 
 A tool approval is a list of choices: `↑` / `↓` pick one and `Enter` answers. Its last row, "Deny
 with feedback", opens the same response box instead of answering, for the line or two that tells
-the run what to do instead of the call. `Ctrl+Enter` or the Send button sends it with the deny, and
+the run what to do instead of the call. `Ctrl+S` or the Send button sends it with the deny, and
 `Esc` goes back to the choices with nothing sent. The text reaches the model inside the refused
 call's tool result; see [Human-in-the-loop](/docs/interaction#tool-approval).
 
