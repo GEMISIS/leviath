@@ -2717,6 +2717,7 @@ dependencies = [
  "jsonschema",
  "leviath-core",
  "leviath-providers",
+ "leviath-scripting",
  "leviath-sys",
  "quick-xml",
  "serde_json",
