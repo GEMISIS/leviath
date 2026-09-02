@@ -1477,6 +1477,9 @@ mod tests {
         );
         crate::lint::LintEnv {
             known_tools,
+            // Empty on purpose: no bundled blueprint grants a tool group, so
+            // the group-aware checks have nothing to classify here.
+            tool_sources: std::collections::HashMap::new(),
             known_models: crate::commands::models::closed_catalog_models(),
             available_providers: None,
             read_paths: None,

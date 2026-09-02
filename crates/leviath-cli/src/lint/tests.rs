@@ -632,6 +632,335 @@ read_file = "allow"
     assert!(lint(&toml, &LintEnv::default()).is_empty());
 }
 
+// ─── Tool groups ──────────────────────────────────────────────────────────────
+
+/// An install that knows one tool of each kind, so a group-aware check can
+/// say which group reaches what.
+fn grouped_env() -> LintEnv {
+    use leviath_core::blueprint::ToolGroup;
+    let sources = [
+        ("read_file", ToolGroup::Builtin),
+        ("shell", ToolGroup::Builtin),
+        ("bash", ToolGroup::Builtin),
+        ("write_file", ToolGroup::Builtin),
+        ("ask_user_text", ToolGroup::Builtin),
+        ("ask_user_choice", ToolGroup::Builtin),
+        ("ask_user_confirm", ToolGroup::Builtin),
+        ("present_for_review", ToolGroup::Builtin),
+        ("edit_document", ToolGroup::Builtin),
+        ("spawn_agent", ToolGroup::Subagent),
+        ("summarize", ToolGroup::Scripts),
+    ];
+    LintEnv {
+        known_tools: known_tools(&sources.map(|(n, _)| n)),
+        tool_sources: sources
+            .map(|(n, g)| (n.to_string(), g))
+            .into_iter()
+            .collect(),
+        ..LintEnv::default()
+    }
+}
+
+/// A group token is a grant, not a tool name: `@scripts` is never "not a
+/// built-in", and everything it reaches is left to the runtime to enumerate.
+#[test]
+fn a_group_token_is_not_an_unknown_tool() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@scripts", "@mcp", "read_file"]
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// `Stage::validate` cannot say whether `@scripts` reaches `summarize`; the
+/// lint can, given an inventory, and a required tool nothing grants is an
+/// error either way.
+#[test]
+fn a_required_tool_no_group_reaches_is_an_error() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@scripts"]
+required_tools = ["summarize", "read_file", "github__create_issue"]
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    let missing = with_code(&findings, "required-tool-not-granted");
+    let named: Vec<&str> = missing
+        .iter()
+        .map(|f| {
+            f.message
+                .split('\'')
+                .nth(1)
+                .expect("the message quotes the tool")
+        })
+        .collect();
+    assert_eq!(named, ["read_file", "github__create_issue"], "{findings:?}");
+    assert!(missing.iter().all(|f| f.is_error()));
+    assert!(missing[0].message.contains("@scripts"), "{findings:?}");
+
+    // With no inventory the question cannot be answered, so it is not asked.
+    assert!(
+        with_code(
+            &lint(&toml, &LintEnv::default()),
+            "required-tool-not-granted"
+        )
+        .is_empty()
+    );
+}
+
+/// A required tool reached by name (either spelling) or by its group is fine,
+/// and `@all` reaches everything, MCP names included.
+#[test]
+fn a_required_tool_a_group_reaches_is_fine() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@builtin", "@scripts", "bash"]
+required_tools = ["summarize", "read_file", "shell"]
+allow_blocking_tools = true
+
+[stages.main.tool_permissions]
+shell = "allow"
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@all"]
+required_tools = ["spawn_agent", "github__create_issue"]
+allow_blocking_tools = true
+
+[stages.main.tool_permissions]
+shell = "allow"
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// A permission is orphaned only when nothing grants the tool: a group that
+/// reaches it counts, and with no inventory to classify by the check stays
+/// quiet, as it does under a connector.
+#[test]
+fn a_permission_a_group_reaches_is_not_orphaned() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@scripts", "@mcp", "read_file"]
+
+[stages.main.tool_permissions]
+summarize = "allow"
+github__create_issue = "ask"
+write_file = "allow"
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert_eq!(codes(&findings), ["orphan-stage-permission"]);
+    assert!(findings[0].message.contains("write_file"), "{findings:?}");
+
+    assert!(lint(&toml, &LintEnv::default()).is_empty());
+}
+
+/// `@builtin` in an autonomous stage carries every blocking tool, reported
+/// once as the group; keeping one in `required_tools` takes it off the list,
+/// and `allow_blocking_tools` silences it.
+#[test]
+fn a_builtin_group_in_an_autonomous_stage_is_warned_about_once() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@builtin"]
+required_tools = ["ask_user_text"]
+
+[stages.main.tool_permissions]
+shell = "allow"
+"#,
+    );
+    // The required ask tool also earns its own `holds-under-yolo` note, which
+    // is not what this test is about.
+    let blocking = |toml: &str| -> Vec<LintFinding> {
+        lint(toml, &grouped_env())
+            .into_iter()
+            .filter(|f| f.code != "holds-under-yolo")
+            .collect()
+    };
+    let findings = blocking(&toml);
+    assert_eq!(codes(&findings), ["blocking-tool-in-autonomous-stage"]);
+    assert_eq!(findings[0].severity, LintSeverity::Warning);
+    assert!(findings[0].message.contains("'@builtin'"), "{findings:?}");
+    assert!(
+        findings[0].message.contains("present_for_review"),
+        "{findings:?}"
+    );
+    assert!(
+        !findings[0].message.contains("ask_user_text"),
+        "{findings:?}"
+    );
+
+    let silenced = blocking(&toml.replace(
+        "required_tools",
+        "allow_blocking_tools = true\nrequired_tools",
+    ));
+    assert!(silenced.is_empty(), "{:?}", codes(&silenced));
+
+    // Naming every blocking tool in required_tools leaves nothing to say.
+    let all_required = toml.replace(
+        r#"required_tools = ["ask_user_text"]"#,
+        r#"required_tools = ["ask_user_text", "ask_user_choice", "ask_user_confirm", "present_for_review", "edit_document"]"#,
+    );
+    let findings = blocking(&all_required);
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// The shell arrives with `@builtin` as surely as by name, and its default
+/// policy is still `ask`. Said once, through the group; not at all when the
+/// shell is also named, since that finding already covers it.
+#[test]
+fn a_builtin_group_with_no_shell_policy_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@all"]
+allow_blocking_tools = true
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert_eq!(codes(&findings), ["implicit-shell-policy"]);
+    assert!(
+        findings[0].message.contains("'shell' through '@all'"),
+        "{findings:?}"
+    );
+    assert!(
+        findings[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("set shell =")),
+        "{findings:?}"
+    );
+
+    let named = lint(
+        &toml.replace(r#"["@all"]"#, r#"["@all", "bash"]"#),
+        &grouped_env(),
+    );
+    let shells = with_code(&named, "implicit-shell-policy");
+    assert_eq!(shells.len(), 1, "{named:?}");
+    assert!(shells[0].message.contains("'bash'"), "{named:?}");
+}
+
+/// An output stage reaching the built-ins through a group can modify the
+/// workspace, reported once as the group rather than once per member.
+#[test]
+fn an_output_stage_granting_the_builtin_group_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@builtin", "submit_output"]
+require_output = true
+
+[stages.main.tool_permissions]
+shell = "allow"
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    let modify = with_code(&findings, "output-stage-can-modify");
+    assert_eq!(modify.len(), 1, "{findings:?}");
+    assert!(modify[0].message.contains("'@builtin'"), "{findings:?}");
+}
+
+/// Routing tool output into a region with `@builtin` granted is fine: the
+/// group carries `context_read` along with `read_file`.
+#[test]
+fn a_builtin_group_satisfies_the_region_read_check() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@builtin"]
+allow_blocking_tools = true
+
+[stages.main.tool_routing]
+default_region = "notes"
+
+[stages.main.tool_permissions]
+shell = "allow"
+
+[stages.main.context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+notes = { kind = "temporary", max_tokens = 1000 }
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert!(
+        with_code(&findings, "routing-without-region-read").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// A required region is enforceable through `@builtin`: the group carries the
+/// context-writing tools.
+#[test]
+fn a_builtin_group_makes_a_required_region_enforceable() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["@builtin"]
+allow_blocking_tools = true
+
+[stages.main.tool_permissions]
+shell = "allow"
+
+[stages.main.context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+findings = { kind = "pinned", max_tokens = 1000, required = true }
+"#,
+    );
+    let findings = lint(&toml, &grouped_env());
+    assert!(
+        with_code(&findings, "required-region-unenforceable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
 // ─── Blocking tools ───────────────────────────────────────────────────────────
 
 #[test]

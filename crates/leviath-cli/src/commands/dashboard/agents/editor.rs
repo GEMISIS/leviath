@@ -120,8 +120,9 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) message: Option<String>,
     /// `provider/model` ids the model chooser offers.
     pub(in crate::commands::dashboard) models: Vec<String>,
-    /// Tool names the tools chooser offers.
-    pub(in crate::commands::dashboard) tools: Vec<String>,
+    /// What the tools chooser offers: the five group tokens first, then
+    /// every tool by name.
+    pub(in crate::commands::dashboard) tools: Vec<ToolChoice>,
     /// Where the last frame put the inspector's rows: the screen row of
     /// each field, and the column span of each stage tab, so a click lands
     /// on the right one.
@@ -180,6 +181,55 @@ fn chain_graph(names: &[String]) -> Arc<StageGraph> {
     let bp = leviath_core::manifest::parse_manifest(&text)
         .expect("stage names passed the manifest's charset");
     Arc::new(StageGraph::from_blueprint(&bp))
+}
+
+/// One row of the tools chooser: a name the stage may write, and what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands::dashboard) struct ToolChoice {
+    /// The `available_tools` entry: a tool name or a group token.
+    pub(in crate::commands::dashboard) name: String,
+    /// Where it comes from, or what the group reaches, in a few words.
+    pub(in crate::commands::dashboard) detail: String,
+}
+
+/// Everything the tools chooser offers for the agent at `dir`: the group
+/// tokens first, since "all the built-ins" is the usual answer, then the
+/// tools this install has (built in, and scripts under the agent and the
+/// global directory), then whatever the manifest names that was not found.
+pub(super) fn tool_choices(
+    dir: &std::path::Path,
+    name: &str,
+    doc: &ManifestDoc,
+) -> Vec<ToolChoice> {
+    use leviath_core::blueprint::{ToolGroup, is_tool_group_token};
+
+    let mut choices: Vec<ToolChoice> = ToolGroup::ALL
+        .iter()
+        .map(|g| ToolChoice {
+            name: g.token().to_string(),
+            detail: g.describe().to_string(),
+        })
+        .collect();
+    let inventory = crate::tool_inventory::ToolInventory::discover(Some(dir), Some(name));
+    let mut named: Vec<ToolChoice> = inventory
+        .tools
+        .iter()
+        .map(|t| ToolChoice {
+            name: t.name.clone(),
+            detail: t.source.describe().to_string(),
+        })
+        .collect();
+    for tool in doc.known_tools() {
+        if !is_tool_group_token(&tool) && !named.iter().any(|t| t.name == tool) {
+            named.push(ToolChoice {
+                name: tool,
+                detail: "named by this agent, not found on this install".to_string(),
+            });
+        }
+    }
+    named.sort_by(|a, b| a.name.cmp(&b.name));
+    choices.extend(named);
+    choices
 }
 
 impl Editor {
@@ -394,16 +444,7 @@ impl Dashboard {
         );
         models.sort();
         models.dedup();
-        // The tools this install has: built in, plus scripts under the
-        // agent's directory and the ones the manifest already names.
-        let mut tools: Vec<String> =
-            crate::tool_inventory::ToolInventory::discover(Some(&dir), Some(&name))
-                .names()
-                .into_iter()
-                .collect();
-        tools.extend(doc.known_tools());
-        tools.sort();
-        tools.dedup();
+        let tools = tool_choices(&dir, &name, &doc);
         let mut editor = Editor {
             name,
             is_new,

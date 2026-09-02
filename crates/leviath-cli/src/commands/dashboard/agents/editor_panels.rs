@@ -551,19 +551,23 @@ impl Dashboard {
         let rows: Vec<PickerOption> = all
             .iter()
             .map(|t| PickerOption {
-                value: t.clone(),
-                detail: String::new(),
+                value: t.name.clone(),
+                detail: t.detail.clone(),
             })
             .collect();
         let chosen: Vec<usize> = all
             .iter()
             .enumerate()
-            .filter(|(_, t)| have.contains(t))
+            .filter(|(_, t)| have.contains(&t.name))
             .map(|(i, _)| i)
             .collect();
         let mut picker = Picker::new(
             format!("Tools {stage} may use"),
-            vec!["Every tool this install has: built in, and scripts under the agent.".to_string()],
+            vec![
+                "A group such as @builtin grants every tool of that kind, installed now or \
+                 later; the rest are the tools this install has, one by one."
+                    .to_string(),
+            ],
             rows,
             0,
         );
@@ -623,7 +627,10 @@ impl Dashboard {
     pub(super) fn editor_settle_tools(&mut self, chosen: &[usize]) {
         let stage = self.editor().panel_stage().expect("a stage field");
         let all = self.editor().tools.clone();
-        let tools: Vec<String> = chosen.iter().filter_map(|i| all.get(*i).cloned()).collect();
+        let tools: Vec<String> = chosen
+            .iter()
+            .filter_map(|i| all.get(*i).map(|t| t.name.clone()))
+            .collect();
         self.editor_mutate(|d| d.set_tools(&stage, &tools));
     }
 

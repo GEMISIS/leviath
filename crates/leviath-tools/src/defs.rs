@@ -19,6 +19,51 @@ pub fn is_subagent_tool(name: &str) -> bool {
     SUBAGENT_TOOLS.contains(&name)
 }
 
+/// Every canonical built-in tool name, before platform gating and without
+/// aliases. [`BuiltinTools::names`] is this list minus what the host cannot
+/// provide, plus the aliases; this is the one to ask "is this name a
+/// built-in at all", which is what a group grant (`@builtin`) needs to sort
+/// a run's tool defs by source.
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "read_files",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "shell",
+    "present_for_review",
+    "ask_user_text",
+    "ask_user_choice",
+    "ask_user_confirm",
+    "edit_document",
+    "context_write",
+    "context_append",
+    "context_read",
+    "context_delete",
+    "context_list",
+    "todo_add",
+    "todo_done",
+    "todo_note",
+    "current_time",
+    "system_info",
+    "locale_info",
+    "environment_info",
+    "which_command",
+    "runtime_info",
+    "install_tool",
+    crate::SUBMIT_OUTPUT_TOOL,
+    crate::FAN_OUT_TOOL,
+];
+
+/// The built-ins a stage mode grants rather than a manifest: `submit_output`
+/// and `fan_out` end or fork the run, so no group hands them out.
+pub const STAGE_CONTROL_TOOLS: &[&str] = &[crate::SUBMIT_OUTPUT_TOOL, crate::FAN_OUT_TOOL];
+
+/// Whether `name` is a canonical built-in (not an alias, not a sub-agent tool).
+pub fn is_builtin_tool(name: &str) -> bool {
+    BUILTIN_TOOL_NAMES.contains(&name)
+}
+
 /// The `shell` tool's description, naming the shell this host actually resolved
 /// instead of listing every platform's and leaving the model to guess which one
 /// it got. Pure over the shell so both wordings are testable on any platform.
@@ -709,43 +754,14 @@ impl BuiltinTools {
     /// under an alias name as a built-in; the canonical names are what get
     /// advertised to the model.
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = [
-            "read_file",
-            "read_files",
-            "write_file",
-            "edit_file",
-            "list_dir",
-            "shell",
-            "present_for_review",
-            "ask_user_text",
-            "ask_user_choice",
-            "ask_user_confirm",
-            "edit_document",
-            "context_write",
-            "context_append",
-            "context_read",
-            "context_delete",
-            "context_list",
-            "todo_add",
-            "todo_done",
-            "todo_note",
-            "current_time",
-            "system_info",
-            "locale_info",
-            "environment_info",
-            "which_command",
-            "runtime_info",
-            "install_tool",
-            crate::SUBMIT_OUTPUT_TOOL,
-            crate::FAN_OUT_TOOL,
-        ]
-        .iter()
-        // Drop any canonical built-in the current platform can't provide, so a
-        // filtered-out tool (e.g. `shell` without `ProcessSpawn`) isn't even
-        // recognized as a built-in on dispatch.
-        .filter(|n| self.available(n))
-        .map(|s| s.to_string())
-        .collect();
+        let mut names: Vec<String> = BUILTIN_TOOL_NAMES
+            .iter()
+            // Drop any canonical built-in the current platform can't provide, so a
+            // filtered-out tool (e.g. `shell` without `ProcessSpawn`) isn't even
+            // recognized as a built-in on dispatch.
+            .filter(|n| self.available(n))
+            .map(|s| s.to_string())
+            .collect();
         // Include an alias only when its canonical target survived filtering
         // (so `bash` disappears together with `shell`).
         names.extend(

@@ -156,11 +156,14 @@ through the same `tool_permissions`, the same taint gate, and the same approval 
 you named by hand.
 
 > [!NOTE]
-> There is no wildcard form of `available_tools`, and a connector grant is not sugar for one.
-> Names are server-qualified, so `github__*` would *usually* work - but not reliably enough to
-> build on: a server named `my.tools` sanitizes to `my_tools`, and a name collision appends `_2`,
-> so matching the string is a guess where the connector grant is a fact. `available_connectors`
-> asks Leviath which tools a server owns rather than inferring it from how they are spelled.
+> A connector grant is per server. To grant every connected server at once, put `@mcp` in
+> `available_tools` instead (see [tool groups](/docs/tools#tool-groups)); `@mcp` and
+> `available_connectors` compose, so `["@builtin", "@mcp"]` with no connector list is the
+> "all built-ins and every MCP tool" shape in one line. There is no pattern form such as
+> `github__*`: a server named `my.tools` sanitizes to `my_tools`, and a name collision appends
+> `_2`, so matching the string would be a guess where the connector grant is a fact.
+> `available_connectors` asks Leviath which tools a server owns rather than inferring it from how
+> they are spelled.
 
 ## OAuth, safely
 

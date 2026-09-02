@@ -23,7 +23,10 @@ mod install;
 mod platform;
 pub mod validate;
 pub use context::*;
-pub use defs::{SUBAGENT_TOOLS, is_subagent_tool, submit_output_description};
+pub use defs::{
+    BUILTIN_TOOL_NAMES, STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS, is_builtin_tool, is_subagent_tool,
+    submit_output_description,
+};
 pub use install::{
     InstallProbes, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
     install_script_tool_with,
@@ -189,6 +192,24 @@ mod tests {
             assert!(is_subagent_tool(name));
         }
         assert!(!is_subagent_tool("read_file"));
+    }
+
+    /// The static list is the catalog `tool_defs` ships, one name per def:
+    /// a built-in added to one and not the other would make `@builtin` miss it.
+    #[test]
+    fn builtin_name_list_matches_the_catalog() {
+        let tools = make_tools(&std::env::temp_dir());
+        let defs: Vec<String> = tools.tool_defs().into_iter().map(|d| d.name).collect();
+        for name in BUILTIN_TOOL_NAMES {
+            assert!(defs.contains(&name.to_string()), "{name} has no def");
+            assert!(is_builtin_tool(name));
+        }
+        assert_eq!(defs.len(), BUILTIN_TOOL_NAMES.len());
+        assert!(!is_builtin_tool("bash"), "an alias is not a canonical name");
+        assert!(!is_builtin_tool("spawn_agent"));
+        for name in STAGE_CONTROL_TOOLS {
+            assert!(is_builtin_tool(name));
+        }
     }
 
     // ── Tool definitions ──────────────────────────────────────────────────

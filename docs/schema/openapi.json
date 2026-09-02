@@ -2198,7 +2198,7 @@
           "scripts"
         ],
         "summary": "Tools an agent on this machine can call",
-        "description": "Built-ins, sub-agent tools, the named agent's own `tools/*.rhai` and the global ones, each with a `source`. `skipped` carries the `.rhai` files that were found and could not be offered, with the reason. MCP tools are not included; `/api/mcp/servers/{name}` answers for those.",
+        "description": "Built-ins, sub-agent tools, the named agent's own `tools/*.rhai` and the global ones, each with a `source`. `groups` lists the tokens `available_tools` accepts in place of names (`@all`, `@builtin`, `@subagent`, `@scripts`, `@mcp`), each with a one-line description, so a picker can offer a whole kind at once. `skipped` carries the `.rhai` files that were found and could not be offered, with the reason. MCP tools are not included; `/api/mcp/servers/{name}` answers for those.",
         "parameters": [
           {
             "name": "agent",

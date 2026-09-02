@@ -9924,6 +9924,12 @@ fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool(
         unmet_required_regions(&no_tool.0, &no_tool.0.stages[0], &window_with_plan(false))
             .is_empty()
     );
+    // A built-in group carries the writing tools without naming them.
+    let grouped = required_bp(&["@builtin"], None);
+    assert_eq!(
+        unmet_required_regions(&grouped.0, &grouped.0.stages[0], &window_with_plan(false)).len(),
+        1
+    );
     // A required region absent from the window entirely counts as unmet.
     let mut bare = ContextWindow::new(100_000);
     bare.add_region(Region::new(
@@ -10669,6 +10675,18 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     assert!(
         block_message(gate_blocks(
             Some(&custom),
+            &stage,
+            &progress_with(0, 0, 0),
+            &conv_window()
+        ))
+        .is_some()
+    );
+    // ...or the stage grants the built-ins as a group, which carries the
+    // modifying tools without naming them.
+    stage.available_tools = vec!["@builtin".to_string()];
+    assert!(
+        block_message(gate_blocks(
+            Some(&g),
             &stage,
             &progress_with(0, 0, 0),
             &conv_window()

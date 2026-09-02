@@ -11,6 +11,34 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Added
+
+- Tool groups in `available_tools`. An entry that starts with `@` grants a
+  whole kind of tool rather than one: `@builtin` (every compiled-in tool),
+  `@subagent`, `@scripts` (every Rhai tool, the agent's own and the global
+  ones), `@mcp` (every tool every connected server advertises) and `@all`.
+  Groups and names mix, so "every built-in plus these two scripts" is
+  `["@builtin", "summarize", "cite"]` and "everything" is `["@all"]`. A group
+  is resolved when the stage runs, so a script or MCP server added later is
+  offered without editing the manifest, and it grants visibility only: every
+  tool it reaches still goes through `tool_permissions`, the taint gate and
+  the approval prompts. `submit_output` and `fan_out` are never granted by a
+  group. `lev validate` refuses an entry that looks like a group and names
+  none, checks `required_tools` against what the groups reach on this
+  install (`required-tool-not-granted`), and reports an autonomous stage
+  granting `@builtin` once for the group rather than once per blocking tool.
+  The dashboard's tool chooser leads with the five groups and labels each
+  tool by where it comes from, and `GET /api/tools` carries the same
+  `groups` list for other clients.
+
+### Fixed
+
+- The `install_tool` summary and the Rhai tools page pointed at an
+  `available_global_tools` stage key that does not exist. Both now say
+  `@scripts`, which does what that key claimed to.
+
 ## 0.5.8 - 2026-09-01
 
 ### Changed

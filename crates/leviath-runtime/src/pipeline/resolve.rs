@@ -8,7 +8,7 @@
 //! arrives as a plain [`ModelDefaults`] value.
 
 use leviath_core::Blueprint;
-use leviath_core::blueprint::{ModelConfig, ModelEntry};
+use leviath_core::blueprint::{ModelConfig, ModelEntry, ToolGroup};
 
 use super::ResolvedStage;
 use crate::providers::ProviderRegistry;
@@ -439,12 +439,32 @@ pub fn bare_default_model<'a>(provider: &str, model: &'a str) -> &'a str {
 ///
 /// Built where the servers are registered, because that is the only place the
 /// mapping exists. A [`Tool`] carries a name, a description and a schema, and
-/// the advertised name does not reliably contain the server: `leviath-mcp`
-/// prefers the bare tool name and only prefixes with the server on a collision,
-/// so `github`'s `create_issue` is usually advertised as `create_issue`. There
-/// is no string pattern that answers "does this tool belong to github", which
-/// is why a grant names the server and this table answers for it.
+/// although `leviath-mcp` now always advertises `<server>__<tool>`, the
+/// server half of that name is a sanitized, collision-suffixed spelling
+/// (`my.tools` becomes `my_tools`, a clash appends `_2`), so there is no
+/// string pattern that reliably answers "does this tool belong to github".
+/// A grant names the server and this table answers for it. It is also how
+/// the filter tells an MCP def from a script def, which nothing on the
+/// [`Tool`] itself records.
 pub type ToolOwners = std::collections::HashMap<String, String>;
+
+/// Where a run-time tool def came from, which is what a group grant selects on.
+///
+/// Decided by name, because a [`Tool`] carries no provenance: the built-in and
+/// sub-agent names are fixed lists, an MCP name is in `owners`, and script
+/// discovery drops any script whose name one of those already owns, so what
+/// is left can only be a script.
+pub fn tool_source(name: &str, owners: &ToolOwners) -> ToolGroup {
+    if leviath_tools::is_builtin_tool(name) {
+        ToolGroup::Builtin
+    } else if leviath_tools::is_subagent_tool(name) {
+        ToolGroup::Subagent
+    } else if owners.contains_key(name) {
+        ToolGroup::Mcp
+    } else {
+        ToolGroup::Scripts
+    }
+}
 
 /// Every tool a run could offer, and which MCP server each came from.
 ///
@@ -502,19 +522,31 @@ pub fn expand_connector_grants(
     granted
 }
 
-/// Filter `all` tool defs down to those a stage's `available_tools` names
-/// (alias-resolved). Shared by spawn-time stage resolution and the mid-run
+/// Filter the catalog's tool defs down to those a stage's `available_tools`
+/// grants: the names it lists (alias-resolved), plus every def whose source a
+/// listed group covers. Shared by spawn-time stage resolution and the mid-run
 /// tool-service refresh so both apply Layer-1 identically.
 ///
 /// Connector grants are expanded into `available` by
-/// [`expand_connector_grants`] before this sees it, so both callers apply one
-/// rule and this stays an exact-match filter.
-pub(crate) fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool> {
+/// [`expand_connector_grants`] before this sees it. Group grants are *not*
+/// pre-expanded, on purpose: a `dynamic_tools` agent that grants `@scripts`
+/// installs a tool mid-run and expects the next refresh to offer it, which
+/// only works if the group is still a group when the refresh filters.
+///
+/// The stage-control tools (`submit_output`, `fan_out`) are never granted by
+/// a group; the stage mode writes them into the list by name.
+pub(crate) fn filter_tools_by_available(
+    catalog: ToolCatalog<'_>,
+    available: &[String],
+) -> Vec<Tool> {
     if available.is_empty() {
         return Vec::new();
     }
+    let all = catalog.defs;
+    let groups = leviath_core::blueprint::groups_in(available);
     let wanted: std::collections::HashSet<&str> = available
         .iter()
+        .filter(|n| !leviath_core::blueprint::is_tool_group_token(n))
         .map(|n| leviath_tools::canonical_tool_name(n))
         .collect();
     // Names that match nothing get one more chance, as a server-qualified MCP
@@ -527,8 +559,19 @@ pub(crate) fn filter_tools_by_available(all: &[Tool], available: &[String]) -> V
         .filter(|n| !all.iter().any(|t| t.name == *n))
         .collect();
     let recovered = recover_unqualified(all, &unmatched);
+    let grouped = |name: &str| {
+        !groups.is_empty()
+            && !leviath_tools::STAGE_CONTROL_TOOLS.contains(&name)
+            && groups
+                .iter()
+                .any(|g| g.covers(tool_source(name, catalog.owners)))
+    };
     all.iter()
-        .filter(|t| wanted.contains(t.name.as_str()) || recovered.contains(t.name.as_str()))
+        .filter(|t| {
+            wanted.contains(t.name.as_str())
+                || recovered.contains(t.name.as_str())
+                || grouped(&t.name)
+        })
         .cloned()
         .collect()
 }
@@ -589,12 +632,12 @@ fn recover_unqualified<'a>(
 /// that arrives anyway (a model repeating itself from context) meets the ordinary
 /// unoffered-tool refusal.
 pub fn filter_tools_for_stage(
-    all: &[Tool],
+    catalog: ToolCatalog<'_>,
     available: &[String],
     required: &[String],
     unattended: bool,
 ) -> Vec<Tool> {
-    let mut tools = filter_tools_by_available(all, available);
+    let mut tools = filter_tools_by_available(catalog, available);
     if unattended {
         tools.retain(|t| {
             !crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS.contains(&t.name.as_str())
@@ -745,16 +788,17 @@ pub fn resolve_stages(
                 });
             }
             // Empty `available_tools` exposes no tools; otherwise filter the full
-            // set by name (alias-resolved). A name matching nothing (a typo, or an
-            // MCP tool whose server isn't installed) is simply omitted. An
-            // unattended run also loses the tools that block on a person.
+            // set by name (alias-resolved) and by group. A name matching nothing
+            // (a typo, or an MCP tool whose server isn't installed) is simply
+            // omitted. An unattended run also loses the tools that block on a
+            // person.
             let granted = expand_connector_grants(
                 &stage.available_tools,
                 &stage.available_connectors,
                 catalog.owners,
             );
             let mut tools =
-                filter_tools_for_stage(catalog.defs, &granted, &stage.required_tools, unattended);
+                filter_tools_for_stage(catalog, &granted, &stage.required_tools, unattended);
             let output = leviath_core::resolve_output_spec(
                 blueprint.output.as_ref(),
                 stage.output.as_ref(),
@@ -1560,7 +1604,7 @@ mod tests {
             "ask_user_text".to_string(),
             "ask_user_choice".to_string(),
         ];
-        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &[], false);
+        let tools = filter_tools_for_stage(catalog(&ask_and_read_defs()), &available, &[], false);
         assert_eq!(
             names(&tools),
             vec!["read_file", "ask_user_text", "ask_user_choice"]
@@ -1918,7 +1962,7 @@ mod tests {
             "ask_user_text".to_string(),
             "ask_user_choice".to_string(),
         ];
-        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &[], true);
+        let tools = filter_tools_for_stage(catalog(&ask_and_read_defs()), &available, &[], true);
         assert_eq!(names(&tools), vec!["read_file"]);
     }
 
@@ -1932,7 +1976,8 @@ mod tests {
             "ask_user_choice".to_string(),
         ];
         let required = vec!["ask_user_text".to_string()];
-        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &required, true);
+        let tools =
+            filter_tools_for_stage(catalog(&ask_and_read_defs()), &available, &required, true);
         assert_eq!(names(&tools), vec!["read_file", "ask_user_text"]);
     }
 
@@ -1943,7 +1988,8 @@ mod tests {
         // this is the belt to that pair of braces.)
         let available = vec!["read_file".to_string()];
         let required = vec!["ask_user_text".to_string()];
-        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &required, true);
+        let tools =
+            filter_tools_for_stage(catalog(&ask_and_read_defs()), &available, &required, true);
         assert_eq!(names(&tools), vec!["read_file"]);
     }
 
@@ -1992,7 +2038,7 @@ mod tests {
             parameters: serde_json::Value::Null,
         }];
         let available = vec!["bash".to_string()];
-        let tools = filter_tools_for_stage(&defs, &available, &[], true);
+        let tools = filter_tools_for_stage(catalog(&defs), &available, &[], true);
         assert_eq!(names(&tools), vec!["shell"]);
     }
 
@@ -2415,7 +2461,7 @@ mod tests {
     #[test]
     fn a_grant_naming_an_mcp_tool_without_its_server_still_resolves() {
         let defs = defs_named(&["github__create_issue", "read_file"]);
-        let tools = filter_tools_by_available(&defs, &["create_issue".to_string()]);
+        let tools = filter_tools_by_available(catalog(&defs), &["create_issue".to_string()]);
         assert_eq!(offered(&tools), vec!["github__create_issue"]);
     }
 
@@ -2426,7 +2472,7 @@ mod tests {
     #[test]
     fn an_ambiguous_unqualified_grant_resolves_to_nothing() {
         let defs = defs_named(&["github__create_issue", "gitlab__create_issue"]);
-        let tools = filter_tools_by_available(&defs, &["create_issue".to_string()]);
+        let tools = filter_tools_by_available(catalog(&defs), &["create_issue".to_string()]);
         assert_eq!(offered(&tools), Vec::<&str>::new());
     }
 
@@ -2437,7 +2483,7 @@ mod tests {
     #[test]
     fn a_builtin_is_never_captured_by_a_server_offering_the_same_name() {
         let defs = defs_named(&["read_file", "scratch__read_file"]);
-        let tools = filter_tools_by_available(&defs, &["read_file".to_string()]);
+        let tools = filter_tools_by_available(catalog(&defs), &["read_file".to_string()]);
         assert_eq!(
             offered(&tools),
             vec!["read_file"],
@@ -2451,7 +2497,7 @@ mod tests {
     #[test]
     fn an_already_qualified_grant_is_untouched() {
         let defs = defs_named(&["github__search", "other__github__search"]);
-        let tools = filter_tools_by_available(&defs, &["github__search".to_string()]);
+        let tools = filter_tools_by_available(catalog(&defs), &["github__search".to_string()]);
         assert_eq!(offered(&tools), vec!["github__search"]);
     }
 
@@ -2460,8 +2506,148 @@ mod tests {
     #[test]
     fn a_name_matching_nothing_is_still_omitted() {
         let defs = defs_named(&["read_file"]);
-        let tools = filter_tools_by_available(&defs, &["nonsense".to_string()]);
+        let tools = filter_tools_by_available(catalog(&defs), &["nonsense".to_string()]);
         assert!(offered(&tools).is_empty());
+    }
+
+    // ── group grants ────────────────────────────────────────────────────────
+
+    /// One of everything a run can carry: a built-in, a stage-control
+    /// built-in, a sub-agent tool, an MCP tool and a script.
+    fn mixed_defs() -> Vec<Tool> {
+        defs_named(&[
+            "read_file",
+            "shell",
+            leviath_tools::SUBMIT_OUTPUT_TOOL,
+            leviath_tools::FAN_OUT_TOOL,
+            "spawn_agent",
+            "github__create_issue",
+            "summarize",
+        ])
+    }
+
+    fn mixed_owners() -> ToolOwners {
+        ToolOwners::from([("github__create_issue".to_string(), "github".to_string())])
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn tool_source_sorts_a_def_by_name() {
+        let owners = mixed_owners();
+        assert_eq!(tool_source("read_file", &owners), ToolGroup::Builtin);
+        assert_eq!(tool_source("spawn_agent", &owners), ToolGroup::Subagent);
+        assert_eq!(tool_source("github__create_issue", &owners), ToolGroup::Mcp);
+        assert_eq!(tool_source("summarize", &owners), ToolGroup::Scripts);
+    }
+
+    #[test]
+    fn each_group_grants_its_own_source_and_nothing_else() {
+        let defs = mixed_defs();
+        let owners = mixed_owners();
+        let cat = ToolCatalog {
+            defs: &defs,
+            owners: &owners,
+        };
+        let by = |grant: &str| offered_owned(filter_tools_by_available(cat, &strings(&[grant])));
+        assert_eq!(by("@builtin"), vec!["read_file", "shell"]);
+        assert_eq!(by("@subagent"), vec!["spawn_agent"]);
+        assert_eq!(by("@mcp"), vec!["github__create_issue"]);
+        assert_eq!(by("@scripts"), vec!["summarize"]);
+    }
+
+    /// `@all` is every source at once, and still not the stage-control pair:
+    /// the mode grants those, or the manifest names them.
+    #[test]
+    fn all_grants_every_source_but_never_the_stage_control_tools() {
+        let defs = mixed_defs();
+        let owners = mixed_owners();
+        let cat = ToolCatalog {
+            defs: &defs,
+            owners: &owners,
+        };
+        assert_eq!(
+            offered_owned(filter_tools_by_available(cat, &strings(&["@all"]))),
+            vec![
+                "read_file",
+                "shell",
+                "spawn_agent",
+                "github__create_issue",
+                "summarize"
+            ]
+        );
+        // Named alongside the group, the stage-control tool is granted as
+        // ever: the group's exclusion is not a veto.
+        assert_eq!(
+            offered_owned(filter_tools_by_available(
+                cat,
+                &strings(&["@all", leviath_tools::SUBMIT_OUTPUT_TOOL])
+            )),
+            vec![
+                "read_file",
+                "shell",
+                leviath_tools::SUBMIT_OUTPUT_TOOL,
+                "spawn_agent",
+                "github__create_issue",
+                "summarize"
+            ]
+        );
+    }
+
+    /// The shapes the feature exists for: groups and names mix, and a name
+    /// that a group already covers is granted once.
+    #[test]
+    fn groups_and_names_mix_without_duplicates() {
+        let defs = mixed_defs();
+        let owners = mixed_owners();
+        let cat = ToolCatalog {
+            defs: &defs,
+            owners: &owners,
+        };
+        assert_eq!(
+            offered_owned(filter_tools_by_available(
+                cat,
+                &strings(&["@builtin", "summarize", "github__create_issue"])
+            )),
+            vec!["read_file", "shell", "github__create_issue", "summarize"]
+        );
+        assert_eq!(
+            offered_owned(filter_tools_by_available(
+                cat,
+                &strings(&["@builtin", "@scripts", "github__create_issue", "read_file"])
+            )),
+            vec!["read_file", "shell", "github__create_issue", "summarize"]
+        );
+    }
+
+    /// A group token is not a name: it never reaches the unqualified-MCP
+    /// recovery, so `@mcp` cannot be "resolved" to a tool ending in `__@mcp`.
+    #[test]
+    fn a_group_token_is_never_treated_as_a_tool_name() {
+        let defs = defs_named(&["weird__@mcp", "read_file"]);
+        let tools = filter_tools_by_available(catalog(&defs), &strings(&["@mcp"]));
+        assert_eq!(offered(&tools), Vec::<&str>::new());
+    }
+
+    /// The unattended cut applies to a grouped tool exactly as to a named one.
+    #[test]
+    fn an_unattended_run_still_drops_grouped_blocking_tools() {
+        let defs = ask_and_read_defs();
+        let tools = filter_tools_for_stage(catalog(&defs), &strings(&["@builtin"]), &[], true);
+        assert_eq!(offered(&tools), vec!["read_file"]);
+        let tools = filter_tools_for_stage(
+            catalog(&defs),
+            &strings(&["@builtin"]),
+            &strings(&["ask_user_text"]),
+            true,
+        );
+        assert_eq!(offered(&tools), vec!["read_file", "ask_user_text"]);
+    }
+
+    fn offered_owned(tools: Vec<Tool>) -> Vec<String> {
+        tools.into_iter().map(|t| t.name).collect()
     }
 
     // ── explicit-route-only providers ───────────────────────────────────────

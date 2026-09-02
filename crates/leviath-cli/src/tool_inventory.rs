@@ -42,6 +42,28 @@ impl ToolSource {
             Self::Global => "global",
         }
     }
+
+    /// What to call this source in a chooser, in a few words.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::Builtin => "built in",
+            Self::Subagent => "sub-agent tool",
+            Self::Agent => "this agent's script",
+            Self::Global => "global script",
+        }
+    }
+
+    /// The `available_tools` group a tool from this source answers to. Both
+    /// script directories are one group: `@scripts` grants a script wherever
+    /// it lives, exactly as naming it would.
+    pub(crate) fn group(self) -> leviath_core::blueprint::ToolGroup {
+        use leviath_core::blueprint::ToolGroup;
+        match self {
+            Self::Builtin => ToolGroup::Builtin,
+            Self::Subagent => ToolGroup::Subagent,
+            Self::Agent | Self::Global => ToolGroup::Scripts,
+        }
+    }
 }
 
 /// One tool an agent may name in `available_tools`.
@@ -199,6 +221,15 @@ mod tests {
         assert_eq!(ToolSource::Subagent.as_str(), "subagent");
         assert_eq!(ToolSource::Agent.as_str(), "agent");
         assert_eq!(ToolSource::Global.as_str(), "global");
+        assert_eq!(ToolSource::Builtin.describe(), "built in");
+        assert_eq!(ToolSource::Subagent.describe(), "sub-agent tool");
+        assert_eq!(ToolSource::Agent.describe(), "this agent's script");
+        assert_eq!(ToolSource::Global.describe(), "global script");
+        use leviath_core::blueprint::ToolGroup;
+        assert_eq!(ToolSource::Builtin.group(), ToolGroup::Builtin);
+        assert_eq!(ToolSource::Subagent.group(), ToolGroup::Subagent);
+        assert_eq!(ToolSource::Agent.group(), ToolGroup::Scripts);
+        assert_eq!(ToolSource::Global.group(), ToolGroup::Scripts);
     }
 
     /// All four sources in one inventory, which is the whole point of the

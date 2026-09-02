@@ -432,7 +432,8 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 FieldId::ToolSet,
                 "Tools it may use",
                 FieldValue::Row(tools),
-                "Enter picks from every tool this install has; Space toggles one.",
+                "Enter picks from every tool this install has, or a group such as @builtin; \
+                 Space toggles one.",
             ));
             out
         }

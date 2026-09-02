@@ -148,11 +148,15 @@ without saying so. `lev validate` reports both. See
 
 ### Which tools a stage gets
 
-`available_tools` lists what the stage may call.
+`available_tools` lists what the stage may call, by name or by kind: `@builtin`, `@subagent`,
+`@scripts`, `@mcp` and `@all` each grant every tool of that kind, so `["@builtin", "@scripts"]`
+is every built-in and every Rhai tool with nothing to keep in step. See
+[tool groups](/docs/tools#tool-groups) for what each reaches and what none of them grant.
 
 `required_tools` is the exception to the unattended cut. A [`--yolo`](/docs/glossary) run drops
-every tool that waits on a person, and this is where a stage names the ones it wants kept anyway. Every entry must also
-appear in `available_tools`.
+every tool that waits on a person, and this is where a stage names the ones it wants kept anyway.
+Every entry must also appear in `available_tools`, by name or through a group that reaches it;
+`lev validate` checks the group case against the tools this install has.
 
 Naming a tool here also settles the `blocking-tool-in-autonomous-stage` lint for it, since listing
 it is how you say you meant it. See

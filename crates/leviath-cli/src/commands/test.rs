@@ -370,11 +370,19 @@ fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
         leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
     let mut defs = builtins.tool_defs();
     defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
-    stage
-        .available_tools
-        .iter()
-        .filter_map(|name| defs.iter().find(|d| d.name == *name).cloned())
-        .collect()
+    // The runtime's own filter, so an alias, a group grant and an unattended
+    // cut mean here what they mean in a run. No MCP servers and no scripts
+    // are behind it: a test drives one inference, not a tool.
+    let owners = leviath_runtime::pipeline::ToolOwners::new();
+    leviath_runtime::pipeline::filter_tools_for_stage(
+        leviath_runtime::pipeline::ToolCatalog {
+            defs: &defs,
+            owners: &owners,
+        },
+        &stage.available_tools,
+        &stage.required_tools,
+        false,
+    )
 }
 
 /// Run a single test case: build a one-off context window from the blueprint,
@@ -704,6 +712,26 @@ max_tokens = 500
         let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
         stage.available_tools = vec!["definitely_not_a_tool".to_string()];
         assert!(stage_tools(&stage).is_empty());
+    }
+
+    /// The same resolver a run uses, so an alias and a group grant advertise
+    /// here what they advertise there.
+    #[test]
+    fn an_alias_and_a_group_grant_resolve_as_in_a_run() {
+        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        stage.available_tools = vec!["bash".to_string()];
+        let names: Vec<String> = stage_tools(&stage).into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["shell"]);
+
+        stage.available_tools = vec!["@builtin".to_string()];
+        let names: Vec<String> = stage_tools(&stage).into_iter().map(|t| t.name).collect();
+        assert!(names.contains(&"read_file".to_string()), "got {names:?}");
+        assert!(names.contains(&"write_file".to_string()), "got {names:?}");
+        assert!(!names.contains(&"spawn_agent".to_string()), "got {names:?}");
+        assert!(
+            !names.contains(&leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()),
+            "got {names:?}"
+        );
     }
 
     #[test]

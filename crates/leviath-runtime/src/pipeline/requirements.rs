@@ -103,10 +103,11 @@ pub(crate) fn unmet_required_regions(
     stage: &leviath_core::Stage,
     window: &ContextWindow,
 ) -> Vec<(String, Option<String>)> {
-    let can_write = stage
-        .available_tools
-        .iter()
-        .any(|t| t == "context_write" || t == "context_append");
+    let can_write = stage.grants_all_builtins()
+        || stage
+            .available_tools
+            .iter()
+            .any(|t| t == "context_write" || t == "context_append");
     if !can_write {
         return Vec::new();
     }

@@ -421,6 +421,9 @@ pub(crate) struct DynamicToolCtx {
     pub reserved_names: HashSet<String>,
     /// Static (non-script) tool defs: built-in + sub-agent + MCP.
     pub static_defs: Vec<leviath_providers::Tool>,
+    /// Which MCP server owns each MCP def, so a refresh can tell an MCP def
+    /// from a fresh script def when a stage grants `@mcp` or `@scripts`.
+    pub mcp_owners: leviath_runtime::pipeline::ToolOwners,
     /// Each stage's `available_tools` (Layer-1 allowlist), by stage index.
     pub stage_available: Vec<Vec<String>>,
     /// Each stage's `required_tools` (human tools kept through an unattended
@@ -978,7 +981,10 @@ impl ToolService for CliToolService {
         let mut all = ctx.static_defs.clone();
         all.extend(script_defs);
         Some(leviath_runtime::pipeline::filter_tools_for_stage(
-            &all,
+            leviath_runtime::pipeline::ToolCatalog {
+                defs: &all,
+                owners: &ctx.mcp_owners,
+            },
             available,
             required,
             ctx.unattended,
@@ -1548,6 +1554,7 @@ mod tests {
                 scan_dirs: vec![scan_dir],
                 reserved_names: HashSet::new(),
                 static_defs,
+                mcp_owners: Default::default(),
                 stage_available,
                 stage_required,
                 unattended,
