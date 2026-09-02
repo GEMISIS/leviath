@@ -2303,6 +2303,54 @@ mode = "autonomous"
     assert!(!bp.find_stage("review").unwrap().allow_blocking_tools);
 }
 
+/// `available_global_tools` is read off the stage table: `true` opts the
+/// stage in, an explicit `false` and an absent key both leave it off.
+#[test]
+fn parse_manifest_available_global_tools() {
+    let toml = r#"
+[agent]
+name = "global-tools-test"
+
+[stages.implement]
+mode = "autonomous"
+available_tools = ["read_file"]
+available_global_tools = true
+
+[stages.review]
+mode = "autonomous"
+available_global_tools = false
+
+[stages.summary]
+mode = "autonomous"
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    assert!(bp.find_stage("implement").unwrap().available_global_tools);
+    assert!(!bp.find_stage("review").unwrap().available_global_tools);
+    assert!(!bp.find_stage("summary").unwrap().available_global_tools);
+    // The parser only records the flag; the grant list itself is untouched
+    // until the daemon resolves the global inventory at spawn.
+    assert_eq!(
+        bp.find_stage("implement").unwrap().available_tools,
+        vec!["read_file".to_string()]
+    );
+}
+
+/// A non-boolean `available_global_tools` is not a grant: exactly like
+/// `allow_blocking_tools`, a value of the wrong type reads as unset.
+#[test]
+fn parse_manifest_available_global_tools_ignores_a_non_bool() {
+    let toml = r#"
+[agent]
+name = "global-tools-test"
+
+[stages.main]
+mode = "autonomous"
+available_global_tools = "yes"
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    assert!(!bp.find_stage("main").unwrap().available_global_tools);
+}
+
 #[test]
 fn parse_manifest_fan_out_stage() {
     let toml = r#"

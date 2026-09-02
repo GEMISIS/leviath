@@ -309,7 +309,32 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
         let entry = blueprint.resolve_entry_stage_name();
         println!("  Graph mode: entry stage '{}'", entry);
 
-        for stage in &blueprint.stages {
+        for line in stage_lines(blueprint) {
+            println!("{line}");
+        }
+    } else {
+        println!(
+            "  Linear mode: {}",
+            blueprint
+                .stages
+                .iter()
+                .map(|s| format!("{}{}", s.name, global_tools_suffix(s)))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
+}
+
+/// The per-stage lines of a graph-mode success report: where each stage can
+/// go, its revisit cap, and whether it draws on the global tools directory.
+///
+/// Returned rather than printed so the formatting is assertable without
+/// capturing stdout.
+fn stage_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    blueprint
+        .stages
+        .iter()
+        .map(|stage| {
             let transitions_info = match &stage.transitions {
                 Some(t) if !t.is_empty() => {
                     let targets: Vec<&str> = t.keys().map(|k| k.as_str()).collect();
@@ -322,18 +347,26 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
                 .max_revisits
                 .map(|n| format!(" (max_revisits: {})", n))
                 .unwrap_or_default();
-            println!("  - {}{}{}", stage.name, transitions_info, revisits);
-        }
+            format!(
+                "  - {}{}{}{}",
+                stage.name,
+                transitions_info,
+                revisits,
+                global_tools_suffix(stage)
+            )
+        })
+        .collect()
+}
+
+/// The marker a stage line carries when the stage set `available_global_tools`:
+/// its advertised set is wider than its `available_tools` says, by whatever is
+/// installed in `~/.leviath/tools/` at spawn, and a reader of the report should
+/// know that from the line rather than from the manifest.
+fn global_tools_suffix(stage: &leviath_core::Stage) -> &'static str {
+    if stage.available_global_tools {
+        " (global tools)"
     } else {
-        println!(
-            "  Linear mode: {}",
-            blueprint
-                .stages
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" → ")
-        );
+        ""
     }
 }
 
@@ -1387,6 +1420,54 @@ max_iterations = 5
         // map) -> exercises the "(terminal)" formatting branch.
         let b = bp.find_stage("b").unwrap();
         assert!(matches!(&b.transitions, Some(t) if t.is_empty()));
+        print_success(&bp);
+    }
+
+    /// A stage that set `available_global_tools` is marked on its report line,
+    /// in graph mode and in the linear listing alike, and a stage that did not
+    /// is not.
+    #[test]
+    fn print_success_marks_stages_that_draw_on_global_tools() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "A"
+max_iterations = 5
+available_tools = ["read_file"]
+available_global_tools = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "B"
+max_iterations = 5
+[stages.b.transitions]
+"#,
+        );
+        let bp = parse(&toml);
+        let lines = stage_lines(&bp);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "  - a → b (global tools)");
+        assert_eq!(lines[1], "  - b (terminal)");
+        print_success(&bp);
+
+        // The linear listing carries the same marker on the stage name.
+        let linear = make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+available_global_tools = true
+"#,
+        );
+        let bp = parse(&linear);
+        assert_eq!(global_tools_suffix(&bp.stages[0]), " (global tools)");
         print_success(&bp);
     }
 

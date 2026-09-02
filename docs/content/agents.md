@@ -148,7 +148,25 @@ without saying so. `lev validate` reports both. See
 
 ### Which tools a stage gets
 
-`available_tools` lists what the stage may call.
+`available_tools` lists what the stage may call. The match is exact, so a tool that is not named is
+not offered, however useful it might be.
+
+`available_global_tools = true` widens that list to every Rhai tool installed in the global
+`~/.leviath/tools/` directory at the moment the run spawns. It exists for tools nobody wrote into
+the blueprint: a run that persisted a mechanical step with `install_tool` last week, say. The stage
+still gets everything in `available_tools`; the global tools are appended after them. Only a script
+whose file lives in the global directory counts. A same-named script in the agent's own `tools/`
+or in the run's working directory wins discovery, as it always has, but it is never granted this
+way, because that file is repository content and a global grant should not be a way for a checkout
+to put its own code behind a trusted name. Each call is still policy-gated like any other tool, and
+`lev validate` marks the stage `(global tools)` so a reader of the report knows the advertised set
+is wider than the manifest says.
+
+```toml
+[stages.implement]
+available_tools        = ["read_file", "edit_file", "shell"]
+available_global_tools = true
+```
 
 `required_tools` is the exception to the unattended cut. A [`--yolo`](/docs/glossary) run drops
 every tool that waits on a person, and this is where a stage names the ones it wants kept anyway. Every entry must also
@@ -383,6 +401,13 @@ dynamic_tools = true
 With it on, a script tool written into the run's own `tools/` directory becomes callable on the
 next inference. Off (the default) is the safer choice, since it means an agent cannot grow its own
 capabilities mid-run.
+
+The re-scan advertises a new tool only to a stage whose `available_tools` names it, with one
+exception: a stage that set `available_global_tools` also picks up whatever has landed in
+`~/.leviath/tools/` since spawn, by the same rule as at spawn (the file has to be in the global
+directory, not merely share a name with one that is). A tool the run itself installs with
+`install_tool` therefore reaches an opted-in stage in the same run, and every stage that opted in
+from the next run onwards whether or not `dynamic_tools` is set.
 
 ## Handing context to a sub-agent
 

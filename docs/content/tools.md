@@ -339,6 +339,14 @@ stage control access:
   value is a load error, because a misspelled `deny` that quietly resolved to `ask` would hand
   the author of the typo a prompt where they had written a refusal.
 
+A third, optional setting widens the first. `available_global_tools = true` appends every
+[Rhai tool](/docs/rhai-tools) installed in the global `~/.leviath/tools/` directory to the stage's
+allowlist when the run spawns, so a tool an earlier run installed is offered without the blueprint
+naming it. Only files in that directory qualify; a same-named script in the agent's own `tools/` or
+the run's working directory is never granted this way. The permission gate is unchanged, so an
+installed tool still resolves to `ask` unless something says otherwise. See
+[which tools a stage gets](/docs/agents#which-tools-a-stage-gets).
+
 ```toml
 [stages.implement]
 available_tools = ["read_file", "read_files", "edit_file", "shell"]

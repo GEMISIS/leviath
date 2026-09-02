@@ -466,8 +466,10 @@ fn build_agent_inner(
     // 0. Everything that can be judged from the request alone.
     check_spawn_request(args)?;
 
-    // 1. Load the blueprint (the client resolves the manifest path).
-    let (content, blueprint) = load_blueprint(args, deps.config)?;
+    // 1. Load the blueprint (the client resolves the manifest path). Mutable
+    // because step 2d writes each stage's global tool grants into it before the
+    // runtime resolves the stages from it.
+    let (content, mut blueprint) = load_blueprint(args, deps.config)?;
 
     // 2a. Entry stage + per-stage sandbox resolution. Each stage's effective
     // sandbox cascades stage → agent → global (`resolve_sandbox`); building the
@@ -572,6 +574,29 @@ fn build_agent_inner(
     );
     all_tool_defs.extend(script_defs);
 
+    // 2d. Global tool grants. `available_tools` is exact-match, so a tool an
+    // earlier run installed into `~/.leviath/tools/` is invisible to a stage
+    // that does not name it; a stage with `available_global_tools` asks for
+    // every such tool. The expansion is written into the blueprint itself,
+    // before stage resolution, because that is where the runtime reads each
+    // stage's grant list from - and the `stage_available` snapshot taken
+    // below inherits it, so a `dynamic_tools` refresh re-filters against the
+    // same expanded list. Only scripts discovered from the global directory
+    // count (see `global_tool_names`): a workdir or agent-dir script that
+    // shadows a global name is never granted this way.
+    let global_tools_dir = leviath_core::tools_dir();
+    let global_names = global_tool_names(
+        &script_tools,
+        &script_tool_names,
+        global_tools_dir.as_deref(),
+    );
+    for stage in &mut blueprint.stages {
+        if stage.available_global_tools {
+            stage.available_tools =
+                expand_global_grants(&stage.available_tools, true, &global_names);
+        }
+    }
+
     // 3. Resolve stages against the world's providers.
     let stages = {
         let registry = &world
@@ -649,6 +674,14 @@ fn build_agent_inner(
         .stages
         .iter()
         .map(|s| s.required_tools.clone())
+        .collect();
+    // And which stages hold a global grant, so a refresh can extend the list
+    // with a tool installed *during* the run - the snapshot above only knows
+    // the global inventory as it stood at spawn.
+    let stage_global: Vec<bool> = blueprint
+        .stages
+        .iter()
+        .map(|s| s.available_global_tools)
         .collect();
     // The same list as a lookup set, canonicalised, for the tool state: an
     // interaction for a kept tool has to reach a real person rather than the
@@ -933,6 +966,8 @@ fn build_agent_inner(
             static_defs: static_tool_defs,
             stage_available,
             stage_required,
+            stage_global,
+            tools_dir: global_tools_dir,
             unattended: args.yolo,
             dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -1159,6 +1194,68 @@ system = { kind = "pinned", max_tokens = 1000 }
             def_names.sort_unstable();
             assert_eq!(def_names, vec!["echo", "net_tool"]);
         });
+    }
+
+    /// A global grant expands to the tools whose *file* is in the global
+    /// directory and that survived discovery: a workdir script shadowing a
+    /// global name is not one, a reserved name that discovery dropped is not
+    /// one, and the result is sorted. With no global directory there is nothing
+    /// to grant.
+    #[test]
+    fn global_tool_names_are_the_surviving_tools_from_the_global_dir_only() {
+        let workdir = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let workdir_tools = workdir.path().join("tools");
+        std::fs::create_dir(&workdir_tools).unwrap();
+        // `echo` exists in both places; the workdir copy wins the scan.
+        std::fs::write(workdir_tools.join("echo.rhai"), "// @tool echo\n\"repo\"").unwrap();
+        std::fs::write(global.path().join("echo.rhai"), "// @tool echo\n\"global\"").unwrap();
+        std::fs::write(global.path().join("zed.rhai"), "// @tool zed\n1").unwrap();
+        std::fs::write(global.path().join("alpha.rhai"), "// @tool alpha\n1").unwrap();
+        // Compiled, but a reserved name discovery would have dropped.
+        std::fs::write(
+            global.path().join("read_file.rhai"),
+            "// @tool read_file\n1",
+        )
+        .unwrap();
+        let (set, _skipped) = leviath_scripting::ScriptToolSet::discover(&[
+            workdir_tools,
+            global.path().to_path_buf(),
+        ]);
+        let surviving: HashSet<String> = ["echo", "zed", "alpha"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            global_tool_names(&set, &surviving, Some(global.path())),
+            vec!["alpha".to_string(), "zed".to_string()]
+        );
+        // A name discovery did not keep is not granted even from the global dir.
+        let fewer: HashSet<String> = ["zed".to_string()].into_iter().collect();
+        assert_eq!(
+            global_tool_names(&set, &fewer, Some(global.path())),
+            vec!["zed".to_string()]
+        );
+        assert!(global_tool_names(&set, &surviving, None).is_empty());
+    }
+
+    /// The grant list keeps the blueprint's order, appends what is global and
+    /// new, names nothing twice, and is untouched for a stage without the flag.
+    #[test]
+    fn expand_global_grants_appends_without_duplicates_only_when_allowed() {
+        let available = vec!["read_file".to_string(), "echo".to_string()];
+        let global = vec!["alpha".to_string(), "echo".to_string()];
+        assert_eq!(
+            expand_global_grants(&available, true, &global),
+            vec![
+                "read_file".to_string(),
+                "echo".to_string(),
+                "alpha".to_string()
+            ]
+        );
+        assert_eq!(expand_global_grants(&available, false, &global), available);
+        assert_eq!(expand_global_grants(&[], true, &[]), Vec::<String>::new());
     }
 
     #[test]
@@ -1790,6 +1887,155 @@ system = { kind = "pinned", max_tokens = 1000 }
             chrono::DateTime::parse_from_rfc3339(v["utc"].as_str().expect("utc")).is_ok(),
             "{json}"
         );
+    }
+
+    /// A stage with `available_global_tools` is offered a tool installed in the
+    /// global directory that its `available_tools` never named - at spawn, in
+    /// the resolved stage the runtime reads, not only on a later refresh - and a
+    /// stage without the flag is not. The `dynamic_tools` snapshot the refresh
+    /// path filters against inherits the same expansion.
+    #[tokio::test]
+    async fn build_agent_grants_global_tools_to_a_stage_that_opted_in() {
+        let home = tempfile::tempdir().unwrap();
+        let global = home.path().join(".leviath").join("tools");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("echo.rhai"),
+            "// @tool echo\n// @description say it back\nparams.x",
+        )
+        .unwrap();
+        temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
+            async {
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = dir.path().join("agent.leviath");
+                std::fs::write(
+                    &manifest,
+                    "[agent]\nname = \"global\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\
+                     dynamic_tools = true\n\n\
+                     [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+                     available_tools = [\"read_file\"]\navailable_global_tools = true\n\n\
+                     [stages.plain]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+                     available_tools = [\"read_file\"]\n",
+                )
+                .unwrap();
+                let (mut world, cli) = test_world();
+                let hub = InteractionHub::new();
+                let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+                let mut args = spawn_args(&manifest.to_string_lossy());
+                args.workdir = dir.path().to_string_lossy().to_string();
+                let entity = build_agent(
+                    world.world_mut(),
+                    SpawnDeps {
+                        tool_service: cli.as_ref(),
+                        config: &Config::default(),
+                        shared_mcp: mcp,
+                        mcp_tool_defs: &[],
+                        mcp_tool_owners: &Default::default(),
+                        hub: &hub,
+                        now_secs: 100,
+                        subagent_tx: sub_tx(),
+                    },
+                    &args,
+                )
+                .expect("spawn succeeds");
+
+                // The entry stage's resolved tools, as the runtime will offer them.
+                let mut offered: Vec<String> = world
+                    .world()
+                    .get::<leviath_runtime::pipeline::StageInference>(entity)
+                    .expect("the entry stage is resolved")
+                    .tools
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect();
+                offered.sort_unstable();
+                assert_eq!(offered, vec!["echo".to_string(), "read_file".to_string()]);
+
+                // The refresh snapshot carries the expansion for the opted-in
+                // stage only.
+                let state = cli.state_for(entity).expect("registered");
+                let dynamic = state.dynamic.as_ref().expect("dynamic_tools agent");
+                assert_eq!(
+                    dynamic.stage_available,
+                    vec![
+                        vec!["read_file".to_string(), "echo".to_string()],
+                        vec!["read_file".to_string()],
+                    ]
+                );
+                assert_eq!(dynamic.stage_global, vec![true, false]);
+                assert_eq!(dynamic.tools_dir.as_deref(), Some(global.as_path()));
+            },
+        )
+        .await;
+    }
+
+    /// The global grant is decided by where a script lives, not by its name: a
+    /// `dynamic_tools` run whose workdir ships `tools/echo.rhai` under the same
+    /// name as a global `echo` has the workdir copy win discovery, and that copy
+    /// is repository content the grant must not advertise. The genuinely global
+    /// `lint` still is.
+    #[tokio::test]
+    async fn build_agent_does_not_grant_a_workdir_script_shadowing_a_global_tool() {
+        let home = tempfile::tempdir().unwrap();
+        let global = home.path().join(".leviath").join("tools");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join("echo.rhai"), "// @tool echo\n\"global\"").unwrap();
+        std::fs::write(global.join("lint.rhai"), "// @tool lint\n\"ok\"").unwrap();
+        temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
+            async {
+                let dir = tempfile::tempdir().unwrap();
+                let workdir_tools = dir.path().join("tools");
+                std::fs::create_dir(&workdir_tools).unwrap();
+                std::fs::write(workdir_tools.join("echo.rhai"), "// @tool echo\n\"repo\"").unwrap();
+                let manifest = dir.path().join("agent.leviath");
+                std::fs::write(
+                    &manifest,
+                    "[agent]\nname = \"shadowed\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\
+                     dynamic_tools = true\n\n\
+                     [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+                     available_tools = [\"read_file\"]\navailable_global_tools = true\n",
+                )
+                .unwrap();
+                let (mut world, cli) = test_world();
+                let hub = InteractionHub::new();
+                let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+                let mut args = spawn_args(&manifest.to_string_lossy());
+                args.workdir = dir.path().to_string_lossy().to_string();
+                let entity = build_agent(
+                    world.world_mut(),
+                    SpawnDeps {
+                        tool_service: cli.as_ref(),
+                        config: &Config::default(),
+                        shared_mcp: mcp,
+                        mcp_tool_defs: &[],
+                        mcp_tool_owners: &Default::default(),
+                        hub: &hub,
+                        now_secs: 100,
+                        subagent_tx: sub_tx(),
+                    },
+                    &args,
+                )
+                .expect("spawn succeeds");
+
+                let mut offered: Vec<String> = world
+                    .world()
+                    .get::<leviath_runtime::pipeline::StageInference>(entity)
+                    .expect("the entry stage is resolved")
+                    .tools
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect();
+                offered.sort_unstable();
+                assert_eq!(offered, vec!["lint".to_string(), "read_file".to_string()]);
+                // The shadowing copy was discovered (it would answer an explicit
+                // `available_tools` entry); it simply earned no global grant.
+                let state = cli.state_for(entity).expect("registered");
+                assert!(state.script_tool_names.lock().unwrap().contains("echo"));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

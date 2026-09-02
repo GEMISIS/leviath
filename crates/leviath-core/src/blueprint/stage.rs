@@ -593,6 +593,23 @@ pub struct Stage {
     #[serde(default)]
     pub allow_blocking_tools: bool,
 
+    /// Whether this stage also advertises every Rhai tool installed in the
+    /// global tools directory (`~/.leviath/tools/`), on top of the names in
+    /// `available_tools`.
+    ///
+    /// `available_tools` is an exact-match allowlist, so a tool that a previous
+    /// run installed with `install_tool` is invisible to every stage that does
+    /// not already name it. This flag is how a stage says "and whatever has
+    /// been installed since": the daemon resolves the global inventory at spawn
+    /// (and again on each `dynamic_tools` refresh) and appends the names to the
+    /// grant list. Only scripts whose file lives in the global directory count;
+    /// a same-named script in the agent's own `tools/` or the run workdir is
+    /// never granted this way, so repository content cannot ride in under a
+    /// global grant. Off by default: a stage has to opt in to running code it
+    /// did not list.
+    #[serde(default)]
+    pub available_global_tools: bool,
+
     /// Per-stage taint/security override. `None` inherits the agent-level
     /// `Blueprint.security` (which in turn inherits the global config toggle).
     /// Set `taint_tracking = false` here to opt a single stage out, or `true`
@@ -687,6 +704,7 @@ impl Stage {
             allow_complete: false,
             allow_as_worker: false,
             allow_blocking_tools: false,
+            available_global_tools: false,
             security: None,
             batch_tool_hint: None,
             shell_hint: None,
