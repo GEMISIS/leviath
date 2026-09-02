@@ -27,27 +27,44 @@ pub(super) fn lint_tool_policies(
             .any(|n| stage.tool_permissions.contains_key(n) || agent_permissions.contains_key(n))
     };
 
-    stage
-        .available_tools
-        .iter()
-        .filter(|t| !has_policy(t))
-        // Only worth saying for the shell, whose default is `ask` - and an `ask`
-        // with nobody to answer waits rather than denying, so an unattended run
-        // hangs on the first command instead of failing it.
+    // Only worth saying for the shell, whose default is `ask` - and an `ask`
+    // with nobody to answer waits rather than denying, so an unattended run
+    // hangs on the first command instead of failing it.
+    let mut shells: Vec<String> = stage
+        .named_tools()
         .filter(|t| canonical_tool_name(t) == "shell")
+        .filter(|t| !has_policy(t))
+        .map(|t| format!("'{t}'"))
+        .collect();
+    // A group reaching the built-ins grants the shell as surely as naming it,
+    // and the policy still keys on the canonical name. Said once, and not at
+    // all when the shell is also named: that finding already covers it.
+    let builtin_group = stage
+        .tool_groups()
+        .into_iter()
+        .find(|g| g.covers(leviath_core::blueprint::ToolGroup::Builtin));
+    if shells.is_empty()
+        && !has_policy("shell")
+        && let Some(group) = builtin_group
+    {
+        shells.push(format!("'shell' through '{group}'"));
+    }
+
+    shells
+        .into_iter()
         .map(|tool| {
             LintFinding::new(
                 LintSeverity::Warning,
                 "implicit-shell-policy",
                 format!(
-                    "grants '{tool}' with no permission set for it, so it \
+                    "grants {tool} with no permission set for it, so it \
                      defaults to ask - and an unattended run waits on that \
                      prompt rather than being denied"
                 ),
             )
             .in_stage(&stage.name)
             .with_fix(format!(
-                "set {tool} = \"allow\" or \"deny\" in [tool_permissions] or \
+                "set shell = \"allow\" or \"deny\" in [tool_permissions] or \
                  [stages.{}.tool_permissions]",
                 stage.name
             ))

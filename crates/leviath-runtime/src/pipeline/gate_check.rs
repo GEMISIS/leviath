@@ -141,14 +141,15 @@ pub(crate) fn gate_blocks(
     if !gate.require_modifications {
         return GateDecision::Pass;
     }
-    let can_modify = stage.available_tools.iter().any(|t| {
-        let canonical = leviath_tools::canonical_tool_name(t);
-        leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
-            || gate
-                .tools
-                .iter()
-                .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
-    });
+    let can_modify = stage.grants_all_builtins()
+        || stage.available_tools.iter().any(|t| {
+            let canonical = leviath_tools::canonical_tool_name(t);
+            leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
+                || gate
+                    .tools
+                    .iter()
+                    .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
+        });
     if !can_modify {
         return GateDecision::Pass;
     }

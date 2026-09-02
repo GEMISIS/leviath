@@ -140,6 +140,7 @@ mod resolve;
 pub use resolve::{
     ModelDefaults, ToolCatalog, ToolOwners, bare_default_model, expand_connector_grants,
     filter_tools_for_stage, model_key, providers_tried, resolve_stage_model, resolve_stages,
+    tool_source,
 };
 mod stall;
 pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};

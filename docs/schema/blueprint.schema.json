@@ -293,7 +293,7 @@
         },
         "available_tools": {
           "type": "array",
-          "description": "The only tools the model is offered here. Anything absent is refused at dispatch.",
+          "description": "The only tools the model is offered here. Anything absent is refused at dispatch. An entry may be a tool name or a group token: `@builtin` (every compiled-in tool), `@subagent` (spawn, check, wait, send, kill), `@scripts` (every Rhai tool, the agent's own and the global ones), `@mcp` (every tool every connected server advertises) or `@all`. A group grants whatever exists at the time the stage runs, so a script or server installed later is offered without editing the manifest. Groups never grant submit_output or fan_out; name those, or use the mode that carries them.",
           "items": {
             "type": "string"
           }
@@ -304,7 +304,7 @@
           "items": {
             "type": "string"
           },
-          "$comment": "Kept separate from available_tools because that field is exact-match, and because an MCP tool's advertised name does not reliably carry its server - there is no prefix a wildcard could match."
+          "$comment": "The per-server form. `@mcp` in available_tools grants every connected server at once; this field is for granting one server and not another."
         },
         "require_output": {
           "type": "boolean",

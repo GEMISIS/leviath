@@ -353,6 +353,43 @@ edit_file = "allow"    # apply edits without prompting
 > `available_tools` to be offered at all, and its `tool_permissions` value then decides whether a
 > call is allowed, prompted, or refused.
 
+### Tool groups
+
+Listing twenty-eight built-ins by hand to say "everything" is a chore, and a list written that way
+goes stale the day a tool is added. An `available_tools` entry that starts with `@` names a whole
+kind of tool instead of one:
+
+| Token | Grants |
+|---|---|
+| `@builtin` | every tool compiled into Leviath (this page's catalog) |
+| `@subagent` | `spawn_agent`, `check_agent`, `wait_for_agent`, `send_to_agent`, `kill_agent` |
+| `@scripts` | every [Rhai tool](/docs/rhai-tools), the agent's own and the global ones |
+| `@mcp` | every tool every connected [MCP server](/docs/mcp) advertises |
+| `@all` | all of the above |
+
+Groups and names mix freely, so the four shapes people actually want are each one line:
+
+```toml
+available_tools = ["read_file", "edit_file", "shell"]          # a hand-picked set
+available_tools = ["@builtin", "summarize", "github__search"]  # every built-in, plus a few others by name
+available_tools = ["@builtin", "@scripts", "github__search"]   # every built-in and script, one MCP tool
+available_tools = ["@all"]                                     # everything this install has
+```
+
+A group is resolved when the stage runs, not when the blueprint is written: a script dropped into
+`~/.leviath/tools/` or a server added with `lev mcp add` is offered to a stage granting `@scripts`
+or `@mcp` without touching the manifest. Two things a group never grants: `submit_output` and
+`fan_out`, which decide what a stage *is* rather than what it can do. Name those, or use the mode
+that carries them.
+
+A group is a grant of visibility and nothing more. Every tool it reaches still goes through
+`tool_permissions`, the taint gate, and the approval prompts exactly as a tool you named would, and
+the `@` prefix can never collide with a real tool, since tool names are limited to `[A-Za-z0-9_-]`.
+`lev validate` knows the groups: an entry like `@builtins` is refused as naming no group, a
+`required_tools` entry no group reaches is an error, and an autonomous stage granting `@builtin`
+gets one `blocking-tool-in-autonomous-stage` warning for the group rather than five for its
+members.
+
 ## Default permissions
 
 With nothing configured, tools fall back to these:

@@ -87,9 +87,22 @@ pub(super) struct SkippedItem {
     pub(super) source: String,
 }
 
+/// One `available_tools` group token: a grant of every tool of one kind.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct GroupItem {
+    /// The token a blueprint writes, `@builtin` and the like.
+    pub(super) name: String,
+    /// What it reaches, in one line.
+    pub(super) description: String,
+}
+
 /// The body of `GET /api/tools`.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ToolsResp {
+    /// The group tokens `available_tools` accepts alongside tool names, so a
+    /// picker can offer "all the built-ins" as one row rather than making
+    /// the user tick twenty-eight boxes.
+    pub(super) groups: Vec<GroupItem>,
     /// Everything that will work if a blueprint names it.
     pub(super) tools: Vec<ToolItem>,
     /// Everything that looked like a tool and will not work, with the reason.
@@ -114,6 +127,13 @@ pub(super) async fn list_tools(
     };
     let inventory = ToolInventory::discover(dir.as_deref(), q.agent.as_deref());
 
+    let groups = leviath_core::blueprint::ToolGroup::ALL
+        .iter()
+        .map(|g| GroupItem {
+            name: g.token().to_string(),
+            description: g.describe().to_string(),
+        })
+        .collect();
     let tools = inventory
         .tools
         .into_iter()
@@ -134,7 +154,11 @@ pub(super) async fn list_tools(
         })
         .collect();
 
-    Ok(Json(ToolsResp { tools, skipped }))
+    Ok(Json(ToolsResp {
+        groups,
+        tools,
+        skipped,
+    }))
 }
 
 #[cfg(test)]
@@ -207,6 +231,21 @@ mod tests {
                 .expect("a built-in");
             assert!(builtin.get("path").is_none());
             assert!(builtin.get("agent").is_none());
+            // The group tokens ride along, so a picker can offer them, and
+            // none of them is ever listed as a tool.
+            let groups = body["groups"].as_array().expect("a groups array");
+            let names: Vec<&str> = groups.iter().filter_map(|g| g["name"].as_str()).collect();
+            assert_eq!(names, ["@all", "@builtin", "@subagent", "@scripts", "@mcp"]);
+            assert!(
+                groups
+                    .iter()
+                    .all(|g| !g["description"].as_str().unwrap().is_empty())
+            );
+            assert!(
+                tools
+                    .iter()
+                    .all(|t| !t["name"].as_str().unwrap().starts_with('@'))
+            );
         })
         .await;
     }

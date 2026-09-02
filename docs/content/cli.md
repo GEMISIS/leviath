@@ -219,7 +219,8 @@ that was looked for.
 | error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
 | error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
 | error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
-| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
+| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted, by name or through a group. It reads as a grant and is not one. |
+| error | `required-tool-not-granted` | A `required_tools` entry that no name and no group in `available_tools` reaches, so the model never sees it. Only checked when a group is in play; without one the load itself refuses the manifest. |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
@@ -259,10 +260,12 @@ ever match it. Write a program, optionally with the subcommand that narrows it: 
 
 **`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
 `present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
-killed. Set `allow_blocking_tools = true` on the stage to say you meant it.
+killed. Set `allow_blocking_tools = true` on the stage to say you meant it. A stage granting
+`@builtin` or `@all` reaches all of them at once and gets one warning naming the group.
 
 **`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
-prompt rather than being denied.
+prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
+grant with no `shell` policy is reported too.
 
 **`unserved-model`** is the one model finding that fails the command, because it is the one that can
 be proved. The provider is configured here, it published the full list of what it carries, and the

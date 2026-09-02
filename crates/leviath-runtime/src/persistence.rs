@@ -169,6 +169,9 @@ pub struct FinalOutput(pub leviath_core::output::FinalOutput);
 ///
 /// [`MODIFYING_TOOLS`]: leviath_core::blueprint::MODIFYING_TOOLS
 fn stage_can_modify(stage: &leviath_core::Stage) -> bool {
+    if stage.grants_all_builtins() {
+        return true;
+    }
     stage.available_tools.iter().any(|t| {
         let canonical = leviath_tools::canonical_tool_name(t);
         leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
@@ -578,6 +581,9 @@ mod tests {
         // leaves no record, so silence from it stays suspicious rather than
         // excused. The alias resolves, so `bash` is judged as `shell`.
         assert!(no_output_tools(vec![stage_with(&["bash"], None)]));
+        // A built-in group carries `write_file` and `edit_file` unnamed.
+        assert!(!no_output_tools(vec![stage_with(&["@builtin"], None)]));
+        assert!(no_output_tools(vec![stage_with(&["@scripts"], None)]));
         // A built-in modifying tool, under either name.
         assert!(!no_output_tools(vec![stage_with(&["write_file"], None)]));
         assert!(!no_output_tools(vec![stage_with(&["edit_file"], None)]));

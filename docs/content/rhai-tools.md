@@ -35,8 +35,8 @@ A tool declares itself with leading `// @` directives and reads its arguments fr
 object. The recognized directives:
 
 - `// @tool <name>` is required and names the tool. A stage sees it when its `available_tools`
-  lists that name, or when the stage sets `available_global_tools = true` and the script lives in
-  `~/.leviath/tools/`.
+  lists that name or includes `@scripts`, the [tool group](/docs/tools#tool-groups) that grants
+  every Rhai tool the install has.
 - `// @description <text>` is an optional one-liner shown to the model.
 - `// @param <name> <type> <required|optional> "<description>"` is repeatable. `<type>` is a JSON
   schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`. A typo here produces a
@@ -154,8 +154,8 @@ decision the model should be making each time ages badly and is hard to notice f
 
 To use an installed tool in the same run, the agent must be a `dynamic_tools` agent, which picks
 the new tool up on its next turn. Any later run sees it at spawn, and a stage advertises it when its
-`available_tools` names it or it sets `available_global_tools = true`. See [Tools](/docs/tools) for
-how a stage's tool set is put together.
+`available_tools` names it or includes `@scripts`. See [Tools](/docs/tools) for how a stage's tool
+set is put together.
 
 ## Inspecting the inventory
 

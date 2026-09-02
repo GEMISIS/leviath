@@ -582,10 +582,11 @@ impl Blueprint {
                     if !gate.require_modifications {
                         continue;
                     }
-                    let can_modify = stage.available_tools.iter().any(|t| {
-                        MODIFYING_TOOLS.contains(&t.as_str())
-                            || gate.tools.iter().any(|extra| extra == t)
-                    });
+                    let can_modify = stage.grants_all_builtins()
+                        || stage.available_tools.iter().any(|t| {
+                            MODIFYING_TOOLS.contains(&t.as_str())
+                                || gate.tools.iter().any(|extra| extra == t)
+                        });
                     if !can_modify {
                         return Err(ValidationError::Transition {
                             from: stage.name.clone(),
@@ -713,6 +714,8 @@ mod stage;
 pub use stage::*;
 mod transition;
 pub use transition::*;
+mod tool_groups;
+pub use tool_groups::*;
 
 #[cfg(test)]
 mod tests {
@@ -1317,6 +1320,11 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
         assert!(err.to_string().contains("no file-modifying tool"));
         // A built-in write tool satisfies it...
         assert!(gated(&["read_file", "edit_file"], &[]).validate().is_ok());
+        // ...so does a group that carries one, with neither name written...
+        assert!(gated(&["@builtin"], &[]).validate().is_ok());
+        assert!(gated(&["@all"], &[]).validate().is_ok());
+        // ...but not a group that carries none.
+        assert!(gated(&["@scripts"], &[]).validate().is_err());
         // ...as does one the gate itself declares (MCP / script toolchains).
         assert!(
             gated(&["read_file", "patch_file"], &["patch_file"])
@@ -1652,6 +1660,51 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
         let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
 
         bp.validate().expect("the tool is on offer");
+    }
+
+    /// With a group in the list the membership question belongs to the
+    /// install, so validation takes the author's word and the lint checks.
+    #[test]
+    fn validate_accepts_a_required_tool_a_group_could_cover() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        stage.available_tools = vec!["@builtin".to_string()];
+        stage.required_tools = vec!["ask_user_text".to_string()];
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        bp.validate().expect("the group may cover it");
+    }
+
+    #[test]
+    fn validate_rejects_a_group_shaped_entry_that_names_no_group() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        stage.available_tools = vec!["read_file".to_string(), "@builtins".to_string()];
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        let err = bp.validate().expect_err("not a group");
+        let text = format!("{err:?}");
+        assert!(text.contains("@builtins"), "names the entry: {text}");
+        assert!(text.contains("@builtin,"), "lists the groups: {text}");
+    }
+
+    #[test]
+    fn stage_reports_its_groups_and_named_tools_separately() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        stage.available_tools = vec![
+            "read_file".to_string(),
+            "@scripts".to_string(),
+            "github__create_issue".to_string(),
+        ];
+        assert_eq!(stage.tool_groups(), vec![ToolGroup::Scripts]);
+        assert!(stage.grants_group(ToolGroup::Scripts));
+        assert!(!stage.grants_group(ToolGroup::Mcp));
+        assert!(!stage.grants_all_builtins());
+        let named: Vec<&String> = stage.named_tools().collect();
+        assert_eq!(named, vec!["read_file", "github__create_issue"]);
+
+        stage.available_tools = vec!["@all".to_string()];
+        assert!(stage.grants_all_builtins());
+        assert!(stage.grants_group(ToolGroup::Mcp));
+        assert_eq!(stage.named_tools().count(), 0);
     }
 
     /// A stage required to produce an output, without the tool that produces

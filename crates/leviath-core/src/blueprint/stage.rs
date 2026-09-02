@@ -475,7 +475,12 @@ pub struct Stage {
     /// Model to use for this stage
     pub model: ModelConfig,
 
-    /// Which tools are available in this stage
+    /// Which tools are available in this stage.
+    ///
+    /// Tool names, exact-match and alias-aware, plus any number of group
+    /// tokens (`@all`, `@builtin`, `@subagent`, `@scripts`, `@mcp`) that each
+    /// stand for a whole source and resolve at spawn against what the install
+    /// has then. See [`ToolGroup`](super::ToolGroup).
     pub available_tools: Vec<String>,
 
     /// Human-in-the-loop tools (`ask_user_*`, `present_for_review`,
@@ -491,28 +496,32 @@ pub struct Stage {
     /// Entries must also appear in `available_tools` - listing a tool the stage
     /// can't call in the first place is a validation error, not a silent no-op.
     /// Matched verbatim against `available_tools` (this crate has no alias
-    /// table), so write the name the same way in both.
+    /// table), so write the name the same way in both. A stage that grants a
+    /// group (`@builtin`, `@all`, ...) may require any tool the group could
+    /// cover; which tools those are is only known at spawn, so this crate
+    /// takes the author's word for it and the lint checks the name.
     #[serde(default)]
     pub required_tools: Vec<String>,
 
     /// MCP servers whose whole tool set this stage may use.
     ///
-    /// `available_tools` is an exact-match list, which makes a server's tools
-    /// the author's problem to enumerate - and a server's tool list is not the
-    /// author's to know. It is whatever that server advertises today. A tool
-    /// added to the server later is simply never offered, with nothing said,
-    /// so the stage quietly cannot do a thing its author believed it could.
+    /// A server's tool list is not the author's to know. It is whatever that
+    /// server advertises today; a tool added to the server later is simply
+    /// never offered, with nothing said, so a stage that enumerated the tools
+    /// quietly cannot do a thing its author believed it could.
     ///
     /// Naming the server instead defers the question to spawn, when the answer
     /// is known. Resolved against what the server actually advertises then,
     /// and merged with whatever `available_tools` names, so the two can be
     /// mixed freely.
     ///
-    /// Kept separate from `available_tools` rather than spelled as a wildcard
-    /// in it, for two reasons. That field's contract is exact-match and every
-    /// consumer reads it that way; and the advertised name of an MCP tool does
-    /// not reliably carry its server, so there is no prefix a wildcard could
-    /// match on (see `unique_advertised_name` in `leviath-mcp`).
+    /// This is the per-server form. `@mcp` in `available_tools` is the
+    /// every-server form; a connector grant is the one to reach for when a
+    /// stage should see one server's tools and not another's. Kept as a
+    /// separate field rather than a `github__*` pattern because the advertised
+    /// name of an MCP tool does not reliably carry its server (a server named
+    /// `my.tools` sanitizes to `my_tools`, and a collision appends `_2`), so
+    /// matching the string is a guess where naming the server is a fact.
     #[serde(default)]
     pub available_connectors: Vec<String>,
 
@@ -723,6 +732,33 @@ impl Stage {
         self
     }
 
+    /// The groups this stage's `available_tools` names, in list order.
+    pub fn tool_groups(&self) -> Vec<ToolGroup> {
+        super::groups_in(&self.available_tools)
+    }
+
+    /// Whether `available_tools` grants `group` outright, or through `@all`.
+    pub fn grants_group(&self, group: ToolGroup) -> bool {
+        self.tool_groups().iter().any(|g| g.covers(group))
+    }
+
+    /// Whether every built-in tool is granted, by `@builtin` or `@all`.
+    ///
+    /// The question every reader of `available_tools` that looks for one
+    /// particular built-in (`context_write`, `edit_file`, `shell`) has to
+    /// ask first, because with a group in the list the name is not there and
+    /// the tool is.
+    pub fn grants_all_builtins(&self) -> bool {
+        self.grants_group(ToolGroup::Builtin)
+    }
+
+    /// The entries of `available_tools` that name a tool rather than a group.
+    pub fn named_tools(&self) -> impl Iterator<Item = &String> {
+        self.available_tools
+            .iter()
+            .filter(|t| !super::is_tool_group_token(t))
+    }
+
     /// Validate that this stage is well-formed.
     pub(super) fn validate(&self) -> std::result::Result<(), ValidationError> {
         if self.name.is_empty() {
@@ -732,12 +768,36 @@ impl Stage {
             });
         }
 
+        // A group-shaped entry that names no group (`@builtins`, `@ALL`) can
+        // match nothing, ever - and unlike a misspelled tool name, which the
+        // lint reports against the install's inventory, this one is wrong on
+        // the manifest's own terms.
+        if let Some(entry) = self
+            .available_tools
+            .iter()
+            .find(|t| super::unknown_group(t))
+        {
+            return Err(ValidationError::Stage {
+                stage: self.name.clone(),
+                message: format!(
+                    "available_tools entry '{entry}' looks like a tool group but names none; \
+                     the groups are {}",
+                    super::group_tokens_list()
+                ),
+            });
+        }
+
         // A `required_tools` entry the stage can't call is dead text: it looks
         // like it keeps a tool through an unattended run, and keeps nothing.
         // Rejected rather than ignored so the typo surfaces at `lev validate`
         // instead of at 3am in a `--yolo` run.
+        //
+        // A group grant makes the membership question unanswerable here (which
+        // tools `@builtin` covers is the install's to say), so with one present
+        // the name is only checked by the lint, which can see the inventory.
+        let grants_a_group = !self.tool_groups().is_empty();
         for tool in &self.required_tools {
-            if !self.available_tools.contains(tool) {
+            if !grants_a_group && !self.available_tools.contains(tool) {
                 return Err(ValidationError::Stage {
                     stage: self.name.clone(),
                     message: format!(

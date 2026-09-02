@@ -1942,3 +1942,61 @@ fn a_system_prompt_comes_back_from_the_editor_too() {
     ));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The tools chooser leads with the group tokens, labels each tool by where
+/// it comes from, and keeps a name the manifest uses that this install lacks
+/// (so it can be unticked) without doubling a group the manifest already
+/// grants.
+#[test]
+fn the_tools_chooser_offers_groups_first_and_labels_sources() {
+    let (mut dash, root) = dashboard("tool_choices");
+    let agent_dir = root.join("agents").join("own");
+    std::fs::create_dir_all(agent_dir.join("tools")).unwrap();
+    std::fs::write(
+        agent_dir.join("tools").join("summarize.rhai"),
+        "// @tool summarize\n// @description sums\n1",
+    )
+    .unwrap();
+    open_editor_on(&mut dash, "own");
+    dash.agents()
+        .editor
+        .as_mut()
+        .unwrap()
+        .doc
+        .set_tools("work", &["@builtin".into(), "ghost_tool".into()])
+        .unwrap();
+    let editor = dash.agents().editor.as_ref().unwrap();
+    let choices = super::editor::tool_choices(&editor.dir, "own", &editor.doc);
+
+    let names: Vec<&str> = choices.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        &names[..5],
+        &["@all", "@builtin", "@subagent", "@scripts", "@mcp"],
+        "{names:?}"
+    );
+    assert_eq!(names.iter().filter(|n| **n == "@builtin").count(), 1);
+    let detail = |name: &str| {
+        choices
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.detail.clone())
+            .unwrap_or_else(|| panic!("{name} offered: {names:?}"))
+    };
+    assert_eq!(
+        detail("@builtin"),
+        leviath_core::blueprint::ToolGroup::Builtin.describe()
+    );
+    assert_eq!(detail("read_file"), "built in");
+    assert_eq!(detail("spawn_agent"), "sub-agent tool");
+    assert_eq!(detail("summarize"), "this agent's script");
+    assert_eq!(
+        detail("ghost_tool"),
+        "named by this agent, not found on this install"
+    );
+    // Past the groups the list is alphabetical.
+    let rest: Vec<&str> = names[5..].to_vec();
+    let mut sorted = rest.clone();
+    sorted.sort_unstable();
+    assert_eq!(rest, sorted);
+    let _ = std::fs::remove_dir_all(&root);
+}

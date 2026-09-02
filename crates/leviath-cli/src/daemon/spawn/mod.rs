@@ -931,6 +931,7 @@ fn build_agent_inner(
             scan_dirs: script_scan_dirs(&args.blueprint_path, workdir_tools_dir),
             reserved_names: reserved_tool_names(&builtin_names, deps.mcp_tool_defs),
             static_defs: static_tool_defs,
+            mcp_owners: deps.mcp_tool_owners.clone(),
             stage_available,
             stage_required,
             unattended: args.yolo,
