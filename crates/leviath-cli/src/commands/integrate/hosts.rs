@@ -303,6 +303,11 @@ fn read_existing(path: &Path) -> anyhow::Result<Option<String>> {
 
 /// Write `contents` to `path`, creating parents, or with `print` say what
 /// would be written and touch nothing.
+///
+/// The write is atomic (staged beside the target, then renamed over it):
+/// `~/.claude.json` is the whole of Claude Code's user state, and a
+/// truncate-then-write that dies halfway would leave it empty. The target's
+/// permissions are kept; a new file gets the platform default.
 pub(crate) fn write_text(
     path: &Path,
     contents: &str,
@@ -324,7 +329,7 @@ pub(crate) fn write_text(
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|e| anyhow::anyhow!("could not create {}: {e}", parent.display()))?;
-    std::fs::write(path, contents)
+    leviath_sys::write_atomic(path, contents.as_bytes(), None)
         .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
     report.wrote(path);
     Ok(())

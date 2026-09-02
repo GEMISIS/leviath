@@ -311,6 +311,38 @@ fn write_text_reports_its_two_failure_arms() {
     assert!(err.contains("could not write"), "{err}");
 }
 
+/// The write goes through `write_atomic`: the bytes land whole, the staging
+/// file is gone afterwards, and a file that already exists is replaced rather
+/// than truncated in place (the inode changes), so a crash mid-write could
+/// only ever leave the previous contents, never an empty `~/.claude.json`.
+#[test]
+fn write_text_replaces_an_existing_file_atomically() {
+    let fx = Fixture::new();
+    let mut report = Report::default();
+    let path = fx.path("host/.claude.json");
+    write_text(&path, "{\"a\": 1}\n", false, &mut report).unwrap();
+    assert_eq!(read(&path), "{\"a\": 1}\n");
+    let before = std::fs::metadata(&path).unwrap();
+    write_text(&path, "{\"a\": 2}\n", false, &mut report).unwrap();
+    assert_eq!(read(&path), "{\"a\": 2}\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let after = std::fs::metadata(&path).unwrap();
+        assert_ne!(
+            before.ino(),
+            after.ino(),
+            "replaced by rename, not rewritten in place"
+        );
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(fx.path("host"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".lev-write-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
 // ─── Per host ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
