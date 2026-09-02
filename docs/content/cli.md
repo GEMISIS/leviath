@@ -824,6 +824,36 @@ Inside the wizard, the keys work the same way on every screen:
 Nothing is written until you confirm on the Review screen. Leaving the provider screen with
 nothing selected asks before letting you continue, since an agent cannot run without one.
 
+### `lev integrate <HOST>`
+
+Register Leviath as an MCP server in a host coding agent and install the skill that routes "use
+leviath to ..." to it. `HOST` is one of `claude-code`, `grok`, `codex`, `gemini`, `hermes` or
+`all` (every host whose dot-directory exists under your home). The full walkthrough, the files each
+host gets and the long-run behaviour are in [Claude Code, Grok and other agents](/docs/host-agents).
+
+```bash
+lev integrate claude-code
+lev integrate all --print          # show every file and command, write nothing
+lev integrate claude-code --project
+```
+
+| Flag | Purpose |
+|---|---|
+| `--project` | Register for this project only: Claude Code writes `./.mcp.json` and `./.claude/skills`, Grok writes `./.grok/config.toml`. No effect for the other hosts |
+| `--print` | Print what would be written or run, and touch nothing |
+| `--no-skill` | Register the server without installing the `SKILL.md` |
+| `--no-agents` | Do not install or update the bundled blueprints the server's default agent runs |
+
+The command merges into an existing config with a real parser (JSON or TOML), so keys it did not
+touch survive and running it twice changes nothing. For Claude Code it prefers `claude mcp add-json
+--scope user` when the `claude` CLI is on `PATH`, and edits `~/.claude.json` (or
+`$CLAUDE_CONFIG_DIR/.claude.json`) itself otherwise. Hermes only gets the `mcp_servers:` snippet
+printed, since Leviath carries no YAML parser; paste it and run `/reload-mcp`.
+
+It finishes with next steps: restart the host, then say "use leviath to <task>". If no provider is
+configured it points at `lev setup`, and if `[limits]` sets no write ceiling it prints the
+[two lines to add](/docs/configuration#limits), because an unattended run has no other byte limit.
+
 ### `lev providers`
 
 Show the configured providers and set their **priority order** - the

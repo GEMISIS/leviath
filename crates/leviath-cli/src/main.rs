@@ -287,6 +287,34 @@ impl RiskyExecutors for RealExecutors {
     async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {
         real_update(args)
     }
+
+    async fn integrate(&self, args: commands::integrate::IntegrateArgs) -> anyhow::Result<()> {
+        use commands::integrate::{IntegrateEnv, find_on_path, limits_unset, providers_configured};
+        // A config that will not load reads as "nothing configured", which is
+        // what the next-steps hint about `lev setup` is for.
+        let config = leviath_cli::config::Config::load().unwrap_or_default();
+        let env = IntegrateEnv {
+            home: dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("could not resolve a home directory"))?,
+            claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            lev_exe: std::env::current_exe()?,
+            cwd: std::env::current_dir()?,
+            agents_dir: leviath_core::agents_dir(),
+            limits_unset: limits_unset(&config),
+            providers_configured: providers_configured(&config),
+            which: Box::new(|bin| find_on_path(std::env::var_os("PATH"), bin)),
+            run: Box::new(|exe, argv| {
+                let out = leviath_sys::child_command(exe).args(argv).output()?;
+                anyhow::ensure!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            }),
+        };
+        commands::integrate::execute_with(args, &env).await
+    }
 }
 
 /// Real `lev update`: this machine, plus a terminal's way to run a command and

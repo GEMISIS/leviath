@@ -230,7 +230,7 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
 /// make it the default on a machine that never installed it. An
 /// OpenAI-compatible endpoint was written deliberately, so it sits with the
 /// keyed providers, after them and in name order.
-fn configured_providers(config: &Config) -> Vec<String> {
+pub(crate) fn configured_providers(config: &Config) -> Vec<String> {
     let mut endpoints: Vec<&str> = config
         .model_providers
         .iter()

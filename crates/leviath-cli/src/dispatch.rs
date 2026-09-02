@@ -64,6 +64,9 @@ pub enum Commands {
     #[command(long_about = commands::update::UPDATE_LONG_ABOUT)]
     Update(commands::update::UpdateArgs),
 
+    /// Register Leviath as an MCP server in Claude Code, Grok, Codex, Gemini or Hermes
+    Integrate(commands::integrate::IntegrateArgs),
+
     // ─── Blueprints ───────────────────────────────────────────────────────────
     /// Create a new agent blueprint
     Create(commands::create::CreateArgs),
@@ -172,6 +175,7 @@ Setup and configuration:
   approvals     Show what runs without an approval prompt, and why
   policy        Manage taint tracking policy rules
   update        Update Leviath, then everything that shipped with it
+  integrate     Register Leviath as an MCP server in Claude Code, Grok, Codex, Gemini or Hermes
 
 Blueprints:
   create        Create a new agent blueprint
@@ -313,6 +317,13 @@ pub trait RiskyExecutors {
         &self,
         args: commands::update::UpdateArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+
+    /// `lev integrate` - writes a host agent's config under the real home
+    /// directory and may run the host's own CLI.
+    fn integrate(
+        &self,
+        args: commands::integrate::IntegrateArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
 /// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
@@ -364,6 +375,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Providers(args) => ex.providers(args).await,
         Commands::Auth(args) => ex.auth(args).await,
         Commands::Update(args) => ex.update(args).await,
+        Commands::Integrate(args) => ex.integrate(args).await,
     }
 }
 
@@ -463,6 +475,10 @@ mod tests {
         }
 
         async fn update(&self, _args: commands::update::UpdateArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn integrate(&self, _args: commands::integrate::IntegrateArgs) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -615,6 +631,16 @@ mod tests {
         // it. Its own tests drive the command core against injected seams.
         let args = commands::update::UpdateArgs::default();
         let result = dispatch(Commands::Update(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_integrate_variant_is_routed_through_the_executor() {
+        // Routed, not called directly: the real command writes under the real
+        // home directory and may run the host's CLI, neither of which a unit
+        // test may touch. Its own tests drive the core against a tempdir.
+        let args = commands::integrate::IntegrateArgs::claude_code_for_test();
+        let result = dispatch(Commands::Integrate(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
