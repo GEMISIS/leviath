@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use anyhow::bail;
+use leviath_core::run_meta::RunStatus;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
@@ -223,7 +224,7 @@ fn warn_ungranted_read_paths(spawn_args: &SpawnArgs) {
 /// The warning for a spawn request, read from the real manifest and config.
 /// Empty when there is nothing to say, and empty when either file cannot be
 /// read: see [`warn_ungranted_read_paths`] for why that is not an error here.
-fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
+pub(crate) fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
         return Vec::new();
     };
@@ -316,7 +317,7 @@ fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
 /// behind is worth saying however the run was launched, and it is the reason
 /// this exists: nothing said it at the moment it mattered, so a run could keep
 /// using an old blueprint long after the fix had shipped.
-fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
+pub(crate) fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
     let path = std::path::Path::new(&spawn_args.blueprint_path);
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -438,10 +439,7 @@ pub(crate) async fn send_spawn(
     spawn_args: SpawnArgs,
     json: bool,
 ) -> anyhow::Result<()> {
-    warn_broken_config();
-    warn_ungranted_read_paths(&spawn_args);
-    warn_held_checkpoints(&spawn_args);
-    warn_retired_output_checks(&spawn_args);
+    warn_before_spawn(&spawn_args);
     let spawned = spawn_once(client, spawn_args).await?;
     println!("{}", spawn_report(&spawned, json));
     Ok(())
@@ -473,10 +471,7 @@ pub async fn send_spawn_batch(
     }
     // The warnings describe the blueprint and the machine, not the individual
     // run: once.
-    warn_broken_config();
-    warn_ungranted_read_paths(&spawn_args);
-    warn_held_checkpoints(&spawn_args);
-    warn_retired_output_checks(&spawn_args);
+    warn_before_spawn(&spawn_args);
     let mut spawned = Vec::with_capacity(count);
     for _ in 0..count {
         let mut args = spawn_args.clone();
@@ -495,7 +490,13 @@ pub async fn send_spawn_batch(
 }
 
 /// One spawn exchange with the daemon, warnings and printing left to callers.
-async fn spawn_once(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<SpawnedRun> {
+///
+/// `pub(crate)` for the MCP server, which prints nothing on stdout and reports
+/// the outcome in its own shape.
+pub(crate) async fn spawn_once(
+    client: &ControlClient,
+    spawn_args: SpawnArgs,
+) -> anyhow::Result<SpawnedRun> {
     let blueprint_path = spawn_args.blueprint_path.clone();
     let workdir = spawn_args.workdir.clone();
     let yolo = spawn_args.yolo;
@@ -509,6 +510,128 @@ async fn spawn_once(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Re
         Ok(ControlResponse::Error { message }) => bail!("spawn failed: {message}"),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
+    }
+}
+
+/// Print every pre-flight warning for a spawn request, on stderr.
+fn warn_before_spawn(spawn_args: &SpawnArgs) {
+    warn_broken_config();
+    warn_ungranted_read_paths(spawn_args);
+    warn_held_checkpoints(spawn_args);
+    warn_retired_output_checks(spawn_args);
+}
+
+/// `--wait` follows one run, so a batch cannot be waited on: refuse the
+/// combination before anything is spawned rather than wait on the first run
+/// and leave the others unmentioned.
+pub fn refuse_wait_with_count(count: usize, wait: bool) -> anyhow::Result<()> {
+    if wait && count > 1 {
+        bail!("--wait follows a single run; drop it or use --count 1");
+    }
+    Ok(())
+}
+
+/// `lev run --wait`: spawn the run and stay until it finishes, then print its
+/// answer once.
+///
+/// One composition here rather than in the binary, because the pieces it joins
+/// (`spawn_once`, the wait loop, `lev result`'s rendering) are crate-private
+/// and because `send_spawn` prints the spawn report: with `--json` that would
+/// put two JSON documents on stdout. Exactly one thing is printed: with `json`
+/// the object `{run_id, status, final_output}`, otherwise what
+/// `lev result <run-id>` prints (or one line saying there is no answer).
+/// Returns `Err` when the run ended in error or was cancelled, when it parked
+/// on a question nobody at this terminal is being asked, or when the daemon
+/// could not be followed, so the exit code says how it went.
+pub async fn spawn_and_wait(
+    client: &ControlClient,
+    spawn_args: SpawnArgs,
+    json: bool,
+    runs_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    spawn_and_wait_with(client, spawn_args, json, runs_dir, None).await
+}
+
+/// [`spawn_and_wait`] with a deadline on the wait, after which the run is left
+/// running and the command fails saying so. `lev run --wait` has no deadline
+/// flag today; the parameter exists so the deadline arm is a tested path
+/// rather than a dead one.
+pub(crate) async fn spawn_and_wait_with(
+    client: &ControlClient,
+    spawn_args: SpawnArgs,
+    json: bool,
+    runs_dir: &std::path::Path,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<()> {
+    warn_before_spawn(&spawn_args);
+    // Subscribe before spawning so no event between the two is missed.
+    let stream = match client.subscribe().await {
+        Ok(stream) => stream,
+        Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
+    };
+    let spawned = spawn_once(client, spawn_args).await?;
+    let run_id = spawned.run_id;
+    let outcome = crate::daemon::wait::wait_for_run(
+        client,
+        stream,
+        &run_id,
+        runs_dir,
+        timeout,
+        &mut |_event| {},
+    )
+    .await;
+    use crate::daemon::wait::WaitOutcome;
+    match outcome {
+        WaitOutcome::Finished {
+            status,
+            final_output,
+            error,
+            ..
+        } => {
+            let text = match json {
+                true => {
+                    let report = serde_json::json!({
+                        "run_id": run_id,
+                        "status": status.wire(),
+                        "final_output": final_output,
+                    });
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&report).expect("a report serializes")
+                    )
+                }
+                false => {
+                    crate::commands::result::render(&run_id, final_output.as_ref(), false, false)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "run '{run_id}' finished with status {status} and no final output\n"
+                            )
+                        })
+                }
+            };
+            print!("{text}");
+            match status {
+                RunStatus::Error | RunStatus::Cancelled => bail!(
+                    "run '{run_id}' ended with status {status}{}",
+                    error.map(|e| format!(": {e}")).unwrap_or_default()
+                ),
+                _ => Ok(()),
+            }
+        }
+        WaitOutcome::Interaction {
+            run_id: asker,
+            request,
+        } => bail!(
+            "run '{asker}' is waiting for an answer to interaction '{}' ({}); answer it with \
+             `lev respond {}` and read the result with `lev result {run_id}`",
+            request.id,
+            request.prompt,
+            request.id
+        ),
+        WaitOutcome::TimedOut { .. } => bail!("stopped waiting for run '{run_id}'; it continues"),
+        WaitOutcome::Lost { reason } => {
+            bail!("lost track of run '{run_id}' ({reason}); it may still be running - see `lev ps`")
+        }
     }
 }
 

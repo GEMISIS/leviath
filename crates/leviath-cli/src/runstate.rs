@@ -335,11 +335,18 @@ pub fn runs_dir() -> PathBuf {
 /// caller's "no such run" branch as the single failure path, instead of adding a
 /// second one that all of them would have to handle identically.
 pub(crate) fn run_dir(run_id: &str) -> PathBuf {
+    run_dir_in(&runs_dir(), run_id)
+}
+
+/// [`run_dir`] under an explicit runs directory, for a caller that was handed
+/// one (the MCP server, whose tests isolate with a temp dir) rather than
+/// resolving it from the environment. Same unsafe-id mapping.
+pub(crate) fn run_dir_in(runs_dir: &std::path::Path, run_id: &str) -> PathBuf {
     if !leviath_core::is_safe_path_component(run_id) {
         tracing::warn!(run_id = %run_id, "rejected an unsafe run id");
-        return runs_dir().join("<invalid>");
+        return runs_dir.join("<invalid>");
     }
-    runs_dir().join(run_id)
+    runs_dir.join(run_id)
 }
 
 /// How many random bits go in a run ID's suffix, rendered as 12 hex digits.
@@ -559,6 +566,12 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 /// Silently skips any runs whose metadata cannot be read.
 pub(crate) fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
+}
+
+/// [`list_runs`] under an explicit runs directory; see [`run_dir_in`] for why
+/// a caller would hold one.
+pub(crate) fn list_runs_in(runs_dir: &std::path::Path) -> Vec<RunMeta> {
+    list_runs_in_dir(runs_dir.to_path_buf())
 }
 
 /// Every run below `root_id` in the sub-agent tree - its children, their

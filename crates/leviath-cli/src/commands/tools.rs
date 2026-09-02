@@ -64,8 +64,8 @@ fn param_type_label(p: &leviath_scripting::ParamSpec) -> String {
 }
 
 /// Render one tool's parameters as a compact `name:type[!]` list (`!` marks a
-/// required parameter).
-fn params_summary(meta: &ScriptToolMeta) -> String {
+/// required parameter). Shared with the MCP server's `list_tools`.
+pub(crate) fn params_summary(meta: &ScriptToolMeta) -> String {
     meta.params
         .iter()
         .map(|p| {

@@ -8,8 +8,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// JSON-RPC error code for an unimplemented method.
-pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC error code for an unimplemented method. `i32`, the width every
+/// JSON-RPC envelope in the workspace gives an error code, so the server side
+/// (`crate::server`) can hand it straight to one.
+pub const METHOD_NOT_FOUND: i32 = -32601;
 
 /// A JSON-RPC request or notification.
 ///

@@ -51,7 +51,7 @@ pub enum Commands {
     /// Inspect and move the secrets Leviath holds
     Auth(commands::auth::AuthArgs),
 
-    /// Manage MCP tool servers and their authentication
+    /// Manage MCP tool servers, or serve Leviath itself as one
     Mcp(commands::mcp::McpArgs),
 
     /// Show what runs without an approval prompt, and why
@@ -168,7 +168,7 @@ Setup and configuration:
   doctor        Check that provider wiring works, end to end
   models        List and inspect available models
   auth          Inspect and move the secrets Leviath holds
-  mcp           Manage MCP tool servers and their authentication
+  mcp           Manage MCP tool servers, or serve Leviath itself as one
   approvals     Show what runs without an approval prompt, and why
   policy        Manage taint tracking policy rules
   update        Update Leviath, then everything that shipped with it
@@ -621,6 +621,16 @@ mod tests {
     #[tokio::test]
     async fn dispatch_mcp_variant_is_routed_through_the_executor() {
         let args = commands::mcp::McpArgs::list_for_test();
+        let result = dispatch(Commands::Mcp(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_serve_variant_is_routed_through_the_executor() {
+        // `lev mcp serve` takes over real stdio and talks to the daemon, so it
+        // rides the same risky arm as the rest of `lev mcp`; the binary tells
+        // the two apart with `McpArgs::route`.
+        let args = commands::mcp::McpArgs::serve_for_test();
         let result = dispatch(Commands::Mcp(args), &MockRisky).await;
         assert!(result.is_ok());
     }

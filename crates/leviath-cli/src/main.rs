@@ -205,6 +205,49 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()> {
+        // `lev mcp serve` is the other direction entirely: Leviath as the MCP
+        // server a host agent launches. The protocol loop is the tested
+        // `mcp::serve::serve_over`; only real stdio, the control client and the
+        // daemon auto-start are composed here. The daemon is started lazily by
+        // the first tool call that needs it (hosts launch servers eagerly),
+        // and a failed start is retried on the next call rather than cached.
+        let args = match args.route() {
+            commands::mcp::McpRoute::Serve(serve) => {
+                // Claude Code says which project it is in; other hosts launch
+                // from wherever they run (Claude Desktop from `$HOME`).
+                let default_cwd = std::env::var("CLAUDE_PROJECT_DIR")
+                    .ok()
+                    .filter(|p| std::path::Path::new(p).is_absolute())
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_default();
+                let env = commands::mcp::serve::McpServeEnv {
+                    runs_dir: leviath_cli::runstate::runs_dir(),
+                    default_cwd,
+                    tools_dir: leviath_core::tools_dir(),
+                    agents_dir: leviath_core::agents_dir(),
+                    home: dirs::home_dir(),
+                    allowed_workdirs: leviath_cli::config::Config::load()
+                        .map(|c| c.security.allowed_workdirs)
+                        .unwrap_or_default(),
+                    daemon_ready: std::sync::Arc::new(|| {
+                        Box::pin(async { ensure_daemon_running().await.map_err(|e| e.to_string()) })
+                    }),
+                };
+                return commands::mcp::serve::serve_over(
+                    tokio::io::BufReader::new(tokio::io::stdin()),
+                    tokio::io::stdout(),
+                    long_lived_control_client()?,
+                    serve,
+                    env,
+                )
+                .await;
+            }
+            commands::mcp::McpRoute::Manage(args) => args,
+        };
         // The command logic is the tested `mcp::execute_with`; only the real
         // paths, browser launcher, and clock are composed here. The config
         // load propagates: a config that exists but doesn't parse must fail
@@ -385,7 +428,17 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // and build staleness first would mean spawning against a socket last
     // verified a third of an hour ago. It also stops a run that was never going
     // to happen (a bad path, a typo'd region) from auto-starting a daemon.
+    leviath_cli::daemon::client::refuse_wait_with_count(args.count, args.wait)?;
     ensure_daemon_running().await?;
+    if args.wait {
+        return leviath_cli::daemon::client::spawn_and_wait(
+            &long_lived_control_client()?,
+            spawn_args,
+            args.json,
+            &leviath_cli::runstate::runs_dir(),
+        )
+        .await;
+    }
     leviath_cli::daemon::client::send_spawn_batch(
         &control_client()?,
         spawn_args,

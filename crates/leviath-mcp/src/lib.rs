@@ -13,6 +13,7 @@ pub mod auth;
 pub mod client;
 pub mod discovery;
 pub mod execution;
+pub mod server;
 pub mod transport;
 
 #[cfg(test)]
@@ -23,6 +24,7 @@ pub use auth::{
     StoredTokenRefresher, wait_for_callback,
 };
 pub use client::{EmbeddedResource, MCPClient, ToolResult};
+pub use client::{PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 pub use discovery::{MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery};
 pub use execution::ToolExecutor;
 /// The handshake deadline a caller with a person waiting should use. Exported

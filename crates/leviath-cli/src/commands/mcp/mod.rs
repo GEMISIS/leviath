@@ -1,7 +1,17 @@
-//! `lev mcp` - manage MCP tool servers and their authentication.
+//! `lev mcp` - manage MCP tool servers and their authentication, or serve
+//! Leviath itself as one.
 //!
 //! Adding a server that requires OAuth starts the browser login automatically,
 //! the way Claude Code and other clients do, so setup is a single command.
+//!
+//! `lev mcp serve` turns the direction around: it is the stdio MCP server a
+//! host agent (Claude Code, Grok Build, Codex, Gemini, Hermes) launches to hand
+//! work to Leviath. It lives in [`serve`] and is routed in the binary through
+//! [`McpArgs::route`], because it takes over real stdin and stdout and speaks
+//! to the daemon rather than reading the config the other subcommands rewrite.
+
+pub mod serve;
+mod serve_tools;
 
 use clap::{Args, Subcommand};
 
@@ -23,6 +33,36 @@ impl McpArgs {
             command: McpCommand::List(ListArgs { json: false }),
         }
     }
+
+    /// A `serve` invocation, for routing tests in `dispatch`.
+    #[cfg(test)]
+    pub(crate) fn serve_for_test() -> Self {
+        Self {
+            command: McpCommand::Serve(serve::McpServeArgs::default()),
+        }
+    }
+
+    /// Which of the two very different things `lev mcp` was asked for.
+    ///
+    /// `serve` takes over stdio and talks to the daemon; everything else
+    /// rewrites the config and may open a browser. The binary composes a
+    /// different environment for each, so it asks this first. An enum rather
+    /// than `Result<McpServeArgs, Self>`: `McpArgs` is large enough that clippy
+    /// objects to it as an `Err` type.
+    pub fn route(self) -> McpRoute {
+        match self.command {
+            McpCommand::Serve(serve) => McpRoute::Serve(serve),
+            other => McpRoute::Manage(McpArgs { command: other }),
+        }
+    }
+}
+
+/// The two halves of `lev mcp`; see [`McpArgs::route`].
+pub enum McpRoute {
+    /// `lev mcp serve`: serve Leviath as an MCP server over stdio.
+    Serve(serve::McpServeArgs),
+    /// Everything else: manage the MCP servers Leviath itself calls.
+    Manage(McpArgs),
 }
 
 #[derive(Subcommand)]
@@ -39,6 +79,8 @@ enum McpCommand {
     Logout(ServerArg),
     /// Connect to a server and list its tools
     Test(ServerArg),
+    /// Serve Leviath itself as an MCP server over stdio, for a host agent
+    Serve(serve::McpServeArgs),
 }
 
 #[derive(Args)]
@@ -137,6 +179,11 @@ pub async fn execute_with(args: McpArgs, env: &McpEnv) -> anyhow::Result<()> {
         McpCommand::Login(server) => login(&server.name, env).await,
         McpCommand::Logout(server) => logout(&server.name, env),
         McpCommand::Test(server) => test(&server.name, env).await,
+        // Routed in the binary through `McpArgs::route` before this is reached;
+        // it needs stdio and the daemon, neither of which `McpEnv` carries.
+        McpCommand::Serve(_) => {
+            anyhow::bail!("`lev mcp serve` is not run through the config environment")
+        }
     }
 }
 
@@ -419,6 +466,19 @@ fn find_server<'a>(config: &'a Config, name: &str) -> anyhow::Result<&'a MCPServ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn serve_does_not_run_through_the_config_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = execute_with(
+            McpArgs::serve_for_test(),
+            &env_at(dir.path(), never_opens, 0),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("lev mcp serve"), "{err}");
+    }
 
     fn env_at(
         dir: &std::path::Path,
