@@ -226,15 +226,26 @@ enum ManifestCheckError {
 struct CheckedManifest {
     blueprint: leviath_core::Blueprint,
     content: String,
-    /// The directory holding the manifest: where its `tools/` live.
-    agent_dir: PathBuf,
+    /// The `agent.leviath` file that was checked, wherever the target resolved
+    /// to: the file named, the one inside the directory named, or the installed
+    /// copy of the agent named.
+    manifest_path: PathBuf,
 }
 
-/// The manifest a validate target names: the file itself, or the `agent.leviath`
-/// inside a directory.
+impl CheckedManifest {
+    /// The directory holding the manifest: where its `tools/` live.
+    fn agent_dir(&self) -> &std::path::Path {
+        self.manifest_path
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+    }
+}
+
+/// The manifest a validate target names when read as a path: the file itself,
+/// or the `agent.leviath` inside a directory.
 ///
-/// Pure, and shared by [`check_manifest`] and the stale-install suffix, so both
-/// resolve a target the same way. Says nothing about whether the file exists.
+/// Pure. Says nothing about whether the file exists; [`resolved_manifest_path`]
+/// answers that and falls back to an installed name.
 fn manifest_path_for(path: &std::path::Path) -> std::path::PathBuf {
     if path.is_file() {
         path.to_path_buf()
@@ -243,14 +254,28 @@ fn manifest_path_for(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The manifest a validate target names, if it exists: as a path first, then
+/// as the name of an installed agent (`<agents_dir>/<name>/agent.leviath`).
+///
+/// Shared by [`check_manifest`] and the stale-install suffix, so both resolve a
+/// target the same way. Only the install tree is consulted for a name, never
+/// the current directory, so `lev validate <typo>` run inside an agent
+/// directory stays an error rather than quietly validating the wrong file.
+fn resolved_manifest_path(path: &std::path::Path) -> Option<PathBuf> {
+    let named = manifest_path_for(path);
+    if named.exists() {
+        return Some(named);
+    }
+    super::run::manifest::installed_manifest(&path.to_string_lossy())
+}
+
 fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestCheckError> {
-    let manifest_path = manifest_path_for(path);
-    if !manifest_path.exists() {
-        return Err(ManifestCheckError::Io(anyhow::anyhow!(
+    let manifest_path = resolved_manifest_path(path).ok_or_else(|| {
+        ManifestCheckError::Io(anyhow::anyhow!(
             "No agent.leviath found at {}",
             path.display()
-        )));
-    }
+        ))
+    })?;
 
     let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
         ManifestCheckError::Io(anyhow::anyhow!(
@@ -281,14 +306,10 @@ fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestChe
     crate::daemon::spawn::resolve_stage_hook_scripts(&blueprint, &manifest_path.to_string_lossy())
         .map_err(ManifestCheckError::Validation)?;
 
-    let agent_dir = manifest_path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
     Ok(CheckedManifest {
         blueprint,
         content,
-        agent_dir,
+        manifest_path,
     })
 }
 
@@ -447,7 +468,7 @@ fn execute_reporting_outcome(
     // is built after the lint and emitted once, and none of these run.
     if !args.json {
         print_success(&checked.blueprint);
-        print_script_tool_report(&path);
+        print_script_tool_report(checked.agent_dir());
         print_global_script_report();
         if args.graph {
             println!();
@@ -455,7 +476,7 @@ fn execute_reporting_outcome(
         }
     }
 
-    let mut env = LintEnv::offline(&checked.agent_dir);
+    let mut env = LintEnv::offline(checked.agent_dir());
     if let Some(config) = config {
         // The directory the command was run from is the workdir a `lev run`
         // would default to, so it is what relative `[read_paths]` entries
@@ -664,17 +685,15 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// Validate the agent's own Rhai script tools: discover the agent
-/// directory's `tools/` and report how many compiled, warning (non-fatal, like
-/// the daemon's own skip-and-warn) about any that failed. A missing `tools/` dir
-/// prints nothing.
-fn print_script_tool_report(path: &std::path::Path) {
-    // The agent dir is the manifest's parent (file path) or the path itself (dir).
-    let agent_dir = if path.is_file() {
-        path.parent().unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
+/// Validate the agent's own Rhai script tools: discover `tools/` under the
+/// directory holding the checked manifest and report how many compiled, warning
+/// (non-fatal, like the daemon's own skip-and-warn) about any that failed. A
+/// missing `tools/` dir prints nothing.
+///
+/// Takes the resolved agent directory rather than the command's argument, so an
+/// installed name reports the install's own `tools/` and not a `<name>/tools`
+/// relative to wherever the command was run.
+fn print_script_tool_report(agent_dir: &std::path::Path) {
     let tools_dir = agent_dir.join("tools");
     if !tools_dir.is_dir() {
         return;
@@ -958,10 +977,14 @@ pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     };
     // Appended to a load failure, and only when the file is an installed copy
     // of a bundled agent this build ships a different version of. Then the
-    // answer is "reinstall it", not "debug your graph".
+    // answer is "reinstall it", not "debug your graph". Resolved the way
+    // `check_manifest` resolves, so `lev validate coder` (by installed name)
+    // is recognised as that installed copy. Only a load failure reaches this,
+    // and a load failure means the manifest resolved, so the empty fallback is
+    // never what gets compared.
     let stale = || {
         crate::bundled::stale_install_suffix(
-            &manifest_path_for(std::path::Path::new(&args.path)),
+            &resolved_manifest_path(std::path::Path::new(&args.path)).unwrap_or_default(),
             crate::bundled::real_agents_dir_opt().as_deref(),
             "\n\n",
         )
@@ -1765,6 +1788,38 @@ system = { kind = "pinned", max_tokens = 1000 }
         .await;
     }
 
+    /// The whole command, by installed name: the manifest is found under the
+    /// `LEVIATH_HOME` agents dir, its own `tools/` are reported, and the
+    /// verdict is the clean one; a name that is not installed is refused.
+    #[tokio::test]
+    async fn execute_validates_an_installed_agent_by_name() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join(".leviath").join("agents").join("by-name");
+        std::fs::create_dir_all(agent_dir.join("tools")).unwrap();
+        write_test_agent(&agent_dir, CLEAN_MANIFEST);
+        std::fs::write(
+            agent_dir.join("tools").join("echo.rhai"),
+            "// @tool echo\n// @description Echoes its input\nparams.text",
+        )
+        .unwrap();
+
+        temp_env::async_with_vars([("LEVIATH_HOME", Some(home.path()))], async {
+            crate::config::with_isolated_config_path_async("validate-by-name", |_| async {
+                let by_name = |name: &str| ValidateArgs {
+                    path: name.to_string(),
+                    deny_warnings: false,
+                    json: false,
+                    graph: false,
+                    width: 120,
+                };
+                assert!(execute(by_name("by-name")).await.is_ok());
+                assert!(execute(by_name("not-installed-either")).await.is_err());
+            })
+            .await;
+        })
+        .await;
+    }
+
     // ─── execute_reporting_outcome ───────────────────────────────────────
 
     impl ValidateOutcome {
@@ -2206,11 +2261,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
     #[test]
     fn print_script_tool_report_no_tools_dir_is_silent() {
         // No `tools/` dir → the early return (covered by most success tests, but
-        // asserted here directly against a file path, which exercises the
-        // `path.is_file()` → parent arm).
+        // asserted here directly).
         let dir = tempfile::tempdir().unwrap();
-        let manifest = write_manifest(dir.path(), "unused");
-        print_script_tool_report(&manifest);
+        write_manifest(dir.path(), "unused");
+        print_script_tool_report(dir.path());
     }
 
     #[test]
@@ -2266,7 +2320,7 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         // The text is carried through for the linter, and the agent dir points
         // at the manifest's own directory rather than the manifest file.
         assert!(checked.content.contains("custom-validate"));
-        assert_eq!(checked.agent_dir, dir.path());
+        assert_eq!(checked.agent_dir(), dir.path());
     }
 
     /// Extract the inner `anyhow::Error` from a `ManifestCheckError::Io`,
@@ -2382,6 +2436,78 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         // Pass the *file* path directly, not the directory.
         let checked = check_manifest(&manifest_path).unwrap();
         assert_eq!(checked.blueprint.name, "ok-agent");
+    }
+
+    /// The path-shaped targets: the file and its directory both resolve to the
+    /// same manifest, and the reported paths are that file and its parent.
+    #[test]
+    fn check_manifest_reports_the_resolved_paths_for_a_file_and_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = write_manifest(dir.path(), CLEAN_MANIFEST);
+        for target in [manifest_path.as_path(), dir.path()] {
+            let checked = check_manifest(target).unwrap();
+            assert_eq!(checked.manifest_path, manifest_path);
+            assert_eq!(checked.agent_dir(), dir.path());
+        }
+    }
+
+    /// `lev validate <installed-name>` works the way `lev run <name>` does: a
+    /// target that is not a path is looked up under the `LEVIATH_HOME`-aware
+    /// agents dir, and the checked manifest reports that install's own paths so
+    /// the `tools/` report and the stale-install suffix look in the right place.
+    #[test]
+    fn check_manifest_resolves_an_installed_agent_by_name() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join(".leviath").join("agents").join("named");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manifest_path = write_manifest(&agent_dir, CLEAN_MANIFEST);
+
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            let checked = check_manifest(std::path::Path::new("named")).unwrap();
+            assert_eq!(checked.manifest_path, manifest_path);
+            assert_eq!(checked.agent_dir(), agent_dir);
+        });
+    }
+
+    /// A name that is neither a path nor installed gets the same "No
+    /// agent.leviath found" error a missing path gets, naming what was asked.
+    #[test]
+    fn check_manifest_uninstalled_name_is_io_error() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            let err = check_manifest(std::path::Path::new("lev-no-such-agent-9f3a")).unwrap_err();
+            let e = unwrap_io_err(err).to_string();
+            assert!(
+                e.contains("No agent.leviath found at lev-no-such-agent-9f3a"),
+                "{e}"
+            );
+        });
+    }
+
+    /// The name lookup consults only the install tree, never the current
+    /// directory: `lev validate <typo>` run from inside an agent directory must
+    /// still fail rather than validate the manifest under foot and call the
+    /// typo fine. (`find_manifest`, which `lev run` uses, does fall back to
+    /// the cwd, which is exactly why validate does not go through it.)
+    #[test]
+    fn check_manifest_typo_inside_an_agent_directory_still_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_manifest(cwd.path(), CLEAN_MANIFEST);
+
+        let _guard = crate::config::CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(cwd.path()).unwrap();
+        let outcome = temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            check_manifest(std::path::Path::new("tset-agent"))
+        });
+        // Restore before asserting so a failure does not leak the cwd swap.
+        std::env::set_current_dir(&original_cwd).unwrap();
+
+        let e = unwrap_io_err(outcome.unwrap_err()).to_string();
+        assert!(e.contains("No agent.leviath found at tset-agent"), "{e}");
     }
 
     /// The blueprint is still validated when the config file will not load,

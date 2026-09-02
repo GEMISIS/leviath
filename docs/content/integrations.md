@@ -1,6 +1,6 @@
 ---
 title: How Leviath integrates
-description: The four ways to drive Leviath from a tool you already use, and how to choose between them.
+description: The five ways to drive Leviath from a tool you already use, and how to choose between them.
 group: Integrations
 group_order: 5
 order: 1
@@ -29,9 +29,12 @@ flowchart TD
   ORCH -->|"one process per job"| RUN["lev run"]
   ORCH -->|"HTTP + WebSocket"| API["lev serve"]
   ORCH -->|"Rust library"| EMB["the leviath crate"]
+  HOST["A host agent<br/>Claude Code / Grok / Codex / Gemini / Hermes"]
+  HOST -->|"MCP over stdio"| MCP["lev mcp serve"]
   ACP --> D["Shared-world daemon"]
   RUN --> D
   API --> D
+  MCP --> D
   EMB --> W["Embedded world"]
   D --> M["Model providers"]
   W --> M
@@ -45,11 +48,17 @@ flowchart TD
 | One run per job, usually in a container | `lev run` | [CLI reference](/docs/cli) |
 | A long-lived service that several jobs share | `lev serve` | [HTTP API](/docs/api) |
 | Leviath inside your own Rust program | the `leviath` crate | [Embedding](/docs/embedding) |
+| A host agent that speaks MCP (Claude Code, Grok, Codex, Gemini, Hermes) | `lev mcp serve` | [Claude Code, Grok and other agents](/docs/host-agents) |
 
 Most orchestrators land on one of the first two. If yours can launch a subprocess and speak
 JSON-RPC over its stdin and stdout, use `lev agent-client`, because you get streaming output and
 in-turn tool approvals for free. If it thinks in terms of "run this command in this container until
 it exits", use `lev run`.
+
+The fifth row is for a different kind of host: an agent that already has a tool schema, such as
+Claude Code or Grok on your own machine. It never picks a shell binary it has not been told about,
+so `lev integrate <host>` registers `lev mcp serve` as an MCP server and installs a skill, and from
+then on "use leviath to fix the flaky test" becomes a tool call that waits for Leviath's answer.
 
 Not every host can speak it. Hermes Agent implements the
 [Agent Client Protocol as a server](https://hermes-agent.nousresearch.com/docs/user-guide/features/acp)

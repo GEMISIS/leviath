@@ -43,6 +43,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--count <N>` | Start this many runs of the same agent and task, each under its own run id, from one invocation |
+| `--wait` | Stay attached until the run finishes and print its final output the way `lev result` does. Exits non-zero when the run ends in error or is cancelled. See below |
 | `--json` | Print the spawned run as JSON rather than a sentence. See below |
 | `--output-format <LABEL>` | Ask for the final output in this shape. A label that differs from what the blueprint declares retires its Rhai validator and JSON schema, with a warning on stderr. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
@@ -54,6 +55,13 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 
 **`--json`** is for a caller that parses the run id back out. With `--count` above 1 it prints an
 array, one object per run.
+
+**`--wait`** is for a script that wants the answer, not the run id. The command subscribes to the
+daemon before spawning, follows the run to its end, and prints the final output once: the
+`lev result` rendering, or with `--json` one object holding `run_id`, `status`, and
+`final_output`. A run that ends in error or is cancelled exits non-zero, as does losing the
+daemon. The run still belongs to the daemon, so an interrupted `lev run --wait` leaves it running
+and `lev result <id>` collects the output later. `--wait` refuses `--count` above 1.
 
 **`--yolo`** waives approvals, not checkpoints. It approves every tool call, and it takes away the
 tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run does
@@ -197,7 +205,11 @@ Scaffold a new [blueprint](/docs/agents) directory.
 
 ### `lev validate [PATH]`
 
-Check a blueprint before running it. `PATH` defaults to `.`.
+Check a blueprint before running it. `PATH` is a blueprint directory, an `agent.leviath` file, or
+the name of an installed agent, so `lev validate coder` checks `~/.leviath/agents/coder/` the same
+way `lev run coder` would run it. It defaults to `.`. A name is looked up only in the install
+tree, never in the current directory, so a typo is an error even when the directory you are in
+holds a manifest.
 
 Beyond parsing and structural validation, it reports what the blueprint leaves unsaid. Findings come
 in three levels: an **error** exits non-zero, a **warning** does not, and a **note** never does.
@@ -886,6 +898,32 @@ Manage [MCP tool servers](/docs/mcp).
 | `lev mcp test <NAME>` | | Connect and list the server's tools |
 
 Transport is inferred from whether you pass `--url` or `--command`.
+
+### `lev mcp serve`
+
+Serve Leviath itself as an MCP server over stdio, so a host agent (Claude Code, Grok, Codex,
+Gemini, Hermes) hands a task to Leviath with a tool call instead of hunting for the `lev` binary.
+You rarely type this yourself: `lev integrate <host>` registers the command in the host's MCP
+configuration under the server name `leviath` and installs a skill that tells the host when to
+reach for it. The tools the server exposes, and how a host session uses them, are on
+[Claude Code, Grok and other agents](/docs/host-agents).
+
+| Flag | Purpose |
+|---|---|
+| `--attended` | Runs the host starts ask before effectful tool calls, as a plain `lev run` does. Without it they run as `--yolo`, since a host session usually has nobody watching the Leviath side |
+| `--allow <TOOL>` | Allow one tool outright on every run the host starts. Repeatable |
+| `--default-agent <NAME>` | The agent a `run` call gets when it names none. Defaults to `orchestrator` |
+| `--workdir <DIR>` | The working directory for a `run` call that passes none. Defaults to `CLAUDE_PROJECT_DIR` when the host sets it, else the directory the server was started in |
+
+The wire format is newline-delimited JSON-RPC 2.0 on stdin and stdout, one object per line, so
+stdout belongs to the protocol and everything the server has to say for itself goes to stderr. The
+daemon is started by the first call that needs one; `initialize`, `list_agents`, `list_tools`, and
+`install_tool` never do.
+
+A host that stops waiting on a tool call, because its own timeout fired or the user cancelled,
+only stops waiting. The Leviath run continues in the daemon, and the host finds it again with
+`list_runs`, then `wait`, `status`, or `cancel`. The `cancel` tool is the one way a host ends a
+run.
 
 ### `lev auth`
 

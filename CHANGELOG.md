@@ -11,6 +11,60 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Added
+
+- `lev mcp serve` turns Leviath into an MCP server over stdio, so a host agent
+  (Claude Code, Grok, Codex, Gemini, Hermes) delegates a task with a tool call
+  instead of hunting for the `lev` binary. The `run` tool starts an agent and
+  waits for its final output; `wait`, `status`, `result`, `cancel`, `message`,
+  and `respond` steer a run the host already started; `list_runs`,
+  `list_agents`, `list_tools`, and `install_tool` answer without a daemon. A
+  host timeout or cancellation only stops the waiting, never the run.
+  `--attended` makes host-started runs ask before effectful tool calls (they
+  run unattended by default); `--allow`, `--default-agent`, and `--workdir`
+  set the defaults every call inherits.
+- `lev integrate <host>` registers that server in Claude Code, Grok, Codex,
+  Gemini, or Hermes (`all` covers every host installed under your home). It
+  merges into the host's existing configuration rather than replacing it,
+  installs a skill that tells the host when to reach for Leviath, and installs
+  or updates the bundled agents. `--project` writes project-scoped
+  configuration where the host has one; `--print` shows what would be written
+  and writes nothing.
+- A bundled `orchestrator` agent, the one a host reaches for by default: it
+  plans, fans the work out to `coder` workers, verifies the result, and ends
+  by deciding which repeatable steps deserve a Rhai tool.
+- `install_tool`, a built-in that compiles a Rhai tool script and installs it
+  into `~/.leviath/tools` so every future run can call it. It refuses a script
+  that does not compile, lacks `// @tool` or `// @description`, or collides
+  with an existing tool name, and stamps each file with a provenance line so
+  `lev tools` shows where it came from. It asks before running by default;
+  `--yolo` waives the prompt.
+- `available_global_tools = true` on a stage advertises every tool installed
+  in `~/.leviath/tools` to that stage on top of its `available_tools`.
+  Without it an installed tool is offered only to a blueprint that names it,
+  so nothing a run installed was ever used by the next one. `lev validate`
+  marks such stages with `(global tools)`.
+- `lev run --wait` stays attached until the run finishes and prints its final
+  output the way `lev result` does, or one JSON object with `--json`, and
+  exits non-zero when the run ends in error or is cancelled.
+
+### Changed
+
+- The bundled `coder` agent's `implement` and `review` stages set
+  `available_global_tools = true`, so the worker that performs the mechanical
+  steps is offered the tools earlier runs installed.
+
+### Fixed
+
+- `lev validate <name>` accepts an installed agent's name, as `lev run <name>`
+  always has, instead of failing with "No agent.leviath found at <name>". The
+  install's own `tools/` are reported, and a stale installed copy of a bundled
+  agent is still named when it fails to load. A name is looked up only in the
+  install tree, never in the current directory, so a typo run from inside an
+  agent directory stays an error.
+
 ## 0.5.8 - 2026-09-01
 
 ### Changed

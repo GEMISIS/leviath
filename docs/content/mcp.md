@@ -171,3 +171,12 @@ non-interactively.
 > [!NOTE]
 > Manage servers from the [dashboard](/docs/dashboard) with `m`, or over the [API](/docs/api) under
 > `/api/mcp/servers` (add/remove need `--allow-admin`).
+
+## Serving Leviath as an MCP server
+
+This page is about Leviath as an MCP client. The other direction exists too: `lev mcp serve`
+speaks MCP over stdio so a host agent such as Claude Code, Grok, Codex, Gemini, or Hermes hands a
+task to Leviath with a tool call, and `lev integrate <host>` registers it in the host and installs
+a skill saying when to use it. The tools it exposes and the host-by-host setup are on
+[Claude Code, Grok and other agents](/docs/host-agents); the flags are under
+[`lev mcp serve`](/docs/cli#lev-mcp-serve).
