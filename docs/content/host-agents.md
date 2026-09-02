@@ -154,8 +154,9 @@ A host model rediscovers the same mechanical steps in every session. Leviath giv
 put them. `install_tool` compiles a Rhai script and writes it to `~/.leviath/tools/<name>.rhai`
 with a provenance comment naming who installed it and when. Any stage that sets
 `available_global_tools = true` sees every tool in that directory on its next run; the bundled
-`orchestrator` and `coder` do. `lev tools` lists the inventory with each file's provenance line,
-and deleting the file removes the tool.
+`orchestrator` and `coder` do. `lev tools` lists the inventory and prints each file's provenance
+line under its tool, or `no provenance line (hand-written, or written outside install_tool)` for a
+file `install_tool` did not write; deleting the file removes the tool.
 
 The skill is deliberately strict about when to install: the step ran at least twice, it is not a
 single command the model already has through its shell, the script encodes an invariant (fixed

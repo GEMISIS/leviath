@@ -1,10 +1,15 @@
 //! The core of `install_tool`: compile a Rhai tool script and place it in the
 //! global tools directory, where every future agent run discovers it.
 //!
-//! This is the persist path for mechanical learnings. A stage hook cannot touch
-//! the filesystem by design, and a script tool's `write_file` is confined to the
-//! run's workdir, so before this nothing an agent could do reached
-//! `~/.leviath/tools/`. The function is deliberately pure over its inputs: the
+//! This is the audited persist path for mechanical learnings. A stage hook
+//! cannot touch the filesystem by design, a script tool's `write_file` is
+//! confined to the run's workdir, and this is the one built-in that writes to
+//! `~/.leviath/tools/` on purpose, checking the script and recording who put
+//! it there. It is not the only way bytes can land in that directory: `shell`
+//! is confined to the workdir only when a `[sandbox]` is configured, so an
+//! unattended run with a shell can drop a `.rhai` file there directly, with
+//! none of the checks below. A file without a provenance line did not come
+//! through here. The function is deliberately pure over its inputs: the
 //! destination directory, the reserved-name set, the provenance and the
 //! filesystem predicates are all parameters, so the built-in tool, the MCP
 //! server and the tests call the same code with nothing ambient.

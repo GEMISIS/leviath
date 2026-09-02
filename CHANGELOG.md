@@ -39,8 +39,9 @@ same list.
 - `install_tool`, a built-in that compiles a Rhai tool script and installs it
   into `~/.leviath/tools` so every future run can call it. It refuses a script
   that does not compile, lacks `// @tool` or `// @description`, or collides
-  with an existing tool name, and stamps each file with a provenance line so
-  `lev tools` shows where it came from. It asks before running by default;
+  with an existing tool name, and stamps each file with a provenance line,
+  which `lev tools` prints under the tool (a file without one was not
+  installed this way). It asks before running by default;
   `--yolo` waives the prompt.
 - `available_global_tools = true` on a stage advertises every tool installed
   in `~/.leviath/tools` to that stage on top of its `available_tools`.

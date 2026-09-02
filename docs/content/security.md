@@ -257,7 +257,7 @@ read (which is Private) flowing into `submit_output` and into `shell`:
 | --- | --- | --- |
 | Attended, through `lev serve` or the dashboard | Raises the leak prompt and parks the run in `waiting_input` | Only if you pick **Allow once** or **Allow for this session** |
 | `--yolo`, or the dashboard's unattended toggle | Waives enforcement and lets the call through, with no prompt | **Yes** |
-| `--yolo`, and the run calls `install_tool` | Installs the script into `~/.leviath/tools/` without a prompt; the file is stamped with the run's workdir and time as its provenance | Not by itself, but the code runs on every later run that advertises it. See [Rhai tools](/docs/rhai-tools#installing-a-tool-from-a-run) |
+| `--yolo`, and the run calls `install_tool` | Installs the script into `~/.leviath/tools/` without a prompt; the file is stamped with the run's workdir and time as its provenance. `install_tool` is the audited path, not the only one: a run whose `shell` is not confined by a `[sandbox]` can write into that directory directly, and `lev tools` shows such a file as having no provenance line | Not by itself, but the code runs on every later run that advertises it. See [Rhai tools](/docs/rhai-tools#installing-a-tool-from-a-run) |
 | A tool set to `allow` in `[tool_permissions]` | Still prompts. Granting a tool is not granting the data | Only if you allow it |
 | An embedded host with no interaction hub wired | Blocks the call outright and hands the model `[blocked]` | No |
 | A prompt nobody answers before `[limits] interaction_timeout_secs` | Resolves as a deny once the deadline passes | No |
