@@ -235,11 +235,17 @@ pub(crate) async fn run(
             );
         }
     };
-    if let WorkdirVerdict::Confirm(concern) = assess(
-        &workdir,
-        shared.env.home.as_deref(),
-        &shared.env.allowed_workdirs,
-    ) {
+    // `workdir` was just canonicalised, so the home it is compared against
+    // has to be too, or a symlinked home is never refused. `main` resolves
+    // the home once already; this covers an env built by another caller.
+    let home = shared
+        .env
+        .home
+        .as_deref()
+        .map(crate::workdir_guard::canonical_home);
+    if let WorkdirVerdict::Confirm(concern) =
+        assess(&workdir, home.as_deref(), &shared.env.allowed_workdirs)
+    {
         return fail(
             format!(
                 "workdir {} is your home directory (or a filesystem root); pass an explicit \

@@ -916,6 +916,34 @@ async fn run_refuses_bad_workdirs_before_touching_anything() {
     assert!(daemon.requests().is_empty());
 }
 
+/// A home reached through a symlink (Fedora Silverblue's `/home` is one) is
+/// refused like any other: the guard compares the canonical workdir against
+/// the canonical home, not against the spelling `dirs::home_dir()` answered.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_refuses_a_symlinked_home_given_as_its_real_path() {
+    let machine = Machine::new();
+    let daemon = ScriptedDaemon::new(vec![StreamScript::Hold(vec![])], spawn_ok);
+    let real = machine.root.path().join("real-home");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = machine.root.path().join("home-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut env = machine.env(always_ready());
+    env.home = Some(link);
+    let mut h = Harness::start(daemon.client(), McpServeArgs::default(), env, fast_timing());
+    h.call(
+        1,
+        "run",
+        json!({ "task": "t", "workdir": real.to_string_lossy() }),
+    )
+    .await;
+    let (is_error, text, structured) = h.call_result(1).await;
+    assert!(is_error);
+    assert!(text.contains("is your home directory"), "{text}");
+    assert_eq!(structured["refused"], "workdir");
+    assert!(daemon.requests().is_empty());
+}
+
 #[tokio::test]
 async fn run_reports_an_agent_it_cannot_resolve_and_a_daemon_it_cannot_reach() {
     let machine = Machine::new();

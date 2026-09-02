@@ -95,6 +95,19 @@ pub(crate) fn assess(
     WorkdirVerdict::Proceed
 }
 
+/// The home directory as the filesystem knows it, for a caller that compares
+/// it against a canonicalised workdir.
+///
+/// `assess` is textual, so a home that is itself a symlink (Fedora
+/// Silverblue's `/home` is a link to `var/home`; a `dirs::home_dir()` there
+/// answers `/home/alice` while the canonical workdir is `/var/home/alice`)
+/// would never match the workdir and the guard would never fire. A home that
+/// cannot be canonicalised (it does not exist, or is not readable) is kept
+/// as given, so the check still fires on the spelling it has.
+pub fn canonical_home(home: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())
+}
+
 /// Whether `path` is `base` or sits under it.
 ///
 /// Component-wise rather than a string prefix: `/home/alice-old` starts with
@@ -321,6 +334,47 @@ mod tests {
         assert_eq!(
             assess(Path::new("/Users/alice"), None, &[]),
             WorkdirVerdict::Proceed
+        );
+    }
+
+    /// A home that exists comes back as the filesystem spells it (on macOS the
+    /// tempdir under `/var` canonicalises to `/private/var`), so a symlinked
+    /// home matches a canonicalised workdir.
+    #[test]
+    fn canonical_home_resolves_a_real_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            canonical_home(dir.path()),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+    }
+
+    /// A home that does not exist is kept as given rather than dropped: the
+    /// textual check still fires on the spelling it has.
+    #[test]
+    fn canonical_home_keeps_a_path_it_cannot_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nowhere");
+        assert_eq!(canonical_home(&missing), missing);
+    }
+
+    /// The case the helper exists for: home reached through a symlink, the
+    /// workdir given as the real directory. Textually different, the same
+    /// place, and the guard has to say so.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_home_is_still_questioned_once_canonicalised() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-home");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let workdir = std::fs::canonicalize(&real).unwrap();
+        // Raw, the symlink never matches the canonical workdir.
+        assert_eq!(assess(&workdir, Some(&link), &[]), WorkdirVerdict::Proceed);
+        assert_eq!(
+            assess(&workdir, Some(&canonical_home(&link)), &[]),
+            WorkdirVerdict::Confirm(WorkdirConcern::HomeDirectory)
         );
     }
 

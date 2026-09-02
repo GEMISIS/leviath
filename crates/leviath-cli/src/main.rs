@@ -229,7 +229,7 @@ impl RiskyExecutors for RealExecutors {
                     default_cwd,
                     tools_dir: leviath_core::tools_dir(),
                     agents_dir: leviath_core::agents_dir(),
-                    home: dirs::home_dir(),
+                    home: dirs::home_dir().map(|h| leviath_cli::workdir_guard::canonical_home(&h)),
                     allowed_workdirs: leviath_cli::config::Config::load()
                         .map(|c| c.security.allowed_workdirs)
                         .unwrap_or_default(),
