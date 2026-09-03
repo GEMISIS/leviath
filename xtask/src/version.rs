@@ -403,9 +403,6 @@ const PROD_WORKFLOW: &str = ".github/workflows/prod.yml";
 /// Path of the workflow carrying the per-package coverage matrix.
 const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 
-/// Members that are never published, because their manifests say so.
-const UNPUBLISHED: &[&str] = &["xtask", "leviath-testkit"];
-
 /// Members the coverage gate does not run, matching
 /// [`crate::coverage::parse_workspace_packages`].
 const UNGATED: &[&str] = &["xtask", "leviath-testkit", "leviath"];
@@ -459,6 +456,52 @@ fn names_present<'a>(text: &str, candidates: &'a [String]) -> Vec<&'a String> {
         .collect()
 }
 
+/// Members whose manifests carry `publish = false`, by name.
+///
+/// Read from the manifests rather than kept as a list here, so a crate that
+/// opts out after the list was written is still seen. `leviath-alloc` did
+/// exactly that: the flag went in as repo hygiene while the publish loop
+/// still named it, and the 0.5.8 stable release spent thirty minutes retrying
+/// a publish cargo refuses by design, then gave up with every crate behind it
+/// unpublished.
+fn opted_out_of_publish(manifests: &[(String, String)]) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|(_, text)| text.lines().any(|line| line.trim() == "publish = false"))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Every opted-out member the release still needs.
+///
+/// An opt-out breaks a release in two ways, both caught here rather than at
+/// `cargo publish`: the prod workflow's loop names the crate, so the loop
+/// fails on it; or a manifest pins it by version, so the crate naming it
+/// cannot be verified against the registry. `pins` is `(manifest path,
+/// dependency name)` for every intra-workspace pin.
+fn unpublishable_but_needed(
+    opted_out: &[String],
+    prod: &str,
+    pins: &[(String, String)],
+) -> Vec<String> {
+    let mut needed = Vec::new();
+    for name in names_present(prod, opted_out) {
+        needed.push(format!(
+            "{name} is `publish = false` but {PROD_WORKFLOW}'s publish list names it, \
+             and `cargo publish` refuses a crate that opted out"
+        ));
+    }
+    for (manifest, dep) in pins {
+        if opted_out.contains(dep) {
+            needed.push(format!(
+                "{manifest} pins {dep} by version, but {dep} is `publish = false`, \
+                 so the crate naming it cannot be published"
+            ));
+        }
+    }
+    needed
+}
+
 /// Every member that must appear in a release list but does not.
 ///
 /// The publish list and the coverage matrix are written out by hand in two
@@ -466,14 +509,20 @@ fn names_present<'a>(text: &str, candidates: &'a [String]) -> Vec<&'a String> {
 /// publishable crate left off the publish list fails the release at `cargo
 /// publish`, because a dependency carrying a version has to be on the registry
 /// before the crate that names it. A release is the worst place to discover a
-/// list is stale.
-fn missing_from_release_lists(manifest: &str, prod: &str, ci: &str) -> Vec<String> {
+/// list is stale. `opted_out` names the members whose manifests say they are
+/// never published; those are not demanded.
+fn missing_from_release_lists(
+    manifest: &str,
+    prod: &str,
+    ci: &str,
+    opted_out: &[String],
+) -> Vec<String> {
     let members = workspace_members(manifest);
     let mut missing = Vec::new();
 
     let publishable: Vec<String> = members
         .iter()
-        .filter(|m| !UNPUBLISHED.contains(&m.as_str()))
+        .filter(|m| !opted_out.contains(m))
         .cloned()
         .collect();
     let listed = names_present(prod, &publishable);
@@ -537,7 +586,8 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
 
             let prod = std::fs::read_to_string(PROD_WORKFLOW).unwrap_or_default();
             let ci = std::fs::read_to_string(CI_WORKFLOW).unwrap_or_default();
-            let missing = missing_from_release_lists(&manifest, &prod, &ci);
+            let opted_out = opted_out_of_publish(&crate::structure::crate_manifests()?);
+            let missing = missing_from_release_lists(&manifest, &prod, &ci, &opted_out);
             anyhow::ensure!(
                 missing.is_empty(),
                 "a workspace member is missing from a release list: {}. \
@@ -546,10 +596,28 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                 missing.join("; ")
             );
 
+            let mut pins: Vec<(String, String)> = pinned_versions(&manifest)
+                .into_iter()
+                .map(|(dep, _)| (MANIFEST.to_owned(), dep))
+                .collect();
+            pins.extend(
+                pinned_versions(&cli_manifest)
+                    .into_iter()
+                    .map(|(dep, _)| (CLI_MANIFEST.to_owned(), dep)),
+            );
+            let needed = unpublishable_but_needed(&opted_out, &prod, &pins);
+            anyhow::ensure!(
+                needed.is_empty(),
+                "a crate the release needs has opted out of publishing: {}. \
+                 Drop the `publish = false`, or stop naming the crate.",
+                needed.join("; ")
+            );
+
             println!(
                 "Every intra-workspace pin matches [workspace.package] version {expected}, \
-                 both [profile.release] blocks agree, and every member is in the \
-                 publish list and the coverage matrix."
+                 both [profile.release] blocks agree, every member is in the \
+                 publish list and the coverage matrix, and nothing the release \
+                 needs has opted out of publishing."
             );
             Ok(())
         }
@@ -1086,13 +1154,91 @@ members = [
         );
     }
 
+    /// The members whose manifests opt out of publishing, as the real
+    /// workspace has them.
+    fn opted_out() -> Vec<String> {
+        vec!["xtask".to_owned(), "leviath-testkit".to_owned()]
+    }
+
+    /// A manifest with `publish = false` anywhere in it opts out; one without
+    /// it, or with only a comment mentioning the flag, does not.
+    #[test]
+    fn opted_out_members_are_read_from_their_manifests() {
+        let manifests = vec![
+            (
+                "leviath-alloc".to_owned(),
+                "[package]\nname = \"leviath-alloc\"\npublish = false\n".to_owned(),
+            ),
+            (
+                "leviath-core".to_owned(),
+                "[package]\n# publish = false was considered\nname = \"leviath-core\"\n".to_owned(),
+            ),
+            (
+                "xtask".to_owned(),
+                "[package]\n  publish = false\n".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            opted_out_of_publish(&manifests),
+            vec!["leviath-alloc", "xtask"]
+        );
+    }
+
+    /// An opted-out crate that the publish loop still names is reported, as is
+    /// one that a manifest pins by version; an opt-out nothing needs is not.
+    #[test]
+    fn an_opted_out_crate_the_release_needs_is_reported() {
+        let opted = vec!["leviath-alloc".to_owned(), "leviath-testkit".to_owned()];
+        let pins = vec![
+            ("Cargo.toml".to_owned(), "leviath-core".to_owned()),
+            (
+                "crates/leviath-cli/Cargo.toml".to_owned(),
+                "leviath-alloc".to_owned(),
+            ),
+        ];
+        let needed = unpublishable_but_needed(
+            &opted,
+            "for c in leviath-net leviath-alloc leviath-core; do",
+            &pins,
+        );
+        assert_eq!(needed.len(), 2, "{needed:?}");
+        assert!(
+            needed[0].contains("leviath-alloc") && needed[0].contains("publish list"),
+            "{needed:?}"
+        );
+        assert!(
+            needed[1].contains("crates/leviath-cli/Cargo.toml") && needed[1].contains("pins"),
+            "{needed:?}"
+        );
+        assert!(
+            !needed.iter().any(|n| n.contains("testkit")),
+            "a path-only opt-out nobody names is fine: {needed:?}"
+        );
+    }
+
+    /// With the flag gone and the loop still naming the crate, nothing is
+    /// reported: that is the shape a release needs.
+    #[test]
+    fn a_publishable_crate_in_the_loop_is_not_reported() {
+        let needed = unpublishable_but_needed(
+            &opted_out(),
+            "for c in leviath-net leviath-alloc; do",
+            &[("Cargo.toml".to_owned(), "leviath-alloc".to_owned())],
+        );
+        assert!(needed.is_empty(), "{needed:?}");
+    }
+
     /// A member in neither workflow is reported once per list, so the message
     /// names the publish list and the coverage matrix separately rather than
     /// stopping at the first.
     #[test]
     fn a_member_missing_from_both_lists_is_reported_twice() {
-        let missing =
-            missing_from_release_lists(MEMBERS, "for c in leviath-core; do", "- leviath-core");
+        let missing = missing_from_release_lists(
+            MEMBERS,
+            "for c in leviath-core; do",
+            "- leviath-core",
+            &opted_out(),
+        );
         assert!(
             missing
                 .iter()
@@ -1116,6 +1262,7 @@ members = [
             MEMBERS,
             "for c in leviath-core leviath-net leviath-alloc; do",
             "- leviath-core\n- leviath-net\n- leviath-alloc",
+            &opted_out(),
         );
         assert!(missing.is_empty(), "{missing:?}");
         assert!(
@@ -1131,7 +1278,8 @@ members = [
     /// missing almost everything.
     #[test]
     fn a_substring_does_not_count_as_present() {
-        let missing = missing_from_release_lists(MEMBERS, "for c in leviath; do", "- leviath");
+        let missing =
+            missing_from_release_lists(MEMBERS, "for c in leviath; do", "- leviath", &opted_out());
         assert!(
             missing.iter().any(|m| m.contains("leviath-core")),
             "a prefix match must not satisfy a longer name: {missing:?}"

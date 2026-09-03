@@ -13,9 +13,11 @@
 [package]
 name = "leviath-alloc"
 description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
-# Only `leviath-cli` consumes this, by path. Not publishing it keeps the one
-# `unsafe` call in the workspace out of crates.io and off the release ritual.
-publish = false
+# Published, and it has to be: `leviath-cli` pins it by version under its
+# default `mimalloc-allocator` feature, so `cargo install leviath-cli` fetches
+# it from crates.io. Marking it `publish = false` once looked like hygiene
+# (the one `unsafe` call, kept off the registry) and stalled the 0.5.8
+# release at this crate; `cargo xtask version --check` now refuses that.
 version.workspace = true
 edition.workspace = true
 license.workspace = true

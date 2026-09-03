@@ -21,6 +21,19 @@ same list.
   resource in `lev.exe` stays. Should signing ever be wanted, the SignPath
   Foundation route in CONTRIBUTING is the one to add.
 
+### Fixed
+
+- The crates.io publish on a stable release stopped at `leviath-alloc`. An
+  August hygiene commit marked the crate `publish = false` while the prod
+  workflow's publish loop still named it and `leviath-cli`'s default allocator
+  feature still pinned it by version, so the 0.5.8 release published
+  `leviath-net` and then retried a refused publish for thirty minutes before
+  giving up, leaving every other crate at 0.5.5 on the registry. The crate is
+  publishable again (it had shipped there through 0.5.5 already), and
+  `cargo xtask version --check` now reads each member's manifest and refuses
+  a `publish = false` crate that the publish loop names or that another
+  manifest pins by version.
+
 ## 0.5.9 - 2026-09-02
 
 ### Added
