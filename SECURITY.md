@@ -278,7 +278,5 @@ on an unknown file, which the build provenance attestation above answers: it
 proves *which workflow* built the file, which is a stronger statement than a
 publisher signature makes.
 
-The release pipeline can sign if a certificate is ever available - the alpha
-build carries an opt-in step for Azure Artifact Signing, and the free path for
-open-source projects is the SignPath Foundation (see CONTRIBUTING). Neither is
-configured; the step prints a notice and ships the binary unsigned.
+The release pipeline has no signing step. If signing is ever wanted, the free
+path for open-source projects is the SignPath Foundation (see CONTRIBUTING).
