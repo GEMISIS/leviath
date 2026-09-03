@@ -277,7 +277,7 @@ pub fn run(mode: StructureMode) -> Result<()> {
 ///
 /// `xtask` is a workspace member like any other and carries the same lint
 /// table; leaving it out here would let it drop the table without a word.
-fn crate_manifests() -> Result<Vec<(String, String)>> {
+pub(crate) fn crate_manifests() -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir("crates")?.flatten() {
         let manifest = entry.path().join("Cargo.toml");
