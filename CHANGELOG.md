@@ -11,6 +11,16 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Removed
+
+- The opt-in Azure Artifact Signing step on the alpha build, along with the
+  `id-token` grant that existed only for it. It was never configured, so every
+  `lev.exe` to date shipped unsigned and nothing changes for users. The version
+  resource in `lev.exe` stays. Should signing ever be wanted, the SignPath
+  Foundation route in CONTRIBUTING is the one to add.
+
 ## 0.5.9 - 2026-09-02
 
 ### Added

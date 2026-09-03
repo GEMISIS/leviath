@@ -279,31 +279,10 @@ reviewers and approvers), and once accepted the alpha build would submit
 `lev.exe` through `signpath/github-action-submit-signing-request` and receive
 it back signed with the Foundation's certificate - which Windows trusts, and
 which accrues reputation across releases. That is the only way the Defender
-flags stop for good; everything below is the paid alternative.
-
-The alpha build also carries an opt-in step for Azure Artifact Signing (which
-costs money and is not configured). It signs when six repository secrets
-exist and prints a `::notice` and ships unsigned when they do not, so nothing
-about a fork or a PR build depends on Azure. Should that ever be wanted:
-
-1. **Azure portal → Artifact Signing** (Basic tier): create an account, complete
-   the identity validation for Sun Forge AI (this is the slow step - days - and
-   nothing signs until it is approved), then add a certificate profile of type
-   *Public Trust*. Note the account's endpoint (for example
-   `https://eus.codesigning.azure.net`).
-2. **Microsoft Entra → App registrations**: create an app. Under *Certificates &
-   secrets → Federated credentials*, add one for GitHub Actions: organization
-   `GEMISIS`, repository `leviath`, entity **Branch**, branch `main`. No client
-   secret - the workflow authenticates with OpenID Connect, and the alpha build
-   only ever runs from `main`.
-3. **The signing account → Access control (IAM)**: assign the app the role
-   *Artifact Signing Certificate Profile Signer*.
-4. **Repository secrets**: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
-   `AZURE_SUBSCRIPTION_ID`, `ARTIFACT_SIGNING_ENDPOINT`,
-   `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`.
-
-The next alpha run signs. Verify on the published asset with
-`Get-AuthenticodeSignature lev.exe`.
+flags stop for good. The release pipeline carries no signing step today, so
+adopting it means adding that step to the alpha build (beta and stable promote
+the alpha artifacts, so a signature travels with them). Verify a signed asset
+with `Get-AuthenticodeSignature lev.exe`.
 
 ## Design notes
 
