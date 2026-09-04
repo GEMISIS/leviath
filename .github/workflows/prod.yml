@@ -335,11 +335,14 @@ jobs:
             exit 0
           fi
           # Dependency order: cargo publish verifies each crate against the
-          # registry, so dependencies must land before their dependents.
-          for c in leviath-net leviath-alloc \
-                   leviath-core leviath-sys leviath-agent-client leviath-mcp \
-                   leviath-package leviath-scripting leviath-telemetry \
-                   leviath-providers leviath-tools leviath-runtime \
+          # registry, so dependencies must land before their dependents. A
+          # dev-dependency counts too: cargo resolves it when packaging, so
+          # agent-client (which tests against tools) has to follow tools.
+          # The version check in CI refuses a list that breaks this.
+          for c in leviath-alloc leviath-core leviath-net leviath-sys \
+                   leviath-mcp leviath-package leviath-scripting \
+                   leviath-telemetry leviath-providers leviath-tools \
+                   leviath-agent-client leviath-runtime \
                    leviath leviath-cli; do
             if curl -fsS -A "leviath-ci (github.com/GEMISIS/leviath)" \
                  "https://crates.io/api/v1/crates/$c/$VERSION" >/dev/null 2>&1; then
