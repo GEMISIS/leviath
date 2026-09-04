@@ -502,6 +502,73 @@ fn unpublishable_but_needed(
     needed
 }
 
+/// The crate names in `prod`'s publish loop, in the order it publishes them.
+///
+/// The loop is a shell `for c in a b \ c; do`, so this reads the words
+/// between `for c in ` and the `; do` that closes it, dropping the line
+/// continuations. A rewritten loop yields nothing, and the membership check
+/// then reports every crate missing rather than this passing an empty list
+/// off as a correct one.
+fn publish_loop(prod: &str) -> Vec<String> {
+    let Some((_, after)) = prod.split_once("for c in ") else {
+        return Vec::new();
+    };
+    let Some((body, _)) = after.split_once("; do") else {
+        return Vec::new();
+    };
+    body.split_whitespace()
+        .filter(|word| *word != "\\")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The workspace members a manifest names as dependencies, of any kind.
+///
+/// A dev-dependency counts: cargo resolves every kind when it packages a
+/// crate, so a dev-dependency not yet on the registry fails the publish just
+/// as a normal one does. Only a dependency carrying a version can block, and
+/// those are exactly the workspace-table entries (`workspace = true`) and
+/// `leviath-cli`'s sideways allocator pin; both spellings are read.
+fn workspace_deps(manifest: &str, members: &[String]) -> Vec<String> {
+    manifest
+        .lines()
+        .filter_map(|line| {
+            let (name, rest) = line.split_once(" = ")?;
+            let name = name.trim();
+            let ours = members.iter().any(|m| m == name);
+            let pinned = rest.contains("workspace = true") || is_workspace_path_dep(line);
+            (ours && pinned).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Every crate the publish loop names before one of its dependencies.
+///
+/// `manifests` is `(member name, manifest text)`. A crate published before a
+/// dependency fails at `cargo publish`, which resolves the dependency against
+/// the registry and finds only the previous version there. The 0.5.8 release
+/// hit this after the opt-out above was patched around: `leviath-agent-client`
+/// sat before `leviath-tools`, which it tests against.
+fn published_before_dependency(prod: &str, manifests: &[(String, String)]) -> Vec<String> {
+    let order = publish_loop(prod);
+    let members: Vec<String> = manifests.iter().map(|(name, _)| name.clone()).collect();
+    let position = |name: &str| order.iter().position(|o| o == name);
+    let mut wrong = Vec::new();
+    for (name, text) in manifests {
+        let Some(at) = position(name) else {
+            continue;
+        };
+        for dep in workspace_deps(text, &members) {
+            if position(&dep).is_some_and(|dep_at| dep_at > at) {
+                wrong.push(format!(
+                    "{name} is published before {dep}, which it depends on"
+                ));
+            }
+        }
+    }
+    wrong
+}
+
 /// Every member that must appear in a release list but does not.
 ///
 /// The publish list and the coverage matrix are written out by hand in two
@@ -586,7 +653,8 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
 
             let prod = std::fs::read_to_string(PROD_WORKFLOW).unwrap_or_default();
             let ci = std::fs::read_to_string(CI_WORKFLOW).unwrap_or_default();
-            let opted_out = opted_out_of_publish(&crate::structure::crate_manifests()?);
+            let manifests = crate::structure::crate_manifests()?;
+            let opted_out = opted_out_of_publish(&manifests);
             let missing = missing_from_release_lists(&manifest, &prod, &ci, &opted_out);
             anyhow::ensure!(
                 missing.is_empty(),
@@ -613,11 +681,21 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                 needed.join("; ")
             );
 
+            let wrong = published_before_dependency(&prod, &manifests);
+            anyhow::ensure!(
+                wrong.is_empty(),
+                "{PROD_WORKFLOW}'s publish list is out of dependency order: {}. \
+                 Move each crate after everything it depends on, dev-dependencies \
+                 included.",
+                wrong.join("; ")
+            );
+
             println!(
                 "Every intra-workspace pin matches [workspace.package] version {expected}, \
                  both [profile.release] blocks agree, every member is in the \
-                 publish list and the coverage matrix, and nothing the release \
-                 needs has opted out of publishing."
+                 publish list and the coverage matrix, nothing the release \
+                 needs has opted out of publishing, and the publish list is in \
+                 dependency order."
             );
             Ok(())
         }
@@ -1226,6 +1304,72 @@ members = [
             &[("Cargo.toml".to_owned(), "leviath-alloc".to_owned())],
         );
         assert!(needed.is_empty(), "{needed:?}");
+    }
+
+    /// The loop's words come back in order with the line continuations
+    /// dropped; a rewritten loop yields nothing rather than a guess.
+    #[test]
+    fn publish_loop_reads_the_for_loop_in_order() {
+        let prod = "          for c in leviath-alloc leviath-core \\\n                   leviath-cli; do\n            cargo publish";
+        assert_eq!(
+            publish_loop(prod),
+            vec!["leviath-alloc", "leviath-core", "leviath-cli"]
+        );
+        assert!(publish_loop("while read c; do").is_empty());
+    }
+
+    /// Both spellings of a versioned workspace dependency are read, under any
+    /// dependency table; a third-party crate and the package's own name line
+    /// are not.
+    #[test]
+    fn workspace_deps_reads_both_spellings_and_every_kind() {
+        let manifest = "[package]\nname = \"leviath-cli\"\n\n[dependencies]\n\
+                        leviath-core = { workspace = true }\n\
+                        serde = { workspace = true }\n\
+                        leviath-alloc = { path = \"../leviath-alloc\", version = \"0.5.9\", optional = true }\n\n\
+                        [dev-dependencies]\nleviath-tools = { workspace = true }\n";
+        let members = [
+            "leviath-cli",
+            "leviath-core",
+            "leviath-alloc",
+            "leviath-tools",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            workspace_deps(manifest, &members),
+            vec!["leviath-core", "leviath-alloc", "leviath-tools"]
+        );
+    }
+
+    /// A crate the loop names before a dependency, dev-dependencies included,
+    /// is reported; the same loop with the two swapped is clean.
+    #[test]
+    fn a_crate_published_before_its_dependency_is_reported() {
+        let manifests = vec![
+            (
+                "leviath-tools".to_owned(),
+                "[package]\nname = \"leviath-tools\"\n".to_owned(),
+            ),
+            (
+                "leviath-agent-client".to_owned(),
+                "[package]\nname = \"leviath-agent-client\"\n\n[dev-dependencies]\n\
+                 leviath-tools = { workspace = true }\n"
+                    .to_owned(),
+            ),
+        ];
+        let wrong = published_before_dependency(
+            "for c in leviath-agent-client leviath-tools; do",
+            &manifests,
+        );
+        assert_eq!(
+            wrong,
+            vec!["leviath-agent-client is published before leviath-tools, which it depends on"]
+        );
+        let fine = published_before_dependency(
+            "for c in leviath-tools leviath-agent-client; do",
+            &manifests,
+        );
+        assert!(fine.is_empty(), "{fine:?}");
     }
 
     /// A member in neither workflow is reported once per list, so the message

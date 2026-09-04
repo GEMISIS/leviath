@@ -33,6 +33,13 @@ same list.
   `cargo xtask version --check` now reads each member's manifest and refuses
   a `publish = false` crate that the publish loop names or that another
   manifest pins by version.
+- The publish loop's order was also wrong for the current dependency graph:
+  `leviath-agent-client` sat before `leviath-tools`, which it tests against,
+  and cargo resolves dev-dependencies when packaging, so the publish would
+  have failed there next. The loop is reordered, and the same check now
+  reads every member's dependencies and refuses a list that names a crate
+  before one it depends on. The rest of 0.5.8 was published by hand from the
+  tag in that order.
 
 ## 0.5.9 - 2026-09-02
 
