@@ -21,6 +21,7 @@ use crate::config::Config;
 // Sections of the former single-file wizard state. Glob re-exported so every
 // existing `state::Wizard` path keeps working.
 mod endpoints;
+mod models;
 mod priority;
 pub(crate) use endpoints::*;
 mod lanes;
@@ -593,9 +594,13 @@ impl Wizard {
         self.scroll = 0;
         self.edit = None;
         if step == Step::Defaults {
-            // The model picker is populated by verification, which may have
-            // finished since the last visit.
+            // The provider priority is populated by verification, which may
+            // have finished since the last visit.
             self.rebuild_defaults();
+        }
+        if step == Step::Limits {
+            // Same for the two model choices at the end of the tuning screen.
+            self.rebuild_advanced_models();
         }
     }
 
@@ -620,65 +625,6 @@ impl Wizard {
             return true;
         }
         false
-    }
-
-    /// What choosing one of these values actually decides.
-    ///
-    /// Written against `leviath_runtime::pipeline::resolve`, which is the code
-    /// that reads them. The line about a blueprint winning is the one worth
-    /// having: a user who sets a default and then watches an agent run on
-    /// something else has been told, by every other tool, that a default is a
-    /// default.
-    fn precedence_explanation(provider: bool) -> Vec<&'static str> {
-        if provider {
-            vec![
-                "Where your runs go by default. A stage that lists this provider among",
-                "its models is served by it first, ahead of the blueprint's own order.",
-                "",
-                "This field does nothing on its own. Until you also set a default model",
-                "below, the only thing it can do is reorder a list that already names",
-                "this provider, so on a machine keyed for one provider that no blueprint",
-                "mentions, every stage still goes somewhere else.",
-                "",
-                "It never overrides a blueprint that pins its provider: a stage with",
-                "allow_user_default = false ignores this, and so does a provider you",
-                "have not given a credential.",
-            ]
-        } else {
-            vec![
-                "The model your default provider is asked for. The two travel together:",
-                "this name is never sent to a different provider, so an OpenAI model is",
-                "never asked of Anthropic.",
-                "",
-                "Setting it is what makes the default provider above take effect. The",
-                "pair is offered to every stage that allows a user default, and moves to",
-                "the front of the models that stage lists.",
-                "",
-                "Leaving it unset does not mean your provider picks a model. It means",
-                "each blueprint uses the models it names, and a stage that names none",
-                "falls back to a model built into Leviath, whoever you configured.",
-            ]
-        }
-    }
-
-    /// Every model id any provider reported, deduplicated, for the picker.
-    pub(crate) fn discovered_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = self
-            .providers
-            .iter()
-            .filter(|r| r.selected)
-            .flat_map(|r| r.outcome.models().iter().cloned())
-            .collect();
-        let selected = self.selected_endpoint_names();
-        models.extend(
-            self.endpoints
-                .iter()
-                .filter(|e| selected.contains(&e.name))
-                .flat_map(|e| e.model_choices()),
-        );
-        models.sort();
-        models.dedup();
-        models
     }
 
     // ── Forms ───────────────────────────────────────────────────────────────
@@ -732,24 +678,6 @@ impl Wizard {
             order.insert(0, head);
         }
 
-        let mut models = vec![Self::NO_DEFAULT_MODEL.to_string()];
-        models.extend(self.discovered_models());
-        // An endpoint entry at the head of the priority brings the model picked
-        // on its own screen, unless a model was already chosen here.
-        let chosen_provider = order.first().cloned().unwrap_or_default();
-        let current_model = self
-            .current_default_model()
-            .filter(|m| m != Self::NO_DEFAULT_MODEL)
-            .or_else(|| self.endpoint_default_model(&chosen_provider))
-            .unwrap_or_else(|| Self::NO_DEFAULT_MODEL.to_string());
-        if !models.contains(&current_model) {
-            models.push(current_model.clone());
-        }
-        let model_index = models
-            .iter()
-            .position(|m| *m == current_model)
-            .unwrap_or_default();
-
         let timeout = self.current_request_timeout();
         self.defaults = vec![
             Field {
@@ -759,25 +687,15 @@ impl Wizard {
                 value: FieldValue::Order(order),
             },
             Field {
-                label: "Override model",
-                help: "One model every stage that allows a user default starts on, ahead of \
-                       what its blueprint names, paired with the provider above. Leave it \
-                       unset to let each blueprint decide. Listed from what your providers \
-                       reported.",
-                value: FieldValue::Choice {
-                    options: models,
-                    index: model_index,
-                },
-            },
-            Field {
                 label: "Request timeout (seconds)",
                 help: "How long to wait on one inference. Unset uses the provider default.",
                 value: FieldValue::Number(timeout),
             },
             Field {
                 label: "Show advanced tuning",
-                help: "Adds a screen of concurrency, retry and context limits. Every one of \
-                       them already has a default that works.",
+                help: "Adds a screen of concurrency, retry and context limits, and the two \
+                       model settings that override or back up what a blueprint names. \
+                       Every one of them already has a default that works.",
                 value: FieldValue::Bool(self.show_advanced),
             },
         ];
@@ -792,8 +710,19 @@ impl Wizard {
     /// Where the provider choice sits on the Defaults screen.
     pub const PROVIDER_FIELD: usize = 0;
 
+    /// Where the request timeout sits on the Defaults screen.
+    pub const TIMEOUT_FIELD: usize = 1;
+
     /// Where the advanced-tuning toggle sits on the Defaults screen.
-    pub const ADVANCED_FIELD: usize = 3;
+    pub const ADVANCED_FIELD: usize = 2;
+
+    /// Where the override model sits on the advanced screen: after every
+    /// tuning limit, so the limits keep the indices `apply_limits_fields`
+    /// matches on.
+    pub const OVERRIDE_FIELD: usize = LIMITS_FIXED;
+
+    /// Where the fallback model sits on the advanced screen.
+    pub const FALLBACK_FIELD: usize = LIMITS_FIXED + 1;
 
     /// The model field's "no default" option.
     ///
@@ -803,100 +732,8 @@ impl Wizard {
     /// Leviath, not to anything the provider chose.
     pub const NO_DEFAULT_MODEL: &'static str = "(each blueprint decides)";
 
-    /// Open the chooser for the Defaults field the cursor is on.
-    ///
-    /// The options come from the caller because it has already matched on the
-    /// field's kind: re-reading them here would add a shape this cannot be in.
-    pub(super) fn open_picker(&mut self, title: &'static str, options: Vec<String>, index: usize) {
-        let field = self.cursor;
-        let options = options
-            .into_iter()
-            .map(|value| {
-                let detail = if field == Self::PROVIDER_FIELD {
-                    self.provider_detail(&value)
-                } else {
-                    self.model_detail(&value)
-                };
-                PickerOption { value, detail }
-            })
-            .collect();
-        self.picker_field = field;
-        // Opening on the current value rather than at the top: the list is
-        // long, and "where am I now" is the first thing you look for.
-        self.picker = Some(Picker::new(
-            title,
-            Self::precedence_explanation(field == Self::PROVIDER_FIELD)
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            options,
-            index,
-        ));
-    }
-
-    /// What a provider id is, for the chooser's second column.
-    fn provider_detail(&self, id: &str) -> String {
-        // Entries before rows: an entry is named after its preset by default,
-        // and the preset row is never itself a choice here.
-        if let Some(entry) = self.endpoints.iter().find(|e| e.name == id) {
-            let preset = self
-                .providers
-                .iter()
-                .find(|r| r.provider.id == entry.preset)
-                .map_or(entry.preset, |r| r.provider.display);
-            return format!("{preset} at {}", entry.base_url);
-        }
-        if let Some(row) = self.providers.iter().find(|r| r.provider.id == id) {
-            return row.provider.display.to_string();
-        }
-        // A provider that is configured but not in the catalog: it came
-        // from the config file, so it is still a legitimate choice.
-        "from your config".to_string()
-    }
-
-    /// Which providers reported a model, so the row says where it came from.
-    fn model_detail(&self, model: &str) -> String {
-        // The first row is the absence of a model, not a model, so the
-        // question "who reported it" does not apply to it.
-        if model == Self::NO_DEFAULT_MODEL {
-            return "no default; every blueprint uses the models it names".to_string();
-        }
-        let reported: Vec<&str> = self
-            .providers
-            .iter()
-            .filter(|r| r.selected && r.outcome.models().iter().any(|m| m == model))
-            .map(|r| r.provider.display)
-            .collect();
-        if reported.is_empty() {
-            return "not reported by a provider you selected".to_string();
-        }
-        format!("reported by {}", reported.join(", "))
-    }
-
-    /// Take the chooser's answer (an index into its options), writing it
-    /// back into the field it came from.
-    pub(super) fn commit_picker(&mut self, chosen: usize) {
-        // The chooser's options were built from this field's, one for one and
-        // in order, so the option index *is* the field's index. Indexing rather
-        // than looking up: the field is where it was when the chooser opened,
-        // and nothing rebuilds the form while one is on screen.
-        self.defaults[self.picker_field].value.set_index(chosen);
-        self.dirty = true;
-        // The provider field is an ordered priority now and opens the reorder
-        // modal, not the chooser, so the only field this commits is the default
-        // model - the concurrency-follows-provider adjustment lives in
-        // `commit_reorder`.
-    }
-
-    fn current_default_model(&self) -> Option<String> {
-        match self.defaults.get(1).map(|f| &f.value) {
-            Some(FieldValue::Choice { options, index }) => options.get(*index).cloned(),
-            _ => self.base.override_model.clone(),
-        }
-    }
-
     fn current_request_timeout(&self) -> Option<u64> {
-        match self.defaults.get(2).map(|f| &f.value) {
+        match self.defaults.get(Self::TIMEOUT_FIELD).map(|f| &f.value) {
             Some(FieldValue::Number(n)) => *n,
             _ => self.base.request_timeout_secs,
         }
@@ -1059,9 +896,21 @@ impl Wizard {
             .cloned()
             .unwrap_or_else(|| self.current_default_provider());
         config.providers.provider_order = if order.len() > 1 { order } else { Vec::new() };
-        config.override_model = self
-            .current_default_model()
-            .filter(|m| m != Self::NO_DEFAULT_MODEL);
+        // The two model settings live on the advanced screen. Until it has
+        // been visited the override keeps what the config holds, or what an
+        // endpoint entry at the head of the priority picked for itself; a
+        // visit that chose "(each blueprint decides)" is a real answer and is
+        // not overridden by that pick.
+        let head = config.default_provider.clone();
+        config.override_model = self.chosen_model(Self::OVERRIDE_FIELD).unwrap_or_else(|| {
+            self.base
+                .override_model
+                .clone()
+                .or_else(|| self.endpoint_default_model(&head))
+        });
+        config.fallback_model = self
+            .chosen_model(Self::FALLBACK_FIELD)
+            .unwrap_or_else(|| self.base.fallback_model.clone());
         config.request_timeout_secs = self.current_request_timeout();
 
         apply_limits_fields(&mut config, &self.limits);
@@ -1926,9 +1775,10 @@ pub(super) mod tests {
         let mut wizard = test_wizard(dir.path());
         let (_requests, replies) = wizard.take_verify_ends().expect("first take");
         wizard.providers[0].selected = true;
-        wizard.enter(Step::Defaults);
+        wizard.show_advanced = true;
+        wizard.enter(Step::Limits);
         assert_eq!(
-            wizard.defaults[1].value.options(),
+            wizard.limits[Wizard::OVERRIDE_FIELD].value.options(),
             [Wizard::NO_DEFAULT_MODEL.to_string()],
             "nothing has been reported yet"
         );
@@ -1944,12 +1794,56 @@ pub(super) mod tests {
         wizard.drain_verifications();
 
         assert!(
-            wizard.defaults[1]
+            wizard.limits[Wizard::OVERRIDE_FIELD]
                 .value
                 .options()
                 .contains(&"claude-opus-5".to_string()),
             "the picker should have refilled"
         );
+        assert!(
+            wizard.limits[Wizard::FALLBACK_FIELD]
+                .value
+                .options()
+                .contains(&"claude-opus-5".to_string()),
+            "both choosers share the list"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_reply_rebuilds_the_defaults_screen_too() {
+        // The Defaults screen's provider priority is built from the same
+        // replies, so a reply landing while it is open rebuilds it as well.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let (_requests, replies) = wizard.take_verify_ends().expect("first take");
+        wizard.providers[0].selected = true;
+        wizard.enter(Step::Defaults);
+        let before = wizard.defaults.len();
+        replies
+            .send(VerifyReply {
+                provider_id: "anthropic".to_string(),
+                outcome: Outcome::Reachable {
+                    models: vec!["claude-opus-5".to_string()],
+                },
+            })
+            .unwrap();
+        wizard.drain_verifications();
+        assert_eq!(wizard.defaults.len(), before, "the form keeps its shape");
+        assert_eq!(wizard.step, Step::Defaults);
+    }
+
+    #[test]
+    fn commit_picker_off_a_form_step_changes_no_field() {
+        // The chooser only opens on a form step, but the commit is written
+        // against the step the wizard is on when it lands: a screen with no
+        // fields has nothing to write into and nothing to panic over.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Providers);
+        wizard.picker_field = 0;
+        wizard.commit_picker(0);
+        assert!(wizard.dirty);
+        assert!(wizard.fields().is_empty());
     }
 
     #[tokio::test]
@@ -2052,16 +1946,94 @@ pub(super) mod tests {
             models: vec!["claude-opus-5".to_string()],
         };
 
-        wizard.enter(Step::Defaults);
+        wizard.show_advanced = true;
+        wizard.enter(Step::Limits);
 
-        let options = wizard.defaults[1].value.options();
+        let options = wizard.limits[Wizard::OVERRIDE_FIELD].value.options();
         assert!(options.contains(&Wizard::NO_DEFAULT_MODEL.to_string()));
         assert!(options.contains(&"claude-opus-5".to_string()));
         assert_eq!(
-            wizard.defaults[1].value.display(),
+            wizard.limits[Wizard::OVERRIDE_FIELD].value.display(),
             "hand-typed",
             "a model already in the config must survive"
         );
+        assert_eq!(
+            wizard.limits[Wizard::FALLBACK_FIELD].value.display(),
+            Wizard::NO_DEFAULT_MODEL,
+            "nothing configured reads as the blueprints deciding"
+        );
+    }
+
+    /// A choice made on the advanced screen is what gets written, survives
+    /// leaving and re-entering the screen, and an explicit "(each blueprint
+    /// decides)" there beats the model an endpoint entry picked for itself.
+    #[test]
+    fn the_advanced_model_choices_are_written_back_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.providers[0].selected = true;
+        wizard.providers[0].outcome = Outcome::Reachable {
+            models: vec!["m-1".to_string(), "m-2".to_string()],
+        };
+        wizard.show_advanced = true;
+        wizard.enter(Step::Defaults);
+        assert_eq!(wizard.build_config().override_model, None);
+        assert_eq!(wizard.build_config().fallback_model, None);
+
+        wizard.enter(Step::Limits);
+        wizard.cursor = Wizard::OVERRIDE_FIELD;
+        wizard.open_picker(
+            "Override model",
+            wizard.limits[Wizard::OVERRIDE_FIELD]
+                .value
+                .options()
+                .to_vec(),
+            0,
+        );
+        let pick = wizard.limits[Wizard::OVERRIDE_FIELD]
+            .value
+            .options()
+            .iter()
+            .position(|m| m == "m-2")
+            .expect("reported");
+        wizard.commit_picker(pick);
+        wizard.cursor = Wizard::FALLBACK_FIELD;
+        wizard.open_picker(
+            "Fallback model",
+            wizard.limits[Wizard::FALLBACK_FIELD]
+                .value
+                .options()
+                .to_vec(),
+            0,
+        );
+        let pick = wizard.limits[Wizard::FALLBACK_FIELD]
+            .value
+            .options()
+            .iter()
+            .position(|m| m == "m-1")
+            .expect("reported");
+        wizard.commit_picker(pick);
+        assert_eq!(wizard.build_config().override_model.as_deref(), Some("m-2"));
+        assert_eq!(wizard.build_config().fallback_model.as_deref(), Some("m-1"));
+
+        // Out and back in: the choices are still there.
+        wizard.enter(Step::Defaults);
+        wizard.enter(Step::Limits);
+        assert_eq!(wizard.limits[Wizard::OVERRIDE_FIELD].value.display(), "m-2");
+        assert_eq!(wizard.limits[Wizard::FALLBACK_FIELD].value.display(), "m-1");
+
+        // Choosing "(each blueprint decides)" is an answer, not an absence.
+        wizard.cursor = Wizard::OVERRIDE_FIELD;
+        wizard.open_picker(
+            "Override model",
+            wizard.limits[Wizard::OVERRIDE_FIELD]
+                .value
+                .options()
+                .to_vec(),
+            0,
+        );
+        wizard.commit_picker(0);
+        assert_eq!(wizard.build_config().override_model, None);
     }
 
     #[test]
@@ -2116,7 +2088,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Defaults);
-        wizard.cursor = 3; // the "Show advanced tuning" bool
+        wizard.cursor = Wizard::ADVANCED_FIELD; // the "Show advanced tuning" bool
         wizard.open_reorder();
         assert!(wizard.reorder.is_none());
     }
@@ -2425,12 +2397,12 @@ pub(super) mod tests {
         wizard.enter(Step::Defaults);
 
         wizard.edit = Some(Edit {
-            target: EditTarget::Field(2),
+            target: EditTarget::Field(1),
             line: crate::tui::widgets::line_edit::LineEdit::new("45".to_string(), false),
         });
         wizard.commit_edit();
 
-        assert_eq!(wizard.defaults[2].value, FieldValue::Number(Some(45)));
+        assert_eq!(wizard.defaults[1].value, FieldValue::Number(Some(45)));
         assert_eq!(wizard.build_config().request_timeout_secs, Some(45));
     }
 
@@ -2615,8 +2587,9 @@ pub(super) mod tests {
         wizard.providers[0].selected = true;
         wizard.enter(Step::Defaults);
 
-        // Index 0 of the model field is always the "no default" option.
+        // Nothing chosen and nothing configured: both settings stay unset.
         assert!(wizard.build_config().override_model.is_none());
+        assert!(wizard.build_config().fallback_model.is_none());
     }
 
     #[test]
@@ -2663,6 +2636,10 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Limits);
+        // The two model choosers past the tuning fields are read by
+        // `build_config` itself, not by `apply_limits_fields`.
+        assert_eq!(wizard.limits.len(), LIMITS_FIXED + 2);
+        wizard.limits.truncate(LIMITS_FIXED);
         let count = wizard.limits.len();
 
         let before = wizard.build_config();
