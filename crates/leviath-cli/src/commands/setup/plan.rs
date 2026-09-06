@@ -138,9 +138,15 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     );
     push_if_changed(
         &mut out,
-        "default model",
-        before.default_model.as_ref(),
-        after.default_model.as_ref(),
+        "override model",
+        before.override_model.as_ref(),
+        after.override_model.as_ref(),
+    );
+    push_if_changed(
+        &mut out,
+        "fallback model",
+        before.fallback_model.as_ref(),
+        after.fallback_model.as_ref(),
     );
     push_if_changed(
         &mut out,
@@ -498,7 +504,8 @@ mod tests {
         let before = Config::default();
         let mut after = before.clone();
         after.default_provider = "ollama".to_string();
-        after.default_model = Some("llama3".to_string());
+        after.override_model = Some("llama3".to_string());
+        after.fallback_model = Some("llama3-small".to_string());
         after.limits.max_concurrent_inferences = Some(1);
         after.limits.max_concurrent_tools = 4;
         after.limits.default_max_iterations = None;
@@ -508,7 +515,8 @@ mod tests {
         let lines = changes(&before, &plan_of(after));
 
         assert!(lines.contains(&"default provider: anthropic → ollama".to_string()));
-        assert!(lines.contains(&"default model: (unset) → llama3".to_string()));
+        assert!(lines.contains(&"override model: (unset) → llama3".to_string()));
+        assert!(lines.contains(&"fallback model: (unset) → llama3-small".to_string()));
         assert!(lines.contains(&"max concurrent inferences: 8 → 1".to_string()));
         assert!(lines.contains(&"max concurrent tools: 8 → 4".to_string()));
         assert!(lines.contains(&"default max iterations: 50 → (unset)".to_string()));

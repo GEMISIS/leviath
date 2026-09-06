@@ -462,7 +462,7 @@ fn execute_reporting_outcome(
 ///
 /// A blueprint lists an ordered set of models per stage, and the resolver
 /// reorders it: registered candidates on `default_provider` move to the front,
-/// `default_model` first among them. Nothing surfaced the result, so a config
+/// `override_model` first among them. Nothing surfaced the result, so a config
 /// line could silently move every stage onto a fallback model and the only
 /// evidence was in a finished run's metadata. The line under each stage is the
 /// blueprint's own order, so the promotion is visible as a difference rather
@@ -595,9 +595,10 @@ fn model_resolution_lines(
         }
     }
     if !config.default_provider.is_empty() {
-        let model = config.default_model.as_deref().unwrap_or("(unset)");
+        let over = config.override_model.as_deref().unwrap_or("(unset)");
+        let fall = config.fallback_model.as_deref().unwrap_or("(unset)");
         lines.push(format!(
-            "  default_provider = {}, default_model = {model}",
+            "  default_provider = {}, override_model = {over}, fallback_model = {fall}",
             config.default_provider
         ));
     }
@@ -993,7 +994,7 @@ system_prompt = "hi"
 
         let config = crate::config::Config {
             default_provider: "anthropic".to_string(),
-            default_model: None,
+            override_model: None,
             providers: crate::config::ProviderConfig {
                 anthropic_api_key: Some("test-key".to_string()),
                 ..Default::default()
@@ -1103,7 +1104,7 @@ system_prompt = "hi"
         // is not part of what the test is about.
         let with_keys = |default_provider: &str| crate::config::Config {
             default_provider: default_provider.to_string(),
-            default_model: None,
+            override_model: None,
             openrouter_api_key: Some("test-key".to_string()),
             providers: crate::config::ProviderConfig {
                 anthropic_api_key: Some("test-key".to_string()),
@@ -1157,7 +1158,7 @@ system_prompt = "hi"
             lines
                 .iter()
                 .any(|l| l.contains("default_provider = openrouter")
-                    && l.contains("default_model = (unset)")),
+                    && l.contains("override_model = (unset), fallback_model = (unset)")),
             "and the setting responsible has to be named: {lines:#?}"
         );
 

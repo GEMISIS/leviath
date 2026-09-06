@@ -11,9 +11,13 @@
       "default": "anthropic",
       "description": "Which provider a stage falls back to when it states no preference of its own. `lev setup` points this at a provider you configured; leaving it on one you did not is what makes `lev doctor` report a resolve failure."
     },
-    "default_model": {
+    "override_model": {
       "type": "string",
-      "description": "The model to pair with default_provider. Without it a stage naming no model falls through to a hard-coded last resort, which fails on a machine with no Anthropic key."
+      "description": "One model every stage that allows a user default starts on, ahead of the models its blueprint names: a bare model id on default_provider. Unset, the usual state, lets each blueprint pick per stage. Was `default_model` before 0.6; that key now loads as `fallback_model`."
+    },
+    "fallback_model": {
+      "type": "string",
+      "description": "The model a stage falls back to when none of the models it names is configured here, tried after all of them and before [providers] fallback_order: a bare model id on default_provider. Never moves a stage off a model its blueprint names."
     },
     "agent_paths": {
       "type": "array",

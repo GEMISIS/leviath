@@ -1095,13 +1095,15 @@ system = { kind = "pinned", max_tokens = 1000 }
     fn model_defaults_carries_the_fallback_chain_from_config() {
         let mut config = Config {
             default_provider: "openrouter".to_string(),
-            default_model: Some("deepseek".to_string()),
+            override_model: Some("deepseek".to_string()),
+            fallback_model: Some("flash".to_string()),
             ..Default::default()
         };
         config.providers.fallback_order = vec!["anthropic/claude-sonnet-5".to_string()];
         let defaults = model_defaults(&config);
         assert_eq!(defaults.provider, "openrouter");
-        assert_eq!(defaults.model.as_deref(), Some("deepseek"));
+        assert_eq!(defaults.override_model.as_deref(), Some("deepseek"));
+        assert_eq!(defaults.fallback_model.as_deref(), Some("flash"));
         assert_eq!(defaults.fallback_order.len(), 1);
         assert_eq!(defaults.fallback_order[0].provider, "anthropic");
     }

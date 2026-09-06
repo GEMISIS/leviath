@@ -1877,12 +1877,19 @@
                   "default_provider": {
                     "type": "string"
                   },
-                  "default_model": {
+                  "override_model": {
                     "type": [
                       "string",
                       "null"
                     ],
-                    "description": "Three states, unlike every other field here. Absent leaves the setting alone; `null` clears it, so each blueprint picks its own model per stage again; a string pins that model across every stage. An empty string is a 400, not a clear: `\"\"` is not a model id, and a form that posts its empty box should be told rather than silently lose the setting."
+                    "description": "Three states, unlike most fields here. Absent leaves the setting alone; `null` clears it, so each blueprint picks its own model per stage again; a string pins that model across every stage that allows a user default. An empty string is a 400, not a clear: `\"\"` is not a model id, and a form that posts its empty box should be told rather than silently lose the setting."
+                  },
+                  "fallback_model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The model a stage falls back to when none of the models it names is configured on this machine. Same three states and the same empty-string refusal as `override_model`."
                   },
                   "anthropic_key": {
                     "type": "string"
@@ -3187,7 +3194,8 @@
         "description": "The active configuration with every credential reduced to whether one is set, plus what this server can do and how much it accepts.",
         "required": [
           "default_provider",
-          "default_model",
+          "override_model",
+          "fallback_model",
           "provider_order",
           "has_anthropic_key",
           "has_openai_key",
@@ -3204,12 +3212,19 @@
           "default_provider": {
             "type": "string"
           },
-          "default_model": {
+          "override_model": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The model every stage runs on while it is set, as a bare model id on `default_provider`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
+            "description": "The model every stage that allows a user default starts on while it is set, ahead of what its blueprint names, as a bare model id on `default_provider`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
+          },
+          "fallback_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model a stage falls back to when none of the models it names is configured here, never ahead of them, as a bare model id on `default_provider`. `null` when unset. Always sent."
           },
           "provider_order": {
             "type": "array",

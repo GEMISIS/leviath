@@ -168,21 +168,38 @@ impl AgentWorldBuilder {
         self
     }
 
-    /// The user-default provider/model, the fallback when none of a stage's
-    /// listed models has a registered provider.
-    pub fn default_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+    /// The provider bare model names route to, and the model every stage
+    /// that allows a user default starts on while this is set - ahead of the
+    /// models its blueprint names. The embedded form of `override_model`.
+    pub fn override_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
         self.defaults.provider = provider.into();
-        self.defaults.model = Some(model.into());
+        self.defaults.override_model = Some(model.into());
+        self
+    }
+
+    /// The provider bare model names route to, with no override: each stage
+    /// keeps its blueprint's choice and open routes are asked of this
+    /// provider first. The embedded form of `default_provider` on its own.
+    pub fn default_provider(mut self, provider: impl Into<String>) -> Self {
+        self.defaults.provider = provider.into();
+        self
+    }
+
+    /// A model on the default provider tried after every model a stage names
+    /// and before any [`fallback_route`](Self::fallback_route), never ahead
+    /// of the blueprint's own choices. The embedded form of `fallback_model`.
+    pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
+        self.defaults.fallback_model = Some(model.into());
         self
     }
 
     /// Append a host-wide failover target, tried after a stage's own entries
-    /// and the default model when the provider in use stops answering.
+    /// and the user's models when the provider in use stops answering.
     ///
     /// Call it once per target, best first. This is what keeps a blueprint
     /// that names exactly one model running when that provider runs out of
     /// credits.
-    pub fn fallback_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn fallback_route(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
         self.defaults
             .fallback_order
             .push(leviath_core::blueprint::ModelEntry::new(
@@ -1055,16 +1072,33 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         }
     }
 
+    /// `default_provider` names the route for bare model names and nothing
+    /// else; `fallback_model` is the model behind every stage's own list.
+    /// Neither touches the override, so each stage keeps its blueprint's
+    /// choice.
+    #[test]
+    fn a_default_provider_and_a_fallback_model_leave_the_override_unset() {
+        let builder = AgentWorldBuilder::new()
+            .default_provider("openrouter")
+            .fallback_model("deepseek-v4-flash");
+        assert_eq!(builder.defaults.provider, "openrouter");
+        assert_eq!(builder.defaults.override_model, None);
+        assert_eq!(
+            builder.defaults.fallback_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+    }
+
     /// The failover chain is ordered and additive, and setting a default model
     /// afterwards must not wipe it.
     #[test]
     fn fallback_models_accumulate_in_order_beside_the_default() {
         let builder = AgentWorldBuilder::new()
-            .fallback_model("anthropic", "sonnet")
-            .fallback_model("openai", "gpt")
-            .default_model("openrouter", "deepseek");
+            .fallback_route("anthropic", "sonnet")
+            .fallback_route("openai", "gpt")
+            .override_model("openrouter", "deepseek");
         assert_eq!(builder.defaults.provider, "openrouter");
-        assert_eq!(builder.defaults.model.as_deref(), Some("deepseek"));
+        assert_eq!(builder.defaults.override_model.as_deref(), Some("deepseek"));
         assert_eq!(
             builder
                 .defaults
@@ -1096,11 +1130,11 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                     ),
                 }),
             )
-            .default_model("mock", "m")
+            .override_model("mock", "m")
             // Repeated on purpose: the chain is ordered, so it must accumulate
             // rather than replace, and it must not disturb the default model.
-            .fallback_model("ollama", "llama")
-            .fallback_model("mock", "spare")
+            .fallback_route("ollama", "llama")
+            .fallback_route("mock", "spare")
             .state_dir(state.path())
             .inference_pool(InferencePoolConfig::new())
             .tool_concurrency(2)

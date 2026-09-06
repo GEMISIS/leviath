@@ -24,6 +24,10 @@ pub struct ResolvedStage {
     /// caller-side (like the model and tool choices beside it) because only the
     /// caller knows what was asked for at launch.
     pub output: Option<leviath_core::output::OutputSpec>,
+    /// Operational lines to log for this stage at spawn: today, one per stage
+    /// whose head the user's `override_model` or `fallback_model` moved off
+    /// the blueprint's own choice. Empty when the blueprint's choice stands.
+    pub notes: Vec<String>,
 }
 
 /// Fallback context window used when a stage's provider isn't registered (so
@@ -293,6 +297,14 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     // shape into its system prompt that its tool description already carries.
     let stage_outputs: Vec<Option<leviath_core::output::OutputSpec>> =
         stages.iter().map(|rs| rs.output.clone()).collect();
+    // Spawn-time notes ride each stage's operational log, tagged with the
+    // stage's index, so the substitution a user's model settings made is the
+    // first line anyone reading that stage's log sees.
+    let notes: Vec<(usize, String)> = stages
+        .iter()
+        .enumerate()
+        .flat_map(|(i, rs)| rs.notes.iter().cloned().map(move |line| (i, line)))
+        .collect();
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
         .map(|rs| StageInference {
@@ -390,7 +402,10 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     // Inserted after spawn: the bundle above is already at bevy's 15-tuple limit.
     world.entity_mut(entity).insert((
         ledger,
-        StageIoBuffer::default(),
+        StageIoBuffer {
+            output: Vec::new(),
+            logs: notes,
+        },
         crate::pipeline::response::GlobalNudge(global_nudge),
     ));
     if let Some(detector) = repetition {

@@ -196,31 +196,44 @@ In order:
    [script provider](/docs/rhai-providers) is asked too when it is the one you named as
    `default_provider` - see [preferring a script provider](#preferring-a-script-provider) for what
    it has to report before it can answer.
-3. Your `default_model`, when it is set, first among the entries from step 2. It leads even when the
+3. Your `override_model`, when it is set, first among the entries from step 2. It leads even when the
    blueprint lists that same provider with a different model: `default_provider = "ollama"` with
-   `default_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
-   `qwen3.5:9b` becomes the failover.
+   `override_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
+   `qwen3.5:9b` becomes the failover. The name says what it does: it overrides the blueprint.
 4. The first entry in `models` whose provider is configured.
-5. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
-6. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
+5. Your `fallback_model`, when it is set, on `default_provider`. It sits behind every model the stage
+   named and is never moved ahead of them, so it only ever carries a stage none of whose own models
+   is configured here.
+6. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
+7. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
    spawn with `stage '<name>' has no usable provider`.
 
 Everything below the first line is the failover chain, in that same order, so a stage that starts on
-your default still has the blueprint's own entries to fall back to.
+your override still has the blueprint's own entries to fall back to.
+
+A run says so when one of your two settings moved a stage off the model its blueprint named: one
+`[model] stage 'fix' starts on openrouter/deepseek-v4-flash (override_model); blueprint asked for
+openrouter/deepseek-v4-pro` line per stage in the run's log, at spawn, and nothing when the
+blueprint's own choice stands. `lev validate` prints the same thing before anything is spent.
 
 > [!IMPORTANT]
-> `default_model` pins **one** model across every stage, which is usually not what you want. A
+> `override_model` pins **one** model across every stage, which is usually not what you want. A
 > blueprint picks per stage on purpose: `deep-researcher` gathers on a mid-tier model and analyses
 > on a top one. Setting `default_provider` alone keeps that shape and moves it onto your
 > provider - gathering on that provider's mid-tier entry, analysing on its top one. Setting
-> `default_model` too flattens it, and the cheap stages start paying top-tier prices while the
-> deciding stage loses the model the author chose for it.
+> `override_model` too flattens it, and the cheap stages start paying top-tier prices while the
+> deciding stage loses the model the author chose for it. `fallback_model` is the safe one: it
+> changes nothing for a stage that can run what it asked for.
 
-Going back is a first-class move, not a repair. Delete the `default_model` line from `config.toml`,
-or over the API send `PUT /api/config` with `{"default_model": null}` - `null` clears it, an absent
+Going back is a first-class move, not a repair. Delete the `override_model` line from `config.toml`,
+or over the API send `PUT /api/config` with `{"override_model": null}` - `null` clears it, an absent
 key leaves it alone, and an empty string is refused rather than read as a clear. Either way the next
-run picks per stage again, with no restart. `GET /api/config` reports the current value, `null` when
-nothing is pinned.
+run picks per stage again, with no restart. `GET /api/config` reports both settings, `null` when
+nothing is set.
+
+Before 0.6 there was one key, `default_model`, and it behaved as `override_model` does. A config
+that still carries it is read as `fallback_model`, the load and `lev doctor` say so, and `lev update`
+rewrites the file. Set `override_model` if the old behaviour was the one you wanted.
 
 Run `lev validate <agent>` to see the result before you spend anything on it. It prints the model
 each stage would actually use on this machine, and, where that differs from the blueprint's own
@@ -232,10 +245,10 @@ Models this install would use:
                      blueprint order: anthropic/claude-sonnet-5, openai/gpt-5.4-mini, ...
   analyze          openrouter/anthropic/claude-opus-5
                      blueprint order: anthropic/claude-opus-5, openai/gpt-5.5, ...
-  default_provider = openrouter, default_model = (unset)
+  default_provider = openrouter, override_model = (unset), fallback_model = (unset)
 ```
 
-`default_model` is a bare model id: `qwen3.8:latest`, not `ollama/qwen3.8:latest`. The provider is
+`override_model` and `fallback_model` take a bare model id: `qwen3.8:latest`, not `ollama/qwen3.8:latest`. The provider is
 `default_provider`. That differs from `--model` and `[providers] fallback_order`, which take
 `provider/model` in one string, so a leading `<default_provider>/` is dropped rather than sent
 (`lev doctor` names the reading when it happens). The slash in an OpenRouter id such as
@@ -271,7 +284,7 @@ openrouter_api_key = "sk-or-..."
 ```
 
 Every stage now starts on OpenRouter, on the model its author picked for that stage, and keeps the
-blueprint's own order behind it. Add `default_model` only when you want one model everywhere
+blueprint's own order behind it. Add `override_model` only when you want one model everywhere
 regardless of stage. A stage that must stay on the provider its author picked opts out with
 `allow_user_default = false`.
 
@@ -346,15 +359,15 @@ lev validate <agent>               # which model each stage would actually use h
 Models this install would use:
   cheap            spark/deepseek-v4-flash
   deciding         spark/deepseek-v4-max
-  default_provider = spark, default_model = (unset)
+  default_provider = spark, override_model = (unset), fallback_model = (unset)
 ```
 
-Both stages on your provider, each still on the model its author chose. Add `default_model` and
+Both stages on your provider, each still on the model its author chose. Add `override_model` and
 that collapses to one model everywhere, with the blueprint's own choice printed underneath as the
 substitution it is.
 
 > [!WARNING]
-> Once Ollama is enabled, it is registered whether or not a server is running. Leave `default_model`
+> Once Ollama is enabled, it is registered whether or not a server is running. Leave `override_model`
 > unset on such a machine with no Ollama server up and every stage that lists it starts against
 > `http://localhost:11434`. The run moves on to its next candidate rather than dying there, but
 > it still spends the attempts finding out. This is why the bundled agents pin their Ollama entry

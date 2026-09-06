@@ -2263,6 +2263,7 @@ mod tests {
                     tools: vec![],
                     fallbacks: Vec::new(),
                     output: None,
+                    notes: Vec::new(),
                 }],
                 hints(true),
             )
@@ -2835,6 +2836,7 @@ mod tests {
                 tools: vec![],
                 fallbacks: Vec::new(),
                 output: None,
+                notes: Vec::new(),
             }],
             hints(true),
         );

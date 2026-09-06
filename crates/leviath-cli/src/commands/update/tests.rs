@@ -589,7 +589,7 @@ static SAMPLE: &[Migration] = &[
         name: "sample-default-provider",
         description: "point a config with no default_provider at ollama",
         applies: |config, raw| config.default_provider != "ollama" && !raw.is_empty(),
-        apply: |config| {
+        apply: |config, _raw| {
             let was = std::mem::replace(&mut config.default_provider, "ollama".to_string());
             vec![format!("default_provider: {was} -> ollama")]
         },
@@ -598,7 +598,7 @@ static SAMPLE: &[Migration] = &[
         name: "sample-never-applies",
         description: "a migration whose predicate is false for this config",
         applies: |_, _| false,
-        apply: |_| vec!["unreachable".to_string()],
+        apply: |_, _| vec!["unreachable".to_string()],
     },
 ];
 
@@ -608,7 +608,7 @@ static ALWAYS: &[Migration] = &[Migration {
     name: "sample-always-applies",
     description: "a migration every config needs",
     applies: |_, _| true,
-    apply: |config| {
+    apply: |config, _raw| {
         config.default_provider = "ollama".to_string();
         vec!["default_provider -> ollama".to_string()]
     },
@@ -671,6 +671,57 @@ fn every_shipped_migration_is_named_and_idempotent() {
             migration.name
         );
     }
+}
+
+/// The shipped `renamed-keys` migration, end to end: a config still carrying
+/// `default_model` is planned for it, the report explains the rename, and the
+/// write leaves a file that says `fallback_model` and nothing of the old key.
+#[test]
+fn the_renamed_keys_migration_rewrites_a_legacy_default_model() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.dir.path().join("config.toml"),
+            "default_provider = \"ollama\"\ndefault_model = \"qwen3.8:latest\"\n",
+        )
+        .expect("write the config");
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let env = fixture.env_with("/home/u/.cargo/bin/lev", true, true, MIGRATIONS);
+
+        let planned = plan(&args, &env);
+        let names: Vec<&str> = planned.migrations.iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["renamed-keys"], "only the rename applies");
+        let ConfigState::Loaded(loaded) = &planned.config else {
+            panic!("the config loaded");
+        };
+        let lines = (planned.migrations[0].apply)(&mut loaded.config.clone(), &loaded.raw);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("`default_model = \"qwen3.8:latest\"`"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains("override_model"),
+            "the note names the way back: {lines:?}"
+        );
+
+        execute_with(&args, &env, "0.6.0").expect("the flow succeeds");
+
+        let on_disk = std::fs::read_to_string(&env.config_path).expect("still there");
+        assert!(!on_disk.contains("default_model"), "{on_disk}");
+        assert!(
+            on_disk.contains("fallback_model = \"qwen3.8:latest\""),
+            "{on_disk}"
+        );
+        let after = Config::load_from_path_public(&env.config_path).expect("parses");
+        assert_eq!(after.fallback_model.as_deref(), Some("qwen3.8:latest"));
+        assert_eq!(after.override_model, None);
+        // Taken once: the rewritten file no longer needs it.
+        assert!(plan(&args, &env).migrations.is_empty());
+    });
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1655,7 +1706,7 @@ fn the_stale_serves_migration_removes_the_line_and_leaves_the_rest() {
         "a config carrying the stale line needs it"
     );
 
-    let done = (migration.apply)(&mut config);
+    let done = (migration.apply)(&mut config, &toml::Table::new());
     assert_eq!(done.len(), 1, "one provider changed, not both: {done:?}");
     assert!(done[0].contains("cerebras"), "{done:?}");
 

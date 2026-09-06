@@ -56,7 +56,8 @@ fn redact(
         config_error,
         config_mtime,
         default_provider: c.default_provider.clone(),
-        default_model: c.default_model.clone(),
+        override_model: c.override_model.clone(),
+        fallback_model: c.fallback_model.clone(),
         provider_order: c.providers.provider_order.clone(),
         has_anthropic_key: c.providers.anthropic_api_key.is_some(),
         has_openai_key: c.providers.openai_api_key.is_some(),
@@ -153,19 +154,32 @@ pub(super) async fn put_config(
     // model again, and a string pins that one. Written as a `match` because
     // the read has to distinguish "the key was not sent" from "the key was
     // sent as null", which an `if let Some` on a single `Option` cannot.
-    match req.default_model {
-        None => {}
-        Some(None) => config.default_model = None,
-        // Refused rather than treated as a clear: `""` is not a model id, and
-        // a form that posts its empty box should be told, not obeyed. The
-        // check runs before anything is saved, so the file is untouched.
-        Some(Some(v)) if v.trim().is_empty() => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "default_model must not be empty; send null to clear it".to_string(),
-            ));
+    // Refused rather than treated as a clear: `""` is not a model id, and a
+    // form that posts its empty box should be told, not obeyed. The check runs
+    // before anything is saved, so the file is untouched.
+    for (key, sent, slot) in [
+        (
+            "override_model",
+            req.override_model,
+            &mut config.override_model,
+        ),
+        (
+            "fallback_model",
+            req.fallback_model,
+            &mut config.fallback_model,
+        ),
+    ] {
+        match sent {
+            None => {}
+            Some(None) => *slot = None,
+            Some(Some(v)) if v.trim().is_empty() => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("{key} must not be empty; send null to clear it"),
+                ));
+            }
+            Some(Some(v)) => *slot = Some(v),
         }
-        Some(Some(v)) => config.default_model = Some(v),
     }
     if let Some(v) = req.anthropic_key {
         config.providers.anthropic_api_key = Some(v);
@@ -1103,7 +1117,8 @@ mod tests {
     fn redacted_config_hides_keys() {
         let config = RedactedConfig {
             default_provider: "anthropic".to_string(),
-            default_model: None,
+            override_model: None,
+            fallback_model: None,
             provider_order: Vec::new(),
             has_anthropic_key: true,
             has_openai_key: false,
@@ -1136,7 +1151,8 @@ mod tests {
     fn redacted_config_with_ollama_url() {
         let config = RedactedConfig {
             default_provider: "ollama".to_string(),
-            default_model: None,
+            override_model: None,
+            fallback_model: None,
             provider_order: Vec::new(),
             has_anthropic_key: false,
             has_openai_key: false,
@@ -1505,7 +1521,7 @@ mod tests {
 
         let body = serde_json::json!({
             "default_provider": "openai",
-            "default_model": "gpt-5",
+            "override_model": "gpt-5",
             "anthropic_key": "sk-ant-x",
             "openai_key": "sk-openai-x",
             "google_key": "g-x",
@@ -1538,9 +1554,9 @@ mod tests {
         );
         assert_eq!(saved.providers.google_api_key.as_deref(), Some("g-x"));
         assert_eq!(saved.openrouter_api_key.as_deref(), Some("or-x"));
-        assert_eq!(saved.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(saved.override_model.as_deref(), Some("gpt-5"));
         assert_eq!(
-            rc.default_model.as_deref(),
+            rc.override_model.as_deref(),
             Some("gpt-5"),
             "the answer reports the pin it just wrote"
         );
@@ -1550,14 +1566,14 @@ mod tests {
         );
     }
 
-    /// A config with `default_model` pinned to `gpt-5`, saved at `path`.
+    /// A config with `override_model` pinned to `gpt-5`, saved at `path`.
     ///
     /// A named helper rather than a closure at each call site: a closure is a
     /// separate region per site, and four of them are four uncovered regions
     /// the day one test stops running.
     fn pinned_config_at(path: &std::path::Path) {
         let pinned = Config {
-            default_model: Some("gpt-5".to_string()),
+            override_model: Some("gpt-5".to_string()),
             ..Default::default()
         };
         pinned.save_to_path_public(path).unwrap();
@@ -1572,7 +1588,7 @@ mod tests {
     /// as "nothing is set". Collapsing the two is what left the picker
     /// drawing an empty box over a machine with a model pinned.
     #[tokio::test]
-    async fn get_config_reports_the_default_model_when_set_and_null_when_not() {
+    async fn get_config_reports_the_override_model_when_set_and_null_when_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         Config::default().save_to_path_public(&path).unwrap();
@@ -1580,11 +1596,11 @@ mod tests {
 
         let unset = get_config_request(state.clone()).await;
         assert!(
-            unset.get("default_model").is_some(),
+            unset.get("override_model").is_some(),
             "the key is always there, so its absence can mean something else"
         );
         assert!(
-            unset["default_model"].is_null(),
+            unset["override_model"].is_null(),
             "nothing pinned reads as null"
         );
 
@@ -1592,13 +1608,13 @@ mod tests {
         bump_mtime(&path);
 
         let set = get_config_request(state).await;
-        assert_eq!(set["default_model"], "gpt-5");
+        assert_eq!(set["override_model"], "gpt-5");
     }
 
     /// The partial-update rule the rest of the body follows: a key this
     /// request does not mention is left exactly as it was.
     #[tokio::test]
-    async fn put_config_without_default_model_leaves_the_pin_alone() {
+    async fn put_config_without_override_model_leaves_the_pin_alone() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         pinned_config_at(&path);
@@ -1609,7 +1625,7 @@ mod tests {
 
         let saved = Config::load_from_path_public(&path).unwrap();
         assert_eq!(
-            saved.default_model.as_deref(),
+            saved.override_model.as_deref(),
             Some("gpt-5"),
             "an absent key changes nothing"
         );
@@ -1620,11 +1636,11 @@ mod tests {
     /// goes back to the model its blueprint names.
     ///
     /// The file is what is checked, not the struct in memory. "Cleared" has
-    /// to survive the save: a `None` that still serialized a `default_model`
+    /// to survive the save: a `None` that still serialized a `override_model`
     /// line would read back as pinned on the next load, and the console would
     /// see its own clear undone one request later.
     #[tokio::test]
-    async fn put_config_with_null_clears_the_default_model_from_the_file() {
+    async fn put_config_with_null_clears_the_override_model_from_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         pinned_config_at(&path);
@@ -1633,7 +1649,7 @@ mod tests {
             "the pin starts out on disk"
         );
 
-        let body = serde_json::json!({ "default_model": null }).to_string();
+        let body = serde_json::json!({ "override_model": null }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -1641,17 +1657,70 @@ mod tests {
             .unwrap();
         let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
-            answer["default_model"].is_null(),
+            answer["override_model"].is_null(),
             "the answer already reports it gone"
         );
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !on_disk.contains("default_model"),
+            !on_disk.contains("override_model"),
             "the key is gone from the file, not merely None in memory"
         );
         let reread = Config::load_from_path_public(&path).unwrap();
-        assert_eq!(reread.default_model, None, "and it stays gone on re-read");
+        assert_eq!(reread.override_model, None, "and it stays gone on re-read");
+    }
+
+    /// `fallback_model` has the same three states as `override_model`: a
+    /// string sets it, `null` clears it from the file, and an empty string is
+    /// refused with a message that names the key.
+    #[tokio::test]
+    async fn put_config_sets_clears_and_refuses_the_fallback_model_like_the_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let state = state_with_config_path(path.clone());
+
+        let resp = put_config_request(state.clone(), r#"{"fallback_model": "haiku"}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["fallback_model"], "haiku");
+        assert!(
+            answer["override_model"].is_null(),
+            "the other setting is untouched"
+        );
+        assert_eq!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .fallback_model
+                .as_deref(),
+            Some("haiku")
+        );
+
+        let resp = put_config_request(state.clone(), r#"{"fallback_model": ""}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("fallback_model must not be empty"),
+            "the refusal names the key"
+        );
+        assert_eq!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .fallback_model
+                .as_deref(),
+            Some("haiku"),
+            "nothing was written on refusal"
+        );
+
+        let resp = put_config_request(state, r#"{"fallback_model": null}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("fallback_model"), "cleared from the file");
     }
 
     /// An empty string is not a clear and not a model id, so it is a 400.
@@ -1662,17 +1731,17 @@ mod tests {
     /// `openai-compatible` gateway with an empty `base_url` is refused, and
     /// like that one it is refused before anything is written.
     #[tokio::test]
-    async fn put_config_refuses_an_empty_default_model() {
+    async fn put_config_refuses_an_empty_override_model() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         pinned_config_at(&path);
 
-        for body in [r#"{"default_model": ""}"#, r#"{"default_model": "   "}"#] {
+        for body in [r#"{"override_model": ""}"#, r#"{"override_model": "   "}"#] {
             let resp = put_config_request(state_with_config_path(path.clone()), body).await;
             assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
             let saved = Config::load_from_path_public(&path).unwrap();
             assert_eq!(
-                saved.default_model.as_deref(),
+                saved.override_model.as_deref(),
                 Some("gpt-5"),
                 "a refused write leaves the file as it was"
             );

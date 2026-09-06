@@ -8101,7 +8101,51 @@ fn resolved(model: &str) -> ResolvedStage {
         tools: vec![],
         fallbacks: Vec::new(),
         output: None,
+        notes: Vec::new(),
     }
+}
+
+/// A resolved stage's notes are the first lines of that stage's operational
+/// log, tagged with the stage's index, so a substitution the user's model
+/// settings made is the first thing a reader of the log sees.
+#[test]
+fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
+    let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+    let s0 = leviath_core::Stage::new(
+        "plan".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let s1 = leviath_core::Stage::new(
+        "fix".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
+    let mut noted = resolved("m");
+    noted.notes = vec![
+        "[model] stage 'fix' starts on p/m (override_model); blueprint asked for q/n".to_string(),
+    ];
+
+    let mut world = World::new();
+    let e = spawn_agent(
+        &mut world,
+        "agent-x".to_string(),
+        bp,
+        "the task",
+        vec![resolved("m"), noted],
+        hints(true),
+    )
+    .unwrap();
+
+    let buffer = world.get::<StageIoBuffer>(e).unwrap();
+    assert!(buffer.output.is_empty());
+    assert_eq!(
+        buffer.logs,
+        vec![(
+            1,
+            "[model] stage 'fix' starts on p/m (override_model); blueprint asked for q/n"
+                .to_string()
+        )]
+    );
 }
 
 #[test]

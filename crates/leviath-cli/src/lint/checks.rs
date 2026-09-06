@@ -821,7 +821,7 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
                 "no-reachable-provider",
                 format!(
                     "names nothing this install can run (tried {}), so it \
-                     falls back to your default model",
+                     falls back to your fallback_model, if one is set",
                     tried.join(", ")
                 ),
             )

@@ -520,13 +520,13 @@ impl UpdateJobs {
         let Some(()) = self.reached(id, step, req.migrations, binary, events) else {
             return;
         };
-        let config = match &plan.config {
+        let loaded = match &plan.config {
             ConfigState::Unreadable(e) => {
                 let detail = format!("the config could not be read, so it was left alone: {e}");
                 self.step(id, step, SKIPPED, detail, events);
                 return;
             }
-            ConfigState::Loaded(config) => config,
+            ConfigState::Loaded(loaded) => loaded,
         };
         if plan.migrations.is_empty() {
             self.step(id, step, SKIPPED, "nothing to migrate".to_string(), events);
@@ -539,10 +539,10 @@ impl UpdateJobs {
             format!("applying {} migration(s)", plan.migrations.len()),
             events,
         );
-        let mut config = config.as_ref().clone();
+        let mut config = loaded.config.clone();
         let mut changed = Vec::new();
         for migration in &plan.migrations {
-            for line in (migration.apply)(&mut config) {
+            for line in (migration.apply)(&mut config, &loaded.raw) {
                 changed.push(format!("{}: {line}", migration.name));
             }
         }

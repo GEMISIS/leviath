@@ -77,8 +77,10 @@ returning.
 | --- | --- |
 | `provider(creds)` | Register a provider from credentials. Repeatable. `ProviderCreds::simple(name)` covers key-free providers like `ollama`. |
 | `register_provider(name, arc)` | Register your own `Provider` implementation, including mocks for tests. Wins over a credentials entry with the same name. |
-| `default_model(provider, model)` | The fallback when none of a stage's listed models has a registered provider. |
-| `fallback_model(provider, model)` | Where a run moves when its provider fails mid-run, so a single-model blueprint survives an outage. |
+| `default_provider(provider)` | The provider bare model names route to. Each stage keeps the model its blueprint names. |
+| `override_model(provider, model)` | The provider above, plus one model every stage that allows a user default starts on, ahead of what its blueprint names. The embedded `override_model`. |
+| `fallback_model(model)` | A model on the default provider tried after every model a stage names, never ahead of them. The embedded `fallback_model`. |
+| `fallback_route(provider, model)` | Where a run moves when its provider fails mid-run, so a single-model blueprint survives an outage. Was `fallback_model` before 0.6. |
 | `prompt_hints(hints)` | Turn on the batch-tool and shell hints, which are off by default on the embed path. |
 | `tool_service(arc)` | Replace the built-in tool service with your own (see below). |
 | `state_dir(dir)` | Persist runs on disk in the daemon's layout (`dir/runs/<run_id>/`). Without it the world stays in memory. |

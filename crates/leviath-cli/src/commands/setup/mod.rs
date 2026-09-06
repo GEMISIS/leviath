@@ -84,9 +84,15 @@ pub struct SetupArgs {
     #[arg(long)]
     pub ollama_url: Option<String>,
 
-    /// Default model override (e.g. claude-sonnet-4-6)
+    /// One model every stage starts on, ahead of what its blueprint names
+    /// (e.g. claude-sonnet-4-6). Unset lets each blueprint decide.
     #[arg(long)]
-    pub default_model: Option<String>,
+    pub override_model: Option<String>,
+
+    /// The model a stage falls back to when none of the models it names is
+    /// configured here.
+    #[arg(long)]
+    pub fallback_model: Option<String>,
 
     /// Enable the Claude Code CLI transport (runs on your Claude subscription
     /// instead of an API key). Off unless set: the CLI adds its own context to
@@ -208,8 +214,11 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref u) = args.ollama_url {
         config.ollama_base_url = Some(u.clone());
     }
-    if let Some(ref m) = args.default_model {
-        config.default_model = Some(m.clone());
+    if let Some(ref m) = args.override_model {
+        config.override_model = Some(m.clone());
+    }
+    if let Some(ref m) = args.fallback_model {
+        config.fallback_model = Some(m.clone());
     }
     if let Some(enabled) = args.claude_code {
         config.providers.claude_code_enabled = enabled;
@@ -500,7 +509,8 @@ mod tests {
             google_key: None,
             openrouter_key: None,
             ollama_url: None,
-            default_model: None,
+            override_model: None,
+            fallback_model: None,
             claude_code: None,
             claude_code_effort: None,
             codex: None,
@@ -878,7 +888,8 @@ mod tests {
             google_key: Some("goog".to_string()),
             openrouter_key: Some("sk-or".to_string()),
             ollama_url: Some("http://box:11434".to_string()),
-            default_model: Some("m".to_string()),
+            override_model: Some("m".to_string()),
+            fallback_model: Some("f".to_string()),
             claude_code: Some(true),
             claude_code_effort: Some("xhigh".to_string()),
             ..args()
@@ -895,7 +906,8 @@ mod tests {
         assert_eq!(written.providers.google_api_key.as_deref(), Some("goog"));
         assert_eq!(written.openrouter_api_key.as_deref(), Some("sk-or"));
         assert_eq!(written.ollama_base_url.as_deref(), Some("http://box:11434"));
-        assert_eq!(written.default_model.as_deref(), Some("m"));
+        assert_eq!(written.override_model.as_deref(), Some("m"));
+        assert_eq!(written.fallback_model.as_deref(), Some("f"));
         assert!(written.providers.claude_code_enabled);
         assert_eq!(
             written.providers.claude_code_effort.as_deref(),

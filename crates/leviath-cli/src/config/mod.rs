@@ -26,6 +26,10 @@ pub(crate) use serve::*;
 mod fault;
 pub(crate) use fault::ConfigFault;
 
+// Keys that changed name: one table, read by the loader, the unread-key
+// warning, `lev doctor` and `lev update`.
+pub(crate) mod renamed;
+
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
 // tests below reach them through the imports here.
@@ -100,9 +104,18 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: Vec<MCPServerConfig>,
 
-    /// Default model override
+    /// One model every stage that allows a user default starts on, ahead of
+    /// the models its blueprint names. A bare model id on `default_provider`.
+    /// Unset, the usual state, lets each blueprint pick per stage.
     #[serde(default)]
-    pub default_model: Option<String>,
+    pub override_model: Option<String>,
+
+    /// The model a stage falls back to when none of the models it names is
+    /// configured here, tried after all of them and before `[providers]
+    /// fallback_order`. A bare model id on `default_provider`. Never moves a
+    /// stage off a model its blueprint names.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
 
     /// Per-model capability overrides. Key is model ID (e.g. "my-local-llama").
     /// Takes precedence over the provider's built-in capability table.
@@ -335,7 +348,8 @@ impl Default for Config {
             ollama_base_url: None,
             update_check: default_update_check(),
             mcp_servers: Vec::new(),
-            default_model: None,
+            override_model: None,
+            fallback_model: None,
             model_capabilities: HashMap::new(),
             model_providers: HashMap::new(),
             tool_permissions: HashMap::new(),
@@ -517,34 +531,58 @@ impl Config {
         }
     }
 
-    /// Say so when `default_model` is written as `provider/model`.
+    /// Say so when `override_model` or `fallback_model` is written as
+    /// `provider/model`.
     ///
-    /// The setting is a bare model id that pairs with `default_provider`, but
+    /// Both settings are bare model ids that pair with `default_provider`, but
     /// `--model` and `[providers] fallback_order` take the qualified form and an
-    /// OpenRouter id already has a slash in it, so `default_model =
+    /// OpenRouter id already has a slash in it, so `override_model =
     /// "ollama/qwen3.8:latest"` gets written. The resolver reads it bare, so
     /// nothing breaks; this names the reading, at the same place the unread-key
     /// warning appears, so the file can be tidied.
-    fn warn_qualified_default_model(&self) {
-        if let Some((written, bare)) = self.qualified_default_model() {
+    fn warn_qualified_user_models(&self) {
+        for (key, written, bare) in self.qualified_user_models() {
             let provider = &self.default_provider;
             tracing::warn!(
-                default_model = %written,
+                key = %key,
+                written = %written,
                 read_as = %bare,
-                "config.toml default_model is written as provider/model; it takes a \
-                 bare model id and pairs with default_provider, so the '{provider}/' \
+                "config.toml {key} is written as provider/model; it takes a bare \
+                 model id and pairs with default_provider, so the '{provider}/' \
                  prefix is dropped. `lev doctor` reports it too, if this scrolls past."
             );
         }
     }
 
-    /// `default_model` when it is written qualified with the default provider's
-    /// own name: the value as written and the bare id it is read as. `None`
-    /// when unset or already bare.
-    pub(crate) fn qualified_default_model(&self) -> Option<(&str, &str)> {
-        let written = self.default_model.as_deref()?;
-        let bare = leviath_runtime::pipeline::bare_default_model(&self.default_provider, written);
-        (bare != written).then_some((written, bare))
+    /// Each of `override_model` and `fallback_model` that is written qualified
+    /// with the default provider's own name: the key, the value as written and
+    /// the bare id it is read as. Empty when both are unset or already bare.
+    pub(crate) fn qualified_user_models(&self) -> Vec<(&'static str, &str, &str)> {
+        [
+            ("override_model", self.override_model.as_deref()),
+            ("fallback_model", self.fallback_model.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, written)| {
+            let written = written?;
+            let bare = leviath_runtime::pipeline::bare_user_model(&self.default_provider, written);
+            (bare != written).then_some((key, written, bare))
+        })
+        .collect()
+    }
+
+    /// The renamed keys still present in the config file at `path`, for
+    /// `lev doctor`. Read the same way [`unread_keys_at`](Self::unread_keys_at)
+    /// is: an unreadable or absent file has none, because that is a different
+    /// problem.
+    pub(crate) fn renamed_keys_at(path: &std::path::Path) -> Vec<renamed::Renamed> {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let Ok(table) = toml::from_str::<toml::value::Table>(&content) else {
+            return Vec::new();
+        };
+        renamed::legacy_keys_present(&table)
     }
 
     /// Keys in the config file at `path` that nothing reads.
@@ -596,6 +634,10 @@ impl Config {
     /// does not have that problem, because a field they set is a field that
     /// serializes.
     fn unknown_config_keys(content: &str) -> Vec<String> {
+        // A key that moved is read under its new name, so it is not unread;
+        // judging the document as the loader sees it keeps the two agreeing.
+        let (content, _) = renamed::rename_in_text(content);
+        let content = content.as_str();
         let Ok(found) = toml::from_str::<toml::value::Table>(content) else {
             return Vec::new();
         };
@@ -633,11 +675,20 @@ impl Config {
         let content =
             std::fs::read_to_string(path).map_err(|e| Box::new(ConfigFault::read(path, &e)))?;
 
+        // A key that changed name is respelled in the text before serde looks,
+        // so an install that never runs `lev update` keeps working and is told
+        // what its file now means. Done on the text so a parse error still
+        // points at its line.
+        let (content, renamed) = renamed::rename_in_text(&content);
         let c: Self = toml::from_str(&content)
             .map_err(|e| Box::new(ConfigFault::parse(path, &content, &e)))?;
 
+        for r in &renamed {
+            let notice = renamed::notice(r);
+            tracing::warn!(old = %r.key.old, new = %r.key.new, "{notice}");
+        }
         Self::warn_unknown_config_keys(&content);
-        c.warn_qualified_default_model();
+        c.warn_qualified_user_models();
 
         // Catch a malformed MCP server entry here, at load, rather than at
         // the first tool call: a typo that drops a server's tools should
@@ -1851,7 +1902,7 @@ some_custom_thing = \"forwarded to the script\"
         let mut config = Config::default();
         config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
         config.providers.anthropic_api_key = Some("sk-ant-secret".to_string());
-        config.default_model = Some("some-model".to_string());
+        config.override_model = Some("some-model".to_string());
 
         let store = std::sync::Arc::new(leviath_core::MemoryStore::new());
         struct Shared(std::sync::Arc<leviath_core::MemoryStore>);
@@ -2009,11 +2060,11 @@ some_custom_thing = \"forwarded to the script\"
         config.providers.openai_api_key = Some("b".to_string());
         config.providers.google_api_key = Some("c".to_string());
         config.openrouter_api_key = Some("d".to_string());
-        config.default_model = Some("m".to_string());
+        config.override_model = Some("m".to_string());
 
         let stripped = config.without_secrets();
         assert!(stripped.provider_secrets().is_empty(), "no keys survive");
-        assert_eq!(stripped.default_model.as_deref(), Some("m"), "settings do");
+        assert_eq!(stripped.override_model.as_deref(), Some("m"), "settings do");
         assert_eq!(
             config.providers.anthropic_api_key.as_deref(),
             Some("a"),
@@ -2070,37 +2121,90 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(config.default_provider, "openai");
     }
 
-    /// `default_model = "ollama/qwen3.8:latest"` next to `default_provider =
+    /// `override_model = "ollama/qwen3.8:latest"` next to `default_provider =
     /// "ollama"` is read as `qwen3.8:latest`; the load names the reading, and
     /// the value in the struct stays as written so `save` does not rewrite a
-    /// file behind the user's back.
+    /// file behind the user's back. `fallback_model` is judged the same way.
     #[test]
-    fn load_from_path_names_a_default_model_qualified_with_its_provider() {
+    fn load_from_path_names_a_user_model_qualified_with_its_provider() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "default_provider = \"ollama\"\ndefault_model = \"ollama/qwen3.8:latest\"\n",
+            "default_provider = \"ollama\"\noverride_model = \"ollama/qwen3.8:latest\"\n\
+             fallback_model = \"ollama/qwen3.5:9b\"\n",
         )
         .unwrap();
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(
-            config.default_model.as_deref(),
+            config.override_model.as_deref(),
             Some("ollama/qwen3.8:latest")
         );
         assert_eq!(
-            config.qualified_default_model(),
-            Some(("ollama/qwen3.8:latest", "qwen3.8:latest"))
+            config.qualified_user_models(),
+            vec![
+                ("override_model", "ollama/qwen3.8:latest", "qwen3.8:latest"),
+                ("fallback_model", "ollama/qwen3.5:9b", "qwen3.5:9b"),
+            ]
         );
 
-        // A bare id, or no default at all, has nothing to say.
+        // A bare id, or no model at all, has nothing to say.
         let bare = Config {
             default_provider: "ollama".to_string(),
-            default_model: Some("qwen3.8:latest".to_string()),
+            override_model: Some("qwen3.8:latest".to_string()),
             ..Config::default()
         };
-        assert_eq!(bare.qualified_default_model(), None);
-        assert_eq!(Config::default().qualified_default_model(), None);
+        assert!(bare.qualified_user_models().is_empty());
+        assert!(Config::default().qualified_user_models().is_empty());
+    }
+
+    /// A config written before the rename still loads: `default_model` is read
+    /// as `fallback_model`, the load says so, and the old key is not counted
+    /// among the keys nothing reads, because something did.
+    #[test]
+    fn a_legacy_default_model_loads_as_the_fallback_model_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"ollama\"\ndefault_model = \"qwen3.8:latest\"\n",
+        )
+        .unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(config.fallback_model.as_deref(), Some("qwen3.8:latest"));
+        assert_eq!(config.override_model, None);
+        assert!(Config::unread_keys_at(&path).is_empty());
+        let renamed = Config::renamed_keys_at(&path);
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].key.old, "default_model");
+        assert_eq!(renamed[0].value, "\"qwen3.8:latest\"");
+    }
+
+    /// Both names present: the current key is the one the user meant, and the
+    /// old one is reported as unread rather than quietly winning or vanishing.
+    #[test]
+    fn a_legacy_key_beside_its_new_name_is_unread_and_the_new_name_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_model = \"old\"\nfallback_model = \"new\"\n").unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(config.fallback_model.as_deref(), Some("new"));
+        assert_eq!(
+            Config::unread_keys_at(&path),
+            vec!["default_model".to_string()]
+        );
+        assert_eq!(Config::renamed_keys_at(&path).len(), 1);
+    }
+
+    /// A file that does not read or parse has no renamed keys to report,
+    /// the same way it has no unread ones: that is a different problem.
+    #[test]
+    fn renamed_keys_at_is_empty_for_a_missing_or_broken_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::renamed_keys_at(&dir.path().join("absent.toml")).is_empty());
+        let broken = dir.path().join("broken.toml");
+        std::fs::write(&broken, "default_model = [\n").unwrap();
+        assert!(Config::renamed_keys_at(&broken).is_empty());
     }
 
     #[test]
@@ -3234,7 +3338,7 @@ script = \"groq.rhai\"
         assert!(config.openrouter_api_key.is_none());
         assert!(config.ollama_base_url.is_none());
         assert!(config.mcp_servers.is_empty());
-        assert!(config.default_model.is_none());
+        assert!(config.override_model.is_none());
         assert!(config.model_capabilities.is_empty());
         assert!(config.tool_permissions.is_empty());
     }
@@ -3301,7 +3405,7 @@ script = \"groq.rhai\"
 default_provider = "openai"
 openrouter_api_key = "sk-or-test"
 ollama_base_url = "http://my-ollama:11434"
-default_model = "gpt-5"
+override_model = "gpt-5"
 agent_paths = []
 
 [providers]
@@ -3334,7 +3438,7 @@ model = "claude-haiku-4-5"
             config.ollama_base_url.as_deref(),
             Some("http://my-ollama:11434")
         );
-        assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(config.override_model.as_deref(), Some("gpt-5"));
         assert!(!config.title.enabled);
         assert_eq!(config.tool_permissions.get("bash"), Some(&ToolPolicy::Deny));
         assert_eq!(
@@ -3365,14 +3469,14 @@ agent_paths = []
         let config: Config = toml::from_str(
             r#"
 default_provider = "openrouter"
-default_model = "openai/gpt-4o-mini"
+override_model = "openai/gpt-4o-mini"
 openrouter_api_key = "sk-or-test"
 "#,
         )
         .expect("a hand-written OpenRouter config parses");
         assert_eq!(config.default_provider, "openrouter");
         assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-test"));
-        assert_eq!(config.default_model.as_deref(), Some("openai/gpt-4o-mini"));
+        assert_eq!(config.override_model.as_deref(), Some("openai/gpt-4o-mini"));
     }
 
     #[test]
@@ -3386,7 +3490,8 @@ openrouter_api_key = "sk-or-test"
         assert_eq!(parsed.agent_paths, default.agent_paths);
         assert_eq!(parsed.openrouter_api_key, default.openrouter_api_key);
         assert_eq!(parsed.ollama_base_url, default.ollama_base_url);
-        assert_eq!(parsed.default_model, default.default_model);
+        assert_eq!(parsed.override_model, default.override_model);
+        assert_eq!(parsed.fallback_model, default.fallback_model);
         assert_eq!(parsed.request_timeout_secs, default.request_timeout_secs);
         assert_eq!(
             parsed.providers.anthropic_api_key,
@@ -3847,7 +3952,7 @@ enabled = false
                 ..Default::default()
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
-            default_model: Some("gpt-5".to_string()),
+            override_model: Some("gpt-5".to_string()),
             ..Config::default()
         };
 
@@ -3862,7 +3967,7 @@ enabled = false
             loaded.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-test")
         );
-        assert_eq!(loaded.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(loaded.override_model.as_deref(), Some("gpt-5"));
     }
 
     #[test]
@@ -3925,7 +4030,8 @@ enabled = false
             openrouter_api_key: None,
             ollama_base_url: Some("http://custom:11434".to_string()),
             mcp_servers: vec![],
-            default_model: None,
+            override_model: None,
+            fallback_model: None,
             model_capabilities: model_caps,
             model_providers: HashMap::new(),
             tool_permissions: tool_perms,
