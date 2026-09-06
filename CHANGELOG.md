@@ -38,8 +38,9 @@ same list.
   /api/config` takes both with the same three states (absent, `null`, a
   string) and the same empty-string refusal. `default_model` is gone from the
   API. `lev setup --default-model` is `--override-model`, with
-  `--fallback-model` beside it; the wizard's model field is labelled Override
-  model. The embedding builder's `default_model(provider, model)` is
+  `--fallback-model` beside it. In the wizard both settings sit on the
+  advanced tuning screen, as Override model and Fallback model, so the main
+  screen asks only for providers and their order. The embedding builder's `default_model(provider, model)` is
   `override_model(provider, model)`, `default_provider(provider)` sets the
   provider alone, `fallback_model(model)` is the new setting, and the old
   `fallback_model(provider, model)` that appended to the failover chain is

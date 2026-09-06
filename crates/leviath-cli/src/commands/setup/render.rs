@@ -1309,12 +1309,17 @@ mod tests {
         w.providers[0].outcome = crate::commands::setup::verify::Outcome::Reachable {
             models: vec!["claude-opus-4".to_string()],
         };
-        w.enter(Step::Defaults);
-        w.cursor = 1;
-        w.open_picker("Default model", w.defaults[1].value.options().to_vec(), 0);
+        w.show_advanced = true;
+        w.enter(Step::Limits);
+        w.cursor = Wizard::OVERRIDE_FIELD;
+        w.open_picker(
+            "Override model",
+            w.limits[Wizard::OVERRIDE_FIELD].value.options().to_vec(),
+            0,
+        );
 
         let screen = rendered(&w);
-        assert!(screen.contains("Default model"), "{screen}");
+        assert!(screen.contains("Override model"), "{screen}");
         assert!(
             screen.contains("never sent to a different provider"),
             "the precedence prose is the point of the screen:\n{screen}"
@@ -1743,8 +1748,11 @@ mod tests {
         assert!(screen.contains("[enter]"), "numbers are typed");
         assert!(screen.contains("[enter/space]"), "booleans are toggled");
 
+        // The choices are the two model fields at the end of this screen.
         w.providers[0].selected = true;
-        w.enter(Step::Defaults);
+        w.show_advanced = true;
+        w.enter(Step::Limits);
+        w.scroll_end();
         assert!(rendered(&w).contains("enter/← →"), "choices are cycled");
     }
 

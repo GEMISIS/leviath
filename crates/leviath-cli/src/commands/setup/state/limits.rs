@@ -7,6 +7,12 @@
 
 use super::*;
 
+/// How many tuning fields the Limits screen has before the two model fields
+/// the wizard appends (see `Wizard::rebuild_advanced_models`). Their indices
+/// are what `apply_limits_fields` matches on, so the two are kept in step by
+/// a test rather than by counting.
+pub(super) const LIMITS_FIXED: usize = 12;
+
 /// The Limits screen's fields, seeded from a config.
 pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
     vec![
@@ -153,7 +159,20 @@ pub(super) fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             // stores `None` rather than reinstating a number they just removed.
             (10, FieldValue::Number(n)) => config.limits.max_tool_call_write_bytes = *n,
             (11, FieldValue::Number(n)) => config.limits.max_run_write_bytes = *n,
+            // The two model fields past here are read by `build_config` itself.
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The index the model fields are appended at is the number of tuning
+    /// fields, so a field added above has to move this constant with it.
+    #[test]
+    fn the_fixed_field_count_matches_the_form() {
+        assert_eq!(limits_fields(&Config::default()).len(), LIMITS_FIXED);
     }
 }

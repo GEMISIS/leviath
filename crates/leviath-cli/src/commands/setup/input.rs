@@ -370,9 +370,9 @@ impl Wizard {
             }
             FieldValue::Choice { options, index } => (options.clone(), *index),
         };
-        // Unconditionally, because the only list-valued fields in the wizard
-        // are the Defaults screen's provider and model. The tuning screen is
-        // numbers and switches, which the arrows already handle well.
+        // The list-valued fields are the two model choices at the end of the
+        // tuning screen; the rest of that screen is numbers and switches, which
+        // the arrows already handle well.
         self.open_picker(label, choice.0, choice.1);
     }
 

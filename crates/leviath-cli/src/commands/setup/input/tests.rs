@@ -1136,8 +1136,9 @@ fn wizard_with_models() -> (tempfile::TempDir, Wizard) {
             "claude-haiku-4-5".to_string(),
         ],
     };
-    w.enter(Step::Defaults);
-    w.cursor = 1; // the model choice
+    w.show_advanced = true;
+    w.enter(Step::Limits);
+    w.cursor = Wizard::OVERRIDE_FIELD; // the override model choice
     (dir, w)
 }
 
@@ -1185,7 +1186,10 @@ fn typing_filters_the_chooser_and_enter_takes_the_match() {
     w.handle_key(press(KeyCode::Enter));
 
     assert!(w.picker.is_none(), "choosing closes it");
-    assert_eq!(w.defaults[1].value.display(), "claude-haiku-4-5");
+    assert_eq!(
+        w.limits[Wizard::OVERRIDE_FIELD].value.display(),
+        "claude-haiku-4-5"
+    );
     assert!(w.dirty, "a chosen default is an unsaved change");
 }
 
@@ -1322,7 +1326,10 @@ fn clicking_a_row_in_the_chooser_takes_it_and_the_wheel_moves_within_it() {
 
     assert!(w.picker.is_none(), "a click on a row chooses it");
     // Row 0 is the "no default" option and the models sort after it.
-    assert_eq!(w.defaults[1].value.display(), "claude-opus-4");
+    assert_eq!(
+        w.limits[Wizard::OVERRIDE_FIELD].value.display(),
+        "claude-opus-4"
+    );
 }
 
 /// Page keys and Home/End are bound, not only reachable through the methods
@@ -1406,8 +1413,14 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
     assert_eq!(rows[0].0, "in-house");
     assert_eq!(rows[0].1, "from your config");
 
-    w.cursor = 1;
-    w.open_picker("Default model", w.defaults[1].value.options().to_vec(), 0);
+    w.show_advanced = true;
+    w.enter(Step::Limits);
+    w.cursor = Wizard::OVERRIDE_FIELD;
+    w.open_picker(
+        "Override model",
+        w.limits[Wizard::OVERRIDE_FIELD].value.options().to_vec(),
+        0,
+    );
     let picker = w.picker.as_ref().expect("open");
     let ghost = picker
         .options

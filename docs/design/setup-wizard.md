@@ -126,8 +126,8 @@ stateDiagram-v2
 | **Welcome** | Reports what is already configured, how many blueprints need installing, how many MCP servers were found elsewhere. |
 | **Providers** | Multi-select. Pre-checked for anything already configured or supplied by the environment. |
 | **Credentials** | One card per selected provider: masked key entry, Ollama base URL, Claude Code effort. `o` opens the signup page, `v` re-checks, `Ctrl-R` reveals. |
-| **Defaults** | `default_provider` as a radio over what was actually selected. `override_model` filled from what verification reported. Request timeout. |
-| **Limits** | Concurrency, iteration ceiling, exact token counting, the batch-tool hint. |
+| **Defaults** | `default_provider` as a radio over what was actually selected. Request timeout. A toggle for the advanced screen. |
+| **Limits** | Concurrency, iteration ceiling, exact token counting, the batch-tool hint, and the two model settings: `override_model` and `fallback_model`, each a chooser filled from what verification reported with "(each blueprint decides)" as the unset option. |
 | **Agents** | The ten embedded blueprints, each showing `install` / `update X → Y` / `up to date`. Changes pre-checked. |
 | **MCP servers** | Grouped by harness, with the project scope, name collisions, and inline secrets flagged. |
 | **Review** | A diff against the current file, plus warnings, then write. |

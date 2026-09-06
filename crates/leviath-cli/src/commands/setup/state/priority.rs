@@ -27,7 +27,7 @@ impl Wizard {
         self.reorder_field = field;
         self.reorder = Some(Reorder::new(
             "Provider priority",
-            Self::precedence_explanation(true)
+            self.picker_explanation(Self::PROVIDER_FIELD)
                 .into_iter()
                 .take(2)
                 .map(str::to_string)

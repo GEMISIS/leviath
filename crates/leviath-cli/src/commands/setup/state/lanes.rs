@@ -110,6 +110,12 @@ impl Wizard {
         if landed && self.step == Step::Defaults {
             self.rebuild_defaults();
         }
+        // The model choosers live on the advanced screen and are built from
+        // the same lists, so a reply landing while that screen is open refills
+        // them too, keeping whatever was already chosen.
+        if landed && self.step == Step::Limits {
+            self.rebuild_advanced_models();
+        }
     }
 
     // ── Signing in ──────────────────────────────────────────────────────────
