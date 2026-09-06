@@ -13,6 +13,48 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- `default_model` is two settings now, named for what they do. `override_model`
+  is what `default_model` was: while set, every stage that allows a user
+  default starts on it, ahead of the models its blueprint names. `fallback_model`
+  is new and is what the old name promised: tried after every model a stage
+  names and before `[providers] fallback_order`, so it carries a stage none
+  of whose own models is configured here and never moves a stage off a model
+  its blueprint chose. Unset is the valid default for both. A config written
+  before this loads its `default_model` as `fallback_model`, which is a change
+  of behaviour for that install: stages go back to their blueprint models. The
+  load says so, `lev doctor` warns, and `lev update` rewrites the key with the
+  user watching; setting `override_model` restores the old behaviour (#795).
+- A run says when one of those settings moved a stage off the model its
+  blueprint named: one `[model] stage 'fix' starts on openrouter/deepseek-v4-flash
+  (override_model); blueprint asked for openrouter/deepseek-v4-pro` line per
+  stage in the run's log at spawn, so it reaches `lev run` output, the
+  dashboard and the journal. A stage that starts on its own first choice says
+  nothing. `lev validate` prints `override_model` and `fallback_model` beside
+  `default_provider`.
+- `GET /api/config` reports `override_model` and `fallback_model` in place of
+  `default_model`, both always present and `null` when unset; `PUT
+  /api/config` takes both with the same three states (absent, `null`, a
+  string) and the same empty-string refusal. `default_model` is gone from the
+  API. `lev setup --default-model` is `--override-model`, with
+  `--fallback-model` beside it; the wizard's model field is labelled Override
+  model. The embedding builder's `default_model(provider, model)` is
+  `override_model(provider, model)`, `default_provider(provider)` sets the
+  provider alone, `fallback_model(model)` is the new setting, and the old
+  `fallback_model(provider, model)` that appended to the failover chain is
+  `fallback_route(provider, model)`.
+
+### Added
+
+- A renamed-key table (`config/renamed.rs`) that every surface reads: the
+  loader respells an old key in the file text before parsing, so a type
+  error still points at its line; the unread-key warning does not report it;
+  `lev doctor` warns with the same notice; and `lev update` lists it under a
+  `renamed-keys` migration and rewrites the file. The next rename is one
+  entry in that table. `Migration::apply` now receives the raw document too,
+  so a migration can quote a key that serde no longer reads.
+
 ### Removed
 
 - The opt-in Azure Artifact Signing step on the alpha build, along with the

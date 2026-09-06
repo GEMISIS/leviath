@@ -9,12 +9,13 @@
 
 use super::*;
 
-/// The user's default provider/model from `config.toml`, in the plain form the
-/// runtime's stage resolver takes.
+/// The user's default provider and model settings from `config.toml`, in the
+/// plain form the runtime's stage resolver takes.
 pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
     ModelDefaults {
         provider: config.default_provider.clone(),
-        model: config.default_model.clone(),
+        override_model: config.override_model.clone(),
+        fallback_model: config.fallback_model.clone(),
         fallback_order: parse_fallback_order(&config.providers.fallback_order),
         provider_order: config.providers.provider_order.clone(),
     }

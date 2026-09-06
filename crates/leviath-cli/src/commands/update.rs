@@ -201,7 +201,7 @@ pub(crate) fn plan(args: &UpdateArgs, env: &UpdateEnv) -> UpdatePlan {
                 .iter()
                 .filter(|m| (m.applies)(&loaded.config, &loaded.raw))
                 .collect(),
-            ConfigState::Loaded(Box::new(loaded.config)),
+            ConfigState::Loaded(Box::new(loaded)),
         ),
         Err(e) => (Vec::new(), ConfigState::Unreadable(e.to_string())),
     };

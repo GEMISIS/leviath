@@ -109,7 +109,8 @@ provider serves wins), tools, iteration cap, and context layout. Transitions for
 
 ```toml
 [stages.analyze.model]
-allow_user_default = true          # fall back to the user's default model, else fail closed
+allow_user_default = true          # let the host's override_model and fallback_model apply;
+                                   # false keeps this list exactly as written
 models = ["claude-sonnet-5", "gpt-5.4-mini"]
                                    # name models, not routes: whichever provider
                                    # the user configured is asked which it serves.

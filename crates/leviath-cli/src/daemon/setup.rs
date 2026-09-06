@@ -1763,7 +1763,7 @@ system_prompt = "x"
     fn config_naming(path: &std::path::Path, providers: &[(&str, &str)], default: &str) -> Config {
         let mut config = Config {
             default_provider: default.to_string(),
-            default_model: Some("m".to_string()),
+            override_model: Some("m".to_string()),
             ..Config::default()
         };
         for (name, url) in providers {

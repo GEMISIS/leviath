@@ -761,7 +761,8 @@ names onto your plan.
 | `--no-verify` | Skip checking credentials against the provider APIs |
 | `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key <KEY>` | Provider API keys |
 | `--ollama-url <URL>` | Ollama base URL |
-| `--default-model <MODEL>` | Default model override |
+| `--override-model <MODEL>` | One model every stage starts on, ahead of what its blueprint names; unset lets each blueprint decide |
+| `--fallback-model <MODEL>` | The model a stage falls back to when none of the models it names is configured here |
 | `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it: this flag is the way to turn it on |
 | `--claude-code-effort <LEVEL>` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--codex <true\|false>` | Enable the Codex transport, which bills a ChatGPT subscription. Flips the switch only: interactive `lev setup` signs in from its own screen, and a non-interactive run has nobody watching a browser, so sign in with `lev auth login codex` on that path |

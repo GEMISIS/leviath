@@ -6,7 +6,8 @@
 # with one provider key needs almost none of it.
 
 default_provider = "anthropic"
-default_model = "claude-sonnet-5"
+override_model = "claude-sonnet-5"
+fallback_model = "claude-haiku-4-5"
 agent_paths = ["~/work/agents"]
 openrouter_api_key = "sk-or-example"
 ollama_base_url = "http://localhost:11434"

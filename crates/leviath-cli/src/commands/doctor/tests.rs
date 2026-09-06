@@ -578,6 +578,39 @@ fn config_check_counts_more_than_one_unread_key() {
     );
 }
 
+/// A config file still carrying a key that changed name gets a warning, not a
+/// note: the value's meaning changed with the name, and the line says what it
+/// was read as and that `lev update` rewrites it. It is not counted among the
+/// keys nothing reads, because something did.
+#[test]
+fn config_check_warns_about_a_renamed_key_still_in_the_file() {
+    let check = crate::config::with_isolated_config_path(
+        "doctor-config_check_warns_about_a_renamed_key_still_in_the_file",
+        |dir| {
+            std::fs::write(
+                dir.join("config.toml"),
+                "default_provider = \"ollama\"\ndefault_model = \"qwen3.8:latest\"\n",
+            )
+            .expect("write the config");
+            config_check(&Config::default(), &ProviderRegistry::new())
+        },
+    );
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+    assert!(
+        check.detail.contains(
+            "`default_model = \"qwen3.8:latest\"` was read as `fallback_model = \"qwen3.8:latest\"`"
+        ),
+        "got: {}",
+        check.detail
+    );
+    assert!(check.detail.contains("lev update"), "got: {}", check.detail);
+    assert!(
+        !check.detail.contains("read by nothing"),
+        "a renamed key is read, not unread: {}",
+        check.detail
+    );
+}
+
 /// A `tokens_per_minute` below one call's usual size throttles nearly every
 /// call, which reads as a slow model from the outside. The config check names
 /// it - the value was documented inert before it was enforced, so a stale one
@@ -721,7 +754,7 @@ fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
 fn resolve_check_uses_the_configured_default() {
     let config = Config {
         default_provider: "stub".to_string(),
-        default_model: Some("m-1".to_string()),
+        override_model: Some("m-1".to_string()),
         ..Config::default()
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
@@ -773,7 +806,7 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
     // sent an investigation of a downgraded run in the wrong direction.
     let config = Config {
         default_provider: "openrouter".to_string(),
-        default_model: None,
+        override_model: None,
         ..Config::default()
     };
     let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
@@ -802,7 +835,7 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
 fn resolve_check_is_quiet_when_the_configured_default_does_win() {
     let config = Config {
         default_provider: "openrouter".to_string(),
-        default_model: Some("openai/gpt-4o-mini".to_string()),
+        override_model: Some("openai/gpt-4o-mini".to_string()),
         ..Config::default()
     };
     let registry = registry_with("openrouter", StubProvider::replying("hi"));
@@ -817,7 +850,7 @@ fn resolve_check_reads_a_qualified_default_model_bare_and_says_so() {
     // setting was read so the config can be tidied.
     let config = Config {
         default_provider: "stub".to_string(),
-        default_model: Some("stub/m-1".to_string()),
+        override_model: Some("stub/m-1".to_string()),
         ..Config::default()
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
@@ -848,10 +881,10 @@ fn resolve_check_does_not_second_guess_an_unregistered_default_provider() {
     // check's fail arm covers the case where nothing usable is left. Saying it
     // again here would put a note on every install with a stale provider name
     // in its config.
-    for default_model in [None, Some("m-1".to_string())] {
+    for override_model in [None, Some("m-1".to_string())] {
         let config = Config {
             default_provider: "ghost".to_string(),
-            default_model,
+            override_model,
             ..Config::default()
         };
         let registry = registry_with("anthropic", StubProvider::replying("hi"));
@@ -867,7 +900,7 @@ fn resolve_check_stays_quiet_under_an_explicit_model_override() {
     // default was passed over is noise.
     let config = Config {
         default_provider: "openrouter".to_string(),
-        default_model: None,
+        override_model: None,
         ..Config::default()
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));

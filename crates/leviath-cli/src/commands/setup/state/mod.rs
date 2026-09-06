@@ -759,9 +759,11 @@ impl Wizard {
                 value: FieldValue::Order(order),
             },
             Field {
-                label: "Default model",
-                help: "Offered to every stage that allows a user default, paired with the \
-                       provider above. Listed from what your providers reported.",
+                label: "Override model",
+                help: "One model every stage that allows a user default starts on, ahead of \
+                       what its blueprint names, paired with the provider above. Leave it \
+                       unset to let each blueprint decide. Listed from what your providers \
+                       reported.",
                 value: FieldValue::Choice {
                     options: models,
                     index: model_index,
@@ -889,7 +891,7 @@ impl Wizard {
     fn current_default_model(&self) -> Option<String> {
         match self.defaults.get(1).map(|f| &f.value) {
             Some(FieldValue::Choice { options, index }) => options.get(*index).cloned(),
-            _ => self.base.default_model.clone(),
+            _ => self.base.override_model.clone(),
         }
     }
 
@@ -1057,7 +1059,7 @@ impl Wizard {
             .cloned()
             .unwrap_or_else(|| self.current_default_provider());
         config.providers.provider_order = if order.len() > 1 { order } else { Vec::new() };
-        config.default_model = self
+        config.override_model = self
             .current_default_model()
             .filter(|m| m != Self::NO_DEFAULT_MODEL);
         config.request_timeout_secs = self.current_request_timeout();
@@ -2033,7 +2035,7 @@ pub(super) mod tests {
     fn the_model_picker_is_filled_from_verification_and_keeps_a_stored_value() {
         let dir = tempfile::tempdir().unwrap();
         let base = Config {
-            default_model: Some("hand-typed".to_string()),
+            override_model: Some("hand-typed".to_string()),
             ..Config::default()
         };
         let mut wizard = Wizard::new(
@@ -2614,7 +2616,7 @@ pub(super) mod tests {
         wizard.enter(Step::Defaults);
 
         // Index 0 of the model field is always the "no default" option.
-        assert!(wizard.build_config().default_model.is_none());
+        assert!(wizard.build_config().override_model.is_none());
     }
 
     #[test]

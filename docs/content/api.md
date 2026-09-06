@@ -217,7 +217,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/agents/{id}/message` | Steer a running agent |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
-| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider` or [`default_model`](#the-default-model) applies to the next run spawned, with no daemon restart |
+| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
 | `GET /api/models?provider=` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
@@ -1187,31 +1187,35 @@ omits the field whether or not the file loads, so its absence proves nothing the
 cannot be the thing that breaks the file: a body that would produce a config this build refuses to
 read back answers **400** and the file is left byte for byte as it was.
 
-## The default model
+## Override and fallback models
 
-`default_model` on `GET /api/config` is the model every stage runs on while it is set, as a bare
-model id on `default_provider`. It is always sent, `null` included, and that is the point: a server
-that omits the key predates the field, which is a different answer from "nothing is pinned". Read
-the absence as "cannot say" and show that, rather than showing an empty picker over a machine that
-has a model pinned.
+`override_model` on `GET /api/config` is the model every stage that allows a user default starts on
+while it is set, ahead of what its blueprint names; `fallback_model` is the model a stage falls back
+to when none of the models it names is configured on that machine, never ahead of them. Both are
+bare model ids on `default_provider`. Both are always sent, `null` included, and that is the point:
+a server that omits a key predates the field, which is a different answer from "nothing is set".
+Read the absence as "cannot say" and show that, rather than showing an empty picker over a machine
+that has a model pinned. Servers before 0.6 sent `default_model` instead, which behaved as
+`override_model` does.
 
-On `PUT /api/config` the same key has three states, which no other field in that body has:
+On `PUT /api/config` each key has three states, which the other fields in that body do not have:
 
-| Body                        | What happens                                       |
-|-----------------------------|----------------------------------------------------|
-| no `default_model` key      | the setting is left exactly as it was              |
-| `"default_model": null`     | the setting is written away                        |
-| `"default_model": "gpt-5"`  | the setting is pinned to `gpt-5`                   |
+| Body                          | What happens                                       |
+|-------------------------------|----------------------------------------------------|
+| no `override_model` key       | the setting is left exactly as it was              |
+| `"override_model": null`      | the setting is written away                        |
+| `"override_model": "gpt-5"`   | the setting is pinned to `gpt-5`                   |
 
-Clearing it matters as much as setting it. A pinned model runs every stage of every blueprint on
-that one model, and the cheap stages then pay a top-tier price, so unset is the state most machines
-want: see [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on). Sending
-`null` is the only way to get back there through this API, in the same way `remove_gateways` is the
-only way to delete a gateway.
+`fallback_model` reads the same way. Clearing `override_model` matters as much as setting it. A
+pinned model runs every stage of every blueprint on that one model, and the cheap stages then pay a
+top-tier price, so unset is the state most machines want: see
+[which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on). Sending `null` is
+the only way to get back there through this API, in the same way `remove_gateways` is the only way
+to delete a gateway.
 
-`"default_model": ""` is a **400**, not a clear. An empty string is not a model id, and a form that
-posts its empty box should be told rather than quietly lose the setting. Nothing is written when it
-is refused.
+`"override_model": ""` (or `"fallback_model": ""`) is a **400**, not a clear. An empty string is not
+a model id, and a form that posts its empty box should be told rather than quietly lose the
+setting. Nothing is written when it is refused.
 
 `default_provider` takes no `null`. It is not optional in `config.toml` - a machine always has one,
 defaulting to `anthropic` - so there is no unset state to write, and sending a different name is the

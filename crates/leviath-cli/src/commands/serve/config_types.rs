@@ -35,14 +35,19 @@ where
 #[derive(Serialize, Deserialize)]
 pub(super) struct RedactedConfig {
     pub(super) default_provider: String,
-    /// `default_model`: the one model every stage runs on while it is set.
+    /// `override_model`: the one model every stage that allows a user default
+    /// starts on while it is set, ahead of what its blueprint names.
     ///
     /// Always serialized, `null` when nothing is set, which is the
     /// distinction a console needs. A daemon too old to report this omits the
     /// key entirely, and that has to read as "cannot say" rather than as
     /// "nothing is set" - without the field, a picker drew an empty box over
     /// a machine that had a model pinned.
-    pub(super) default_model: Option<String>,
+    pub(super) override_model: Option<String>,
+    /// `fallback_model`: the model a stage falls back to when none of the
+    /// models it names is configured here, never ahead of them. Always
+    /// serialized, `null` when unset, for the same reason as `override_model`.
+    pub(super) fallback_model: Option<String>,
     /// `[providers] provider_order`: the ordered provider preference for a bare
     /// model name, best first. Empty when the user set none, in which case
     /// `default_provider` alone decides. Always serialized (empty array, not
@@ -416,7 +421,7 @@ pub(super) struct WriteConfigReq {
     /// alone, `null` clears it, a string sets it. See [`double_option`].
     ///
     /// Unset is a real state here, and usually the better one: a pinned
-    /// `default_model` runs every stage of every blueprint on one model,
+    /// `override_model` runs every stage of every blueprint on one model,
     /// which puts the cheap stages on a top-tier price. A route that could
     /// set it and never unset it was a one-way door, the same gap
     /// `remove_gateways` exists to close for gateways.
@@ -425,7 +430,11 @@ pub(super) struct WriteConfigReq {
     /// `""` is not a model id, and a console that sends one by accident
     /// should hear about it instead of quietly losing the setting.
     #[serde(default, deserialize_with = "double_option")]
-    pub(super) default_model: Option<Option<String>>,
+    pub(super) override_model: Option<Option<String>>,
+    /// `fallback_model`, with the same three states and the same empty-string
+    /// refusal as `override_model`.
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) fallback_model: Option<Option<String>>,
     pub(super) anthropic_key: Option<String>,
     pub(super) openai_key: Option<String>,
     pub(super) google_key: Option<String>,

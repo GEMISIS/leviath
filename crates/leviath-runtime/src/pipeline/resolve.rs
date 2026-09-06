@@ -22,11 +22,19 @@ use leviath_providers::Tool;
 pub struct ModelDefaults {
     /// The default provider name (e.g. `anthropic`).
     pub provider: String,
-    /// The default model, if the user configured one.
-    pub model: Option<String>,
+    /// The user's `override_model`: while set, every stage that allows a user
+    /// default starts on it, ahead of the models its blueprint names. A bare
+    /// model id on [`provider`](Self::provider).
+    pub override_model: Option<String>,
+    /// The user's `fallback_model`: tried after every model a stage names and
+    /// before [`fallback_order`](Self::fallback_order), so a stage whose own
+    /// entries are all unroutable still has somewhere to go. Never promoted
+    /// ahead of the blueprint's own choices. A bare model id on
+    /// [`provider`](Self::provider).
+    pub fallback_model: Option<String>,
     /// The host-wide failover chain, from `[providers] fallback_order`.
     ///
-    /// Appended after a stage's own entries and the user default, so a
+    /// Appended after a stage's own entries and the user's models, so a
     /// blueprint that names exactly one model still has somewhere to go when
     /// that provider stops answering. The case it covers: every stage names a
     /// single OpenRouter model, so there is nothing to fall back to when the
@@ -280,9 +288,16 @@ pub(crate) fn resolve_stage_candidates(
         }
     }
 
-    let user_default = user_default_model(model_cfg, override_model.as_deref(), defaults, registry);
+    let user_default =
+        user_override_model(model_cfg, override_model.as_deref(), defaults, registry);
     if let Some((provider, model)) = &user_default {
         push(provider.clone(), model.clone());
+    }
+    // The user's fallback sits behind everything the blueprint named and is
+    // never moved: it is the answer to "nothing I listed is configured here",
+    // not a preference over what was listed.
+    if let Some((provider, model)) = user_fallback_model(model_cfg, defaults, registry) {
+        push(provider, model);
     }
 
     // The host-wide chain last: it is the safety net for a blueprint that names
@@ -301,13 +316,14 @@ pub(crate) fn resolve_stage_candidates(
     // dispatched every stage at a localhost server that was not running.
     //
     // Registered candidates on the user's default provider therefore move to
-    // the front, the user's own `default_model` first among them and the rest
-    // in blueprint order. The default model leads because it is the one the
-    // user named: every bundled blueprint lists Ollama as `qwen3.5:9b`, and
-    // someone who set `default_model = "qwen3.8:latest"` was still sent to the
-    // blueprint's model, which they may never have pulled. A blueprint that
-    // must pin its own provider already has the way to say so -
-    // `allow_user_default = false` - and that suppresses this too.
+    // the front, the user's own `override_model` first among them and the rest
+    // in blueprint order. The override leads because that is what it is for:
+    // someone who set `override_model = "qwen3.8:latest"` under
+    // `default_provider = "ollama"` means every stage to run there, whatever
+    // the blueprint lists for Ollama. A blueprint that must pin its own
+    // provider already has the way to say so - `allow_user_default = false` -
+    // and that suppresses this too. The user's `fallback_model` is deliberately
+    // not promoted here: it stays behind the blueprint's entries.
     if model_cfg.allow_user_default && defaults.order().iter().any(|p| registry.has(p)) {
         // Grouped by MODEL, not by provider. The provider preference says where
         // a run should go, which is a statement about routes; letting it reorder
@@ -316,9 +332,9 @@ pub(crate) fn resolve_stage_candidates(
         // another.
         //
         // Models keep blueprint order, except that the user's own
-        // `default_model` leads - that IS a model preference, and someone who
-        // named a model meant it.
-        let default_model = user_default.as_ref().map(|(_, m)| m.as_str());
+        // `override_model` leads - that IS a model preference, and someone who
+        // named an override meant it.
+        let override_model = user_default.as_ref().map(|(_, m)| m.as_str());
         let mut order: Vec<String> = Vec::new();
         for c in &candidates {
             let key = model_key(&c.model).to_string();
@@ -326,7 +342,7 @@ pub(crate) fn resolve_stage_candidates(
                 order.push(key);
             }
         }
-        if let Some(dm) = default_model
+        if let Some(dm) = override_model
             && let Some(at) = order.iter().position(|k| k == model_key(dm))
         {
             let key = order.remove(at);
@@ -362,7 +378,7 @@ pub(crate) fn resolve_stage_candidates(
     // rejects with a readable error. The *tail* is different: every entry in
     // it is somewhere the runtime will actually dispatch to, so an
     // unregistered one is not a fallback but a phantom that parks the run on
-    // `StallReason::ProviderMissing`. `user_default_model` hands one back
+    // `StallReason::ProviderMissing`. `user_override_model` hands one back
     // whenever a bare `--model` override is in play, so filter here.
     //
     // A pair whose provider is here and says it does not carry that model is a
@@ -379,9 +395,10 @@ pub(crate) fn resolve_stage_candidates(
     candidates
 }
 
-/// The user-default fallback for [`resolve_stage_model`]: `None` when the stage
-/// forbids it or no usable default exists.
-fn user_default_model(
+/// The user's override for [`resolve_stage_model`]: the run-level bare
+/// `--model` when one is in play, else the configured `override_model`.
+/// `None` when the stage forbids a user default or nothing usable is set.
+fn user_override_model(
     model_cfg: &ModelConfig,
     override_model: Option<&str>,
     defaults: &ModelDefaults,
@@ -393,24 +410,100 @@ fn user_default_model(
     if let Some(model) = override_model {
         return Some((defaults.provider.clone(), model.to_string()));
     }
-    if let Some(default_model) = &defaults.model
+    if let Some(model) = &defaults.override_model
         && registry.has(&defaults.provider)
     {
-        let model = bare_default_model(&defaults.provider, default_model);
+        let model = bare_user_model(&defaults.provider, model);
         return Some((defaults.provider.clone(), model.to_string()));
     }
     None
 }
 
-/// The model id a `default_model` setting actually names, with a leading
-/// `<default_provider>/` taken off.
+/// The user's `fallback_model` on the default provider, when the stage allows a
+/// user default and the provider is registered.
+fn user_fallback_model(
+    model_cfg: &ModelConfig,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Option<(String, String)> {
+    if !model_cfg.allow_user_default {
+        return None;
+    }
+    let model = defaults.fallback_model.as_deref()?;
+    if !registry.has(&defaults.provider) {
+        return None;
+    }
+    let model = bare_user_model(&defaults.provider, model);
+    Some((defaults.provider.clone(), model.to_string()))
+}
+
+/// Where a stage's head came from: its own list, or one of the user's models.
 ///
-/// `default_model` is a bare model id that pairs with `default_provider`, but
-/// it is easy to write qualified: `--model` and `[providers] fallback_order`
+/// Told apart so a run can say when a substitution happened rather than
+/// silently starting somewhere the blueprint did not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadSource {
+    /// The blueprint's own first usable entry.
+    Blueprint,
+    /// The user's `override_model` displaced the blueprint's choice.
+    Override,
+    /// Nothing the blueprint named is configured; the user's `fallback_model`
+    /// is carrying the stage.
+    Fallback,
+}
+
+/// Which of the user's models, if any, put `head` at the front of a stage.
+///
+/// Resolved twice on purpose: once as the install has it and once with the
+/// user's two models taken out. When the two heads agree, the user's settings
+/// changed nothing worth saying; when they differ, the head is whichever of
+/// the two settings it matches. A run-level `--model` is the caller overriding
+/// on purpose and is not reported.
+pub fn head_source(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+    head: &ModelEntry,
+) -> HeadSource {
+    if model_override.is_some() || !model_cfg.allow_user_default {
+        return HeadSource::Blueprint;
+    }
+    let without = ModelDefaults {
+        override_model: None,
+        fallback_model: None,
+        ..defaults.clone()
+    };
+    let own = resolve_stage_candidates(model_cfg, None, &without, registry);
+    if own
+        .first()
+        .is_some_and(|e| e.provider == head.provider && e.model == head.model)
+    {
+        return HeadSource::Blueprint;
+    }
+    let is = |setting: &Option<String>| {
+        setting.as_deref().is_some_and(|m| {
+            head.provider == defaults.provider
+                && head.model == bare_user_model(&defaults.provider, m)
+        })
+    };
+    // The two settings are the only things taken out of `without`, so a head
+    // that changed and is not the fallback is the override.
+    match is(&defaults.fallback_model) {
+        true => HeadSource::Fallback,
+        false => HeadSource::Override,
+    }
+}
+
+/// The model id an `override_model` or `fallback_model` setting actually names,
+/// with a leading `<default_provider>/` taken off.
+///
+/// Both settings are bare model ids that pair with `default_provider`, but they
+/// are easy to write qualified: `--model` and `[providers] fallback_order`
 /// both take `provider/model`, an OpenRouter id such as
 /// `deepseek/deepseek-v4-flash` already looks qualified, and a console that
 /// lists models as `provider/id` hands the pair back in one string. Sent
-/// verbatim, `default_provider = "ollama"` with `default_model =
+/// verbatim, `default_provider = "ollama"` with `override_model =
 /// "ollama/qwen3.8:latest"` reached Ollama as a request for a model called
 /// `ollama/qwen3.8:latest`, which it does not have. The prefix names the
 /// provider the setting already names, so dropping it loses nothing.
@@ -421,7 +514,7 @@ fn user_default_model(
 /// (`openrouter/deepseek/deepseek-v4-flash`), which is how the two are told
 /// apart. Anything that does not begin with the provider's name is returned as
 /// written.
-pub fn bare_default_model<'a>(provider: &str, model: &'a str) -> &'a str {
+pub fn bare_user_model<'a>(provider: &str, model: &'a str) -> &'a str {
     let Some(rest) = model
         .strip_prefix(provider)
         .and_then(|rest| rest.strip_prefix('/'))
@@ -710,6 +803,23 @@ pub fn providers_tried(
     names.join(", ")
 }
 
+/// A stage's own model list as the blueprint wrote it, for the substitution
+/// note: a bare name for an open route, `provider/model` for a pinned one.
+fn blueprint_choice(model_cfg: &ModelConfig) -> String {
+    let listed: Vec<String> = model_cfg
+        .models
+        .iter()
+        .map(|e| match e.provider.is_empty() {
+            true => e.model.clone(),
+            false => format!("{}/{}", e.provider, e.model),
+        })
+        .collect();
+    match listed.is_empty() {
+        true => "no model".to_string(),
+        false => listed.join(", "),
+    }
+}
+
 /// Resolve every stage's provider/model + effective tool set from the
 /// blueprint, or report the first stage that has no usable provider.
 ///
@@ -805,12 +915,35 @@ pub fn resolve_stages(
                 output_request,
             );
             apply_output_shape(&mut tools, output.as_ref());
+            // One line, at spawn, when the user's settings moved this stage off
+            // the model its blueprint named. It rides the stage's operational
+            // log so `lev run`, the dashboard and the journal all carry it;
+            // a stage that starts on its own first choice says nothing.
+            let notes = match head_source(&stage.model, model_override, defaults, registry, &head) {
+                HeadSource::Blueprint => Vec::new(),
+                HeadSource::Override => vec![format!(
+                    "[model] stage '{}' starts on {}/{} (override_model); blueprint asked for {}",
+                    stage.name,
+                    head.provider,
+                    head.model,
+                    blueprint_choice(&stage.model)
+                )],
+                HeadSource::Fallback => vec![format!(
+                    "[model] stage '{}' starts on {}/{} (fallback_model); nothing the blueprint \
+                     named is configured here ({})",
+                    stage.name,
+                    head.provider,
+                    head.model,
+                    blueprint_choice(&stage.model)
+                )],
+            };
             Ok(ResolvedStage {
                 provider_name: head.provider,
                 model: head.model,
                 tools,
                 fallbacks: candidates,
                 output,
+                notes,
             })
         })
         .collect()
@@ -917,7 +1050,8 @@ mod tests {
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -936,7 +1070,7 @@ mod tests {
 
     /// The preference decides the route, not the model, so a blueprint that
     /// tiers its stages keeps each stage's own model. This is what separates it
-    /// from `default_model`, which pins one model everywhere.
+    /// from `override_model`, which pins one model everywhere.
     #[tokio::test]
     async fn preferring_a_script_provider_keeps_each_stage_on_its_own_model() {
         let (registry, _dir) = registry_with_script_default(&["cheap-model", "costly-model"]);
@@ -945,7 +1079,8 @@ mod tests {
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -968,7 +1103,8 @@ mod tests {
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1135,7 +1271,8 @@ mod tests {
         // Listed provider "ghost" is unavailable; anthropic (the default) is.
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
-            model: Some("claude-default".to_string()),
+            override_model: Some("claude-default".to_string()),
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1149,13 +1286,14 @@ mod tests {
     }
 
     /// The case that reached Ollama as a request for `ollama/qwen3.8:latest`: a
-    /// `default_model` written as `provider/model` next to the provider it
+    /// `override_model` written as `provider/model` next to the provider it
     /// names. The prefix is dropped on the way to the resolver.
     #[test]
-    fn a_default_model_qualified_with_its_own_provider_is_sent_bare() {
+    fn an_override_model_qualified_with_its_own_provider_is_sent_bare() {
         let defaults = ModelDefaults {
             provider: "ollama".to_string(),
-            model: Some("ollama/qwen3.8:latest".to_string()),
+            override_model: Some("ollama/qwen3.8:latest".to_string()),
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1169,45 +1307,45 @@ mod tests {
     }
 
     #[test]
-    fn bare_default_model_strips_only_the_named_providers_prefix() {
+    fn bare_user_model_strips_only_the_named_providers_prefix() {
         // The provider's own name, and nothing else, comes off.
         assert_eq!(
-            bare_default_model("ollama", "ollama/qwen3.8:latest"),
+            bare_user_model("ollama", "ollama/qwen3.8:latest"),
             "qwen3.8:latest"
         );
         assert_eq!(
-            bare_default_model("anthropic", "anthropic/claude-sonnet-5"),
+            bare_user_model("anthropic", "anthropic/claude-sonnet-5"),
             "claude-sonnet-5"
         );
         // Another provider's name is part of the model id, as far as this
         // provider is concerned.
-        assert_eq!(bare_default_model("ollama", "openai/gpt-5"), "openai/gpt-5");
+        assert_eq!(bare_user_model("ollama", "openai/gpt-5"), "openai/gpt-5");
         // A bare id is untouched, as is one that merely starts with the same
         // letters or has nothing after the slash.
         assert_eq!(
-            bare_default_model("ollama", "qwen3.8:latest"),
+            bare_user_model("ollama", "qwen3.8:latest"),
             "qwen3.8:latest"
         );
-        assert_eq!(bare_default_model("ollama", "ollamafoo/x"), "ollamafoo/x");
-        assert_eq!(bare_default_model("ollama", "ollama/"), "ollama/");
-        assert_eq!(bare_default_model("ollama", "ollama"), "ollama");
+        assert_eq!(bare_user_model("ollama", "ollamafoo/x"), "ollamafoo/x");
+        assert_eq!(bare_user_model("ollama", "ollama/"), "ollama/");
+        assert_eq!(bare_user_model("ollama", "ollama"), "ollama");
     }
 
     #[test]
-    fn bare_default_model_keeps_openrouters_own_catalog_ids() {
+    fn bare_user_model_keeps_openrouters_own_catalog_ids() {
         // `openrouter/auto` is a real OpenRouter model, not a qualified one.
         assert_eq!(
-            bare_default_model("openrouter", "openrouter/auto"),
+            bare_user_model("openrouter", "openrouter/auto"),
             "openrouter/auto"
         );
         // A qualified OpenRouter model still carries the vendor segment, so
         // there is a second slash and the prefix comes off.
         assert_eq!(
-            bare_default_model("openrouter", "openrouter/deepseek/deepseek-v4-flash"),
+            bare_user_model("openrouter", "openrouter/deepseek/deepseek-v4-flash"),
             "deepseek/deepseek-v4-flash"
         );
         assert_eq!(
-            bare_default_model("openrouter", "deepseek/deepseek-v4-flash"),
+            bare_user_model("openrouter", "deepseek/deepseek-v4-flash"),
             "deepseek/deepseek-v4-flash"
         );
     }
@@ -1216,7 +1354,8 @@ mod tests {
     fn resolve_user_default_with_model_override() {
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1235,7 +1374,8 @@ mod tests {
         // registered ⇒ neither user-default branch fires ⇒ last resort.
         let defaults = ModelDefaults {
             provider: "ghost-default".to_string(),
-            model: Some("dm".to_string()),
+            override_model: Some("dm".to_string()),
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1266,7 +1406,8 @@ mod tests {
         cfg.allow_user_default = false; // forbid the default fallback
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
-            model: Some("would-be-default".to_string()),
+            override_model: Some("would-be-default".to_string()),
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1485,7 +1626,8 @@ mod tests {
     fn providers_tried_lists_the_blueprint_entries_and_the_user_default() {
         let defaults = ModelDefaults {
             provider: "fallback".to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
@@ -1682,7 +1824,8 @@ mod tests {
         let cfg = model_cfg(vec![("openrouter", "deepseek")]);
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
-            model: Some("sonnet".to_string()),
+            override_model: Some("sonnet".to_string()),
+            fallback_model: None,
             fallback_order: vec![ModelEntry::new("openai".to_string(), "gpt".to_string())],
             provider_order: Vec::new(),
         };
@@ -1701,18 +1844,233 @@ mod tests {
         );
     }
 
+    /// `fallback_model` sits behind every model the stage named and ahead of
+    /// the host-wide chain, and the regroup that promotes `override_model`
+    /// leaves it where it is: it is the answer to "nothing I listed is
+    /// configured", not a preference over what was listed.
+    #[test]
+    fn the_fallback_model_comes_after_the_stages_own_entries_and_is_never_promoted() {
+        let cfg = model_cfg(vec![("openrouter", "deepseek"), ("anthropic", "opus")]);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: None,
+            fallback_model: Some("haiku".to_string()),
+            fallback_order: vec![ModelEntry::new("openai".to_string(), "gpt".to_string())],
+            provider_order: Vec::new(),
+        };
+        let registry = registry_with(&["openrouter", "anthropic", "openai"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        // The blueprint's model order stands (the preference reorders routes
+        // within a model, never across models); the fallback stays behind both
+        // listed models and ahead of the host-wide chain.
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("openrouter", "deepseek"),
+                ("anthropic", "opus"),
+                ("anthropic", "haiku"),
+                ("openai", "gpt"),
+            ]
+        );
+    }
+
+    /// A stage none of whose models is configured lands on the fallback, and
+    /// the run is told that is what happened.
+    #[test]
+    fn a_stage_with_nothing_configured_starts_on_the_fallback_model_and_says_so() {
+        let cfg = model_cfg(vec![("ghost", "m")]);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: None,
+            fallback_model: Some("anthropic/haiku".to_string()),
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let registry = registry_with(&["anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(pairs(&got), vec![("anthropic", "haiku")]);
+        assert_eq!(
+            head_source(&cfg, None, &defaults, &registry, &got[0]),
+            HeadSource::Fallback
+        );
+    }
+
+    /// A stage that forbids the user default gets neither of the user's models.
+    #[test]
+    fn a_stage_that_forbids_the_user_default_gets_no_fallback_model() {
+        let mut cfg = model_cfg(vec![("openrouter", "deepseek")]);
+        cfg.allow_user_default = false;
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: Some("sonnet".to_string()),
+            fallback_model: Some("haiku".to_string()),
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let registry = registry_with(&["openrouter", "anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(pairs(&got), vec![("openrouter", "deepseek")]);
+        assert_eq!(
+            head_source(&cfg, None, &defaults, &registry, &got[0]),
+            HeadSource::Blueprint
+        );
+    }
+
+    /// An unregistered default provider has no fallback to offer.
+    #[test]
+    fn the_fallback_model_needs_its_provider_registered() {
+        let cfg = model_cfg(vec![("openrouter", "deepseek")]);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: None,
+            fallback_model: Some("haiku".to_string()),
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let registry = registry_with(&["openrouter"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(pairs(&got), vec![("openrouter", "deepseek")]);
+    }
+
+    /// The head's source: the override when it displaced the blueprint's
+    /// choice, the blueprint when the two agree (the override names the same
+    /// model), and the blueprint under a run-level `--model`, which is the
+    /// caller overriding on purpose.
+    #[test]
+    fn head_source_tells_an_override_from_the_blueprints_own_choice() {
+        let cfg = model_cfg(vec![("anthropic", "opus")]);
+        let registry = registry_with(&["anthropic"]);
+        let displaced = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: Some("sonnet".to_string()),
+            fallback_model: None,
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let got = resolve_stage_candidates(&cfg, None, &displaced, &registry);
+        assert_eq!(got[0].model, "sonnet");
+        assert_eq!(
+            head_source(&cfg, None, &displaced, &registry, &got[0]),
+            HeadSource::Override
+        );
+        let same = ModelDefaults {
+            override_model: Some("opus".to_string()),
+            ..displaced.clone()
+        };
+        let got = resolve_stage_candidates(&cfg, None, &same, &registry);
+        assert_eq!(
+            head_source(&cfg, None, &same, &registry, &got[0]),
+            HeadSource::Blueprint
+        );
+        let got = resolve_stage_candidates(&cfg, Some("anthropic/sonnet"), &displaced, &registry);
+        assert_eq!(
+            head_source(
+                &cfg,
+                Some("anthropic/sonnet"),
+                &displaced,
+                &registry,
+                &got[0]
+            ),
+            HeadSource::Blueprint
+        );
+    }
+
+    /// The blueprint's list is rendered the way it was written; an empty list
+    /// is named as such rather than as nothing.
+    #[test]
+    fn blueprint_choice_renders_routes_and_names_an_empty_list() {
+        let mut mixed = model_cfg(vec![("anthropic", "opus")]);
+        mixed
+            .models
+            .push(ModelEntry::new(String::new(), "gpt".to_string()));
+        assert_eq!(blueprint_choice(&mixed), "anthropic/opus, gpt");
+        let empty = ModelConfig {
+            models: Vec::new(),
+            allow_user_default: true,
+            parameters: HashMap::new(),
+            request_timeout_secs: None,
+        };
+        assert_eq!(blueprint_choice(&empty), "no model");
+    }
+
+    /// The spawn-time note rides the resolved stage: one line naming the
+    /// substitution and the blueprint's own list, nothing when the blueprint's
+    /// choice stands.
+    #[test]
+    fn resolve_stages_notes_a_substitution_and_is_silent_otherwise() {
+        let stage =
+            leviath_core::Stage::new("fix".to_string(), model_cfg(vec![("anthropic", "opus")]));
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let registry = registry_with(&["anthropic"]);
+        let overridden = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: Some("sonnet".to_string()),
+            fallback_model: None,
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let resolved = resolve_stages(&bp, None, &overridden, &registry, catalog(&[]), false, None)
+            .expect("anthropic is registered");
+        assert_eq!(
+            resolved[0].notes,
+            vec![
+                "[model] stage 'fix' starts on anthropic/sonnet (override_model); blueprint asked \
+                 for anthropic/opus"
+                    .to_string()
+            ]
+        );
+        let quiet = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("anthropic is registered");
+        assert!(quiet[0].notes.is_empty());
+
+        // The fallback wording says why the blueprint's own list did not do.
+        let ghost = leviath_core::Stage::new("fix".to_string(), model_cfg_open(vec!["nowhere"]));
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![ghost],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+        let fallback = ModelDefaults {
+            provider: "anthropic".to_string(),
+            override_model: None,
+            fallback_model: Some("haiku".to_string()),
+            fallback_order: Vec::new(),
+            provider_order: Vec::new(),
+        };
+        let resolved = resolve_stages(&bp, None, &fallback, &registry, catalog(&[]), false, None)
+            .expect("the fallback carries it");
+        assert_eq!(
+            resolved[0].notes,
+            vec![
+                "[model] stage 'fix' starts on anthropic/haiku (fallback_model); nothing the \
+                 blueprint named is configured here (nowhere)"
+                    .to_string()
+            ]
+        );
+    }
+
     /// Every bundled blueprint lists Ollama as `qwen3.5:9b`. A user who set
-    /// `default_model = "qwen3.8:latest"` was still sent to the blueprint's
+    /// `override_model = "qwen3.8:latest"` was still sent to the blueprint's
     /// model, so the named default leads.
     ///
     /// What it does NOT do is drag the rest of that provider's entries with it.
-    /// `default_model` is a statement about a model and moves that model;
+    /// `override_model` is a statement about a model and moves that model;
     /// `default_provider` is a statement about a route and reorders routes
     /// within a model. So the blueprint's own first model stays ahead of the
     /// blueprint's later ones, and only falls through when nothing registered
     /// can serve it.
     #[test]
-    fn the_users_default_model_leads_the_blueprints_entry_on_the_same_provider() {
+    fn the_users_override_model_leads_the_blueprints_entry_on_the_same_provider() {
         let cfg = model_cfg(vec![
             ("anthropic", "claude-sonnet-5"),
             ("ollama", "qwen3.5:9b"),
@@ -1720,7 +2078,8 @@ mod tests {
         ]);
         let defaults = ModelDefaults {
             provider: "ollama".to_string(),
-            model: Some("qwen3.8:latest".to_string()),
+            override_model: Some("qwen3.8:latest".to_string()),
+            fallback_model: None,
             ..Default::default()
         };
         let registry = registry_with(&["anthropic", "ollama"]);
@@ -1741,7 +2100,8 @@ mod tests {
         // reorders the routes to a model, not the models themselves.
         let repeated = ModelDefaults {
             provider: "ollama".to_string(),
-            model: Some("qwen3.6:27b".to_string()),
+            override_model: Some("qwen3.6:27b".to_string()),
+            fallback_model: None,
             ..Default::default()
         };
         let got = resolve_stage_candidates(&cfg, None, &repeated, &registry);
@@ -1767,7 +2127,8 @@ mod tests {
         ]);
         let defaults = ModelDefaults {
             provider: "openrouter".to_string(),
-            model: Some("openai/gpt-4o-mini".to_string()),
+            override_model: Some("openai/gpt-4o-mini".to_string()),
+            fallback_model: None,
             ..Default::default()
         };
         let registry = registry_with(&["openrouter", "ollama"]);
@@ -1794,7 +2155,8 @@ mod tests {
         };
         let defaults = ModelDefaults {
             provider: "openrouter".to_string(),
-            model: Some("deepseek".to_string()),
+            override_model: Some("deepseek".to_string()),
+            fallback_model: None,
             ..Default::default()
         };
         let registry = registry_with(&["openrouter", "anthropic"]);
@@ -1814,7 +2176,8 @@ mod tests {
         let cfg = model_cfg(vec![("anthropic", "sonnet"), ("ollama", "qwen")]);
         let defaults = ModelDefaults {
             provider: "openrouter".to_string(),
-            model: Some("deepseek".to_string()),
+            override_model: Some("deepseek".to_string()),
+            fallback_model: None,
             ..Default::default()
         };
         let registry = registry_with(&["anthropic", "ollama"]);
@@ -1832,7 +2195,8 @@ mod tests {
         let cfg = model_cfg(vec![("anthropic", "sonnet"), ("anthropic", "sonnet")]);
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
-            model: Some("sonnet".to_string()),
+            override_model: Some("sonnet".to_string()),
+            fallback_model: None,
             fallback_order: vec![ModelEntry::new(
                 "anthropic".to_string(),
                 "sonnet".to_string(),
@@ -2708,7 +3072,8 @@ mod tests {
     fn defaults_of(provider: &str) -> ModelDefaults {
         ModelDefaults {
             provider: provider.to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         }
@@ -2832,7 +3197,8 @@ mod tests {
     fn defaults_ordered(default_provider: &str, order: &[&str]) -> ModelDefaults {
         ModelDefaults {
             provider: default_provider.to_string(),
-            model: None,
+            override_model: None,
+            fallback_model: None,
             fallback_order: Vec::new(),
             provider_order: order.iter().map(|s| s.to_string()).collect(),
         }

@@ -111,7 +111,8 @@ That stage's `models` list never mentions the provider you configured. A bluepri
 starts on a provider it lists. The [bundled agents](/docs/agent-catalog) list all five providers,
 so with them any key qualifies; a blueprint you downloaded or wrote may list fewer.
 
-Set `default_provider` and `default_model` together, which puts your provider ahead of the
+Set `fallback_model` beside your `default_provider`: a stage none of whose models is configured
+here then runs on that. `override_model` is the heavier tool, putting one model ahead of the
 blueprint's list for every stage that has not opted out. `--model <provider>/<model>` does it for
 one run, and copying the blueprint does it per stage. See
 [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on).
@@ -124,7 +125,7 @@ over from before Ollama became opt-in, since an address that used to configure i
 it is on, every bundled agent lists it last, so on a stage that names no model of its own it is the
 first entry that matches, and the run starts against `http://localhost:11434`.
 
-Two ways to stop it. Turn Ollama off if you did not mean to enable it. Or set `default_model`
+Two ways to stop it. Turn Ollama off if you did not mean to enable it. Or set `fallback_model`
 alongside your `default_provider`: without a model to send, `default_provider` is never consulted
 and Ollama wins by default. `lev doctor` says so in its `resolve` line when your configured provider
 is being passed over.
@@ -205,10 +206,11 @@ the same way: an API error on the first call, not a `lev validate` failure.
 
 If the name in the error carries a provider prefix, as in Ollama's
 `model 'ollama/qwen3.8:latest' not found`, the model was written as `provider/model` where a bare
-id was expected. `default_model` in `config.toml` and a `model` in a blueprint's `models` list
-pair with a provider that is named separately, so they take `qwen3.8:latest`; only `--model` and
-`[providers] fallback_order` take `ollama/qwen3.8:latest`. A `default_model` prefixed with its own
-`default_provider` is read bare and `lev doctor` says so; a blueprint entry is sent as written.
+id was expected. `override_model` and `fallback_model` in `config.toml` and a `model` in a
+blueprint's `models` list pair with a provider that is named separately, so they take
+`qwen3.8:latest`; only `--model` and `[providers] fallback_order` take `ollama/qwen3.8:latest`. An
+`override_model` or `fallback_model` prefixed with its own `default_provider` is read bare and
+`lev doctor` says so; a blueprint entry is sent as written.
 
 Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
 rather than Leviath's built-in table. A provider *name* it cannot reach at all fails the command

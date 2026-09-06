@@ -1154,7 +1154,7 @@ fn enter_on_a_default_opens_a_chooser_that_says_what_it_decides() {
     w.handle_key(press(KeyCode::Enter));
 
     let picker = w.picker.as_ref().expect("the chooser is open");
-    assert_eq!(picker.title, "Default model");
+    assert_eq!(picker.title, "Override model");
     assert!(
         !picker.explain.is_empty(),
         "the chooser exists to explain the value, not only to list it"
@@ -1384,7 +1384,7 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
     let dir = tempfile::tempdir().unwrap();
     let config = crate::config::Config {
         default_provider: "in-house".to_string(),
-        default_model: Some("ghost-model".to_string()),
+        override_model: Some("ghost-model".to_string()),
         ..Default::default()
     };
     let mut w = Wizard::new(

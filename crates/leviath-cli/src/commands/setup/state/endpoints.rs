@@ -957,7 +957,7 @@ mod tests {
         assert_eq!(providers, vec!["llama-cpp".to_string()]);
         assert_eq!(w.build_config().default_provider, "llama-cpp");
         assert_eq!(
-            w.build_config().default_model.as_deref(),
+            w.build_config().override_model.as_deref(),
             Some("qwen"),
             "the entry's pick becomes the default model"
         );

@@ -32,7 +32,8 @@ where you look up the exact name, type, and default. The same contract ships mac
 
 ```toml
 default_provider     = "anthropic"   # provider used when a blueprint names none
-default_model        = "claude-sonnet-4-5"   # bare model id on default_provider, no "anthropic/" prefix
+override_model       = "claude-sonnet-4-5"   # every stage starts on this; unset lets each blueprint decide
+fallback_model       = "claude-haiku-4-5"    # only for a stage none of whose own models is configured
 agent_paths          = ["~/projects/my-agents"]   # extra directories scanned for blueprints
 openrouter_api_key   = "sk-or-..."   # env fallback: OPENROUTER_API_KEY
 ollama_base_url      = "http://localhost:11434"   # env fallback: OLLAMA_HOST
@@ -46,7 +47,8 @@ update_check         = true          # ask whether a newer release exists
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `default_provider` | string | `"anthropic"` | |
-| `default_model` | string | unset | A bare model id on `default_provider`, not `provider/model`. A leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. Unset is usually the better state; over the API, `PUT /api/config` with `"default_model": null` writes it away. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
+| `override_model` | string | unset | One model every stage that allows a user default starts on, ahead of the models its blueprint names. A bare model id on `default_provider`, not `provider/model`; a leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. Unset is usually the better state; over the API, `PUT /api/config` with `"override_model": null` writes it away. Was `default_model` before 0.6. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
+| `fallback_model` | string | unset | The model a stage falls back to when none of the models it names is configured here, tried after all of them and before `[providers] fallback_order`. Same bare-id shape as `override_model`. Never moves a stage off a model its blueprint names. A `default_model` from before 0.6 loads as this, with a notice; `lev update` rewrites the key |
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
 | `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434`. Setting it also counts as choosing Ollama, so an install that configured it before `[providers] ollama_enabled` existed keeps working |
@@ -901,7 +903,7 @@ entry, or straight into the file.
 
 ```toml
 default_provider = "llama-cpp"
-default_model    = "qwen3-8b"
+override_model   = "qwen3-8b"
 
 [providers]
 anthropic_api_key = "sk-ant-..."
