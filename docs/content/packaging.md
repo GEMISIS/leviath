@@ -47,6 +47,11 @@ lev add ./my-agent                    # install from a directory
 - `PACKAGE` (required positional): a path to a `.leviath-bundle` file or to an agent
   directory. Anything else is rejected; `lev add` never reaches out to a network.
 
+The install is named after the blueprint's `name` in `agent.leviath`, not after the bundle
+file or the source directory. `lev add ./my-agent-1.0.0.leviath-bundle` installs `my-agent`,
+and that is the name `lev run` and `lev remove` take. Only a package whose
+manifest declares no name falls back to the file's or directory's name.
+
 Installing under a name that already exists replaces the previous install.
 
 When a blueprint asks for anything unusual, `lev add` prints an inventory of exactly what it wants

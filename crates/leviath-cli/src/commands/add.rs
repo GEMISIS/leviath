@@ -1269,10 +1269,9 @@ mod tests {
                     .bundle(project_dir.path())
                     .unwrap();
                 let bundle_dir = tempfile::tempdir().unwrap();
-                // AgentInstaller::install() derives the agent name from the
-                // bundle *filename* (not the manifest content), so name it
-                // to match what we assert on below.
-                let bundle_path = bundle_dir.path().join("bundled-pkg.leviath-bundle");
+                // Named the way `lev pack` names its output: the install is
+                // still called what the manifest says, not what the file is.
+                let bundle_path = bundle_dir.path().join("bundled-pkg-1.0.0.leviath-bundle");
                 std::fs::write(&bundle_path, bundle_bytes).unwrap();
 
                 let agents_dir = tempfile::tempdir().unwrap();
@@ -1288,6 +1287,7 @@ mod tests {
                     .unwrap();
 
                 assert!(agents_dir.path().join("bundled-pkg").exists());
+                assert!(!agents_dir.path().join("bundled-pkg-1.0.0").exists());
             })
         });
     }

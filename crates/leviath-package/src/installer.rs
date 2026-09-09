@@ -93,24 +93,41 @@ pub struct AgentInstaller {
     install_dir: PathBuf,
 }
 
-/// The version and description an `agent.leviath` declares, with the
+/// What an `agent.leviath` says about itself.
+struct ManifestMeta {
+    /// The `[agent] name`, when the manifest declares a non-empty one.
+    name: Option<String>,
+    version: String,
+    description: String,
+}
+
+/// The name, version and description an `agent.leviath` declares, with the
 /// defaults the catalogue shows when the file is missing, unreadable or not
-/// TOML: `0.0.0` and an empty description. Every listing reads the manifest
-/// through here, so they cannot disagree about what a broken one means.
-fn manifest_meta(manifest_path: &Path) -> (String, String) {
+/// TOML: no name, `0.0.0` and an empty description. Every listing reads the
+/// manifest through here, so they cannot disagree about what a broken one
+/// means.
+fn manifest_meta(manifest_path: &Path) -> ManifestMeta {
     let content = fs::read_to_string(manifest_path).unwrap_or_default();
     let parsed: toml::Value =
         toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
-    let field = |key: &str, default: &str| -> String {
+    let field = |key: &str| -> Option<&str> {
         parsed
             .get("agent")
             .and_then(|a| a.get(key))
             .and_then(|v| v.as_str())
-            .unwrap_or(default)
-            .to_string()
     };
-    (field("version", "0.0.0"), field("description", ""))
+    ManifestMeta {
+        name: field("name")
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+        version: field("version").unwrap_or("0.0.0").to_string(),
+        description: field("description").unwrap_or("").to_string(),
+    }
 }
+
+/// Distinguishes the staging directories of concurrent installs in one
+/// process; the pid alone separates processes.
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
@@ -134,6 +151,13 @@ impl AgentInstaller {
     }
 
     /// Install an agent from a `.leviath-bundle` file.
+    ///
+    /// The agent is installed under the name its `agent.leviath` declares,
+    /// which is the name `lev run`, `lev remove` and the API look it up by.
+    /// The file's stem is only the fallback for a bundle whose manifest
+    /// declares no name: `lev pack` writes `<name>-<version>.leviath-bundle`,
+    /// so naming the install after the file put `coder-1.2.0` on disk for a
+    /// blueprint every listing called `coder`.
     pub fn install(&self, package_path: &Path) -> anyhow::Result<InstalledAgent> {
         tracing::info!(path = %package_path.display(), "Installing agent from package");
 
@@ -141,25 +165,29 @@ impl AgentInstaller {
             anyhow::anyhow!("Failed to read package '{}': {}", package_path.display(), e)
         })?;
 
-        let name = package_path
+        let fallback_name = package_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
 
-        self.install_from_bytes(&name, &data)
+        self.install_from_bytes(&fallback_name, &data)
     }
 
     /// Install an agent from in-memory bytes.
     ///
-    /// `name` becomes a directory under the install dir, so it must be a single
-    /// safe path component. `install` derives it from `file_stem()` (which
-    /// already strips directories), but this is `pub` and any future caller
-    /// passing a downloaded or user-supplied name would otherwise get a
-    /// traversal for free - `Path::join` does not normalize, and an absolute
-    /// name replaces the base entirely.
-    pub fn install_from_bytes(&self, name: &str, data: &[u8]) -> anyhow::Result<InstalledAgent> {
-        self.install_from_bytes_with(name, data, classify)
+    /// The install directory is named by the bundle's own `agent.leviath`;
+    /// `fallback_name` is used only when that manifest declares no name.
+    /// Whichever wins becomes a directory under the install dir, so it must be
+    /// a single safe path component: `Path::join` does not normalize, and an
+    /// absolute name replaces the base entirely, so a manifest (or a caller)
+    /// naming `../x` would otherwise get a traversal for free.
+    pub fn install_from_bytes(
+        &self,
+        fallback_name: &str,
+        data: &[u8],
+    ) -> anyhow::Result<InstalledAgent> {
+        self.install_from_bytes_with(fallback_name, data, classify)
     }
 
     /// Extract `data` into `dest` and validate what came out.
@@ -222,22 +250,15 @@ impl AgentInstaller {
     /// exists. A `fn` pointer, so there is one monomorphization.
     fn install_from_bytes_with(
         &self,
-        name: &str,
+        fallback_name: &str,
         data: &[u8],
         classify: fn(&Path) -> Entry,
     ) -> anyhow::Result<InstalledAgent> {
-        tracing::info!(name = %name, "Installing agent from bytes");
-
-        if !leviath_core::is_safe_path_component(name) {
-            anyhow::bail!(
-                "invalid agent name '{name}': names may contain only letters, digits, \
-                 '.', '_' and '-'"
-            );
-        }
-        let agent_dir = self.install_dir.join(name);
+        tracing::info!(fallback_name = %fallback_name, "Installing agent from bytes");
 
         // Unpack into a staging directory and swap it in only once the contents
-        // have passed every check.
+        // have passed every check. The name is not known until then: it is
+        // read from the unpacked manifest.
         //
         // Extracting straight into `agent_dir` leaves a failed bundle's files
         // there - including the symlinks `reject_symlinks_with` refuses, which
@@ -262,9 +283,11 @@ impl AgentInstaller {
         // of `agents`, so it is outside what discovery scans, and there is no
         // "what if there is no parent" branch nothing could ever exercise.
         // `OsString` rather than `format!` on a `Display`, so a non-UTF-8 home
-        // survives the round trip.
+        // survives the round trip. Named by pid and a sequence number rather
+        // than by the agent, since the agent's name is still inside the bundle.
+        let seq = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut staging = self.install_dir.clone().into_os_string();
-        staging.push(format!(".staging-{name}-{}", std::process::id()));
+        staging.push(format!(".staging-{}-{seq}", std::process::id()));
         let staging = PathBuf::from(staging);
         // The agents directory itself may not exist on a first install, and
         // staging happens beside it rather than inside, so nothing else creates
@@ -286,31 +309,42 @@ impl AgentInstaller {
                 e
             )
         })?;
-        // Every early return from here on goes through this, so a refused
-        // bundle leaves nothing behind.
-        let staged = Self::unpack_into(&staging, data, classify);
-        let result = staged.and_then(|()| Self::swap_into_place(&staging, &agent_dir));
-        if let Err(e) = result {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-
-        let (version, description) =
-            manifest_meta(&agent_dir.join(leviath_core::files::MANIFEST_FILENAME));
+        // Every early return from here on goes through the cleanup below, so a
+        // refused bundle leaves nothing behind.
+        let installed = Self::unpack_into(&staging, data, classify).and_then(|()| {
+            let meta = manifest_meta(&staging.join(leviath_core::files::MANIFEST_FILENAME));
+            let name = meta.name.unwrap_or_else(|| fallback_name.to_string());
+            if !leviath_core::is_safe_path_component(&name) {
+                anyhow::bail!(
+                    "invalid agent name '{name}': names may contain only letters, digits, \
+                     '.', '_' and '-'"
+                );
+            }
+            let agent_dir = self.install_dir.join(&name);
+            Self::swap_into_place(&staging, &agent_dir)?;
+            Ok(InstalledAgent {
+                name,
+                version: meta.version,
+                path: agent_dir,
+                description: meta.description,
+            })
+        });
+        let installed = match installed {
+            Ok(installed) => installed,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
 
         tracing::info!(
-            name = %name,
-            version = %version,
-            path = %agent_dir.display(),
+            name = %installed.name,
+            version = %installed.version,
+            path = %installed.path.display(),
             "Agent installed successfully"
         );
 
-        Ok(InstalledAgent {
-            name: name.to_string(),
-            version,
-            path: agent_dir,
-            description,
-        })
+        Ok(installed)
     }
 
     /// Uninstall an agent by removing its directory.
@@ -351,13 +385,13 @@ impl AgentInstaller {
                         .unwrap_or("unknown")
                         .to_string();
 
-                    let (version, description) = manifest_meta(&manifest_path);
+                    let meta = manifest_meta(&manifest_path);
 
                     agents.push(InstalledAgent {
                         name,
-                        version,
+                        version: meta.version,
                         path,
-                        description,
+                        description: meta.description,
                     });
                 }
             }
@@ -388,13 +422,13 @@ impl AgentInstaller {
             return None;
         }
 
-        let (version, description) = manifest_meta(&manifest_path);
+        let meta = manifest_meta(&manifest_path);
 
         Some(InstalledAgent {
             name: name.to_string(),
-            version,
+            version: meta.version,
             path: agent_dir,
-            description,
+            description: meta.description,
         })
     }
 }
@@ -414,15 +448,19 @@ mod tests {
 
     /// Create a minimal tar.gz bundle with an agent.leviath manifest.
     fn make_bundle(name: &str, version: &str, description: &str) -> Vec<u8> {
-        let manifest = format!(
+        make_bundle_with_manifest(&format!(
             r#"[agent]
 name = "{}"
 version = "{}"
 description = "{}"
 "#,
             name, version, description
-        );
+        ))
+    }
 
+    /// A bundle carrying exactly this `agent.leviath`, for manifests that
+    /// declare no name, or a name that is not a directory name.
+    fn make_bundle_with_manifest(manifest: &str) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         {
             let mut archive = tar::Builder::new(&mut encoder);
@@ -439,14 +477,15 @@ description = "{}"
         encoder.finish().unwrap()
     }
 
-    /// `install_from_bytes` is `pub` and joins `name` onto the install dir.
-    /// `Path::join` does not normalize `..` and an absolute name replaces the
-    /// base entirely, so an unvalidated name reaches anywhere on the filesystem.
+    /// `install_from_bytes` is `pub` and joins the fallback name onto the
+    /// install dir when the manifest declares none. `Path::join` does not
+    /// normalize `..` and an absolute name replaces the base entirely, so an
+    /// unvalidated name reaches anywhere on the filesystem.
     #[test]
     fn install_from_bytes_rejects_traversing_names() {
         let dir = tempfile::tempdir().unwrap();
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-        let bundle = make_bundle("x", "1.0.0", "d");
+        let bundle = make_bundle_with_manifest("[agent]\nversion = \"1.0.0\"\n");
         for name in ["../escape", "../../tmp/escape", "/tmp/escape", "a/b", ".."] {
             let err = installer
                 .install_from_bytes(name, &bundle)
@@ -457,6 +496,78 @@ description = "{}"
             !std::path::Path::new("/tmp/escape").exists(),
             "nothing may be created outside the install dir"
         );
+    }
+
+    /// The manifest's own name gets the same check, since it is the one that
+    /// wins: a bundle declaring `name = "../escape"` must not install, must not
+    /// touch what the name points at, and must leave no staging tree behind.
+    #[test]
+    fn install_from_bytes_rejects_a_traversing_manifest_name() {
+        let root = tempfile::tempdir().unwrap();
+        let agents = root.path().join("agents");
+        let victim = root.path().join("escape");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("keepme.txt"), "precious").unwrap();
+        let installer = AgentInstaller::with_install_dir(agents.clone());
+
+        let bundle = make_bundle_with_manifest("[agent]\nname = \"../escape\"\n");
+        let err = installer
+            .install_from_bytes("harmless", &bundle)
+            .expect_err("a traversing manifest name must be refused");
+        assert!(err.to_string().contains("invalid agent name"), "{err}");
+
+        assert_eq!(
+            fs::read_to_string(victim.join("keepme.txt")).unwrap(),
+            "precious",
+            "the escape target must be left alone"
+        );
+        assert!(
+            !agents.join("harmless").exists(),
+            "the fallback must not be used"
+        );
+        let leftovers = fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".staging-"))
+            .count();
+        assert_eq!(leftovers, 0, "a refused install stranded a staging tree");
+    }
+
+    /// The install is named by the manifest, not by the caller: `lev pack`
+    /// writes `<name>-<version>.leviath-bundle`, and every listing, `lev run`
+    /// and `lev remove` key on the manifest's name, so an install directory
+    /// called `coder-1.2.0` was a blueprint nothing could remove by name.
+    #[test]
+    fn install_from_bytes_names_the_agent_after_its_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let installed = installer
+            .install_from_bytes("coder-1.2.0", &make_bundle("coder", "1.2.0", "d"))
+            .unwrap();
+
+        assert_eq!(installed.name, "coder");
+        assert_eq!(installed.path, dir.path().join("coder"));
+        assert!(installed.path.join("agent.leviath").exists());
+        assert!(!dir.path().join("coder-1.2.0").exists());
+        // And the name round-trips through the lookups that join it.
+        assert_eq!(installer.get_installed("coder").unwrap().version, "1.2.0");
+        installer.uninstall("coder").unwrap();
+    }
+
+    /// An empty `name = ""` is no name: the fallback applies, as it does for a
+    /// manifest with no `name` key at all.
+    #[test]
+    fn install_from_bytes_falls_back_when_the_manifest_name_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let bundle = make_bundle_with_manifest("[agent]\nname = \"\"\nversion = \"2.0.0\"\n");
+        let installed = installer.install_from_bytes("from-file", &bundle).unwrap();
+
+        assert_eq!(installed.name, "from-file");
+        assert_eq!(installed.version, "2.0.0");
+        assert!(dir.path().join("from-file").exists());
     }
 
     /// A gzip bomb: a small archive that expands without bound. `Read::take`
@@ -844,22 +955,42 @@ description = "{}"
 
     // ─── install() (file-based) ────────────────────────────────────────
 
+    /// A file named the way `lev pack` names it installs under the manifest's
+    /// name, not the file's.
     #[test]
-    fn install_from_file_path_derives_name_from_filename() {
+    fn install_from_file_path_names_the_agent_after_its_manifest() {
         with_tracing(|| {
             let dir = tempfile::tempdir().unwrap();
             let installer = AgentInstaller::with_install_dir(dir.path().join("agents"));
 
             let bundle = make_bundle("file-agent", "1.2.3", "Installed from a file");
-            let package_path = dir.path().join("file-agent.leviath-bundle");
+            let package_path = dir.path().join("file-agent-1.2.3.leviath-bundle");
             fs::write(&package_path, &bundle).unwrap();
 
             let result = installer.install(&package_path).unwrap();
             assert_eq!(result.name, "file-agent");
             assert_eq!(result.version, "1.2.3");
             assert_eq!(result.description, "Installed from a file");
+            assert_eq!(result.path, dir.path().join("agents").join("file-agent"));
             assert!(result.path.exists());
         });
+    }
+
+    /// The file's stem is the fallback for a bundle whose manifest declares no
+    /// name, so such a bundle still installs somewhere predictable.
+    #[test]
+    fn install_from_file_path_falls_back_to_the_file_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().join("agents"));
+
+        let bundle = make_bundle_with_manifest("[agent]\nversion = \"0.1.0\"\n");
+        let package_path = dir.path().join("nameless.leviath-bundle");
+        fs::write(&package_path, &bundle).unwrap();
+
+        let result = installer.install(&package_path).unwrap();
+        assert_eq!(result.name, "nameless");
+        assert_eq!(result.version, "0.1.0");
+        assert!(dir.path().join("agents").join("nameless").exists());
     }
 
     #[test]
