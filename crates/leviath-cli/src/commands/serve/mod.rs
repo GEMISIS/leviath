@@ -4,6 +4,7 @@
 //! HTTP. No web UI - the frontend lives in a separate repo.
 
 mod agents;
+mod artifact_types;
 mod auth;
 mod blueprints;
 mod config;

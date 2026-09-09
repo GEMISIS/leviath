@@ -252,7 +252,7 @@ precedence over the nudge, and the run records both flags, `max_iterations_hit` 
 
 | Surface | Where the answer appears |
 |---|---|
-| `lev result <run-id>` | The whole answer, and the files it named. `--raw` for pipelines |
+| `lev result <run-id>` | The whole answer, and the files it named, each with its type, size and hash. `--raw` for pipelines |
 | `lev ps --json` | `has_final_output` only. Fetch the answer itself with `lev result` |
 | `GET /api/agents/{id}/result` | `final_output`, beside the existing `output` log tail |
 | Completion webhook | `final_output`. The `result` field is the run's error, as it always was |
@@ -347,18 +347,45 @@ A file larger than one response is read a window at a time. Pass `offset`, then 
 `next_offset` each response carries until it comes back null. Concatenating the windows gives you the
 file back exactly, including through multi-byte characters.
 
-Name your files in `artifacts` when you submit:
+Name your files in `artifacts` when you submit, as a path or as `{ name, path, type }`:
 
 ```
 submit_output(
   content: "2.1M registrations across 14 countries. Norway leads per-capita ...",
-  artifacts: ["data/registrations.csv"]
+  artifacts: ["data/registrations.csv", { name: "chart", path: "out/trend.png" }]
 )
 ```
 
-Paths must land inside the working directory, the same rule that governs serving one. A path that
-escapes refuses the whole submission rather than being quietly dropped, so a named file is always a
-file you can fetch.
+Every path must land inside the working directory, the same rule that governs serving one, and
+name a file that exists when you submit. A path that escapes, or a file that is not there, refuses
+the whole submission rather than being quietly dropped, so a named file is always a file you can
+fetch. Each accepted file is typed by the [media registry](/docs/media) (a `type` you give wins),
+hashed, and stored as a part of the run when it fits `[media] max_part_bytes`, so a later stage
+sees it in the `final_output` region the way it sees any other part. The answer records
+`name`, `path`, `media_type`, `size` and `sha256` per file.
+
+A stage can say up front which files it hands back:
+
+```toml
+[[stages.assemble.output.artifacts]]
+name = "final"
+type = "video/mp4"
+required = true
+description = "the finished cut"
+
+[[stages.assemble.output.artifacts]]
+name = "shots"
+type = "text/*"
+```
+
+The model is told to submit each by name. A `required` one that is missing is refused back to the
+model like a schema failure, and a submitted file whose type does not match its declaration (a
+`video/*` that turns out to be a PNG) is refused with both types named. Declared artifacts cascade
+like the rest of the shape: the nearest non-empty list wins whole, and a caller who reshapes the
+output with `--output-format` retires them with the schema and validator.
+
+Files are what a stage hands back; what it takes is its regions' `accepts`, and
+`[stages.<name>.input]` can narrow or widen that. See [Media](/docs/media).
 
 This is why there is no pagination. What a caller reads is bounded by what a model can say. What
 gets big is a file, and files are fetched by path.
@@ -388,6 +415,7 @@ unreachable.
 | `allow-complete-skips-output` | An earlier stage may end the run instead of routing onward |
 | `output-shape-not-required` | A shape is declared but nothing must produce it |
 | `output-stage-can-modify` | An output stage can also write files |
+| `media-unseen` | A stage's regions take a media type none of its listed models can see, so those parts reach the model as stand-ins |
 
 The second one is worth knowing about. `allow_complete` offers the model a "DONE" it can choose
 instead of a transition. Leviath appends that option even to a stage's own `transition_prompt`, so a

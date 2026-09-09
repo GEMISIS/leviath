@@ -164,10 +164,23 @@ pub(super) fn parse_output_spec(
             }
         },
     };
+    let mut artifacts = Vec::new();
+    if let Some(listed) = table.get("artifacts") {
+        let items = listed.as_array().ok_or_else(|| {
+            Error::Other(format!(
+                "{where_}: artifacts must be a list of tables, e.g. \
+                 [[stages.x.output.artifacts]] name = \"final\", type = \"video/mp4\""
+            ))
+        })?;
+        for item in items {
+            artifacts.push(parse_artifact_spec(where_, item)?);
+        }
+    }
     Ok(crate::output::OutputSpec {
         format: string_field("format"),
         instructions: string_field("instructions"),
         example: string_field("example"),
+        artifacts,
         // A schema that will not convert is dropped rather than fatal: the
         // validator itself already treats an uncompilable schema as "skip the
         // check" rather than "refuse every submission", and disagreeing here
@@ -180,11 +193,56 @@ pub(super) fn parse_output_spec(
     })
 }
 
+/// One `[[...output.artifacts]]` table: a name, a type or pattern, and
+/// whether the submission may leave it out.
+fn parse_artifact_spec(where_: &str, item: &toml::Value) -> Result<crate::output::ArtifactSpec> {
+    let table = item.as_table().ok_or_else(|| {
+        Error::Other(format!(
+            "{where_}: each artifact must be a table with name and type, got: {item}"
+        ))
+    })?;
+    let text = |key: &str| {
+        table
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let name = text("name")
+        .ok_or_else(|| Error::Other(format!("{where_}: an artifact needs a name")))?
+        .to_string();
+    let media_type = text("type")
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "{where_}: artifact '{name}' needs a type, such as \"video/mp4\" or \"image/*\""
+            ))
+        })?
+        .to_ascii_lowercase();
+    let well_formed = media_type
+        .split_once('/')
+        .is_some_and(|(kind, sub)| !kind.is_empty() && !sub.is_empty() && !sub.contains('/'));
+    if !well_formed {
+        return Err(Error::Other(format!(
+            "{where_}: artifact '{name}' has type '{media_type}', which is not type/subtype"
+        )));
+    }
+    Ok(crate::output::ArtifactSpec {
+        name,
+        media_type,
+        required: table
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        description: text("description").map(str::to_string),
+    })
+}
+
 /// Every key [`parse_output_spec`] reads off an output table, for the schema
 /// guard in `tests.rs`. Like `REGION_KEYS`, a list and not a check: the parser
 /// ignores a key it does not know.
 #[cfg(test)]
 pub(super) const OUTPUT_KEYS: &[&str] = &[
+    "artifacts",
     "example",
     "format",
     "instructions",

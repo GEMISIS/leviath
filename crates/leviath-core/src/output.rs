@@ -122,6 +122,12 @@ pub struct OutputSpec {
     /// setting along with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_validator_error: Option<OnValidatorError>,
+
+    /// The files the stage hands back beside its answer, by name and type.
+    /// A submission is checked against them: a `required` one must be
+    /// present, and one that is present must be of the declared type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactSpec>,
 }
 
 impl OutputSpec {
@@ -134,7 +140,87 @@ impl OutputSpec {
             && self.schema.is_none()
             && self.validator.is_none()
             && self.on_validator_error.is_none()
+            && self.artifacts.is_empty()
     }
+}
+
+/// A file a stage declares it hands back beside its answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSpec {
+    /// What the submission calls it: `final`, `scene`, `track`.
+    pub name: String,
+    /// The media type it must be, or a pattern it must match (`video/*`).
+    #[serde(rename = "type")]
+    pub media_type: String,
+    /// Whether a submission without it is refused.
+    #[serde(default)]
+    pub required: bool,
+    /// What it is for, shown to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A file a run produced, as recorded on its answer.
+///
+/// Every field but `path` is what the run could tell from the bytes: the
+/// registry's type (or the declared one), the size, and the hash the run's
+/// blob store holds the file under. An answer recorded before artifacts were
+/// typed carried a bare path, and reads back as one with the rest unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// The name the stage declared, or the file name when it declared none.
+    pub name: String,
+    /// The file, relative to the working directory.
+    pub path: String,
+    /// The file's type.
+    pub media_type: crate::media::MediaType,
+    /// Size in bytes.
+    #[serde(default)]
+    pub size: u64,
+    /// The sha256 the run's blob store holds the bytes under; empty when the
+    /// file was too large to store, or the answer predates typed artifacts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
+}
+
+impl Artifact {
+    /// An artifact known only by its path: the shape every answer recorded
+    /// before artifacts were typed carried.
+    pub fn from_path(path: &str) -> Self {
+        let name = path
+            .rsplit(['/', '\\'])
+            .find(|s| !s.is_empty())
+            .unwrap_or(path)
+            .to_string();
+        Self {
+            name,
+            path: path.to_string(),
+            media_type: crate::media::octet_stream(),
+            size: 0,
+            sha256: String::new(),
+        }
+    }
+}
+
+/// One artifact on the wire: the typed record, or the bare path older
+/// answers wrote.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ArtifactWire {
+    Full(Artifact),
+    Path(String),
+}
+
+/// Read an artifacts list that may hold bare paths.
+fn artifacts_from_wire<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Artifact>, D::Error> {
+    let listed: Vec<ArtifactWire> = Vec::deserialize(d)?;
+    Ok(listed
+        .into_iter()
+        .map(|a| match a {
+            ArtifactWire::Full(a) => a,
+            ArtifactWire::Path(p) => Artifact::from_path(&p),
+        })
+        .collect())
 }
 
 /// What an agent actually produced, content included.
@@ -168,15 +254,19 @@ pub struct FinalOutput {
     #[serde(default)]
     pub truncated: bool,
 
-    /// Files the run produced, as workdir-relative paths.
+    /// Files the run produced, typed and hashed.
     ///
     /// An answer is one model response; anything larger is a file. A run that
     /// gathers two million rows writes them incrementally and names the file
     /// here, so a consumer can fetch it rather than parse the path out of prose.
     /// Validated to resolve inside the run's working directory, the same rule
     /// the files endpoint enforces when serving one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "artifacts_from_wire"
+    )]
+    pub artifacts: Vec<Artifact>,
 }
 
 impl FinalOutput {
@@ -200,7 +290,7 @@ impl FinalOutput {
     }
 
     /// The same submission with `artifacts` attached.
-    pub fn with_artifacts(mut self, artifacts: Vec<String>) -> Self {
+    pub fn with_artifacts(mut self, artifacts: Vec<Artifact>) -> Self {
         self.artifacts = artifacts;
         self
     }
@@ -241,9 +331,13 @@ pub struct FinalOutputDescriptor {
     /// Whether [`MAX_FINAL_OUTPUT_BYTES`] cut the answer short.
     #[serde(default)]
     pub truncated: bool,
-    /// Files the run produced, as workdir-relative paths.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<String>,
+    /// Files the run produced, typed and hashed.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "artifacts_from_wire"
+    )]
+    pub artifacts: Vec<Artifact>,
 }
 
 /// The file, inside a run's directory, holding the answer's bytes.
@@ -311,6 +405,18 @@ pub fn resolve_output_spec(
         false => field(agent, stage, request, |s| s.on_validator_error),
     };
 
+    // Declared artifacts describe the declared shape, so they go with the
+    // schema and the validator when a caller reshapes. Otherwise the nearest
+    // non-empty list wins whole: a stage that names its own files replaces
+    // the agent's list rather than adding to it.
+    let artifacts = match reshaped {
+        true => request.map(|r| r.artifacts.clone()).unwrap_or_default(),
+        false => field(agent, stage, request, |s| {
+            (!s.artifacts.is_empty()).then(|| s.artifacts.clone())
+        })
+        .unwrap_or_default(),
+    };
+
     Some(OutputSpec {
         format: field(agent, stage, request, |s| s.format.clone()),
         instructions: field(agent, stage, request, |s| s.instructions.clone()),
@@ -318,6 +424,7 @@ pub fn resolve_output_spec(
         schema: shape_field(|s| s.schema.clone()),
         validator,
         on_validator_error,
+        artifacts,
     })
 }
 
@@ -499,6 +606,29 @@ pub fn describe_spec(spec: &OutputSpec) -> String {
             "Here is an example of the expected shape:\n{example}"
         ));
     }
+    if !spec.artifacts.is_empty() {
+        let listed: Vec<String> = spec
+            .artifacts
+            .iter()
+            .map(|a| {
+                let mut line = format!("- {} ({}", a.name, a.media_type);
+                if a.required {
+                    line.push_str(", required");
+                }
+                line.push(')');
+                if let Some(d) = &a.description {
+                    line.push_str(": ");
+                    line.push_str(d);
+                }
+                line
+            })
+            .collect();
+        parts.push(format!(
+            "Hand back these files in `artifacts`, each as {{ name, path }} with the name \
+             given here and the path of the file you wrote:\n{}",
+            listed.join("\n")
+        ));
+    }
     if !parts.is_empty() {
         parts.push(
             "This governs how the answer is presented. Where anything else you were told says \
@@ -536,12 +666,34 @@ mod tests {
             42,
         )
         .with_artifacts(vec![
-            "data/dataset.csv".to_string(),
-            "report.pdf".to_string(),
+            Artifact::from_path("data/dataset.csv"),
+            Artifact::from_path("report.pdf"),
         ]);
 
-        assert_eq!(output.artifacts, ["data/dataset.csv", "report.pdf"]);
+        assert_eq!(output.artifacts[0].path, "data/dataset.csv");
+        assert_eq!(output.artifacts[0].name, "dataset.csv");
+        assert_eq!(output.artifacts[1].name, "report.pdf");
         assert_eq!(output.descriptor().artifacts, output.artifacts);
+        // An answer recorded before artifacts were typed carried bare paths.
+        let old: FinalOutputDescriptor = serde_json::from_str(
+            "{\"stage\":\"s\",\"submitted_at\":1,\"artifacts\":[\"a/b.csv\",{\"name\":\"final\",\"path\":\"out.mp4\",\"media_type\":\"video/mp4\",\"size\":9}]}",
+        )
+        .unwrap();
+        assert_eq!(old.artifacts[0].name, "b.csv");
+        assert_eq!(
+            old.artifacts[0].media_type.as_str(),
+            "application/octet-stream"
+        );
+        assert_eq!(old.artifacts[1].name, "final");
+        assert_eq!(old.artifacts[1].size, 9);
+        assert_eq!(Artifact::from_path("").name, "");
+        assert!(
+            serde_json::from_str::<FinalOutputDescriptor>(
+                "{\"stage\":\"s\",\"submitted_at\":1,\"artifacts\":5}"
+            )
+            .is_err()
+        );
+        assert_eq!(Artifact::from_path("dir\\x.png").name, "x.png");
         // The bytes stay out of the descriptor: it goes in `meta.json`, which is
         // read for every run in a listing.
         assert_eq!(output.descriptor().bytes, "the summary".len());
@@ -554,6 +706,46 @@ mod tests {
                 .artifacts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn declared_artifacts_cascade_whole_and_retire_on_a_reshape() {
+        let art = |name: &str| ArtifactSpec {
+            name: name.to_string(),
+            media_type: "video/*".to_string(),
+            required: true,
+            description: None,
+        };
+        let agent = OutputSpec {
+            format: Some("markdown".to_string()),
+            artifacts: vec![art("agent-file")],
+            ..OutputSpec::default()
+        };
+        let stage = OutputSpec {
+            artifacts: vec![art("stage-file")],
+            ..OutputSpec::default()
+        };
+        // The nearest non-empty list, whole.
+        let resolved = resolve_output_spec(Some(&agent), Some(&stage), None).unwrap();
+        assert_eq!(resolved.artifacts[0].name, "stage-file");
+        let resolved = resolve_output_spec(Some(&agent), None, None).unwrap();
+        assert_eq!(resolved.artifacts[0].name, "agent-file");
+        // A reshaping request retires them with the schema and validator.
+        let request = OutputSpec {
+            format: Some("json".to_string()),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), Some(&stage), Some(&request)).unwrap();
+        assert!(resolved.artifacts.is_empty());
+        // Unless it brings its own.
+        let request = OutputSpec {
+            format: Some("json".to_string()),
+            artifacts: vec![art("request-file")],
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), Some(&stage), Some(&request)).unwrap();
+        assert_eq!(resolved.artifacts[0].name, "request-file");
+        assert!(!agent.is_empty());
     }
 
     #[test]
@@ -598,6 +790,7 @@ mod tests {
             schema: None,
             validator: None,
             on_validator_error: None,
+            artifacts: Vec::new(),
         };
         let stage = OutputSpec {
             instructions: Some("stage guidance".to_string()),
@@ -1004,11 +1197,33 @@ mod tests {
             schema: Some(json!({"type": "object"})),
             validator: None,
             on_validator_error: None,
+            artifacts: Vec::new(),
         });
         assert!(described.contains("Return it in this format: a2ui."));
         assert!(described.contains("One card per finding."));
         assert!(described.contains("valid against this schema"));
         assert!(described.contains("{\"root\": {}}"));
+        let with_files = describe_spec(&OutputSpec {
+            artifacts: vec![
+                ArtifactSpec {
+                    name: "final".to_string(),
+                    media_type: "video/mp4".to_string(),
+                    required: true,
+                    description: Some("the cut".to_string()),
+                },
+                ArtifactSpec {
+                    name: "notes".to_string(),
+                    media_type: "text/*".to_string(),
+                    required: false,
+                    description: None,
+                },
+            ],
+            ..OutputSpec::default()
+        });
+        assert!(
+            with_files.contains("- final (video/mp4, required): the cut\n- notes (text/*)"),
+            "{with_files}"
+        );
     }
 
     /// Without this the spec and the stage's own system prompt are two peer

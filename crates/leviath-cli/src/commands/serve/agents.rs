@@ -42,6 +42,7 @@ fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSp
         schema: body.output_schema.clone(),
         validator: None,
         on_validator_error: None,
+        artifacts: Vec::new(),
     })
 }
 

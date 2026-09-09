@@ -548,8 +548,21 @@ impl BuiltinTools {
                         },
                         "artifacts": {
                             "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Files you produced that the caller should read, as paths relative to the working directory. Use this for anything too large to put in the answer: a dataset, a long report, a generated file. Name the file here rather than only mentioning it in prose."
+                            "items": {
+                                "oneOf": [
+                                    { "type": "string" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": { "type": "string", "description": "The name the stage declared for this file, or any name you choose" },
+                                            "path": { "type": "string", "description": "The file, relative to the working directory" },
+                                            "type": { "type": "string", "description": "Its media type, when the file's bytes and name do not say" }
+                                        },
+                                        "required": ["path"]
+                                    }
+                                ]
+                            },
+                            "description": "Files you produced that the caller should read: a path relative to the working directory, or { name, path, type }. Use this for anything too large to put in the answer: a dataset, a long report, a generated file, an image. Each file must exist when you submit. Name the file here rather than only mentioning it in prose."
                         }
                     },
                     "required": ["content"]

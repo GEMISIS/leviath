@@ -221,6 +221,38 @@ impl Blueprint {
 
     /// The caller input keys this blueprint does read, in declaration order.
     ///
+    /// The media type patterns `stage` takes as parts: its own
+    /// `[input] accepts` when it declares one, else the union of `accepts`
+    /// across the regions it sees. Text is always taken and never listed, so
+    /// an empty answer means "text only, unless a region takes anything".
+    /// A visible region with no `accepts` takes anything, and is reported as
+    /// `*/*`.
+    pub fn stage_inputs(&self, stage: &Stage) -> Vec<String> {
+        if !stage.input_accepts.is_empty() {
+            return stage.input_accepts.clone();
+        }
+        let layout = stage
+            .context_layout
+            .as_ref()
+            .unwrap_or(&self.context_layout);
+        let mut out: Vec<String> = Vec::new();
+        for region in &layout.regions {
+            if stage.context_hide.contains(&region.name) {
+                continue;
+            }
+            let patterns: Vec<String> = match region.accepts.is_empty() {
+                true => vec!["*/*".to_string()],
+                false => region.accepts.clone(),
+            };
+            for p in patterns {
+                if !p.starts_with("text/") && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
     /// Used to turn "that agent takes no task" into a message naming what it
     /// takes instead, which is the difference between a dead end and a fix.
     pub fn caller_inputs(&self) -> Vec<&str> {

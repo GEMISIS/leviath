@@ -3154,9 +3154,40 @@
           "artifacts": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/Artifact"
             },
-            "description": "Files the run produced, as workdir-relative paths. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/agents/{id}/files?path=."
+            "description": "Files the run produced, typed and hashed. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/agents/{id}/files?path=."
+          }
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "media_type",
+          "size"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name the stage declared for it, or the file name."
+          },
+          "path": {
+            "type": "string",
+            "description": "The file, relative to the run's working directory."
+          },
+          "media_type": {
+            "type": "string",
+            "description": "Its media type, from the registry or as declared."
+          },
+          "size": {
+            "type": "integer",
+            "description": "Size in bytes."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The hash the run's blob store holds the bytes under. Absent when the file was too large to store."
           }
         }
       },

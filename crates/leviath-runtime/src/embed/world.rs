@@ -105,6 +105,7 @@ impl SpawnSpec {
             schema: None,
             validator: None,
             on_validator_error: None,
+            artifacts: Vec::new(),
         });
         self
     }

@@ -222,6 +222,7 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let si = stage(
         "m",
@@ -291,6 +292,7 @@ fn build_request_passes_through_extra_params() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let si = stage("m", vec![], None);
     let req = build_request(
@@ -325,6 +327,7 @@ fn build_request_prepends_batch_hint_when_enabled() {
         batch_tool_hint: true,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let si = stage("m", vec![], None);
     let req = build_request(
@@ -362,6 +365,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let req = build_request(
         &window_with_sys(),
@@ -400,6 +404,7 @@ fn hint_config(batch_tool_hint: bool, shell_hint: bool) -> InferenceConfig {
         batch_tool_hint,
         shell_hint,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     }
 }
 
@@ -5377,6 +5382,48 @@ async fn dispatch_records_a_submitted_output_inline() {
     );
 }
 
+/// A world with a blob store hands the submission a sink, so the artifact
+/// lands in the store as well as on the answer.
+#[tokio::test]
+async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
+    use crate::blob_store::{BlobStoreHandle, MediaRegistryHandle};
+    use leviath_core::media::{BlobStore, MemoryBlobStore};
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("dataset.csv"), "a,b\n1,2\n").expect("write");
+    let store = Arc::new(MemoryBlobStore::new());
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(BlobStoreHandle(store.clone()));
+    world.insert_resource(MediaRegistryHandle::default());
+    let call = crate::components::ToolCall {
+        tool_id: "o1".to_string(),
+        name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
+        arguments: serde_json::json!({"content": "done", "artifacts": ["dataset.csv"]}),
+        thought_signature: None,
+    };
+    let mut metadata = run_metadata();
+    metadata.workdir = dir.path().to_string_lossy().to_string();
+    let e = world
+        .spawn((
+            agent_state(),
+            metadata,
+            infer_with(vec![call]),
+            output_window(),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    let recorded = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("recorded");
+    assert_eq!(recorded.0.artifacts[0].media_type.as_str(), "text/csv");
+    assert!(store.has(&agent_state().agent_id, &recorded.0.artifacts[0].sha256));
+}
+
 /// Artifacts are resolved against the run's working directory, so a submission
 /// naming one only means something when the agent has a workdir to resolve it
 /// in. A path that escapes it is refused, because the answer is handed to a
@@ -7218,6 +7265,7 @@ fn setup() -> StageSetup {
             batch_tool_hint: false,
             shell_hint: false,
             request_timeout_secs: None,
+            as_text: Vec::new(),
         },
         routing: None,
         accepts_messages: true,
@@ -7823,6 +7871,7 @@ fn enter_stage_injects_system_prompt_and_config() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     s.accepts_messages = false;
     let mut world = World::new();
@@ -13704,6 +13753,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
         schema: None,
         validator: None,
         on_validator_error: None,
+        artifacts: Vec::new(),
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;
@@ -17382,6 +17432,7 @@ fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let si = stage("m", vec![], None);
     let raised = build_request(
@@ -17610,6 +17661,7 @@ fn build_request_resolves_relative_output_caps() {
         batch_tool_hint: false,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let si = stage("m", vec![], None);
     let w = ctx(&[("conversation", 10_000), ("claims", 3_000)]);
@@ -17703,6 +17755,7 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
         batch_tool_hint: true,
         shell_hint: false,
         request_timeout_secs: None,
+        as_text: Vec::new(),
     };
     let w = ctx(&[("conversation", 10_000), ("notes", 2_000)]);
     let mut si = stage("m", vec![tool("read_file"), tool("write_file")], None);

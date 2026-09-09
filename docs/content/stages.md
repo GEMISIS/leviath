@@ -119,6 +119,9 @@ somewhere else.
 | `allow_as_worker` | `false` | Lets this stage be the target of a [fan-out](/docs/sub-agents) |
 | `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
 | `allow_blocking_tools` | `false` | Marks an autonomous stage as deliberately offering the tools that wait on a person |
+| `input.accepts` | the visible regions' `accepts` | The media types the stage takes as [parts](/docs/media), used to prefer a model that can see them and by `lev validate` |
+| `input.as_text` | `[]` | Media types whose parts reach this stage's model as text whatever the model takes |
+| `output.artifacts` | `[]` | The files the stage hands back beside its answer, by name and type. See [Final outputs](/docs/outputs#large-results) |
 
 Three of those need a sentence more.
 

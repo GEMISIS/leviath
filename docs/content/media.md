@@ -115,6 +115,13 @@ inputs and nothing new to declare. A write that does not match `accepts` is refu
 what the region does take. `max_stored` evicts the oldest entry carrying a stored part, or
 refuses the write under `admission = "reject"`.
 
+When a stage lists several models, the one that takes what the stage's regions accept goes
+first, so a stage reading a storyboard lands on the model that can see it. `lev validate` says
+what each stage takes and warns (`media-unseen`) when none of its models can see a type its
+regions take. Two keys under `[stages.<name>.input]` adjust this: `accepts` states the types
+outright, and `as_text` names types whose parts reach the model as text whatever it takes,
+which is how a `model/obj` scene gets to a text model even when the registry calls it binary.
+
 ## Stages declare typed outputs
 
 ```toml
