@@ -36,6 +36,10 @@ use tokio::sync::Mutex;
 use crate::config::ToolPolicy;
 use crate::tools::resolve_policy;
 
+#[cfg(test)]
+use super::tool_content::{Attached, with_attached};
+use super::tool_content::{answer_content, mcp_content};
+
 /// Everything one agent needs to execute a tool call: the executors, its policy
 /// layers, and its interaction backend. All fields are cheap `Arc`s so a clone is
 /// moved into each `exec_for` closure. The stage-scoped fields
@@ -178,6 +182,11 @@ pub(crate) struct AgentToolState {
     pub stage_required: Arc<StdMutex<HashSet<String>>>,
     /// Every stage's `required_tools`, indexed by stage index.
     pub stage_required_by_index: Arc<Vec<HashSet<String>>>,
+    /// What each tool may be handed at the current stage (`tool_accepts`),
+    /// by canonical tool name; a tool absent here has no limit.
+    pub stage_tool_accepts: Arc<StdMutex<HashMap<String, Vec<String>>>>,
+    /// Every stage's `tool_accepts`, indexed by stage index.
+    pub stage_tool_accepts_by_index: Arc<Vec<HashMap<String, Vec<String>>>>,
     /// Blueprint-level `[tool_permissions]`.
     pub agent_perms: Arc<HashMap<String, String>>,
     /// Config-level tool permissions, re-resolved when the run resumes.
@@ -490,7 +499,12 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
     // that manifest's own command seeds and MCP servers.
     if crate::daemon::subagent::is_subagent_tool(&tc.name) {
         return match &state.subagent {
-            Some(handle) => crate::daemon::subagent::handle(handle, tc).await.into(),
+            Some(handle) => {
+                let limit = tool_limit(state, &tc.name);
+                crate::daemon::subagent::handle_within(handle, tc, limit.as_deref())
+                    .await
+                    .into()
+            }
             None => "[error] sub-agent tools are unavailable for this agent".into(),
         };
     }
@@ -520,111 +534,6 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         };
         mcp_content(&tc.name, result, state.builtins.media())
     }
-}
-
-/// An MCP result as the region will hold it: the server's text, then every
-/// binary block it returned as a stored part. A failed call is text alone,
-/// prefixed as the seed reader expects; a binary block that cannot be stored
-/// (no store, over the ceiling) is described in the text instead of dropped.
-fn mcp_content(
-    tool: &str,
-    result: anyhow::Result<leviath_mcp::execution::ExecutionResult>,
-    media: Option<&leviath_tools::ToolMedia>,
-) -> EntryContent {
-    let blobs = match &result {
-        Ok(r) if r.success => r.blobs.clone(),
-        _ => Vec::new(),
-    };
-    let text = super::seed_tool::mcp_text(result);
-    let attached = blobs
-        .into_iter()
-        .map(|blob| Attached {
-            declared: Some(blob.media_type.to_string()),
-            name: blob.name,
-            data: blob.bytes,
-            deliver: None,
-        })
-        .collect();
-    with_attached(tool, text, attached, media)
-}
-
-/// A person's answer as the region will hold it: the text, then every file
-/// attached to it as a stored part, typed by the registry (the sender's
-/// declaration first) and named as the sender named it.
-fn answer_content(
-    tool: &str,
-    text: String,
-    attached: Vec<leviath_core::media::InboundPart>,
-    media: Option<&leviath_tools::ToolMedia>,
-) -> EntryContent {
-    let attached = attached
-        .into_iter()
-        .map(|part| Attached {
-            declared: part.media_type.map(|t| t.to_string()),
-            name: Some(part.name),
-            data: part.data,
-            deliver: part.deliver,
-        })
-        .collect();
-    with_attached(tool, text, attached, media)
-}
-
-/// Bytes on their way into a region beside some text: an MCP block, or a
-/// file a person attached to an answer.
-struct Attached {
-    /// The type the sender declared, when it did; the registry sniffs one
-    /// otherwise, and corrects a declaration it cannot parse.
-    declared: Option<String>,
-    /// The name the sender gave the bytes, when it did.
-    name: Option<String>,
-    /// The bytes.
-    data: Vec<u8>,
-    /// How the part should reach a model, when the sender had a preference.
-    deliver: Option<leviath_core::media::Delivery>,
-}
-
-/// `text`, then each of `attached` as a stored part. Nothing to attach is
-/// text alone; a file that cannot be stored (no store, over the ceiling)
-/// is described in the text instead of dropped.
-fn with_attached(
-    tool: &str,
-    text: String,
-    attached: Vec<Attached>,
-    media: Option<&leviath_tools::ToolMedia>,
-) -> EntryContent {
-    if attached.is_empty() {
-        return text.into();
-    }
-    let mut parts = vec![leviath_core::media::Part::text(text)];
-    for (i, item) in attached.into_iter().enumerate() {
-        let size = leviath_core::media::human_size(item.data.len() as u64);
-        let Some(media) = media else {
-            let what = match (&item.declared, &item.name) {
-                (Some(declared), _) => format!("{declared} block of {size}"),
-                (None, Some(name)) => format!("'{name}' ({size})"),
-                (None, None) => format!("a file of {size}"),
-            };
-            parts.push(leviath_core::media::Part::text(format!(
-                "[{what} dropped: this run has no blob store]"
-            )));
-            continue;
-        };
-        let media_type = media.type_of(item.declared.as_deref(), item.name.as_deref(), &item.data);
-        let name = item
-            .name
-            .unwrap_or_else(|| media.name_for(&format!("{tool}-{}", i + 1), &media_type));
-        let blob = leviath_core::media::Blob::new(media_type, item.data).named(name);
-        match media.store(blob) {
-            Ok(part) => parts.push(match item.deliver {
-                Some(deliver) => part.delivered(deliver),
-                None => part,
-            }),
-            Err(e) => parts.push(leviath_core::media::Part::text(format!(
-                "[block dropped: {e}]"
-            ))),
-        }
-    }
-    EntryContent::from_parts(parts)
 }
 
 /// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
@@ -660,11 +569,31 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> EntryCont
         // Name was in `script_tool_names` but the tool is gone - treat as unknown.
         return format!("[error] unknown script tool: {}", tc.name).into();
     };
-    let host = state.script_host.clone();
+    // Through the stage's limit for this tool, when it has one: the parts
+    // outside it are not there for the script to find.
+    let host: Arc<dyn leviath_scripting::ScriptHost> = match tool_limit(state, &tc.name) {
+        Some(limit) => Arc::new(crate::daemon::script_host::LimitedHost::new(
+            state.script_host.clone(),
+            state.offered_parts.clone(),
+            &tc.name,
+            limit,
+        )),
+        None => state.script_host.clone(),
+    };
     let args = tc.arguments.clone();
     tokio::task::spawn_blocking(move || leviath_scripting::execute_script_tool(&tool, args, host))
         .await
         .unwrap_or_else(script_tool_join_failed)
+}
+
+/// The stage's `tool_accepts` list for `tool`, when it has one.
+fn tool_limit(state: &AgentToolState, tool: &str) -> Option<Vec<String>> {
+    state
+        .stage_tool_accepts
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(leviath_tools::canonical_tool_name(tool))
+        .cloned()
 }
 
 /// Last-resort net for a script tool: a panic that escaped the script engine's
@@ -1087,6 +1016,12 @@ impl ToolService for CliToolService {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = required.clone();
         }
+        if let Some(limits) = state.stage_tool_accepts_by_index.get(stage_index) {
+            *state
+                .stage_tool_accepts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = limits.clone();
+        }
         *state
             .stage_name
             .lock()
@@ -1268,6 +1203,8 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(budget),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -1346,6 +1283,8 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(mcp)),
@@ -1432,6 +1371,8 @@ mod tests {
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let state = Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -1463,6 +1404,81 @@ mod tests {
             config_source: test_config_source(),
         });
         (state, dir)
+    }
+
+    /// A stage's `tool_accepts` for a script tool hides the parts outside
+    /// the list from the script, and names the limit when one is asked for.
+    #[tokio::test]
+    async fn a_script_tool_sees_only_the_parts_its_stage_lets_it_have() {
+        use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, Part};
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("count".to_string(), ToolPolicy::Allow);
+        allow.insert("peek".to_string(), ToolPolicy::Allow);
+        let names: HashSet<String> = ["count".to_string(), "peek".to_string()]
+            .into_iter()
+            .collect();
+        let (state, _dir) = script_state(
+            &hub,
+            &[
+                ("count", "list_parts().len().to_string()"),
+                ("peek", "read_part(\"voice.wav\").len().to_string()"),
+            ],
+            names,
+            no_script_fields().2,
+            allow,
+        );
+        let store = leviath_core::media::MemoryBlobStore::new();
+        let registry = MediaRegistry::builtin();
+        let png = store
+            .put(
+                "r",
+                &Blob::new(
+                    MediaType::parse("image/png").unwrap(),
+                    b"\x89PNG\r\n\x1a\nhero".to_vec(),
+                ),
+                &registry,
+            )
+            .unwrap();
+        let wav = store
+            .put(
+                "r",
+                &Blob::new(MediaType::parse("audio/wav").unwrap(), b"RIFFwav".to_vec()),
+                &registry,
+            )
+            .unwrap();
+        *state.offered_parts.lock().unwrap() = vec![
+            Part::text("words"),
+            Part::stored(png).named("hero.png"),
+            Part::stored(wav).named("voice.wav"),
+        ];
+        state
+            .stage_tool_accepts
+            .lock()
+            .unwrap()
+            .insert("count".to_string(), vec!["image/*".to_string()]);
+        state
+            .stage_tool_accepts
+            .lock()
+            .unwrap()
+            .insert("peek".to_string(), vec!["image/*".to_string()]);
+        let out = dispatch_tools(
+            state.clone(),
+            vec![
+                call("c1", "count", serde_json::json!({})),
+                call("c2", "peek", serde_json::json!({})),
+            ],
+            noop_progress(),
+        )
+        .await;
+        assert_eq!(out[0].1, "1");
+        let peek = out[1].1.to_string();
+        assert!(
+            peek.contains(
+                "'voice.wav' is audio/wav; at this stage peek may be handed only image/*"
+            ),
+            "{peek}"
+        );
     }
 
     #[tokio::test]
@@ -1766,6 +1782,8 @@ mod tests {
         allow.insert("edit_file".to_string(), ToolPolicy::Allow);
         allow.insert("install_tool".to_string(), ToolPolicy::Allow);
         Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -2053,6 +2071,8 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -2432,6 +2452,8 @@ mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Deny);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -2504,6 +2526,8 @@ mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Allow);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -2943,6 +2967,11 @@ mod tests {
                 HashSet::new(),
                 HashSet::from(["ask_user_text".to_string()]),
             ]),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
+            stage_tool_accepts_by_index: Arc::new(vec![
+                HashMap::new(),
+                HashMap::from([("spawn_agent".to_string(), vec!["image/*".to_string()])]),
+            ]),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(HashMap::new()),
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
@@ -2972,6 +3001,12 @@ mod tests {
             *state.stage_required.lock().unwrap(),
             HashSet::from(["ask_user_text".to_string()])
         );
+        // And what the stage lets each tool be handed.
+        assert_eq!(
+            tool_limit(&state, "spawn_agent").as_deref(),
+            Some(["image/*".to_string()].as_slice())
+        );
+        assert!(tool_limit(&state, "read_file").is_none());
 
         // The runtime's offer lands on the state the script host shares.
         service.offer_parts(e, vec![leviath_core::media::Part::text("x")]);
@@ -3515,6 +3550,8 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_tool_accepts_by_index: Arc::new(Vec::new()),
+            stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),

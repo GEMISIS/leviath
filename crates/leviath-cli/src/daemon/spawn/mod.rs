@@ -714,6 +714,23 @@ fn build_agent_inner(
                 .collect()
         })
         .collect();
+    // What each stage lets each tool be handed, canonicalised the same way,
+    // so a limit written against an alias still meets the call.
+    let stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>> = blueprint
+        .stages
+        .iter()
+        .map(|s| {
+            s.tool_accepts
+                .iter()
+                .map(|(tool, list)| {
+                    (
+                        leviath_tools::canonical_tool_name(tool).to_string(),
+                        list.clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
     let model_label = stages
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
@@ -1052,6 +1069,7 @@ fn build_agent_inner(
         entry_index,
         stage_perms_by_index,
         stage_required_by_index,
+        stage_tool_accepts_by_index,
         agent_perms,
         agent_name: &agent_name,
         launch_overrides,
@@ -2611,7 +2629,8 @@ system = { kind = "pinned", max_tokens = 1000 }
             "[agent]\nname = \"asks\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
              available_tools = [\"read_file\", \"ask_user_text\"]\n\
-             required_tools = [\"ask_user_text\"]\n",
+             required_tools = [\"ask_user_text\"]\n\
+             [stages.main.tool_accepts]\nread_file = [\"text/*\"]\n",
         )
         .unwrap();
         let (mut world, cli) = test_world();
@@ -2642,6 +2661,12 @@ system = { kind = "pinned", max_tokens = 1000 }
                 .contains("ask_user_text")
         );
         assert_eq!(state.stage_required_by_index.len(), 1);
+        // And what the stage lets each tool be handed, by canonical name.
+        assert_eq!(
+            state.stage_tool_accepts.lock().unwrap().get("read_file"),
+            Some(&vec!["text/*".to_string()])
+        );
+        assert_eq!(state.stage_tool_accepts_by_index.len(), 1);
     }
 
     #[tokio::test]

@@ -122,6 +122,7 @@ somewhere else.
 | `input.accepts` | the visible regions' `accepts` | The media types the stage takes as [parts](/docs/media), used to prefer a model that can see them and by `lev validate` |
 | `input.as_text` | `[]` | Media types whose parts reach this stage's model as text whatever the model takes |
 | `output.artifacts` | `[]` | The files the stage hands back beside its answer, by name and type. See [Final outputs](/docs/outputs#large-results) |
+| `tool_accepts` | `{}` | What each tool may be handed at this stage, as `tool = ["image/*"]`: a stored part outside the list is out of that tool's reach here. See [Media](/docs/media#what-a-tool-may-be-handed) |
 
 Three of those need a sentence more.
 

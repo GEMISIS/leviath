@@ -3421,6 +3421,7 @@ storyboard = { kind = "pinned", max_tokens = 1000, accepts = ["image/*"] }
 conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
     let findings = lint(manifest, &LintEnv::default());
+    assert!(with_code(&findings, "tool-accepts-ungranted").is_empty());
     let unseen = with_code(&findings, "media-unseen");
     assert_eq!(unseen.len(), 1, "{:?}", codes(&findings));
     assert_eq!(unseen[0].stage.as_deref(), Some("listen"));
@@ -3440,5 +3441,50 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             .as_deref()
             .unwrap_or_default()
             .contains("as_text")
+    );
+}
+
+/// A `tool_accepts` limit on a tool the stage never grants is said once,
+/// unless a group grant makes the question one for the install.
+#[test]
+fn a_tool_limit_on_an_ungranted_tool_is_said_once() {
+    let text = manifest(
+        r#"
+[stages.named]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Named"
+max_iterations = 10
+available_tools = ["read_file", "spawn_agent"]
+[stages.named.tool_accepts]
+spawn_agent = ["image/*"]
+ghost = ["audio/*", "video/mp4"]
+
+[stages.grouped]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Grouped"
+max_iterations = 10
+available_tools = ["@builtin"]
+[stages.grouped.tool_accepts]
+ghost = ["audio/*"]
+"#,
+    );
+    let findings = lint(&text, &LintEnv::default());
+    let said = with_code(&findings, "tool-accepts-ungranted");
+    assert_eq!(said.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(said[0].stage.as_deref(), Some("named"));
+    assert!(
+        said[0]
+            .message
+            .contains("limits 'ghost' to audio/*, video/mp4"),
+        "{}",
+        said[0].message
+    );
+    assert!(
+        said[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("available_tools"))
     );
 }

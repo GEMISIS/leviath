@@ -407,19 +407,30 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
 /// `accepts = ["text/*", "image/png"]`: each entry a media type or a
 /// `type/*` pattern. Absent or empty means anything.
 pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
+    parse_pattern_list(&format!("region '{region_name}'"), "accepts", value)
+}
+
+/// A list of media type patterns under `key` of `what` (a region, a stage's
+/// input table, a tool limit): each entry a media type or a `type/*`
+/// pattern, lowercased. Absent means empty.
+pub(super) fn parse_pattern_list(
+    what: &str,
+    key: &str,
+    value: Option<&toml::Value>,
+) -> Result<Vec<String>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
         return Err(crate::error::Error::ValidationFailed(format!(
-            "region '{region_name}' has accepts = {value}; expected a list of media types"
+            "{what} has {key} = {value}; expected a list of media types"
         )));
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let Some(s) = item.as_str() else {
             return Err(crate::error::Error::ValidationFailed(format!(
-                "region '{region_name}' has accepts entry {item}; expected a media type string"
+                "{what} has {key} entry {item}; expected a media type string"
             )));
         };
         let s = s.trim().to_ascii_lowercase();
@@ -432,7 +443,7 @@ pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> R
         };
         if !valid {
             return Err(crate::error::Error::ValidationFailed(format!(
-                "region '{region_name}' has accepts entry \"{s}\"; expected type/subtype or type/*"
+                "{what} has {key} entry \"{s}\"; expected type/subtype or type/*"
             )));
         }
         out.push(s);

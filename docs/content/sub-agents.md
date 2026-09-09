@@ -70,6 +70,10 @@ spawn_agent({
 })
 ```
 
+A stage can say what a child may be handed: `[stages.<name>.tool_accepts] spawn_agent =
+["image/*"]` refuses a `parts` entry of any other type by name. See
+[What a tool may be handed](/docs/media#what-a-tool-may-be-handed).
+
 Each named part is read from this run's store and lands in the child's task region as a typed
 part, delivered the way it was here, so a worker sees the image its parent was asked about rather
 than a stand-in. A name that matches nothing, or bytes the store no longer holds, refuses the spawn

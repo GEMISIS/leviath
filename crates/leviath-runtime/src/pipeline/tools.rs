@@ -518,6 +518,10 @@ pub(crate) fn dispatch_tools(
                         media: &media,
                         run_id: &state.agent_id,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                        tool_limit: blueprint
+                            .zip(cursor)
+                            .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
+                            .and_then(|s| s.tool_limit(&c.name)),
                     },
                 );
                 context_results.push((c.tool_id.clone(), text));

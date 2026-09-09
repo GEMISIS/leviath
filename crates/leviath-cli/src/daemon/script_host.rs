@@ -231,6 +231,112 @@ fn check_outbound(url: &str, allow_local: bool) -> Result<(), String> {
     leviath_net::check_url(&parsed, allow_local).map_err(|e| format!("[denied] {e}"))
 }
 
+/// A run's script host seen through a stage's `tool_accepts` for one tool:
+/// the stored parts outside the tool's list are not there, and asking for
+/// one by name says why. Everything else passes through to the host.
+pub(crate) struct LimitedHost {
+    inner: Arc<dyn ScriptHost>,
+    /// The parts the run offers, shared with the host underneath.
+    parts: Arc<StdMutex<Vec<Part>>>,
+    /// The tool the limit is for, for the refusal.
+    tool: String,
+    /// The media type patterns the tool may be handed.
+    allowed: Vec<String>,
+}
+
+impl LimitedHost {
+    pub(crate) fn new(
+        inner: Arc<dyn ScriptHost>,
+        parts: Arc<StdMutex<Vec<Part>>>,
+        tool: &str,
+        allowed: Vec<String>,
+    ) -> Self {
+        Self {
+            inner,
+            parts,
+            tool: tool.to_string(),
+            allowed,
+        }
+    }
+
+    /// Whether the tool may be handed `part`: inline text always, a stored
+    /// part when its type matches the list.
+    fn within(&self, part: &Part) -> bool {
+        part.blob()
+            .is_none_or(|b| b.media_type.matches_any(&self.allowed))
+    }
+}
+
+impl ScriptHost for LimitedHost {
+    fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String> {
+        self.inner.http_get(url, headers)
+    }
+
+    fn http_post(
+        &self,
+        url: &str,
+        body: &str,
+        headers: BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        self.inner.http_post(url, body, headers)
+    }
+
+    fn shell(&self, command: &str) -> Result<String, String> {
+        self.inner.shell(command)
+    }
+
+    fn read_file(&self, path: &str) -> Result<String, String> {
+        self.inner.read_file(path)
+    }
+
+    fn write_file(&self, path: &str, content: &str) -> Result<String, String> {
+        self.inner.write_file(path, content)
+    }
+
+    fn env_var(&self, name: &str) -> Result<String, String> {
+        self.inner.env_var(name)
+    }
+
+    fn read_part(&self, wanted: &str) -> Result<Vec<u8>, String> {
+        let outside = leviath_core::sync::lock(&self.parts)
+            .iter()
+            .rev()
+            .find(|p| part_matches(p, wanted))
+            .filter(|p| !self.within(p))
+            .cloned();
+        if let Some(part) = outside {
+            return Err(format!(
+                "'{wanted}' is {}; at this stage {} may be handed only {}",
+                part.media_type,
+                self.tool,
+                self.allowed.join(", ")
+            ));
+        }
+        self.inner.read_part(wanted)
+    }
+
+    fn write_part(
+        &self,
+        bytes: Vec<u8>,
+        media_type: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        self.inner.write_part(bytes, media_type, name)
+    }
+
+    fn list_parts(&self) -> Vec<serde_json::Value> {
+        leviath_core::sync::lock(&self.parts)
+            .iter()
+            .filter(|p| p.is_stored() && self.within(p))
+            .map(part_summary)
+            .collect()
+    }
+
+    fn part(&self, sha256: &str) -> Option<Part> {
+        self.inner.part(sha256)
+    }
+}
+
 impl ScriptHost for DaemonScriptHost {
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String> {
         if !self.allow.http_get {
@@ -2320,6 +2426,81 @@ mod parts_tests {
             write_file: true,
             env_var: true,
         }
+    }
+
+    /// Through a stage's limit, a script sees only the parts the tool may
+    /// be handed; the rest of the host is untouched.
+    #[test]
+    fn a_limited_host_hides_the_parts_outside_the_tools_list() {
+        let (media, store) = media_and_store();
+        let parts = Arc::new(StdMutex::new(Vec::new()));
+        let host: Arc<dyn ScriptHost> = Arc::new(
+            DaemonScriptHost::new(all_allowed(), std::env::temp_dir())
+                .with_media(media.clone(), parts.clone()),
+        );
+        let png = store
+            .put(
+                "run-1",
+                &Blob::new(
+                    MediaType::parse("image/png").unwrap(),
+                    b"\x89PNG\r\n\x1a\nhero".to_vec(),
+                ),
+                &media.registry,
+            )
+            .unwrap();
+        let wav = store
+            .put(
+                "run-1",
+                &Blob::new(MediaType::parse("audio/wav").unwrap(), b"RIFFwav".to_vec()),
+                &media.registry,
+            )
+            .unwrap();
+        let sha = png.sha256.clone();
+        *parts.lock().unwrap() = vec![
+            Part::text("note").named("note"),
+            Part::stored(png).named("hero.png"),
+            Part::stored(wav).named("voice.wav"),
+        ];
+        let limited = LimitedHost::new(
+            host.clone(),
+            parts.clone(),
+            "peek",
+            vec!["image/*".to_string()],
+        );
+        let listed = limited.list_parts();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "hero.png");
+        assert_eq!(limited.read_part("hero.png").unwrap().len(), 12);
+        assert_eq!(
+            limited.read_part("voice.wav").unwrap_err(),
+            "'voice.wav' is audio/wav; at this stage peek may be handed only image/*"
+        );
+        // Text is never hidden, and a name nothing answers to is the host's
+        // own refusal.
+        assert!(
+            limited
+                .read_part("note")
+                .unwrap_err()
+                .contains("inline text")
+        );
+        assert!(
+            limited
+                .read_part("ghost")
+                .unwrap_err()
+                .contains("list_parts()")
+        );
+        assert!(limited.part(&sha).is_some());
+        // The rest passes straight through.
+        let written = limited
+            .write_part(b"\x89PNG\r\n\x1a\ncopy".to_vec(), None, None)
+            .unwrap();
+        assert_eq!(written["media_type"], "image/png");
+        assert!(limited.read_file("../nope").is_err());
+        assert!(limited.write_file("../nope", "x").is_err());
+        assert!(limited.env_var("ANTHROPIC_API_KEY").is_err());
+        assert!(limited.http_get("not a url", BTreeMap::new()).is_err());
+        assert!(limited.http_post("not a url", "", BTreeMap::new()).is_err());
+        assert!(limited.shell("").is_err());
     }
 
     #[test]

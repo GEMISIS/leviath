@@ -135,6 +135,25 @@ regions take. Two keys under `[stages.<name>.input]` adjust this: `accepts` stat
 outright, and `as_text` names types whose parts reach the model as text whatever it takes,
 which is how a `model/obj` scene gets to a text model even when the registry calls it binary.
 
+## What a tool may be handed
+
+A tool says what it takes (`@accepts` on a script, the built-in tables), and a stage can
+narrow that further for its own turn:
+
+```toml
+[stages.review.tool_accepts]
+spawn_agent = ["image/*", "audio/*"]   # a sub-agent started here gets pictures and sound, never the video
+context_export = ["text/*"]            # only text files may be written back into the workdir here
+```
+
+A stored part outside a tool's list is out of that tool's reach at the stage: `spawn_agent`'s
+`parts` refuses it by name, a script's `list_parts` does not show it and its `read_part` says
+which types the tool may be handed, and `context_export` refuses it the same way. Inline text
+is never hidden by a limit, and a tool absent from the table keeps whatever it takes itself.
+`lev validate` prints each stage's limits and warns (`tool-accepts-ungranted`) about a limit
+on a tool the stage does not grant; the dashboard's agent editor sets them on the Models and
+tools tab.
+
 ## Stages declare typed outputs
 
 ```toml

@@ -30,6 +30,9 @@ pub(crate) struct MediaToolContext<'a> {
     pub run_id: &'a str,
     /// The run's working directory, when it has one. Paths resolve inside it.
     pub workdir: Option<&'a Path>,
+    /// What the stage lets this tool be handed (`tool_accepts`), when it
+    /// limits it: a part outside the list is refused by name.
+    pub tool_limit: Option<&'a [String]>,
 }
 
 /// Answer one media tool call, as text for the model.
@@ -54,7 +57,15 @@ pub(crate) fn handle_media_tool(
     };
     match name {
         "context_attach" => attach(args, window, &sink, workdir),
-        _ => export(args, window, store.as_ref(), &registry, ctx.run_id, workdir),
+        _ => export(
+            args,
+            window,
+            store.as_ref(),
+            &registry,
+            ctx.run_id,
+            workdir,
+            ctx.tool_limit,
+        ),
     }
 }
 
@@ -175,7 +186,9 @@ fn attach(
 }
 
 /// `context_export { name, path }`: a stored part, by file name or hash
-/// prefix, written into the workdir.
+/// prefix, written into the workdir. A part outside the stage's limit for
+/// this tool is refused by name, so the model learns the limit rather than
+/// a missing file.
 fn export(
     args: &serde_json::Value,
     window: &ContextWindow,
@@ -183,6 +196,7 @@ fn export(
     registry: &MediaRegistry,
     run_id: &str,
     workdir: &Path,
+    limit: Option<&[String]>,
 ) -> String {
     let Some(wanted) = arg(args, "name") else {
         return "[error] missing 'name' argument: a part's file name or the start of its sha256"
@@ -203,6 +217,15 @@ fn export(
             ),
         };
     };
+    if let Some(limit) = limit
+        && !blob.media_type.matches_any(limit)
+    {
+        return format!(
+            "[error] '{wanted}' is {}; at this stage context_export may be handed only {}",
+            blob.media_type,
+            limit.join(", ")
+        );
+    }
     let target = arg(args, "path")
         .map(str::to_string)
         .or(part_name)
@@ -323,8 +346,57 @@ mod tests {
                 media,
                 run_id: "run-1",
                 workdir,
+                tool_limit: None,
             },
         )
+    }
+
+    /// A stage that limits `context_export` to some types keeps the rest
+    /// out of its reach, by name rather than silently.
+    #[test]
+    fn an_export_outside_the_stages_limit_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nv1").unwrap();
+        with_world(true, &mut |media| {
+            let mut w = window();
+            let out = call(
+                "context_attach",
+                json!({"region": "sprites", "path": "hero.png"}),
+                &mut w,
+                media,
+                Some(dir.path()),
+            );
+            assert!(out.starts_with("Attached"), "{out}");
+            let limit = ["audio/*".to_string()];
+            let out = handle_media_tool(
+                "context_export",
+                &json!({"name": "hero.png"}),
+                &mut w,
+                &MediaToolContext {
+                    media,
+                    run_id: "run-1",
+                    workdir: Some(dir.path()),
+                    tool_limit: Some(&limit),
+                },
+            );
+            assert_eq!(
+                out,
+                "[error] 'hero.png' is image/png; at this stage context_export may be handed only audio/*"
+            );
+            let limit = ["image/*".to_string()];
+            let out = handle_media_tool(
+                "context_export",
+                &json!({"name": "hero.png", "path": "out.png"}),
+                &mut w,
+                &MediaToolContext {
+                    media,
+                    run_id: "run-1",
+                    workdir: Some(dir.path()),
+                    tool_limit: Some(&limit),
+                },
+            );
+            assert!(out.starts_with("Wrote"), "{out}");
+        });
     }
 
     #[test]

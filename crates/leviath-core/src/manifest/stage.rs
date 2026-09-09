@@ -44,6 +44,7 @@ pub(super) const STAGE_KEYS: &[&str] = &[
     "shell_hint",
     "split_prompt",
     "system_prompt",
+    "tool_accepts",
     "tool_permissions",
     "tool_routing",
     "transition_prompt",
@@ -512,8 +513,33 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             INPUT_KEYS,
         )?;
         let where_ = format!("stage '{stage_name}': input");
-        stage.input_accepts = super::regions::parse_accepts(&where_, input_table.get("accepts"))?;
-        stage.input_as_text = super::regions::parse_accepts(&where_, input_table.get("as_text"))?;
+        stage.input_accepts =
+            super::regions::parse_pattern_list(&where_, "accepts", input_table.get("accepts"))?;
+        stage.input_as_text =
+            super::regions::parse_pattern_list(&where_, "as_text", input_table.get("as_text"))?;
+    }
+
+    // `[stages.<name>.tool_accepts]`: what each tool may be handed here. A
+    // limit that lists nothing would hide every part, which is never what
+    // was meant; dropping the key is how a limit is lifted.
+    if let Some(value) = stage_value.field("tool_accepts") {
+        let Some(limits) = value.as_table() else {
+            return Err(Error::Other(format!(
+                "stage '{stage_name}': tool_accepts must be a table of tool = [media types], \
+                 e.g. spawn_agent = [\"image/*\"]"
+            )));
+        };
+        for (tool, list) in limits {
+            let where_ = format!("stage '{stage_name}': tool_accepts");
+            let patterns = super::regions::parse_pattern_list(&where_, tool, Some(list))?;
+            if patterns.is_empty() {
+                return Err(Error::Other(format!(
+                    "stage '{stage_name}': tool_accepts.{tool} must list at least one media \
+                     type; drop the key to lift the limit"
+                )));
+            }
+            stage.tool_accepts.insert(tool.clone(), patterns);
+        }
     }
 
     // Parse accepts_messages flag: whether mid-run user messages are
