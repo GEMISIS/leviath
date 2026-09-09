@@ -13,6 +13,9 @@ use super::block_cache::{
 use super::*;
 
 mod eviction;
+/// Typed parts as provider content blocks: stand-ins, media blocks, and the
+/// lifted message a system region's stored parts ride in.
+mod media;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
 #[derive(Debug, Clone)]
@@ -639,6 +642,10 @@ impl ContextWindow {
         // the newest entry timestamp of the region that produced it. Feeds the
         // cache-breakpoint split after the sort.
         let mut volatile_recency: Vec<i64> = Vec::new();
+        // The stored parts of every region that renders into the system
+        // prompt, which is text. They travel in one user message ahead of the
+        // conversation instead; see `media::lifted_blocks`.
+        let mut lifted: Vec<leviath_providers::ContentBlock> = Vec::new();
 
         for region in &self.regions {
             // A region this stage does not attend to is held but not shown.
@@ -652,6 +659,9 @@ impl ContextWindow {
             let is_custom = matches!(region.kind, leviath_core::RegionKind::Custom { .. });
             if region.content.is_empty() && !is_custom {
                 continue;
+            }
+            if !matches!(region.kind, leviath_core::RegionKind::SlidingWindow { .. }) {
+                lifted.extend(media::lifted_blocks(region));
             }
 
             // Where this region's system blocks begin, so the recency mapping
@@ -719,7 +729,7 @@ impl ContextWindow {
                             EntryKind::UserMessage => {
                                 messages.push(leviath_providers::Message {
                                     role: "user".to_string(),
-                                    content: entry.content.clone().into(),
+                                    content: media::message_content(&entry.content),
                                     cache_breakpoint: false,
                                     reasoning: None,
                                 });
@@ -728,17 +738,12 @@ impl ContextWindow {
                                 if tool_calls.is_empty() {
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
-                                        content: entry.content.clone().into(),
+                                        content: media::message_content(&entry.content),
                                         cache_breakpoint: false,
                                         reasoning: entry.reasoning.clone(),
                                     });
                                 } else {
-                                    let mut blocks = Vec::new();
-                                    if !entry.content.is_empty() {
-                                        blocks.push(leviath_providers::ContentBlock::Text {
-                                            text: entry.content.to_string(),
-                                        });
-                                    }
+                                    let mut blocks = media::content_blocks(&entry.content);
                                     for tc in tool_calls {
                                         blocks.push(leviath_providers::ContentBlock::ToolUse {
                                             id: tc.id.clone(),
@@ -768,6 +773,10 @@ impl ContextWindow {
                                         is_error: *is_error,
                                     },
                                 );
+                                // A tool result is text on every wire; the
+                                // parts it produced follow it in the same user
+                                // turn, after every result block.
+                                pending_tool_results.extend(media::media_blocks(&entry.content));
                             }
                             EntryKind::Text => {
                                 let trimmed = entry.content.trim();
@@ -788,7 +797,7 @@ impl ContextWindow {
                                 } else {
                                     messages.push(leviath_providers::Message {
                                         role: "user".to_string(),
-                                        content: entry.content.clone().into(),
+                                        content: media::message_content(&entry.content),
                                         cache_breakpoint: false,
                                         reasoning: None,
                                     });
@@ -906,6 +915,20 @@ impl ContextWindow {
         if !preamble.is_empty() {
             let conversation = std::mem::replace(&mut messages, preamble);
             messages.extend(conversation);
+        }
+        // The stored parts of the system regions come first of all: they
+        // belong to the reference material, and a leading message that holds
+        // still is one a provider can cache.
+        if !lifted.is_empty() {
+            messages.insert(
+                0,
+                leviath_providers::Message {
+                    role: "user".to_string(),
+                    content: leviath_providers::MessageContent::Blocks(lifted),
+                    cache_breakpoint: false,
+                    reasoning: None,
+                },
+            );
         }
 
         // ── Sort system blocks for optimal prefix caching ────────────────

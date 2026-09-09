@@ -32,6 +32,43 @@ impl Default for MediaRegistryHandle {
     }
 }
 
+/// The three media resources a system reads, as one parameter.
+///
+/// Every `PipelineWorld` installs all three; a world assembled by hand in a
+/// test may install none, and then [`Self::hydration_inputs`] says so and
+/// stored parts go out as their stand-ins.
+#[derive(bevy_ecs::system::SystemParam)]
+pub struct MediaParams<'w> {
+    /// The run's blob store.
+    pub store: Option<bevy_ecs::system::Res<'w, BlobStoreHandle>>,
+    /// The registry that types parts.
+    pub registry: Option<bevy_ecs::system::Res<'w, MediaRegistryHandle>>,
+    /// The operator's ceilings.
+    pub limits: Option<bevy_ecs::system::Res<'w, MediaLimits>>,
+}
+
+/// The store and registry a job hydrates with, when both are installed.
+pub type HydrationSources = Option<(Arc<dyn BlobStore>, Arc<MediaRegistry>)>;
+
+impl MediaParams<'_> {
+    /// The store and registry together when both are installed, and the
+    /// per-request cap either way.
+    pub fn hydration_inputs(&self) -> (HydrationSources, usize) {
+        let both = self
+            .store
+            .as_deref()
+            .map(|s| s.0.clone())
+            .zip(self.registry.as_deref().map(|r| r.0.clone()));
+        let max_stored = self
+            .limits
+            .as_deref()
+            .map_or(MediaLimits::default().max_stored_per_request, |l| {
+                l.max_stored_per_request
+            });
+        (both, max_stored)
+    }
+}
+
 /// The operator's ceilings on typed parts, from `[media]` in the config.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaLimits {
@@ -115,13 +152,12 @@ impl FsBlobStore {
 impl BlobStore for FsBlobStore {
     fn put(&self, run_id: &str, blob: &Blob, reg: &MediaRegistry) -> io::Result<BlobRef> {
         let r = blob.describe(reg);
-        let path = self.path_for(run_id, &r.sha256)?;
+        let dir = self.dir_for(run_id)?;
+        let path = dir.join(&r.sha256);
         if path.is_file() {
             return Ok(r);
         }
-        if let Some(dir) = path.parent() {
-            leviath_sys::create_private_dir_all(dir)?;
-        }
+        leviath_sys::create_private_dir_all(&dir)?;
         leviath_sys::write_atomic(&path, &blob.bytes, Some(0o600))?;
         Ok(r)
     }
@@ -133,15 +169,15 @@ impl BlobStore for FsBlobStore {
     }
 
     fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> io::Result<()> {
+        // `path_for` has validated the hash, so joining it below is safe.
         let from = self.path_for(from_run, sha256)?;
-        let to = self.path_for(to_run, sha256)?;
+        let dir = self.dir_for(to_run)?;
+        let to = dir.join(sha256);
         if to.is_file() {
             return Ok(());
         }
         let bytes = std::fs::read(&from)?;
-        if let Some(dir) = to.parent() {
-            leviath_sys::create_private_dir_all(dir)?;
-        }
+        leviath_sys::create_private_dir_all(&dir)?;
         leviath_sys::write_atomic(&to, &bytes, Some(0o600))
     }
 
@@ -220,6 +256,23 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("run-f")).unwrap();
         std::fs::write(tmp.path().join("run-f").join(BLOBS_DIR), b"x").unwrap();
         assert!(store.list("run-f").is_err());
+        assert!(store.list("../x").is_err());
+        // The same bad ids are refused on every operation, before any I/O.
+        let reg = MediaRegistry::builtin();
+        let good = "0".repeat(64);
+        assert!(store.put("../x", &png_blob(), &reg).is_err());
+        assert!(store.read("../x", &good).is_err());
+        assert!(store.copy("../x", "run-a", &good).is_err());
+        assert!(store.copy("run-a", "../x", &good).is_err());
+        // A blobs directory that cannot be created, because a file sits where
+        // it would go, fails the write rather than the whole daemon.
+        assert!(store.put("run-f", &png_blob(), &reg).is_err());
+        let r = store.put("run-a", &png_blob(), &reg).unwrap();
+        assert!(store.copy("run-a", "run-f", &r.sha256).is_err());
+        // A directory sitting where the blob file would be written fails the
+        // write too.
+        std::fs::create_dir_all(store.dir_for("run-d").unwrap().join(&r.sha256)).unwrap();
+        assert!(store.put("run-d", &png_blob(), &reg).is_err());
     }
 
     #[cfg(unix)]
@@ -280,6 +333,29 @@ mod tests {
         let cloned = reg_handle.clone();
         assert!(Arc::ptr_eq(&cloned.0, &reg_handle.0));
         let limits = MediaLimits::default();
+        // The bundled parameter answers from a world that installs the
+        // resources, and says "nothing to hydrate with" from one that does not.
+        let mut world = bevy_ecs::world::World::new();
+        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let (none, cap) = state
+            .get(&world)
+            .expect("the parameter validates")
+            .hydration_inputs();
+        assert!(none.is_none());
+        assert_eq!(cap, 100);
+        world.insert_resource(BlobStoreHandle(mem.clone()));
+        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(MediaLimits {
+            max_stored_per_request: 3,
+            ..MediaLimits::default()
+        });
+        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let (both, cap) = state
+            .get(&world)
+            .expect("the parameter validates")
+            .hydration_inputs();
+        assert!(both.is_some());
+        assert_eq!(cap, 3);
         assert_eq!(limits.max_part_bytes, 32 * 1024 * 1024);
         assert_eq!(limits.inline_text_bytes, 1024 * 1024);
         assert_eq!(limits.max_stored_per_request, 100);

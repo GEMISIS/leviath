@@ -96,6 +96,21 @@ same list.
   `// @output_types`. `lev models` shows a `MEDIA` column and takes
   `--accepts image/png`, `lev models show` prints both lists, and
   `GET /api/models` carries `input_types` and `output_types` (#400).
+- A stored part reaches the model. Assembly emits a media block per stored
+  part beside a one-line stand-in that names it, and the inference lane
+  fills the bytes in right before the request goes out: as the vendor's own
+  image, audio or document block when the model's input types cover the
+  part, as text when the registry says the bytes are text (a `model/obj`
+  file goes to any text model as text), and as the stand-in alone
+  otherwise. A region that renders into the system prompt has its stored
+  parts lifted into one leading user message, so the prefix still caches.
+  Anthropic gets `image` and `document` blocks, the OpenAI-shaped providers
+  `image_url`, `input_audio` and `file` parts, Codex `input_image` and
+  `input_file`, and a Rhai provider the neutral `media` block with the
+  base64 in `data`; the Claude Code transport and every lane that does not
+  hydrate send the stand-in. The journal and `context.json` never hold
+  base64. `[media] max_stored_per_request` caps how many parts one request
+  carries, oldest dropped first (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

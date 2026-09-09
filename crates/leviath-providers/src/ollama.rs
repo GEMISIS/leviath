@@ -123,13 +123,7 @@ fn estimated_request_tokens(request: &InferenceRequest) -> usize {
 
 /// One content block's share of [`estimated_request_tokens`].
 fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
-    match block {
-        crate::ContentBlock::Text { text } => leviath_core::estimate_tokens(text),
-        crate::ContentBlock::ToolUse { name, input, .. } => {
-            leviath_core::estimate_tokens(name) + leviath_core::estimate_tokens(&input.to_string())
-        }
-        crate::ContentBlock::ToolResult { content, .. } => leviath_core::estimate_tokens(content),
-    }
+    crate::media::block_tokens(block)
 }
 
 /// How long a model warmed for a run stays resident with nothing calling it.

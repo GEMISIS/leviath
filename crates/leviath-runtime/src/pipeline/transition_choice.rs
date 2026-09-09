@@ -284,6 +284,7 @@ pub(crate) fn dispatch_transition_choice(
             // long silent generation from being mistaken for a dead socket, and
             // this call is never long enough for that to arise.
             stream: false,
+            hydration: None,
         };
         let cancel = crate::cancel::CancelToken::new();
         // Supervised for the same reason as the inference lane: the agent is

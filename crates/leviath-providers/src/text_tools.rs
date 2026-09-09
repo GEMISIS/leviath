@@ -194,6 +194,15 @@ pub fn flatten_messages(messages: &[Message]) -> String {
                                 "[tool_result {tool_use_id}{marker}]\n{content}\n[/tool_result]"
                             ));
                         }
+                        // A text transport has nowhere to put bytes; the
+                        // stand-in names the part so the model can still
+                        // hand it to a tool.
+                        ContentBlock::Media { part, .. } => {
+                            if !section.is_empty() {
+                                section.push('\n');
+                            }
+                            section.push_str(&part.stand_in);
+                        }
                     }
                 }
 
@@ -214,6 +223,9 @@ pub fn flatten_messages(messages: &[Message]) -> String {
 
     parts.join("\n\n")
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {

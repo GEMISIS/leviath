@@ -158,6 +158,50 @@ impl Default for RetryPolicy {
 }
 
 /// A unit of inference work the dispatch system hands to the worker pool.
+/// What a job needs to fill its media blocks with bytes right before sending:
+/// where the bytes are, what the model takes, and how many to send.
+pub(crate) struct JobHydration {
+    /// The run's blob store.
+    pub store: Arc<dyn leviath_core::media::BlobStore>,
+    /// The run whose blobs to read.
+    pub run_id: String,
+    /// The registry, for the text bypass.
+    pub registry: Arc<leviath_core::media::MediaRegistry>,
+    /// What the model takes and hands back.
+    pub media: leviath_providers::ModelMedia,
+    /// The most stored parts one request carries with their bytes.
+    pub max_stored: usize,
+}
+
+impl JobHydration {
+    /// Fill `request`'s media blocks, logging what happened when anything
+    /// was left out.
+    fn apply(&self, request: &mut InferenceRequest) {
+        let fetch =
+            |blob: &leviath_core::media::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
+        let report = leviath_providers::media::hydrate_request(
+            request,
+            &leviath_providers::media::Hydration {
+                media: &self.media,
+                registry: &self.registry,
+                max_stored: self.max_stored,
+                fetch: &fetch,
+            },
+        );
+        if report.stand_ins > 0 || report.capped > 0 || !report.missing.is_empty() {
+            tracing::info!(
+                model = %request.model,
+                sent = report.sent,
+                as_text = report.as_text,
+                stand_ins = report.stand_ins,
+                capped = report.capped,
+                missing = report.missing.len(),
+                "[media] stored parts the model did not receive as bytes"
+            );
+        }
+    }
+}
+
 pub(crate) struct InferenceJob {
     /// The agent this inference is for.
     pub entity: Entity,
@@ -174,6 +218,9 @@ pub(crate) struct InferenceJob {
     /// before anything was measured, or for a lane that has no window of its
     /// own to correct.
     pub calibration: Option<crate::pipeline::PromptCalibration>,
+    /// How to put the request's stored parts in front of the model, or `None`
+    /// for a lane that sends them as their stand-ins (routing, compaction).
+    pub hydration: Option<JobHydration>,
     /// Ask the provider to stream this answer and fold the chunks back into one
     /// response, rather than waiting for the whole thing at once.
     ///
@@ -228,12 +275,19 @@ pub async fn guard_context_window(
         return Ok(None);
     }
     let text = flatten_request_text(request);
+    // The text is counted; the media blocks carrying bytes are charged at the
+    // registry's estimate, which is all any tokenizer here can say about them.
+    let media = leviath_providers::media::media_tokens(request);
     let estimate =
-        crate::pipeline::calibrated_tokens(leviath_core::estimate_tokens(&text), calibration);
+        crate::pipeline::calibrated_tokens(leviath_core::estimate_tokens(&text), calibration)
+            .saturating_add(media);
     if estimate.saturating_add(request.max_tokens) < max / COUNT_ABOVE_WINDOW_FRACTION {
         return Ok(None);
     }
-    let used = provider.count_tokens(&text, &request.model).await;
+    let used = provider
+        .count_tokens(&text, &request.model)
+        .await
+        .saturating_add(media);
     if used.saturating_add(request.max_tokens) > max {
         return Err(ProviderError::TokenLimitExceeded {
             used,
@@ -370,11 +424,17 @@ pub(crate) async fn run_inference_job(
     let InferenceJob {
         entity,
         provider,
-        request,
+        mut request,
         permit,
         calibration,
         stream,
+        hydration,
     } = job;
+    // Bytes go in here and nowhere earlier: the assembled request, the
+    // journal and every snapshot carry references only.
+    if let Some(hydration) = &hydration {
+        hydration.apply(&mut request);
+    }
     let started = std::time::Instant::now();
     // Retry transient failures (connection reset, timeout, 429, 5xx) with
     // exponential backoff, holding the permit across the backoff; a permanent
@@ -549,6 +609,7 @@ mod tests {
             permit: pools.try_acquire("p", "m").expect("free pool"),
             calibration: None,
             stream: false,
+            hydration: None,
         }
     }
 
@@ -577,6 +638,7 @@ mod tests {
             permit,
             calibration: None,
             stream: false,
+            hydration: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = crate::cancel::CancelToken::new();
@@ -630,6 +692,7 @@ mod tests {
             permit,
             calibration: None,
             stream: false,
+            hydration: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let policy = RetryPolicy {
@@ -777,6 +840,7 @@ mod tests {
             permit: pools.try_acquire("p", "m").expect("free pool"),
             calibration,
             stream: false,
+            hydration: None,
         }
     }
 
@@ -1106,6 +1170,7 @@ mod tests {
             permit: pools.try_acquire("p", "m").expect("free pool"),
             calibration: None,
             stream: true,
+            hydration: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1141,6 +1206,7 @@ mod tests {
             permit: pools.try_acquire("p", "m").expect("free pool"),
             calibration: None,
             stream: false,
+            hydration: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1521,5 +1587,59 @@ mod tests {
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
+    }
+
+    #[test]
+    fn hydration_fills_media_blocks_from_the_store_and_names_what_is_missing() {
+        use leviath_core::media::{
+            Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore, Part,
+        };
+        use leviath_providers::{ContentBlock, Message, MessageContent, ModelMedia};
+        let registry = Arc::new(MediaRegistry::builtin());
+        let store = Arc::new(MemoryBlobStore::new());
+        let blob = Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nbody".to_vec(),
+        )
+        .named("a.png");
+        let reference = store.put("run-1", &blob, &registry).unwrap();
+        let stored = Part::stored(reference.clone()).named("a.png");
+        let missing = Part::stored(leviath_core::media::BlobRef {
+            sha256: "0".repeat(64),
+            ..reference
+        })
+        .named("a.png");
+        let mut request = test_request();
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::media(&stored).unwrap(),
+                ContentBlock::media(&missing).unwrap(),
+            ]),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+        let hydration = JobHydration {
+            store,
+            run_id: "run-1".to_string(),
+            registry,
+            media: ModelMedia::new(&["text/*", "image/*"], &["text/*"]),
+            max_stored: 10,
+        };
+        hydration.apply(&mut request);
+        let blocks_of = |content: &MessageContent| match content {
+            MessageContent::Blocks(blocks) => blocks.clone(),
+            MessageContent::Text(_) => Vec::new(),
+        };
+        assert!(blocks_of(&MessageContent::Text("t".into())).is_empty());
+        let blocks = blocks_of(&request.messages[0].content);
+        assert!(blocks[0].is_hydrated_media());
+        assert_eq!(
+            blocks[1],
+            ContentBlock::Text {
+                text: "[image/png, 12 B] a.png".to_string()
+            }
+        );
+        assert_eq!(leviath_providers::media::media_tokens(&request), 1600);
     }
 }
