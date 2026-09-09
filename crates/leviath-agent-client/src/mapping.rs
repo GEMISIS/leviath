@@ -35,6 +35,15 @@ pub const OPTION_REJECT_ONCE: &str = "reject-once";
 /// Blocks are joined with a blank line and the result is trimmed, so a prompt
 /// of only unsupported blocks yields `""`.
 pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
+    flatten_prompt_with(blocks, &[])
+}
+
+/// [`flatten_prompt`], told which `resource_link` URIs the caller read
+/// itself: those are marked as attached rather than not fetched, so the
+/// model knows the file is beside the words. Reading is the caller's job
+/// (this crate does no I/O); the stdio server follows `file://` links inside
+/// the session's working directory.
+pub fn flatten_prompt_with(blocks: &[ContentBlock], attached: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
         match block.kind.as_str() {
@@ -62,9 +71,12 @@ pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
                         .as_deref()
                         .map(|m| format!(" ({m})"))
                         .unwrap_or_default();
-                    parts.push(format!(
-                        "--- {uri} ---\n[a linked resource{kind}; not fetched]"
-                    ));
+                    let fate = if attached.iter().any(|a| a == uri) {
+                        "attached"
+                    } else {
+                        "not fetched"
+                    };
+                    parts.push(format!("--- {uri} ---\n[a linked resource{kind}; {fate}]"));
                 }
             }
             _ => {}
@@ -574,14 +586,20 @@ this trailing text is ignored";
     }
 
     /// A linked resource is named in the text so the model knows it exists,
-    /// and marked as not fetched so it does not pretend to have read it.
+    /// and marked as not fetched so it does not pretend to have read it,
+    /// unless the caller says it read the file, in which case it is marked
+    /// as attached.
     #[test]
     fn a_resource_link_is_described_not_followed() {
         let link =
             ContentBlock::resource_link("file:///work/plan.pdf", "plan.pdf", "application/pdf");
         assert_eq!(
-            flatten_prompt(&[text_block("read it"), link]),
+            flatten_prompt(&[text_block("read it"), link.clone()]),
             "read it\n\n--- file:///work/plan.pdf ---\n[a linked resource (application/pdf); not fetched]"
+        );
+        assert_eq!(
+            flatten_prompt_with(&[link], &["file:///work/plan.pdf".to_string()]),
+            "--- file:///work/plan.pdf ---\n[a linked resource (application/pdf); attached]"
         );
         let mut untyped = ContentBlock::resource_link("file:///x", "x", "");
         untyped.mime_type = None;

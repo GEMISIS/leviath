@@ -217,7 +217,9 @@ same list.
   image or audio block's bytes, and a `resource` block's `blob`, become
   parts on the task region (or on the message, on a later prompt), a prompt
   that is only files gets a line naming them, and a `resource_link` is
-  named in the text and marked as not fetched. The files a run produced
+  named in the text: one whose `file://` URI points inside the session's
+  working directory is read there and rides along as a part, marked as
+  attached, and any other is marked as not fetched. The files a run produced
   follow its answer as `resource_link` blocks with a `file://` URI into the
   session's working directory. Embedders get the same: `SpawnSpec::attach`,
   `AgentWorld::send_message_with`, `InteractionResponse::with_parts`, and

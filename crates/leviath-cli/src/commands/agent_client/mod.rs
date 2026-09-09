@@ -29,6 +29,7 @@
 //!
 //! [acp]: https://agentclientprotocol.com
 
+mod links;
 mod session;
 mod translate;
 
@@ -39,7 +40,7 @@ use leviath_agent_client::{
     AgentCapabilities, AgentInfo, ContentBlock, InitializeParams, InitializeResult, JsonRpcMessage,
     PROTOCOL_VERSION, PromptCapabilities, RequestPermissionResult, SessionCancelParams,
     SessionNewParams, SessionNewResult, SessionPromptParams, SessionPromptResult, SessionUpdate,
-    SessionUpdateParams, StopReason, error_codes, flatten_prompt, is_permission_request,
+    SessionUpdateParams, StopReason, error_codes, flatten_prompt_with, is_permission_request,
     parse_region_markers, permission_request, prompt_parts,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
@@ -370,8 +371,13 @@ impl Server {
         let params: SessionPromptParams = params
             .and_then(|p| serde_json::from_value(p).ok())
             .unwrap_or_default();
-        let parts = prompt_parts(&params.prompt);
-        let mut text = flatten_prompt(&params.prompt);
+        let mut parts = prompt_parts(&params.prompt);
+        // A `file://` link inside the working directory is read here and
+        // rides along as a part; the text says which links were followed.
+        let cwd = self.session.as_ref().expect("checked above").cwd.clone();
+        let (linked, fetched) = links::link_parts(&params.prompt, &cwd);
+        parts.extend(linked);
+        let mut text = flatten_prompt_with(&params.prompt, &fetched);
         if text.is_empty() && parts.is_empty() {
             self.write(&JsonRpcMessage::error_response(
                 id,

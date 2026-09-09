@@ -98,7 +98,10 @@ region, exactly as `lev run --attach` sends them: the daemon stores each one and
 natively when the model takes the type, or as a stand-in otherwise. An image or audio block has no
 name in the protocol, so it is named for its kind and position (`image-1.png`); a resource keeps the
 last segment of its URI. A prompt that is only files gets a line naming them as its text. A
-`resource_link` is named in the text under its URI and marked as not fetched, since the agent has no
+`resource_link` whose `file://` URI points inside the session's working directory is read there and
+rides the prompt as a part too, named as the host named it, and the text marks it as attached under
+its URI. Any other link (another scheme, a path outside the working directory, an empty file or one
+over the part ceiling) is named in the text and marked as not fetched, since the agent has no other
 way to read a host's file by reference. On a later prompt the same blocks ride the message.
 
 ## Permission handling
