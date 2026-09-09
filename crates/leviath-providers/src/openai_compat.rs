@@ -866,6 +866,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     Ok(InferenceResponse {
         content,
         tool_calls,
+        parts: crate::media_output::message_blobs(message),
         // The OpenAI shape reports a `prompt_tokens` that INCLUDES its
         // `prompt_tokens_details` breakdown, where Anthropic reports the three
         // separately. `TokenUsage::prompt_tokens` is the fresh figure, so the
@@ -989,6 +990,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                         ),
                         finish_reason: None,
                         reasoning: None,
+                        parts: Vec::new(),
                     })));
                 }
                 continue;
@@ -1071,6 +1073,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                 tokens,
                 finish_reason,
                 reasoning: None,
+                parts: crate::media_output::message_blobs(delta),
             })));
         }
     }
@@ -1690,6 +1693,26 @@ mod tests {
         assert_eq!(resp.tokens_used.completion_tokens, 5);
         assert_eq!(resp.tokens_used.total_tokens, 15);
         assert_eq!(resp.finish_reason, crate::provider::FinishReason::Complete);
+    }
+
+    /// A model that draws answers with data URIs; they come out as blobs
+    /// beside the text, and a streamed delta carries them the same way.
+    #[test]
+    fn parse_response_keeps_the_images_a_model_drew() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "here it is",
+                    "images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID"}}]
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let response = parse_openai_response(&body).unwrap();
+        assert_eq!(response.content, "here it is");
+        assert_eq!(response.parts.len(), 1);
+        assert_eq!(response.parts[0].bytes, vec![1, 2, 3]);
+        assert_eq!(response.parts[0].name.as_deref(), Some("image-1.png"));
     }
 
     #[test]

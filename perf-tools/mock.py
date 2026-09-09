@@ -51,6 +51,17 @@ OVERSIZE_MIB = int(os.environ.get("LV_MOCK_OVERSIZE_MIB", "0"))
 # the body in two pieces, the cut two bytes into the four-byte emoji, so the
 # daemon's stream reader sees a chunk that is not UTF-8 on its own.
 SPLIT_UTF8 = os.environ.get("LV_MOCK_SPLIT_UTF8") == "1"
+# `LV_MOCK_IMAGE=1` makes every text reply carry one PNG the way OpenRouter
+# returns a drawn image: an `images` list of data URIs on the message.
+IMAGE = os.environ.get("LV_MOCK_IMAGE") == "1"
+IMAGE_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+
+def with_image(message):
+    """The reply's message with the mock's picture on it, when asked for."""
+    if IMAGE:
+        message["images"] = [{"type": "image_url", "image_url": {"url": IMAGE_URI}}]
+    return message
 SPLIT_TEXT = "done 完成 🎉"
 
 
@@ -153,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             finish = "tool_calls"
         else:
-            message = {"role": "assistant", "content": "done"}
+            message = with_image({"role": "assistant", "content": "done"})
             finish = "stop"
         return self._json({"id": "c1", "object": "chat.completion", "model": "gpt-mock", "usage": USAGE,
                            "choices": [{"index": 0, "finish_reason": finish, "message": message}]})
@@ -195,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
             delta = {"role": "assistant", "tool_calls": tool_calls(streaming=True)}
             finish = "tool_calls"
         else:
-            delta = {"role": "assistant", "content": SPLIT_TEXT if SPLIT_UTF8 else "done"}
+            delta = with_image({"role": "assistant", "content": SPLIT_TEXT if SPLIT_UTF8 else "done"})
             finish = "stop"
         chunks = [
             {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock",

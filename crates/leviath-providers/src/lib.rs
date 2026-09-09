@@ -21,6 +21,7 @@ pub mod failure;
 pub mod gemini;
 pub mod learned;
 pub mod media;
+pub mod media_output;
 pub mod media_tables;
 pub mod ollama;
 pub mod openai;

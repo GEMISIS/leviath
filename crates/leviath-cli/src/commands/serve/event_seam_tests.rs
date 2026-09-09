@@ -64,6 +64,7 @@ impl Provider for AnswersOnce {
             },
             finish_reason: FinishReason::Stop,
             reasoning: None,
+            parts: Vec::new(),
         })
     }
 

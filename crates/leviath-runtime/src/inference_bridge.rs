@@ -572,6 +572,7 @@ mod tests {
 
     fn response(text: &str) -> InferenceResponse {
         InferenceResponse {
+            parts: Vec::new(),
             content: text.to_string(),
             tool_calls: vec![],
             tokens_used: leviath_providers::TokenUsage {
@@ -1143,6 +1144,7 @@ mod tests {
                     tokens: None,
                     finish_reason: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 }),
                 Ok(leviath_providers::provider::StreamChunk {
                     delta: String::new(),
@@ -1150,6 +1152,7 @@ mod tests {
                     tokens: Some(leviath_providers::TokenUsage::new(7, 0, 0, 3)),
                     finish_reason: Some(leviath_providers::FinishReason::Complete),
                     reasoning: None,
+                    parts: Vec::new(),
                 }),
             ])))
         }

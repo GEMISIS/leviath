@@ -130,6 +130,7 @@ impl Provider for WritesThenAnswers {
             },
             finish_reason: FinishReason::Stop,
             reasoning: None,
+            parts: Vec::new(),
         })
     }
 

@@ -1239,6 +1239,7 @@ mod tests {
                     tokens_used: 0,
                     cut_off_at: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 },
                 ProcessResponse,
             ))
@@ -1329,6 +1330,7 @@ mod tests {
             tokens_used: 0,
             cut_off_at: None,
             reasoning: None,
+            parts: Vec::new(),
         });
     }
 
@@ -2642,6 +2644,7 @@ mod tests {
                     tokens_used: 0,
                     cut_off_at: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 },
                 crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
                     "changed src/lib.rs; the failing test now passes",
@@ -2674,6 +2677,7 @@ mod tests {
                     tokens_used: 0,
                     cut_off_at: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 },
             ))
             .id();
@@ -2812,6 +2816,7 @@ mod tests {
                     tokens_used: 0,
                     cut_off_at: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 },
             ))
             .id();

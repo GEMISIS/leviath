@@ -740,6 +740,13 @@ pub struct InferenceResponse {
     /// that produced it, never by another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+
+    /// Media the model produced beside its text: an image from a model that
+    /// draws, audio from one that speaks. Bytes, not references, because the
+    /// provider has no store; the runtime stores them on the assistant turn.
+    /// Never serialised: a journal carries the stored reference instead.
+    #[serde(skip)]
+    pub parts: Vec<leviath_core::media::Blob>,
 }
 
 // `TokenUsage` lives in `crate::pricing` alongside the rates it is priced
@@ -815,6 +822,9 @@ pub struct StreamChunk {
     /// See [`InferenceResponse::reasoning`]. Arrives on whichever chunk
     /// carries the provider's reasoning item, not necessarily the last.
     pub reasoning: Option<String>,
+
+    /// See [`InferenceResponse::parts`]: media this chunk carried whole.
+    pub parts: Vec<leviath_core::media::Blob>,
 }
 
 /// A partial tool call update from streaming.
@@ -899,6 +909,7 @@ pub trait Provider: Send + Sync {
             tokens: Some(response.tokens_used),
             finish_reason: Some(response.finish_reason),
             reasoning: None,
+            parts: Vec::new(),
         };
         Ok(Box::pin(stream_once::once(Ok(chunk))))
     }
@@ -2097,6 +2108,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
+                parts: Vec::new(),
             })
         }
 

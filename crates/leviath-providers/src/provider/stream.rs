@@ -252,10 +252,12 @@ pub async fn collect_stream(
     // Whichever chunk carried the provider's reasoning item, which is not
     // necessarily the last one.
     let mut reasoning = None;
+    let mut parts = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         content.push_str(&chunk.delta);
+        parts.extend(chunk.parts);
         for delta in chunk.tool_calls {
             let call = calls.entry(delta.index).or_default();
             // The opening delta carries the id, the name and the signature; the
@@ -297,6 +299,7 @@ pub async fn collect_stream(
         tokens_used: tokens,
         finish_reason,
         reasoning,
+        parts,
     })
 }
 
@@ -363,6 +366,7 @@ mod tests {
 
     fn text_chunk(text: &str) -> StreamChunk {
         StreamChunk {
+            parts: Vec::new(),
             delta: text.to_string(),
             tool_calls: Vec::new(),
             tokens: None,
@@ -495,6 +499,7 @@ mod tests {
             text_chunk("Let me "),
             text_chunk("check that."),
             StreamChunk {
+                parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
                     index: 0,
@@ -522,6 +527,7 @@ mod tests {
                 tokens: None,
                 finish_reason: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             StreamChunk {
                 delta: String::new(),
@@ -529,6 +535,7 @@ mod tests {
                 tokens: None,
                 finish_reason: Some(FinishReason::ToolCall),
                 reasoning: None,
+                parts: Vec::new(),
             },
         ]);
 
@@ -555,6 +562,7 @@ mod tests {
     async fn collect_stream_keeps_a_cut_off_tool_call_argument_as_text() {
         let stream = chunks(vec![
             StreamChunk {
+                parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
                     index: 0,
@@ -568,6 +576,7 @@ mod tests {
                 reasoning: None,
             },
             StreamChunk {
+                parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: None,
@@ -585,6 +594,32 @@ mod tests {
         );
     }
 
+    /// Media a chunk carried whole comes out on the collected response, in
+    /// arrival order across chunks.
+    #[tokio::test]
+    async fn collect_stream_keeps_the_media_chunks_carried() {
+        let blob = |name: &str| {
+            leviath_core::media::Blob::new(
+                leviath_core::media::MediaType::parse("image/png").unwrap(),
+                vec![1, 2, 3],
+            )
+            .named(name)
+        };
+        let mut first = text_chunk("a");
+        first.parts = vec![blob("one.png")];
+        let mut second = text_chunk("b");
+        second.parts = vec![blob("two.png")];
+        second.finish_reason = Some(FinishReason::Complete);
+        let response = collect_stream(chunks(vec![first, second])).await.unwrap();
+        assert_eq!(response.content, "ab");
+        let names: Vec<&str> = response
+            .parts
+            .iter()
+            .map(|b| b.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(names, ["one.png", "two.png"]);
+    }
+
     /// Usage chunks add up rather than replacing one another.
     ///
     /// Anthropic reports its input counts on `message_start` and its output
@@ -595,6 +630,7 @@ mod tests {
     async fn collect_stream_adds_usage_across_chunks() {
         let stream = chunks(vec![
             StreamChunk {
+                parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: Some(TokenUsage::new(100, 20, 5, 0)),
@@ -602,6 +638,7 @@ mod tests {
                 reasoning: None,
             },
             StreamChunk {
+                parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: Some(TokenUsage::new(0, 0, 0, 42).with_reported_cost(Some(0.25))),
@@ -677,6 +714,7 @@ mod tests {
             reported_cost_usd: None,
         };
         let stream = chunks(vec![StreamChunk {
+            parts: Vec::new(),
             delta: String::new(),
             tool_calls: Vec::new(),
             tokens: Some(total_only),

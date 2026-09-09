@@ -82,6 +82,7 @@ pub(super) fn parse_sse_event(
                         tokens: None,
                         finish_reason: None,
                         reasoning: None,
+                        parts: Vec::new(),
                     })
                 }
                 Some("input_json_delta") => {
@@ -108,6 +109,7 @@ pub(super) fn parse_sse_event(
                         tokens: None,
                         finish_reason: None,
                         reasoning: None,
+                        parts: Vec::new(),
                     })
                 }
                 _ => None,
@@ -143,6 +145,7 @@ pub(super) fn parse_sse_event(
                     tokens: None,
                     finish_reason: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 })
             } else {
                 None
@@ -167,6 +170,7 @@ pub(super) fn parse_sse_event(
                 tokens: Some(TokenUsage::new(0, 0, 0, output_tokens)),
                 finish_reason: Some(AnthropicProvider::parse_stop_reason(stop_reason)),
                 reasoning: None,
+                parts: Vec::new(),
             })
         }
         "message_start" => {
@@ -192,6 +196,7 @@ pub(super) fn parse_sse_event(
                     tokens: Some(TokenUsage::new(input_tokens, cached, cache_write, 0)),
                     finish_reason: None,
                     reasoning: None,
+                    parts: Vec::new(),
                 })
             } else {
                 None

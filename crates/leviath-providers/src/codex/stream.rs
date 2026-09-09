@@ -83,6 +83,7 @@ pub(super) fn parse_event(
                 tokens: None,
                 finish_reason: None,
                 reasoning: None,
+                parts: Vec::new(),
             })))
         }
 
@@ -116,6 +117,7 @@ pub(super) fn parse_event(
                 tokens: None,
                 finish_reason: None,
                 reasoning: None,
+                parts: Vec::new(),
             })))
         }
 
@@ -133,6 +135,7 @@ pub(super) fn parse_event(
                 tokens: None,
                 finish_reason: None,
                 reasoning: None,
+                parts: Vec::new(),
             })))
         }
 
@@ -151,6 +154,7 @@ pub(super) fn parse_event(
                 tokens: None,
                 finish_reason: None,
                 reasoning: Some(blob.to_string()),
+                parts: Vec::new(),
             })))
         }
 
@@ -165,6 +169,7 @@ pub(super) fn parse_event(
                     false => FinishReason::Complete,
                 }),
                 reasoning: None,
+                parts: Vec::new(),
             })))
         }
 
@@ -176,6 +181,7 @@ pub(super) fn parse_event(
                 tokens: Some(usage_of(response)),
                 finish_reason: Some(FinishReason::TokenLimit),
                 reasoning: None,
+                parts: Vec::new(),
             })))
         }
 

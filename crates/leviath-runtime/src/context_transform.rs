@@ -563,6 +563,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
+                parts: Vec::new(),
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

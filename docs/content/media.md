@@ -100,6 +100,18 @@ Stored parts are charged to their region like text is. The registry's token rule
 estimate; an image is billed by its pixels when the header could be read, and a provider's
 own count corrects the estimate after the first call.
 
+## What a model hands back
+
+A model that draws or speaks answers with bytes as well as words. An OpenAI-shaped provider
+reads them off the message as data URIs, from OpenRouter's `images` list and from `image_url`
+items in a content array, streamed or not; a [Rhai provider](/docs/rhai-providers) returns them
+under `parts`. The runtime stores each one in the run's blob store and writes it beside the
+reply's text on the assistant turn, named as the provider named it (`image-1.png` when it did
+not), so the next request, `lev blobs`, the dashboard's Context view and the API all see it,
+and a later `context_export` or `submit_output` can hand it on as an artifact. A part the run
+cannot keep (over `[media] max_part_bytes`, or a world with no store) becomes a line in the
+reply saying what was dropped. A plain URL in a reply is never fetched.
+
 ## Regions hold typed inputs
 
 A region can say what it accepts and how many stored parts it holds:

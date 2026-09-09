@@ -326,6 +326,11 @@ pub(crate) struct InferenceResult {
     /// provider issued one. Stored on the assistant turn so the next request
     /// hands it back; see `leviath_core::RegionEntry::reasoning`.
     pub reasoning: Option<String>,
+
+    /// Media the model produced, already in the run's store, or a text part
+    /// saying what was dropped when it could not be stored. Written beside
+    /// the reply's text on the assistant turn.
+    pub parts: Vec<leviath_core::media::Part>,
 }
 
 /// A tool call requested by the model.
@@ -956,6 +961,7 @@ mod tests {
             tokens_used: 100,
             cut_off_at: None,
             reasoning: None,
+            parts: Vec::new(),
         };
         assert_eq!(ir.response, "Hello");
         assert_eq!(ir.tool_calls.len(), 1);

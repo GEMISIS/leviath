@@ -900,6 +900,7 @@ mod tests {
 
     fn infer(text: &str) -> InferenceResult {
         InferenceResult {
+            parts: Vec::new(),
             response: text.to_string(),
             tool_calls: vec![],
             tokens_used: 0,

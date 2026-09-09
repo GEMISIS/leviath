@@ -167,6 +167,7 @@ mod tests {
         ) -> leviath_providers::Result<InferenceResponse> {
             match self.out.lock().unwrap().pop_front() {
                 Some(Ok(text)) => Ok(InferenceResponse {
+                    parts: Vec::new(),
                     content: text,
                     tool_calls: vec![],
                     tokens_used: TokenUsage {
@@ -361,6 +362,7 @@ mod tests {
                 tokens_used: TokenUsage::new(1, 0, 0, 1),
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
+                parts: Vec::new(),
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

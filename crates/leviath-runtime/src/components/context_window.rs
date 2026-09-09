@@ -516,7 +516,27 @@ impl ContextWindow {
         tokens: usize,
         reasoning: Option<String>,
     ) -> leviath_core::Result<()> {
-        self.typed_write(
+        self.add_assistant_turn_content(
+            region_name,
+            kind,
+            leviath_core::region::EntryContent::text(content),
+            tokens,
+            reasoning,
+        )
+    }
+
+    /// [`add_assistant_turn`](Self::add_assistant_turn) for a turn that
+    /// carries parts beside its text: what a model that draws or speaks
+    /// handed back.
+    pub(crate) fn add_assistant_turn_content(
+        &mut self,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: leviath_core::region::EntryContent,
+        tokens: usize,
+        reasoning: Option<String>,
+    ) -> leviath_core::Result<()> {
+        self.typed_write_content(
             WriteOrigin::System,
             region_name,
             kind,
