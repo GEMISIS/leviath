@@ -379,10 +379,14 @@ pub struct ModelInfo {
     /// Whether this entry came from the provider's own listing rather than a
     /// table compiled into this build.
     pub learned: bool,
+
+    /// What media the model takes and can hand back. See [`Provider::media`].
+    pub media: crate::capabilities::ModelMedia,
 }
 
 impl ModelInfo {
-    /// An entry from a compiled table: nothing learned, nothing dated.
+    /// An entry from a compiled table: nothing learned, nothing dated, text
+    /// in and text out until [`Self::with_media`] says otherwise.
     pub fn new(
         id: impl Into<String>,
         provider: impl Into<String>,
@@ -397,7 +401,14 @@ impl ModelInfo {
             retires: None,
             pricing: None,
             learned: false,
+            media: crate::capabilities::ModelMedia::text_only(),
         }
+    }
+
+    /// The same entry, with what the model takes and produces filled in.
+    pub fn with_media(mut self, media: crate::capabilities::ModelMedia) -> Self {
+        self.media = media;
+        self
     }
 
     /// This entry with a display name.
@@ -860,6 +871,18 @@ pub trait Provider: Send + Sync {
 
     /// Get the capabilities of the given model.
     fn capabilities(&self, model: &str) -> ModelCapabilities;
+
+    /// What media `model` takes and can hand back, as media type patterns.
+    ///
+    /// Answered the way [`Self::capabilities`] is: the compiled table, then
+    /// the provider's own listing, then the operator's `[model_capabilities]`
+    /// row. A provider that knows nothing about media answers text only,
+    /// which is the default here, so a stored part sent its way arrives as
+    /// text or as its stand-in rather than as bytes it would reject.
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        let _ = model;
+        crate::capabilities::ModelMedia::text_only()
+    }
 
     /// Learn what this provider's own API says about its models, before any
     /// inference asks.

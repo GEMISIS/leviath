@@ -86,6 +86,16 @@ same list.
   `max_stored`; a region with a `schema` takes text only. A snapshot or
   journal written before this reads back unchanged, since a plain string is
   still how a text-only entry is written (#400).
+- Every model says what it takes and what it can hand back, as media type
+  patterns. The built-in tables know that Claude reads images and PDFs, that
+  Gemini also takes audio and video, which OpenAI models see, hear or draw,
+  and which Ollama builds are vision models; OpenRouter's listing corrects
+  that from its `architecture` block and Ollama's `/api/show` from its
+  `capabilities`; `[model_capabilities.<id>] input_types / output_types`
+  correct both, and a Rhai provider declares `// @input_types` and
+  `// @output_types`. `lev models` shows a `MEDIA` column and takes
+  `--accepts image/png`, `lev models show` prints both lists, and
+  `GET /api/models` carries `input_types` and `output_types` (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

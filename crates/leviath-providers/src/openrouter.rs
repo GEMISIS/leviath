@@ -698,6 +698,18 @@ impl Provider for OpenRouterProvider {
         caps
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        // The listing's `architecture` block says outright what a model
+        // takes; before priming, the vendor prefix is the best guess.
+        let base = self
+            .learned
+            .media_corrected(model, crate::media_tables::by_prefix(model));
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
+        }
+    }
+
     fn serves_model(&self, model_key: &str) -> Option<String> {
         // Answered from the primed catalogue rather than the built-in table:
         // OpenRouter fronts hundreds of models and the table lists a few dozen,
@@ -774,6 +786,9 @@ impl Provider for OpenRouterProvider {
             .to_model_infos("openrouter", |id| self.capabilities(id)))
     }
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {

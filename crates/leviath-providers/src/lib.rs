@@ -20,6 +20,7 @@ pub mod endpoint;
 pub mod failure;
 pub mod gemini;
 pub mod learned;
+pub mod media_tables;
 pub mod ollama;
 pub mod openai;
 pub(crate) mod openai_compat;
@@ -35,7 +36,7 @@ pub mod tokenizer;
 mod test_support;
 
 pub use anthropic::AnthropicProvider;
-pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
+pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMedia};
 pub use claude_code::ClaudeCodeProvider;
 pub use codex::{CodexProvider, ProviderAuthStore, ProviderGrant};
 pub use endpoint::EndpointProvider;

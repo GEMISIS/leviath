@@ -93,8 +93,27 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             // The listing has no retirement date; OpenRouter simply drops a
             // model from it.
             retires: None,
+            input_types: modalities(entry, "input_modalities"),
+            output_types: modalities(entry, "output_modalities"),
         },
     ))
+}
+
+/// The listing's `architecture.<key>` words as media type patterns, or
+/// `None` when the entry has no such list.
+fn modalities(entry: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    let words = entry
+        .get("architecture")
+        .and_then(|a| a.get(key))
+        .and_then(|v| v.as_array())?;
+    Some(
+        words
+            .iter()
+            .filter_map(|w| w.as_str())
+            .filter_map(crate::media_tables::modality_pattern)
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -185,5 +204,28 @@ mod tests {
         assert_eq!(parse_entry(&entry).unwrap().1.pricing, None);
         let entry = json!({ "id": "x", "pricing": { "prompt": "abc", "completion": "0.1" } });
         assert_eq!(parse_entry(&entry).unwrap().1.pricing, None);
+    }
+
+    #[test]
+    fn architecture_modalities_become_media_patterns() {
+        let entry = json!({
+            "id": "google/gemini-3.5-flash",
+            "architecture": {
+                "input_modalities": ["text", "image", "file", "audio", "video", "smell"],
+                "output_modalities": ["text", "image"]
+            }
+        });
+        let (_, learned) = parse_entry(&entry).unwrap();
+        assert_eq!(
+            learned.input_types.unwrap(),
+            vec!["text/*", "image/*", "application/pdf", "audio/*", "video/*"]
+        );
+        assert_eq!(learned.output_types.unwrap(), vec!["text/*", "image/*"]);
+        let bare = json!({ "id": "x" });
+        let (_, learned) = parse_entry(&bare).unwrap();
+        assert_eq!(learned.input_types, None);
+        assert_eq!(learned.output_types, None);
+        let odd = json!({ "id": "x", "architecture": { "input_modalities": "text" } });
+        assert_eq!(parse_entry(&odd).unwrap().1.input_types, None);
     }
 }

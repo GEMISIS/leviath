@@ -1170,6 +1170,10 @@ pub(super) struct ModelEntry {
     pub(super) retires: Option<String>,
     /// USD per million tokens, when the provider's listing quotes a rate.
     pub(super) pricing: Option<leviath_providers::ModelPricing>,
+    /// Media type patterns the model accepts in a request, `text/*` included.
+    pub(super) input_types: Vec<String>,
+    /// Media type patterns the model can hand back.
+    pub(super) output_types: Vec<String>,
 }
 
 #[cfg(test)]

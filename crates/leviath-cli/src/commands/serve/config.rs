@@ -515,7 +515,10 @@ pub(super) async fn list_models_from_config(
         };
         if let Ok(list) = provider.list_models().await {
             for m in list {
+                let media = provider.media(&m.id);
                 models.push(ModelEntry {
+                    input_types: media.input,
+                    output_types: media.output,
                     id: m.id,
                     provider: m.provider,
                     display_name: m.display_name,

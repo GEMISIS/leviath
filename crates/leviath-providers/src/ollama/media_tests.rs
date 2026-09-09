@@ -1,0 +1,33 @@
+//! What a local model takes: its name, then `/api/show`, then the override.
+
+use super::*;
+use crate::capabilities::ModelCapabilityOverride;
+use crate::learned::LearnedModel;
+use leviath_core::media::MediaType;
+
+#[test]
+fn vision_builds_by_name_then_by_show_then_by_override() {
+    let mut provider = OllamaProvider::new(reqwest::Client::new());
+    assert!(
+        provider
+            .media("llava:13b")
+            .accepts(&MediaType::parse("image/png").unwrap())
+    );
+    assert!(!provider.media("llama3.3").takes_media());
+    provider.learned.replace(std::collections::HashMap::from([(
+        "llama3.3".to_string(),
+        LearnedModel {
+            input_types: Some(vec!["text/*".into(), "image/*".into()]),
+            ..Default::default()
+        },
+    )]));
+    assert!(provider.media("llama3.3").takes_media());
+    provider.capability_overrides.insert(
+        "llama3.3".to_string(),
+        ModelCapabilityOverride {
+            input_types: Some(vec!["text/*".into()]),
+            ..Default::default()
+        },
+    );
+    assert!(!provider.media("llama3.3").takes_media());
+}

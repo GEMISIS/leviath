@@ -53,6 +53,10 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
                 .and_then(|v| v.as_str())
                 .and_then(unix_seconds_from_rfc3339),
             retires: None,
+            // The listing names no modalities; every current model reads
+            // images and PDFs, which the table says.
+            input_types: None,
+            output_types: None,
         },
     ))
 }

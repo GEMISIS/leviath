@@ -1339,7 +1339,11 @@ it. Beside it: `supports_temperature` and `supports_tools`; `learned`, true when
 listing described the model and false for a row from this build's table; and, when the listing
 carries them, `released` (Unix seconds), `retires` (the date the provider published) and `pricing`
 (USD per million tokens: `input_per_mtok`, `cached_input_per_mtok`, `cache_write_per_mtok`,
-`output_per_mtok`), each `null` otherwise. Which providers can report what, and from where, is in
+`output_per_mtok`), each `null` otherwise. Two lists say what the model takes and hands back:
+`input_types` and `output_types`, media type patterns such as `text/*`, `image/*` or
+`application/pdf`, from this build's table corrected by the provider's listing and by
+`[model_capabilities]`. A stage holding an image picks a model whose `input_types` cover it; see
+[typed media](/docs/media). Which providers can report what, and from where, is in
 [where a model's capabilities come from](/docs/configuration#where-a-models-capabilities-come-from).
 That is what lets a console show the catalog without fetching and re-parsing every script. No other
 kind carries the key at all.
@@ -1390,6 +1394,7 @@ than that feature, not broken.
 | `runs.parent` | `parent=none` / `parent=<run_id>`. See [listing by place in the tree](#listing-by-place-in-the-tree) |
 | `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
+| `models.media_types` | `input_types` and `output_types` on every `GET /api/models` entry: the media type patterns a model takes and hands back |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
 | `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them. Without it a stage record carries tokens and no price, and the missing field is not a zero |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |

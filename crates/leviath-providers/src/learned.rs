@@ -51,6 +51,11 @@ pub struct LearnedModel {
     pub released: Option<i64>,
     /// When the provider will withdraw it, as the date string it published.
     pub retires: Option<String>,
+    /// Media type patterns the listing says the model accepts. `None` when
+    /// the listing has no such field, as with every field here.
+    pub input_types: Option<Vec<String>>,
+    /// Media type patterns the listing says the model can hand back.
+    pub output_types: Option<Vec<String>>,
 }
 
 impl LearnedModel {
@@ -74,6 +79,17 @@ impl LearnedModel {
                 false => base.limits_source,
             },
             ..base
+        }
+    }
+
+    /// `base` with the media lists this record names replaced.
+    pub fn apply_media(
+        &self,
+        base: crate::capabilities::ModelMedia,
+    ) -> crate::capabilities::ModelMedia {
+        crate::capabilities::ModelMedia {
+            input: self.input_types.clone().unwrap_or(base.input),
+            output: self.output_types.clone().unwrap_or(base.output),
         }
     }
 }
@@ -139,6 +155,18 @@ impl LearnedModels {
     pub fn corrected(&self, id: &str, base: ModelCapabilities) -> ModelCapabilities {
         match self.get(id) {
             Some(learned) => learned.apply_to(base),
+            None => base,
+        }
+    }
+
+    /// `base` media lists corrected by what the listing said about `id`.
+    pub fn media_corrected(
+        &self,
+        id: &str,
+        base: crate::capabilities::ModelMedia,
+    ) -> crate::capabilities::ModelMedia {
+        match self.get(id) {
+            Some(learned) => learned.apply_media(base),
             None => base,
         }
     }
@@ -465,5 +493,47 @@ mod tests {
             let seconds = unix_seconds_from_rfc3339(&format!("{text}T00:00:00Z")).unwrap();
             assert_eq!(civil_date(seconds), text);
         }
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use crate::capabilities::ModelMedia;
+
+    #[test]
+    fn a_record_replaces_only_the_media_lists_it_names() {
+        let base = ModelMedia::new(&["text/*"], &["text/*"]);
+        assert_eq!(LearnedModel::default().apply_media(base.clone()), base);
+        let input = LearnedModel {
+            input_types: Some(vec!["text/*".into(), "image/*".into()]),
+            ..Default::default()
+        };
+        let merged = input.apply_media(base.clone());
+        assert_eq!(merged.input, vec!["text/*", "image/*"]);
+        assert_eq!(merged.output, base.output);
+        let output = LearnedModel {
+            output_types: Some(vec!["image/*".into()]),
+            ..Default::default()
+        };
+        assert_eq!(output.apply_media(base.clone()).output, vec!["image/*"]);
+    }
+
+    #[test]
+    fn the_store_corrects_a_listed_id_and_leaves_the_rest() {
+        let store = LearnedModels::default();
+        store.replace(HashMap::from([(
+            "seer".to_string(),
+            LearnedModel {
+                input_types: Some(vec!["text/*".into(), "video/*".into()]),
+                ..Default::default()
+            },
+        )]));
+        let base = ModelMedia::text_only();
+        assert_eq!(
+            store.media_corrected("seer", base.clone()).input,
+            vec!["text/*", "video/*"]
+        );
+        assert_eq!(store.media_corrected("blind", base.clone()), base);
     }
 }

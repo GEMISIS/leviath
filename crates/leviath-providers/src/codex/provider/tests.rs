@@ -898,3 +898,18 @@ fn an_empty_usage_url_leaves_the_default_alone() {
     let p = provider("http://x", Static::new("t")).with_usage_url(None);
     assert_eq!(p.usage_url, crate::codex::USAGE_URL);
 }
+
+#[test]
+fn codex_takes_images_until_an_override_says_otherwise() {
+    let mut p = provider("http://x", Static::new("t"));
+    let png = leviath_core::media::MediaType::parse("image/png").unwrap();
+    assert!(p.media("gpt-5.5-codex").accepts(&png));
+    p.capability_overrides.insert(
+        "gpt-5.5-codex".to_string(),
+        crate::capabilities::ModelCapabilityOverride {
+            input_types: Some(vec!["text/*".into()]),
+            ..Default::default()
+        },
+    );
+    assert!(!p.media("gpt-5.5-codex").accepts(&png));
+}
