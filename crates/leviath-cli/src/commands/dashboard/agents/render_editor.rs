@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use super::super::state::Dashboard;
 use super::super::theme::*;
 use super::super::types::PaneId;
-use super::editor::{Focus, InspectorHits, ModelDrag, Overlay};
+use super::editor::{Editor, Focus, InspectorHits, ModelDrag, Overlay};
 use super::inspector::{Field, FieldId, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
@@ -68,6 +68,9 @@ impl Dashboard {
             self.draw_editor_inspector(frame, area);
         }
         self.draw_editor_hints(frame, rows[2]);
+        // The window sits over the editor and under the chooser or the line
+        // popup a row of it may open.
+        self.draw_editor_modal(frame, rows[1]);
         self.draw_editor_overlays(frame, area);
     }
 
@@ -174,8 +177,17 @@ impl Dashboard {
     /// and the focused row's help at the bottom.
     fn draw_editor_inspector(&mut self, frame: &mut Frame, area: Rect) {
         let editor = self.editor();
-        let focused = editor.focus == Focus::Inspector;
-        let title = panel_title(&editor.panel);
+        // Under a window the inspector shows the panel the window was
+        // opened over, with the keys elsewhere.
+        let (panel, cursor, focused) = match &editor.modal {
+            Some(base) => (base.panel.clone(), base.cursor, false),
+            None => (
+                editor.panel.clone(),
+                editor.cursor,
+                editor.focus == Focus::Inspector,
+            ),
+        };
+        let title = panel_title(&panel);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -188,7 +200,7 @@ impl Dashboard {
             area,
             ..InspectorHits::default()
         };
-        if let Panel::Stage { tab, .. } = &editor.panel {
+        if let Panel::Stage { tab, .. } = &panel {
             let mut spans = Vec::new();
             let mut x = inner.x;
             let mut tabs = Vec::new();
@@ -213,76 +225,33 @@ impl Dashboard {
             lines.push(Line::from(spans));
             lines.push(Line::from(""));
         }
-        if let Panel::External(name) = &editor.panel {
+        if let Panel::External(name) = &panel {
             lines.push(Line::from(Span::styled(
                 format!("{name} is a separate agent; edit it from the catalog."),
                 Style::default().fg(C_MUTED),
             )));
         }
-        let fields = drag_order(editor.fields(), editor.model_drag);
-        let label_w = 23usize;
-        // Two columns wider than the label and its gutter: the grip sits in
-        // the gap, blank on rows nothing can be done with.
-        let value_w = (inner.width as usize).saturating_sub(label_w + GRIP_W as usize + 3);
-        for (i, field) in fields.iter().enumerate() {
-            let row_y = inner.y + lines.len() as u16;
-            hits.rows.push(row_y);
-            if let FieldId::ModelEntry(m) = field.id {
-                hits.grips.push((
-                    m,
-                    Rect {
-                        x: inner.x + 2,
-                        y: row_y,
-                        width: GRIP_W,
-                        height: 1,
-                    },
-                ));
-            }
-            let on = focused && i == editor.cursor;
-            let editing = editor.line.as_ref().filter(|(id, _)| *id == field.id);
-            let label_style = if !field.enabled {
-                Style::default().fg(C_DIM)
-            } else if on {
-                Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(C_MUTED)
-            };
-            let grabbable = matches!(field.id, FieldId::ModelEntry(_));
-            let mut spans = vec![
-                Span::styled(if on { "› " } else { "  " }, Style::default().fg(C_ACCENT)),
-                Span::styled(
-                    if grabbable { GRIP } else { "  " },
-                    Style::default().fg(if on { C_ACCENT } else { C_DIM }),
-                ),
-            ];
-            // A button is its label: the whole row is the action, so it has
-            // no value column.
-            let is_button = matches!(field.value, FieldValue::Button);
-            if !is_button {
-                spans.push(Span::styled(
-                    format!("{:<label_w$}", field.label),
-                    label_style,
-                ));
-            }
-            match editing {
-                Some((_, line)) => spans.extend(line.display_spans(true).spans),
-                None => {
-                    let (text, style) = value_text(field, on);
-                    let room = if is_button {
-                        value_w + label_w
-                    } else {
-                        value_w
-                    };
-                    spans.push(Span::styled(fit(&text, room), style));
-                }
-            }
-            lines.push(Line::from(spans));
-        }
+        let fields = drag_order(
+            super::inspector::fields(&editor.doc, &panel),
+            editor.model_drag,
+        );
+        let painted = field_lines(
+            editor,
+            &fields,
+            cursor,
+            focused,
+            inner,
+            inner.y + lines.len() as u16,
+            true,
+        );
+        lines.extend(painted.lines);
+        hits.rows = painted.rows;
+        hits.grips = painted.grips;
         let help = fields
-            .get(editor.cursor)
+            .get(cursor)
             .filter(|_| focused)
             .map(|f| f.help.to_string())
-            .unwrap_or_else(|| match editor.panel {
+            .unwrap_or_else(|| match panel {
                 Panel::Agent => {
                     "Select a stage or a path on the canvas to edit it; Tab moves here.".to_string()
                 }
@@ -311,6 +280,57 @@ impl Dashboard {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(help, Style::default().fg(C_DIM))))
                 .wrap(Wrap { trim: true }),
+            help_area,
+        );
+    }
+
+    /// The window a region, a declared file or a loop's path is edited in:
+    /// the same rows the inspector would show, over the editor, with the
+    /// keys until Esc closes it.
+    fn draw_editor_modal(&mut self, frame: &mut Frame, area: Rect) {
+        let editor = self.editor();
+        if editor.modal.is_none() {
+            return;
+        }
+        let popup = centered(64, 76, area);
+        let popup = Rect {
+            width: popup.width.max(area.width.min(60)),
+            height: popup.height.max(area.height.min(14)),
+            ..popup
+        };
+        let inner = popup_frame(frame, popup, &panel_title(&editor.panel), C_BORDER_FOCUS);
+        let fields = editor.fields();
+        let painted = field_lines(editor, &fields, editor.cursor, true, inner, inner.y, false);
+        let help = fields
+            .get(editor.cursor)
+            .map(|f| f.help.to_string())
+            .unwrap_or_default();
+        let body_h = inner.height.saturating_sub(3);
+        let mut hits = InspectorHits {
+            area: popup,
+            rows: painted.rows,
+            ..InspectorHits::default()
+        };
+        hits.rows.retain(|y| *y < inner.y + body_h);
+        editor.modal_hit = hits;
+        frame.render_widget(
+            Paragraph::new(painted.lines).wrap(Wrap { trim: false }),
+            Rect {
+                height: body_h,
+                ..inner
+            },
+        );
+        let help_area = Rect {
+            y: inner.y + inner.height.saturating_sub(3),
+            height: inner.height.min(3),
+            ..inner
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("{help}  Esc closes this window."),
+                Style::default().fg(C_DIM),
+            )))
+            .wrap(Wrap { trim: true }),
             help_area,
         );
     }
@@ -348,6 +368,17 @@ impl Dashboard {
                 hint("esc", "cancel"),
                 hint("type", "edit"),
                 hint("enter", "apply"),
+            ]
+        } else if editor.modal.is_some() {
+            vec![
+                hint("esc", "close"),
+                hint("^s", "save"),
+                hint("↑↓", "row"),
+                hint("enter", "edit"),
+                hint("←→", "change"),
+                hint("x", "remove"),
+                hint("^z", "undo"),
+                hint("click", "pick a row"),
             ]
         } else if matches!(editor.overlay, Some(Overlay::Prompts(_))) {
             vec![
@@ -389,14 +420,7 @@ impl Dashboard {
                     hint("drag", "move / connect"),
                 ],
                 Focus::Inspector => vec![
-                    hint(
-                        "esc",
-                        if editor.panel_anchor.is_some() {
-                            "back"
-                        } else {
-                            "canvas"
-                        },
-                    ),
+                    hint("esc", "canvas"),
                     hint("^s", "save"),
                     hint("?", "help"),
                     hint("↑↓", "row"),
@@ -449,6 +473,97 @@ impl Dashboard {
             frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
         }
     }
+}
+
+/// The rows of a panel as drawn: their lines, and where each landed.
+struct PaintedRows {
+    lines: Vec<Line<'static>>,
+    /// The screen row of each field, in field order.
+    rows: Vec<u16>,
+    /// The drag grip beside each model entry.
+    grips: Vec<(usize, Rect)>,
+}
+
+/// Paint `fields` one row each from `start_y`, the cursor's row lit when
+/// `focused`, a line editor drawn in place on the row being typed into.
+/// The inspector and the window share this, so a region reads the same in
+/// both.
+fn field_lines(
+    editor: &Editor,
+    fields: &[Field],
+    cursor: usize,
+    focused: bool,
+    inner: Rect,
+    start_y: u16,
+    with_grips: bool,
+) -> PaintedRows {
+    let label_w = 23usize;
+    // Two columns wider than the label and its gutter: the grip sits in
+    // the gap, blank on rows nothing can be done with.
+    let value_w = (inner.width as usize).saturating_sub(label_w + GRIP_W as usize + 3);
+    let mut painted = PaintedRows {
+        lines: Vec::new(),
+        rows: Vec::new(),
+        grips: Vec::new(),
+    };
+    for (i, field) in fields.iter().enumerate() {
+        let row_y = start_y + i as u16;
+        painted.rows.push(row_y);
+        if with_grips && let FieldId::ModelEntry(m) = field.id {
+            painted.grips.push((
+                m,
+                Rect {
+                    x: inner.x + 2,
+                    y: row_y,
+                    width: GRIP_W,
+                    height: 1,
+                },
+            ));
+        }
+        let on = focused && i == cursor;
+        let editing = editor
+            .line
+            .as_ref()
+            .filter(|(id, _)| focused && *id == field.id);
+        let label_style = if !field.enabled {
+            Style::default().fg(C_DIM)
+        } else if on {
+            Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_MUTED)
+        };
+        let grabbable = with_grips && matches!(field.id, FieldId::ModelEntry(_));
+        let mut spans = vec![
+            Span::styled(if on { "› " } else { "  " }, Style::default().fg(C_ACCENT)),
+            Span::styled(
+                if grabbable { GRIP } else { "  " },
+                Style::default().fg(if on { C_ACCENT } else { C_DIM }),
+            ),
+        ];
+        // A button is its label: the whole row is the action, so it has
+        // no value column.
+        let is_button = matches!(field.value, FieldValue::Button);
+        if !is_button {
+            spans.push(Span::styled(
+                format!("{:<label_w$}", field.label),
+                label_style,
+            ));
+        }
+        match editing {
+            Some((_, line)) => spans.extend(line.display_spans(true).spans),
+            None => {
+                let (text, style) = value_text(field, on);
+                let room = if is_button {
+                    value_w + label_w
+                } else {
+                    value_w
+                };
+                spans.push(Span::styled(fit(&text, room), style));
+            }
+        }
+        painted.lines.push(Line::from(spans));
+    }
+    painted
 }
 
 /// The fields as they should be drawn while a model is in the air: the chain's

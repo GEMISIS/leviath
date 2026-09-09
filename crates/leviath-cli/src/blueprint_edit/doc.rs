@@ -181,6 +181,11 @@ pub(crate) struct StageView {
     pub input_as_text: Vec<String>,
     /// The files the stage declares it hands back, in declaration order.
     pub artifacts: Vec<super::media::ArtifactView>,
+    /// `[stages.<name>.output] format`, or empty.
+    pub output_format: String,
+    /// `[stages.<name>.tool_accepts]`: each tool and what it may be handed,
+    /// in document order.
+    pub tool_accepts: Vec<(String, Vec<String>)>,
 }
 
 /// When a path is taken.
@@ -561,6 +566,8 @@ fn stage_view(name: &str, item: &Item) -> StageView {
             input_accepts: super::media::input_list(item, super::media::InputList::Accepts),
             input_as_text: super::media::input_list(item, super::media::InputList::AsText),
             artifacts: super::media::artifacts_of(item),
+            output_format: super::media::output_format_of(item),
+            tool_accepts: super::media::tool_limits_of(item),
         }
     }
 }

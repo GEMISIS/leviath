@@ -1,7 +1,9 @@
 //! Mutators for what a stage takes and hands back as media: the
-//! `[stages.<name>.input]` lists and the `[[stages.<name>.output.artifacts]]`
-//! declarations. What a region takes (`accepts`, `max_stored`) is a region
-//! key like any other and lives in `regions.rs`.
+//! `[stages.<name>.input]` lists, the `[stages.<name>.output]` format and
+//! `[[artifacts]]` declarations, and the `[stages.<name>.tool_accepts]`
+//! table that says what each tool may be handed. What a region takes
+//! (`accepts`, `max_stored`) is a region key like any other and lives in
+//! `regions.rs`.
 
 use toml_edit::{Array, ArrayOfTables, InlineTable, Item, Table, TableLike, Value};
 
@@ -73,6 +75,29 @@ pub(crate) fn split_list(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// `[stages.<name>.output] format`, or empty.
+pub(super) fn output_format_of(stage: &Item) -> String {
+    child(stage, "output")
+        .and_then(|output| get_str(output, "format"))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `[stages.<name>.tool_accepts]`: each tool and what it may be handed, in
+/// document order. An entry that is not a list of strings is left out (and
+/// left alone).
+pub(super) fn tool_limits_of(stage: &Item) -> Vec<(String, Vec<String>)> {
+    child(stage, "tool_accepts")
+        .map(|limits| {
+            limits
+                .iter()
+                .filter(|(_, v)| v.as_array().is_some())
+                .map(|(tool, _)| (tool.to_string(), get_strings(limits, tool)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The `[stages.<name>.input]` list `which`, or empty.
@@ -224,6 +249,71 @@ impl ManifestDoc {
             input.as_table_like_mut().expect("ensure_parent checked"),
             which.key(),
             values,
+        );
+        Ok(())
+    }
+
+    /// Set `[stages.<name>.output] format`; empty deletes it, and the
+    /// `output` table with it when nothing else is left there.
+    pub(crate) fn set_output_format(&mut self, stage: &str, format: &str) -> Result<(), EditError> {
+        let stage_item = self
+            .stage_item_mut(stage)
+            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
+        if format.is_empty() {
+            if let Some(output) = child_mut(stage_item, "output")
+                && remove_and_report_empty(
+                    output.as_table_like_mut().expect("child_mut checked"),
+                    "format",
+                )
+            {
+                stage_item
+                    .as_table_like_mut()
+                    .expect("a stage is a table")
+                    .remove("output");
+            }
+            return Ok(());
+        }
+        let output = ensure_parent(stage_item, "output")?;
+        set_str(
+            output.as_table_like_mut().expect("ensure_parent checked"),
+            "format",
+            format,
+        );
+        Ok(())
+    }
+
+    /// Set what `tool` may be handed at the stage (`tool_accepts`); an empty
+    /// list lifts the limit, and takes the table with it when it was the
+    /// last one.
+    pub(crate) fn set_tool_accepts(
+        &mut self,
+        stage: &str,
+        tool: &str,
+        types: &[String],
+    ) -> Result<(), EditError> {
+        require_name(tool)?;
+        let stage_item = self
+            .stage_item_mut(stage)
+            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
+        if types.is_empty() {
+            if let Some(limits) = child_mut(stage_item, "tool_accepts")
+                && remove_and_report_empty(
+                    limits.as_table_like_mut().expect("child_mut checked"),
+                    tool,
+                )
+            {
+                stage_item
+                    .as_table_like_mut()
+                    .expect("a stage is a table")
+                    .remove("tool_accepts");
+            }
+            return Ok(());
+        }
+        let limits = ensure_parent(stage_item, "tool_accepts")?;
+        set_strings(
+            limits.as_table_like_mut().expect("ensure_parent checked"),
+            tool,
+            types,
         );
         Ok(())
     }

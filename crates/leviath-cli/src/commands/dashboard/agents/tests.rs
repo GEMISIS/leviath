@@ -586,18 +586,20 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
             .edge("review", "review")
             .is_some()
     );
-    assert!(text(&mut dash).contains("↺ loops"));
-    // The loop opened its own path panel; Esc goes back to the stage, a
-    // second Esc to the canvas.
+    // The loop opened its path in a window over the editor; Esc closes it
+    // onto the stage, with the badge on the box now in view, and a second
+    // Esc goes to the canvas.
     assert!(matches!(
         dash.agents().editor.as_ref().unwrap().panel,
         Panel::Edge { .. }
     ));
+    assert!(dash.agents().editor.as_ref().unwrap().modal.is_some());
     dash.handle_key(key(KeyCode::Esc));
     assert!(matches!(
         dash.agents().editor.as_ref().unwrap().panel,
         Panel::Stage { .. }
     ));
+    assert!(text(&mut dash).contains("↺ loops"));
     // Connect from nothing selected: a message.
     dash.handle_key(key(KeyCode::Esc));
     dash.agents()
@@ -1178,9 +1180,9 @@ fn the_inspector_edits_every_kind_of_field() {
         dash.agents().editor.as_ref().unwrap().doc.stage_names(),
         ["work2", "finish"]
     );
-    dash.handle_key(key(KeyCode::Char('2')));
-    assert!(text(&mut dash).contains("Model & tools"));
     dash.handle_key(key(KeyCode::Char('3')));
+    assert!(text(&mut dash).contains("Models & tools"));
+    dash.handle_key(key(KeyCode::Char('2')));
     dash.handle_key(key(KeyCode::Char('1')));
     dash.handle_key(key(KeyCode::Char('j')));
     dash.handle_key(key(KeyCode::Char('k')));
@@ -2019,7 +2021,7 @@ fn typing_in_a_chooser_never_reaches_the_editor_keys() {
     open_editor_on(&mut dash, "coder");
     dash.handle_key(key(KeyCode::Right));
     dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(key(KeyCode::Char('2')));
+    dash.handle_key(key(KeyCode::Char('3')));
     dash.handle_key(key(KeyCode::Enter));
     assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
     type_str(&mut dash, "haiku");

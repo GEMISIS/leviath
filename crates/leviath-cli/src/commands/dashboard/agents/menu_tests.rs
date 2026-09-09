@@ -386,7 +386,7 @@ fn the_bars_name_the_controls_on_every_screen() {
     assert!(screen.contains("x remove"), "{screen}");
     dash.editor_add_region("r");
     let screen = text(&mut dash);
-    assert!(screen.contains("esc back · ^s save"), "{screen}");
+    assert!(screen.contains("esc close · ^s save · ↑↓ row"), "{screen}");
     dash.handle_key(key(KeyCode::Esc));
     dash.agents()
         .editor

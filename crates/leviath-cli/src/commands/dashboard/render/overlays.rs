@@ -218,21 +218,22 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                 ),
                 (
                     "1 2 3 4",
-                    "a stage's tabs: behaviour, model & tools, context, media",
+                    "a stage's tabs: behaviour, inputs & outputs, models & tools, context",
                 ),
                 (
                     "x / backspace",
-                    "remove the row: a model from the chain, a routing rule, a file declaration",
+                    "remove the row: a model from the chain, a routing rule, a file declaration, a list of types",
+                ),
+                (
+                    "enter on a region, a file or a loop",
+                    "opens it in a window over the editor; esc closes the window",
                 ),
                 ("← → on a model", "move it earlier or later in the chain"),
                 (
                     "drag ⠿",
                     "pick a model up by its grip and drop it anywhere in the chain; the rest of the row still selects text",
                 ),
-                (
-                    "esc",
-                    "back: a region or a loop's path returns to where it was opened from, otherwise the canvas",
-                ),
+                ("esc", "close the window, or move the keys to the canvas"),
                 (
                     "click",
                     "pick a row (again to open it); click a tab to switch",

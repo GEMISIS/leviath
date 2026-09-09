@@ -1522,6 +1522,99 @@ fn media_keys_write_the_way_the_runtime_reads_them() {
     // The typed-list splitter.
     assert_eq!(split_list(" a/b,, c/D\tc/d "), ["a/b", "c/d"]);
     assert!(split_list(", ").is_empty());
+    // The answer format comes and goes with its table.
+    let mut doc = starter();
+    doc.set_output_format("work", "markdown").unwrap();
+    assert_eq!(doc.stage("work").unwrap().output_format, "markdown");
+    assert!(
+        doc.to_toml().contains("[stages.work.output]"),
+        "{}",
+        doc.to_toml()
+    );
+    // Cleared with nothing else in the table, the table goes too.
+    doc.set_output_format("work", "").unwrap();
+    assert!(!doc.to_toml().contains("output"), "{}", doc.to_toml());
+    doc.set_output_format("work", "markdown").unwrap();
+    doc.add_artifact("work", "final").unwrap();
+    doc.set_output_format("work", "").unwrap();
+    let text = doc.to_toml();
+    assert!(
+        !text.contains("format") && text.contains("artifacts"),
+        "{text}"
+    );
+    doc.delete_artifact("work", 0).unwrap();
+    assert!(!doc.to_toml().contains("output"), "{}", doc.to_toml());
+    doc.set_output_format("work", "").unwrap();
+    assert_eq!(
+        doc.set_output_format("ghost", "x"),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    // What a tool may be handed: written per tool, read in order, lifted by
+    // an empty list, the table going with the last one.
+    doc.set_tool_accepts(
+        "work",
+        "spawn_agent",
+        &["image/*".to_string(), "audio/wav".to_string()],
+    )
+    .unwrap();
+    doc.set_tool_accepts("work", "context_export", &["text/*".to_string()])
+        .unwrap();
+    assert_eq!(
+        doc.stage("work").unwrap().tool_accepts,
+        vec![
+            (
+                "spawn_agent".to_string(),
+                vec!["image/*".to_string(), "audio/wav".to_string()]
+            ),
+            ("context_export".to_string(), vec!["text/*".to_string()]),
+        ]
+    );
+    assert!(
+        doc.to_toml().contains("[stages.work.tool_accepts]"),
+        "{}",
+        doc.to_toml()
+    );
+    let bp = runtime_ok(&doc);
+    assert_eq!(
+        bp.stages[0].tool_limit("context_export"),
+        Some(["text/*".to_string()].as_slice())
+    );
+    doc.set_tool_accepts("work", "spawn_agent", &[]).unwrap();
+    assert_eq!(doc.stage("work").unwrap().tool_accepts.len(), 1);
+    doc.set_tool_accepts("work", "context_export", &[]).unwrap();
+    assert!(!doc.to_toml().contains("tool_accepts"), "{}", doc.to_toml());
+    doc.set_tool_accepts("work", "context_export", &[]).unwrap();
+    assert_eq!(
+        doc.set_tool_accepts("work", "no way", &["x/y".to_string()]),
+        Err(EditError::BadName("no way".into()))
+    );
+    assert_eq!(
+        doc.set_tool_accepts("ghost", "t", &["x/y".to_string()]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    // A limit that is not a list is skipped by the view and refused by the
+    // writer; a format table that is not a table is refused too.
+    let mut odd = ManifestDoc::parse(
+        "[agent]\nname = \"odd\"\n[stages.a]\ntool_accepts = { t = 3, u = [\"x/y\"] }\noutput = \"nope\"\n[stages.b]\ntool_accepts = 3\n",
+    )
+    .unwrap();
+    assert_eq!(
+        odd.stage("a").unwrap().tool_accepts,
+        vec![("u".to_string(), vec!["x/y".to_string()])]
+    );
+    assert_eq!(odd.stage("a").unwrap().output_format, "");
+    assert_eq!(
+        odd.set_output_format("a", "json"),
+        Err(EditError::NotATable("output".into()))
+    );
+    odd.set_tool_accepts("a", "t", &["a/b".to_string()])
+        .unwrap();
+    assert_eq!(odd.stage("a").unwrap().tool_accepts.len(), 2);
+    assert!(odd.stage("b").unwrap().tool_accepts.is_empty());
+    assert_eq!(
+        odd.set_tool_accepts("b", "t", &["a/b".to_string()]),
+        Err(EditError::NotATable("tool_accepts".into()))
+    );
 }
 
 #[test]

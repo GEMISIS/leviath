@@ -221,13 +221,17 @@ same list.
   `lev validate` prints each stage's limits and warns
   (`tool-accepts-ungranted`) about a limit on a tool the stage does not
   grant (#400).
-- The dashboard's agent editor writes the media keys: a region's `accepts`
-  and `max_stored` on its panel, and a stage's `[input] accepts` and
-  `as_text` and its `[[output.artifacts]]` declarations (name, type or
-  pattern, required, description) on a fourth stage tab, *Media* (`4`),
-  where `x` on a file's row drops the declaration and the last row
-  declares another. The keys round-trip the way the runtime reads them,
-  and the graph beside the inspector wears the badges as you edit (#400).
+- The dashboard's agent editor is laid out around what moves through a
+  stage. Its tabs are *Behaviour*, *Inputs & outputs* (the regions the
+  stage reads and what each takes, what it takes beyond them and reads as
+  text, the answer's format, the files it hands back), *Models & tools*
+  (the chain, the tools, and what each tool may be handed at the stage)
+  and *Context*. A region, a declared file and a loop's path open in a
+  window over the editor instead of replacing the inspector, and every
+  media type field is one chooser of the families, every type the registry
+  knows and a typed `type/subtype`. The keys round-trip the way the
+  runtime reads them, and the graph beside the inspector wears the badges
+  as you edit (#400).
 - `lev agent-client` advertises `image` and `audio` prompt capabilities. An
   image or audio block's bytes, and a `resource` block's `blob`, become
   parts on the task region (or on the message, on a later prompt), a prompt
