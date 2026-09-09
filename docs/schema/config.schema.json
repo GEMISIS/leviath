@@ -330,6 +330,11 @@
           "default": false,
           "description": "Honour every blueprint's own [tool_permissions] even where it exceeds the built-in default for a tool you have not configured. Off by default: a blueprint may still pre-approve web_search and web_fetch, and anything else is clamped to the default."
         },
+        "lock_permission_files": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refuse any tool call from a run that would write config.toml, yolo.toml, the taint policy and its rules, or the providers/ and tools/ script directories, whatever the run's permissions. On by default; turn off only for an agent that manages this install."
+        },
         "shell_env": {
           "type": "string",
           "enum": [

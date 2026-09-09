@@ -714,6 +714,8 @@ fn build_agent_inner(
         launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
     }
     let workdir_path = std::path::PathBuf::from(&args.workdir);
+    // The files no run may change, for the seeds now and the tool lane after.
+    let protected = crate::tools::permission_files(deps.config);
     // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
     // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
     // policy for that built-in (evaluated against the entry stage).
@@ -831,6 +833,7 @@ fn build_agent_inner(
                     script_host: script_host.clone(),
                     mcp: deps.shared_mcp.clone(),
                     writes: writes.clone(),
+                    protected: protected.clone(),
                 },
                 Arc::new(
                     move |name: &str, is_builtin: bool, arguments: &serde_json::Value| {
@@ -1028,6 +1031,7 @@ fn build_agent_inner(
         unattended: unattended_tools,
         yolo: profile,
         yolo_profile: yolo_profile_name,
+        protected,
         blueprint_safe: blueprint_safe.as_ref(),
         blueprint_read_paths: blueprint_read_paths.as_ref(),
         workdir: std::path::PathBuf::from(&args.workdir),

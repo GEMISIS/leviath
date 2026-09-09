@@ -199,6 +199,10 @@ pub(crate) struct AgentToolState {
     /// `--yolo=<name>`. `None` for an attended run. Re-read from `yolo.toml`
     /// when a named run resumes, like the config layers beside it.
     pub yolo: Arc<Live<Option<Arc<crate::yolo::YoloProfile>>>>,
+    /// The files a run may not change (`[security] lock_permission_files`),
+    /// empty when the lock is off. Re-read with the config when the run
+    /// resumes.
+    pub protected: Arc<Live<Vec<crate::tools::ProtectedPath>>>,
     /// The current stage name, for tagging interactions (re-synced on stage change).
     pub stage_name: Arc<StdMutex<String>>,
     /// Handle for the sub-agent tools (spawn/check/wait/send/kill), or `None`
@@ -362,6 +366,7 @@ impl AgentToolState {
             std::sync::atomic::Ordering::Relaxed,
         );
         self.writes.set_limits(config.limits.write_limits());
+        self.protected.set(crate::tools::permission_files(config));
         // The read-path set is the one layer here that can fail to compile, and
         // dropping the grants the run already had over a typo would tighten it
         // rather than widen it, which is the wrong direction for a file people
@@ -647,6 +652,20 @@ pub(crate) async fn dispatch_tools(
         if let Some(refusal) =
             crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
         {
+            progress(&tc.id, &refusal);
+            slots.push((tc.id.clone(), Some(refusal)));
+            continue;
+        }
+
+        // The files that decide what agents may do are not a run's to change,
+        // whatever its permissions say - same footing as the fence above.
+        if let Some(refusal) = crate::tools::protected_path_refusal(
+            &tc.name,
+            &tc.arguments,
+            state.builtins.workdir(),
+            crate::yolo::home().as_deref(),
+            &state.protected.get(),
+        ) {
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));
             continue;
@@ -1136,6 +1155,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1198,6 +1218,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1282,6 +1303,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1614,6 +1636,7 @@ mod tests {
             interaction: hub.backend_for("a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1899,6 +1922,7 @@ mod tests {
             interaction: hub.backend_for("a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2276,6 +2300,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2346,6 +2371,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2770,6 +2796,7 @@ mod tests {
             interaction: hub.backend_for("a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -3341,6 +3368,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             yolo: Live::new(None),
+            protected: Live::new(Vec::new()),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: Some(handle),
             sandbox: None,
@@ -3822,6 +3850,44 @@ mod tests {
             let plain = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
             plain.reread_config(&Config::default());
             assert!(plain.yolo.get().is_none());
+        })
+        .await;
+    }
+
+    /// The lock runs before policy: a `write_file` aimed at a permission file
+    /// is refused even under a profile that allows everything, and a resume
+    /// that turns the lock off lifts it.
+    #[tokio::test]
+    async fn the_permission_file_lock_refuses_before_policy() {
+        crate::config::with_isolated_config_path_async("lock-dispatch", |cfg| async move {
+            let hub = InteractionHub::new();
+            let state = profile_state(&hub, "[p]\ndefault = \"allow\"\n", "p");
+            state.reread_config(&Config::default());
+            assert!(!state.protected.get().is_empty());
+            let yolo = cfg.join("yolo.toml").display().to_string();
+            let out = dispatch_tools(
+                state.clone(),
+                vec![call(
+                    "c1",
+                    "write_file",
+                    serde_json::json!({"path": yolo, "content": "x"}),
+                )],
+                noop_progress(),
+            )
+            .await;
+            assert!(out[0].1.contains("[denied]"), "{}", out[0].1);
+            assert!(out[0].1.contains("is yolo.toml"), "{}", out[0].1);
+            assert!(!cfg.join("yolo.toml").exists(), "nothing was written");
+
+            let unlocked = Config {
+                security: crate::config::SecurityConfig {
+                    lock_permission_files: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            state.reread_config(&unlocked);
+            assert!(state.protected.get().is_empty());
         })
         .await;
     }

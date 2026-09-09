@@ -68,6 +68,9 @@ pub(super) struct ToolStateParts<'a> {
     /// The profile's name when `--yolo=<name>` named one, so a resume can read
     /// it again. `None` for an attended run and for the bare flag.
     pub(super) yolo_profile: Option<String>,
+    /// The files this run may not change, shared with the seeds that ran
+    /// before the tool lane existed.
+    pub(super) protected: Vec<crate::tools::ProtectedPath>,
     /// `[safe_commands]` the blueprint declares, if the user opted in.
     pub(super) blueprint_safe: Option<&'a leviath_core::blueprint::SafeCommandsConfig>,
     /// `[read_paths]` the blueprint declares, if any.
@@ -123,6 +126,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         interaction: parts.hub.backend_for(parts.run_id),
         unattended: parts.unattended,
         yolo: crate::daemon::tool_service::Live::new(parts.yolo),
+        protected: crate::daemon::tool_service::Live::new(parts.protected),
         stage_name: Arc::new(StdMutex::new(parts.entry_stage.to_string())),
         subagent: parts.subagent,
         sandbox: parts.sandbox,

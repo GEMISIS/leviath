@@ -4120,6 +4120,7 @@ enabled = false
                 read_paths: vec!["~/.leviath/runs".to_string()],
                 credential_store: leviath_core::CredentialStoreKind::Keychain,
                 allow_blueprint_permissions: false,
+                lock_permission_files: false,
                 shell_env: leviath_core::ShellEnvMode::default(),
                 shell_env_withhold: Vec::new(),
             },
