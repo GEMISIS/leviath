@@ -69,12 +69,19 @@ pub(in crate::commands::dashboard) const TYPE_ANOTHER: &str = "another…";
 
 /// The media types the choosers offer: every family, then every type the
 /// registry knows, read the way the daemon reads it (the compiled defaults,
-/// the config's rows, `media_types.toml`).
-fn media_type_options(config_path: &std::path::Path) -> Vec<String> {
-    let registry = crate::config::Config::load_from_path_public(config_path)
+/// the config's rows, `media_types.toml`) with the blueprint's own rows on
+/// top, the way its runs read it.
+fn media_type_options(config_path: &std::path::Path, doc: &ManifestDoc) -> Vec<String> {
+    let mut registry = crate::config::Config::load_from_path_public(config_path)
         .ok()
         .and_then(|c| c.media_registry().ok())
         .unwrap_or_else(leviath_core::media::MediaRegistry::builtin);
+    for key in crate::blueprint_edit::media_type_keys(doc) {
+        let _ = registry.layer(
+            &toml::Table::from_iter([(key, toml::Value::Table(toml::Table::new()))]),
+            "blueprint",
+        );
+    }
     let mut out: Vec<String> = [
         "*/*",
         "text/*",
@@ -513,7 +520,7 @@ impl Dashboard {
         models.sort();
         models.dedup();
         let tools = tool_choices(&dir, &name, &doc);
-        let media_types = media_type_options(&self.new_run_ctx.config_path);
+        let media_types = media_type_options(&self.new_run_ctx.config_path, &doc);
         let mut editor = Editor {
             name,
             is_new,

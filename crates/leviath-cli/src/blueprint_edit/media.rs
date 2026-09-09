@@ -100,6 +100,15 @@ pub(super) fn tool_limits_of(stage: &Item) -> Vec<(String, Vec<String>)> {
         .unwrap_or_default()
 }
 
+/// The keys of the manifest's own `[media_types]` rows, as written.
+pub(crate) fn media_type_keys(doc: &ManifestDoc) -> Vec<String> {
+    doc.doc()
+        .get("media_types")
+        .and_then(Item::as_table_like)
+        .map(|rows| rows.iter().map(|(key, _)| key.to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// The `[stages.<name>.input]` list `which`, or empty.
 pub(super) fn input_list(stage: &Item, which: InputList) -> Vec<String> {
     child(stage, "input")

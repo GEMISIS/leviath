@@ -232,6 +232,22 @@ same list.
   `lev doctor` when they will not load; a blueprint's at spawn, fenced to the
   blueprint's directory like its other scripts. Nothing checks the bytes of a
   type whose row names no check, as before (#400).
+- `lev media add <type>` writes a row into `media_types.toml` from flags
+  (`--family`, `--text`, `--tokens`, `--extensions`, `--magic`, `--stand-in`,
+  `--check`) and sets the fields given on a row that is there; `lev media
+  remove <type>` takes one out; `lev media show <type>` prints one type as
+  the registry resolves it. The file is checked before it is written. `lev
+  media list` gains a check column and `lev media check <file>` runs the
+  type's check over the file and prints the verdict. `lev media init` says
+  in its help that it is optional (#400).
+- `media_check` is a sixth `kind` on the scripts routes (`GET /api/scripts`,
+  `GET/PUT/DELETE /api/scripts/media_check/{name}`, `POST
+  /api/scripts/validate`): the operator's checks are listed and addressed
+  relative to the config's directory, a blueprint's beside the agent with
+  `?agent=`. `scripts.media_checks` in `capabilities` says so. `lev validate`
+  prints the rows a blueprint adds, the dashboard's type chooser offers them,
+  and a new `media-type-overrides-builtin` lint warns when a blueprint row
+  changes the family or the text flag of a built-in type (#400).
 - `[stages.<name>.tool_accepts]`: what each tool may be handed at a stage,
   as `tool = ["image/*"]`. A stored part outside the list is out of that
   tool's reach there: `spawn_agent`'s `parts` refuses it by name, a script's

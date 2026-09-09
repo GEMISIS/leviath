@@ -47,6 +47,36 @@ fn with_code<'a>(findings: &'a [LintFinding], code: &str) -> Vec<&'a LintFinding
     findings.iter().filter(|f| f.code == code).collect()
 }
 
+/// A blueprint row that changes what a built-in type is warns; one that only
+/// adds to it, or describes a type of the agent's own, does not.
+#[test]
+fn a_media_row_that_changes_a_builtin_type_is_flagged() {
+    let text = format!(
+        "{}\n[media_types.\"image/png\"]\nfamily = \"model\"\ntext = true\n\
+         [media_types.\"image/webp\"]\nextensions = [\"webp\", \"wbp\"]\n\
+         [media_types.\"application/x-acme-scene\"]\nfamily = \"model\"\n\
+         [media_types.\"model/*\"]\ntext = true\n\
+         [media_types.\"model/obj\"]\ntext = true\n",
+        manifest(CLEAN_STAGE)
+    );
+    let findings = lint(&text, &LintEnv::default());
+    let said = with_code(&findings, "media-type-overrides-builtin");
+    // `image/png` and the `model/*` family row, whose text flag the compiled
+    // table sets; `model/obj` already reads as text, and the rest add to
+    // their types or describe a new one.
+    let messages: Vec<&str> = said.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(said.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].contains("image/png")
+            && messages[0].contains("family from image to model; text from false to true"),
+        "{messages:?}"
+    );
+    assert!(
+        messages[1].contains("model/*") && messages[1].contains("text from false to true"),
+        "{messages:?}"
+    );
+}
+
 /// A stage that declares everything the linter looks for, so a test can add a
 /// single defect and see only that.
 const CLEAN_STAGE: &str = r#"

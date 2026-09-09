@@ -2978,7 +2978,7 @@
           "scripts"
         ],
         "summary": "Rhai scripts this scope can see",
-        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks and output validators the agent's manifest declares, and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`), a `declared` flag and whether it compiles right now; an agent-scoped entry also carries `relative_path`, where the file sits relative to the agent's own directory, which is the spelling a manifest wants. A provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
+        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks, output validators and media checks the agent's manifest declares, the media checks the operator's `media_types.toml` and `[media_types]` rows name (resolved against the config's directory), and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`), a `declared` flag and whether it compiles right now; an agent-scoped entry also carries `relative_path`, where the file sits relative to the agent's own directory, which is the spelling a manifest wants. A provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
         "parameters": [
           {
             "name": "agent",
@@ -3063,6 +3063,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
+                "media_check",
                 "provider"
               ]
             }
@@ -3118,6 +3119,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
+                "media_check",
                 "provider"
               ]
             }
@@ -3179,6 +3181,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
+                "media_check",
                 "provider"
               ]
             }

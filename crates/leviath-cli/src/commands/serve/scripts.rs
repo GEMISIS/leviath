@@ -1,9 +1,9 @@
 //! Read and write the Rhai scripts a machine runs.
 //!
-//! Five extension points share one API because they share one editor: a script
-//! tool, a region hook, a stage hook, an output validator and a model provider
-//! are all a `.rhai` file somewhere under the home directory, and only the
-//! `kind` says which compiler has to accept it.
+//! Six extension points share one API because they share one editor: a script
+//! tool, a region hook, a stage hook, an output validator, a media check and a
+//! model provider are all a `.rhai` file somewhere under the home directory,
+//! and only the `kind` says which compiler has to accept it.
 //!
 //! # Where each kind actually lives
 //!
@@ -32,6 +32,13 @@
 //! so this route takes no `?agent=` and refuses one rather than inventing a
 //! per-agent layout that nothing would load.
 //!
+//! A **media check** is named by a registry row's `check`, and a row lives in
+//! two places: the operator's `media_types.toml` (or `[media_types]` in the
+//! config), whose scripts resolve against the config's directory, and a
+//! blueprint's own `[media_types]`, whose scripts resolve against the agent's
+//! directory like its hooks. So this kind takes an `?agent=` or not, and the
+//! listing derives it from the rows either way.
+//!
 //! # Why the write half is gated
 //!
 //! A blueprint is declarative. A `.rhai` file is executable code every agent
@@ -48,6 +55,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use super::scripts_media::{collect_media_checks, config_dir, row_checks};
 use super::tools::agent_dir;
 use super::types::{ApiError, AppState, err};
 
@@ -63,18 +71,21 @@ pub(super) enum ScriptKind {
     StageHook,
     /// A validator that decides whether an agent's output may be handed back.
     OutputValidator,
+    /// A check on the bytes behind a media type, named by a registry row.
+    MediaCheck,
     /// A drop-in model provider, global to the machine.
     Provider,
 }
 
 impl ScriptKind {
     /// The wire spelling, which is also the `{kind}` path segment.
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Tool => "tool",
             Self::RegionHook => "region_hook",
             Self::StageHook => "stage_hook",
             Self::OutputValidator => "output_validator",
+            Self::MediaCheck => "media_check",
             Self::Provider => "provider",
         }
     }
@@ -87,6 +98,7 @@ impl ScriptKind {
             "region_hook" => Some(Self::RegionHook),
             "stage_hook" => Some(Self::StageHook),
             "output_validator" => Some(Self::OutputValidator),
+            "media_check" => Some(Self::MediaCheck),
             "provider" => Some(Self::Provider),
             _ => None,
         }
@@ -94,7 +106,7 @@ impl ScriptKind {
 }
 
 /// The kinds, spelled the way the 400s list them.
-const KIND_LIST: &str = "tool, region_hook, stage_hook, output_validator or provider";
+const KIND_LIST: &str = "tool, region_hook, stage_hook, output_validator, media_check or provider";
 
 /// The global drop-in directory, `~/.leviath/tools`.
 ///
@@ -142,12 +154,12 @@ struct Target {
 /// three answers - what to call it, where it sits, and what to write into a
 /// manifest - and having them computed twice is how the two disagreed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Addressed {
+pub(super) struct Addressed {
     /// The `{name}` the routes address it by: `/`-separated, `.rhai` stripped.
-    name: String,
+    pub(super) name: String,
     /// The same file relative to the base directory, extension included, always
     /// with `/` separators because that is what goes into a manifest.
-    relative: String,
+    pub(super) relative: String,
     /// The directory components between the base and the file, in order.
     dirs: Vec<String>,
     /// The file name, `.rhai` included.
@@ -163,7 +175,7 @@ impl Addressed {
     }
 
     /// The file itself under `base`.
-    fn path_in(&self, base: &Path) -> PathBuf {
+    pub(super) fn path_in(&self, base: &Path) -> PathBuf {
         self.dir_in(base).join(&self.file)
     }
 }
@@ -269,6 +281,8 @@ fn resolve(
         }
         (None, ScriptKind::Tool) => (global_tools_dir(), "global", None),
         (None, ScriptKind::Provider) => (global_providers_dir(), "global", None),
+        // The operator's rows name a check relative to the config's directory.
+        (None, ScriptKind::MediaCheck) => (config_dir(), "global", None),
         (None, _) => {
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -362,7 +376,7 @@ fn guard(target: &Target, presence: Presence) -> Result<(), ApiError> {
 /// Every arm stops at the AST. That is what lets `POST /api/scripts/validate`
 /// stay ungated: a provider's `initialize` is script code, and `check_source`
 /// reads it off the compiled AST rather than running it.
-fn compile_status(
+pub(super) fn compile_status(
     kind: ScriptKind,
     label: &str,
     content: &str,
@@ -381,6 +395,9 @@ fn compile_status(
         ScriptKind::OutputValidator => leviath_scripting::output_validator::compile(label, content)
             .map(drop)
             .map_err(|e| e.to_string()),
+        ScriptKind::MediaCheck => leviath_scripting::media_check::compile(label, content)
+            .map(drop)
+            .map_err(|e| e.to_string()),
         ScriptKind::Provider => leviath_providers::rhai_provider::check_source(label, content)
             .map(drop)
             .map_err(|e| e.to_string()),
@@ -388,7 +405,7 @@ fn compile_status(
 }
 
 /// Flatten a compile outcome into the pair the wire types carry.
-fn status_pair(status: Result<(), String>) -> (bool, Option<String>) {
+pub(super) fn status_pair(status: Result<(), String>) -> (bool, Option<String>) {
     match status {
         Ok(()) => (true, None),
         Err(reason) => (false, Some(reason)),
@@ -477,8 +494,8 @@ fn provider_meta(kind: ScriptKind, content: &str) -> Option<ProviderScriptMeta> 
 /// One script in the listing.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ScriptItem {
-    /// `tool`, `region_hook`, `stage_hook`, `output_validator` or `provider`,
-    /// or [`CANDIDATE_KIND`] for a file nothing has claimed yet.
+    /// `tool`, `region_hook`, `stage_hook`, `output_validator`, `media_check`
+    /// or `provider`, or [`CANDIDATE_KIND`] for a file nothing has claimed yet.
     pub(super) kind: String,
     /// The `{name}` the read and write routes address it by, once a caller has
     /// picked a `kind` for it. `/`-separated for a file in a subdirectory.
@@ -490,9 +507,11 @@ pub(super) struct ScriptItem {
     pub(super) agent: Option<String>,
     /// The file on disk.
     pub(super) path: String,
-    /// The same file relative to the agent's own directory, which is the
-    /// spelling a manifest wants (`validators/a2ui.rhai`). Absent for a
-    /// machine-wide script, which no blueprint contains.
+    /// The same file relative to the directory whose rows or manifest name
+    /// it, which is the spelling that goes there (`validators/a2ui.rhai`;
+    /// `checks/scene.rhai` for a media check, relative to the config's
+    /// directory when the row is the operator's). Absent for a global tool
+    /// or a provider, which nothing names by path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) relative_path: Option<String>,
     /// Whether something loads this file as this `kind`: a `tools/` directory
@@ -599,7 +618,7 @@ pub(super) struct ValidateScriptResp {
 /// declaration that is not a `.rhai` file at all: `addressed_path` appends the
 /// extension, so a declared `notes.txt` would be reported as `notes.txt.rhai`,
 /// a different file. Requiring the suffix here keeps the listing off it.
-fn declared_address(declared: &str) -> Option<Addressed> {
+pub(super) fn declared_address(declared: &str) -> Option<Addressed> {
     let stem = declared.strip_suffix(".rhai")?;
     addressed_path(stem)
 }
@@ -648,6 +667,12 @@ fn declared_scripts(bp: &leviath_core::Blueprint) -> BTreeMap<(ScriptKind, Strin
                 .entry((ScriptKind::OutputValidator, validator.to_string()))
                 .or_default();
         }
+    }
+
+    for (_, script) in row_checks(&bp.media_types) {
+        declared
+            .entry((ScriptKind::MediaCheck, script))
+            .or_default();
     }
 
     declared
@@ -979,6 +1004,7 @@ pub(super) async fn list_scripts(
         }
     }
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
+    collect_media_checks(&state.current_config(), &mut scripts);
     collect_providers(&global_providers_dir(), &mut scripts);
     Ok(Json(ScriptsResp { scripts }))
 }

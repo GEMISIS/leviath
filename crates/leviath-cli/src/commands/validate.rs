@@ -344,6 +344,27 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
 /// what `lev run --attach` may aim at it, and what `lev result` will list.
 fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
     let mut lines = Vec::new();
+    if !blueprint.media_types.is_empty() {
+        let rows: Vec<String> = blueprint
+            .media_types
+            .iter()
+            .map(
+                |(key, row)| match row.get("check").and_then(|v| v.as_str()) {
+                    Some(check) if !check.is_empty() => format!("{key} (check {check})"),
+                    _ => key.clone(),
+                },
+            )
+            .collect();
+        lines.push(format!(
+            "  Media types: adds {} row{} for its runs: {}",
+            rows.len(),
+            match rows.len() {
+                1 => "",
+                _ => "s",
+            },
+            rows.join(", ")
+        ));
+    }
     for stage in &blueprint.stages {
         let takes: Vec<String> = blueprint
             .stage_inputs(stage)
@@ -1421,12 +1442,21 @@ description = "Hear"
 max_iterations = 5
 [stages.hear.input]
 accepts = ["audio/*"]
+
+[media_types."application/x-acme-scene"]
+family = "model"
+check = "checks/scene.rhai"
+[media_types."model/obj"]
+text = true
 "#,
         );
         let lines = media_lines(&parse(&toml));
         assert_eq!(
             lines,
             vec![
+                "  Media types: adds 2 rows for its runs: application/x-acme-scene (check \
+                 checks/scene.rhai), model/obj"
+                    .to_string(),
                 "  Media, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
                  final (video/mp4, required), notes (text/*); limits spawn_agent to [image/*]"
                     .to_string(),
@@ -1435,6 +1465,15 @@ accepts = ["audio/*"]
             ]
         );
         print_success(&parse(&toml));
+        // One row, and a check lifted with an empty name, read as a bare key.
+        let one = make_blueprint_toml(
+            "[stages.plan]\nmode = \"autonomous\"\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             description = \"Plan\"\nmax_iterations = 5\n\n[media_types.\"image/gif\"]\ncheck = \"\"\n",
+        );
+        assert_eq!(
+            media_lines(&parse(&one)),
+            vec!["  Media types: adds 1 row for its runs: image/gif".to_string()]
+        );
     }
 
     #[test]

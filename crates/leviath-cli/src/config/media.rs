@@ -63,7 +63,10 @@ pub enum MediaTypesError {
 /// inside it, the fence a blueprint's scripts get against the blueprint's
 /// directory: a row is configuration, and configuration that could point
 /// the daemon at any file on the machine and run it is not.
-fn attach_checks(reg: &mut MediaRegistry, config_dir: &Path) -> Result<(), MediaTypesError> {
+pub(crate) fn attach_checks(
+    reg: &mut MediaRegistry,
+    config_dir: &Path,
+) -> Result<(), MediaTypesError> {
     for (key, script, _) in reg.declared_checks() {
         let fail = |message: String| MediaTypesError::Check {
             key: key.clone(),
