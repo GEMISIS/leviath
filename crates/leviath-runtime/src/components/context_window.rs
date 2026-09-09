@@ -664,7 +664,7 @@ impl ContextWindow {
                     let body = region
                         .content
                         .iter()
-                        .map(|e| e.content.clone())
+                        .map(|e| e.content.to_string())
                         .collect::<Vec<_>>();
                     push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
                 }
@@ -688,7 +688,7 @@ impl ContextWindow {
                     let body = region
                         .content
                         .iter()
-                        .map(|e| e.content.clone())
+                        .map(|e| e.content.to_string())
                         .collect::<Vec<_>>();
                     push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
                 }
@@ -736,7 +736,7 @@ impl ContextWindow {
                                     let mut blocks = Vec::new();
                                     if !entry.content.is_empty() {
                                         blocks.push(leviath_providers::ContentBlock::Text {
-                                            text: entry.content.clone(),
+                                            text: entry.content.to_string(),
                                         });
                                     }
                                     for tc in tool_calls {
@@ -764,7 +764,7 @@ impl ContextWindow {
                                 pending_tool_results.push(
                                     leviath_providers::ContentBlock::ToolResult {
                                         tool_use_id: tool_call_id.clone(),
-                                        content: entry.content.clone(),
+                                        content: entry.content.to_string(),
                                         is_error: *is_error,
                                     },
                                 );
@@ -855,7 +855,7 @@ impl ContextWindow {
                             if let Some(key) = &e.key {
                                 format!("### [{}]\n{}", key, e.content)
                             } else {
-                                e.content.clone()
+                                e.content.to_string()
                             }
                         })
                         .collect::<Vec<_>>()

@@ -6522,7 +6522,7 @@ fn routed_result(
         .iter()
         .filter_map(|name| w.get_region(name))
         .flat_map(|r| r.content.iter())
-        .map(|e| e.content.clone())
+        .map(|e| e.content.to_string())
         .find(|c| c.starts_with("aaa"))
         .unwrap_or_default()
 }

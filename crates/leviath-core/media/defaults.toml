@@ -1,0 +1,161 @@
+# The media types Leviath knows out of the box.
+#
+# Every row is a `[media_types."type/subtype"]` table, the same shape a user
+# writes in `~/.leviath/config.toml` or a blueprint writes in its manifest.
+# A row for `type/*` supplies defaults for every subtype; `*/*` is the last
+# resort. A user row with the same key replaces these fields one by one.
+#
+# Keys:
+#   family     what providers key their encoders on (text, image, audio,
+#              video, document, model, binary, or anything you invent)
+#   text       the bytes are UTF-8 and may travel inline and reach a model
+#              as text
+#   tokens     how to estimate a part's cost before a provider bills it:
+#              { per_byte = 0.25 } | { per_pixel = 750, max = 1600 }
+#              | { per_second = 32 } | { fixed = 1000 }
+#   extensions file extensions that imply this type
+#   magic      a hex prefix that identifies the bytes
+#   stand_in   the text a consumer that cannot take the type sees; supports
+#              {type} {name} {size} {dims} {duration}
+
+["*/*"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+
+["text/*"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
+["text/plain"]
+extensions = ["txt", "text", "log"]
+
+["text/markdown"]
+extensions = ["md", "markdown"]
+
+["text/html"]
+extensions = ["html", "htm"]
+
+["text/csv"]
+extensions = ["csv"]
+
+["text/x-rust"]
+extensions = ["rs"]
+
+["text/x-python"]
+extensions = ["py"]
+
+["text/javascript"]
+extensions = ["js", "mjs"]
+
+["text/x-toml"]
+extensions = ["toml"]
+
+["text/yaml"]
+extensions = ["yaml", "yml"]
+
+["application/json"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+extensions = ["json"]
+
+["application/xml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+extensions = ["xml"]
+
+["image/*"]
+family = "image"
+tokens = { per_pixel = 750, max = 1600 }
+
+["image/png"]
+extensions = ["png"]
+magic = "89504E470D0A1A0A"
+
+["image/jpeg"]
+extensions = ["jpg", "jpeg"]
+magic = "FFD8FF"
+
+["image/gif"]
+extensions = ["gif"]
+magic = "474946383"
+
+["image/webp"]
+extensions = ["webp"]
+magic = "52494646"
+
+["image/svg+xml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+extensions = ["svg"]
+
+["audio/*"]
+family = "audio"
+tokens = { per_second = 32 }
+
+["audio/wav"]
+extensions = ["wav"]
+
+["audio/mpeg"]
+extensions = ["mp3"]
+magic = "494433"
+
+["audio/ogg"]
+extensions = ["ogg", "oga"]
+magic = "4F676753"
+
+["audio/flac"]
+extensions = ["flac"]
+magic = "664C6143"
+
+["audio/mp4"]
+extensions = ["m4a"]
+
+["video/*"]
+family = "video"
+tokens = { per_byte = 0.02 }
+
+["video/mp4"]
+extensions = ["mp4", "m4v"]
+
+["video/webm"]
+extensions = ["webm"]
+
+["video/quicktime"]
+extensions = ["mov"]
+
+["application/pdf"]
+family = "document"
+tokens = { per_byte = 0.5 }
+extensions = ["pdf"]
+magic = "25504446"
+
+["model/*"]
+family = "model"
+tokens = { per_byte = 0.25 }
+
+["model/obj"]
+text = true
+extensions = ["obj"]
+
+["model/gltf+json"]
+text = true
+extensions = ["gltf"]
+
+["model/gltf-binary"]
+extensions = ["glb"]
+magic = "676C5446"
+
+["model/stl"]
+extensions = ["stl"]
+
+["application/zip"]
+extensions = ["zip"]
+magic = "504B0304"
+
+["application/octet-stream"]
+extensions = ["bin"]

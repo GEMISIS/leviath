@@ -810,6 +810,57 @@ max_output_tokens    = 4096
 
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied, and says whether they came from the provider's own listing or this build's table.
+
+## `[media]`
+
+Ceilings on typed media parts: the images, audio, video, documents and models that
+[typed media](/docs/media) moves through regions, tools and outputs. Defaults shown.
+
+```toml
+[media]
+max_part_bytes = 33554432        # one part, at every ingress (32 MiB)
+inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
+max_stored_per_request = 100     # stored parts one model request carries
+```
+
+A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
+result or a model reply. Text longer than `inline_text_bytes` is stored by hash like any other
+part and read back as text when a request is built. Beyond `max_stored_per_request` the oldest
+stored parts are left out of a request, with a warning in the run's log.
+
+<a id="media_typestypesubtype"></a>
+
+## `[media_types."type/subtype"]`
+
+Rows added to the media registry, which says what each media type is. Keys are a
+`type/subtype` or a `type/*` pattern. Name only what you change; every other field resolves
+from the built-in table (the exact type, then `type/*`, then `*/*`).
+
+```toml
+[media_types."model/obj"]
+extensions = ["obj"]
+text = true                      # UTF-8 under the hood: may reach a text model as text
+
+[media_types."application/x-acme-scene"]
+family = "model"
+extensions = ["scene"]
+magic = "41434D45"
+tokens = { per_byte = 0.1 }
+stand_in = "[{type} {size}] {name}"
+```
+
+| Key | Meaning |
+|---|---|
+| `family` | What providers key their encoders on: `text`, `image`, `audio`, `video`, `document`, `model`, `binary`, or a name of your own |
+| `text` | The bytes are UTF-8 and may travel inline and reach any text model as text |
+| `tokens` | Exactly one of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ fixed = 1000 }` |
+| `extensions` | Extensions, without the dot, that imply this type |
+| `magic` | A hex prefix that identifies the bytes |
+| `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
+
+A misspelled key inside a row is refused, and a row that will not load is skipped by the daemon
+and reported by `lev doctor`. `lev media list` prints the effective table with each row's
+source.
 `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
 `override`, so a client can tell a figure the provider reported from one this build matched off the
 model's name. The two are not worth the same and they look identical once printed.

@@ -418,7 +418,7 @@ mod tests {
                 current_tokens: 10,
                 max_tokens: 50,
                 entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
-                    content: "hello".to_string(),
+                    content: "hello".to_string().into(),
                     tokens: 5,
                     kind: Default::default(),
                     metadata: None,

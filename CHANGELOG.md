@@ -70,6 +70,22 @@ same list.
   refused before any policy is consulted, `--yolo` or not, and a seed at spawn
   is held to the same rule. An agent could otherwise widen what its next spawn
   is allowed to do from inside a run.
+- Typed media parts. A region entry, a tool result, a user message, a model
+  reply and a final output are each a list of parts, and a part is one piece
+  of content with a media type: a paragraph, a PNG, a WAV clip, an MP4, a PDF,
+  an OBJ model. Text is a part like any other; its bytes travel inside the
+  entry, while any other part is stored once under `<run>/blobs/<sha256>` and
+  referenced by hash everywhere else, so the journal and `context.json` never
+  grow by a file's size. What a type *is* comes from a media registry rather
+  than from code: the compiled defaults, then `[media_types]` in the config,
+  then a blueprint's own rows, then rows a provider declares, each naming a
+  family, whether the bytes are text, a token rule, extensions, a magic prefix
+  and a stand-in template. `[media]` sets the size ceilings. `lev doctor`
+  reports a row that will not load. A region says what it takes with
+  `accepts = ["text/*", "image/png"]` and how many stored parts it holds with
+  `max_stored`; a region with a `schema` takes text only. A snapshot or
+  journal written before this reads back unchanged, since a plain string is
+  still how a text-only entry is written (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

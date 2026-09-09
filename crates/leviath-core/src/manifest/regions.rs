@@ -219,6 +219,12 @@ pub(super) fn parse_region_layout(
 
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
+        // What the region takes, as media type patterns. Each is checked
+        // here so a typo is a load error and not a region that refuses every
+        // write at runtime.
+        let accepts = parse_accepts(region_name, region_value.get("accepts"))?;
+        let max_stored = count("max_stored")?;
+
         // Percentage regions contribute their (unknown) size at resolution, so
         // only absolute budgets add to the summed total here.
         if percent.is_none() {
@@ -233,6 +239,8 @@ pub(super) fn parse_region_layout(
         def.description = description;
         def.describe_in_prompt = describe_in_prompt;
         def.volatility = volatility;
+        def.accepts = accepts;
+        def.max_stored = max_stored;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }
@@ -396,8 +404,45 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
 /// `tests.rs` holds the published schema to it, and a key read above that is
 /// missing here, or here that is not read above, is the drift it exists to
 /// catch.
+/// `accepts = ["text/*", "image/png"]`: each entry a media type or a
+/// `type/*` pattern. Absent or empty means anything.
+fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(crate::error::Error::ValidationFailed(format!(
+            "region '{region_name}' has accepts = {value}; expected a list of media types"
+        )));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(s) = item.as_str() else {
+            return Err(crate::error::Error::ValidationFailed(format!(
+                "region '{region_name}' has accepts entry {item}; expected a media type string"
+            )));
+        };
+        let s = s.trim().to_ascii_lowercase();
+        let valid = match s.split_once('/') {
+            Some((kind, "*")) => {
+                kind == "*" || crate::media::MediaType::parse(&format!("{kind}/x")).is_ok()
+            }
+            Some(_) => crate::media::MediaType::parse(&s).is_ok(),
+            None => false,
+        };
+        if !valid {
+            return Err(crate::error::Error::ValidationFailed(format!(
+                "region '{region_name}' has accepts entry \"{s}\"; expected type/subtype or type/*"
+            )));
+        }
+        out.push(s);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(super) const REGION_KEYS: &[&str] = &[
+    "accepts",
     "admission",
     "budget",
     "compact_at",
@@ -407,6 +452,7 @@ pub(super) const REGION_KEYS: &[&str] = &[
     "kind",
     "max_entries",
     "max_items",
+    "max_stored",
     "max_tokens",
     "min_tokens",
     "overflow",

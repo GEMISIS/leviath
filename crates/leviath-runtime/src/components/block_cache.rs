@@ -112,7 +112,11 @@ pub(super) fn push_bracketed(
     region: &Region,
     hint: leviath_core::CacheHint,
 ) {
-    let entries: Vec<String> = region.content.iter().map(|e| e.content.clone()).collect();
+    let entries: Vec<String> = region
+        .content
+        .iter()
+        .map(|e| e.content.to_string())
+        .collect();
     let chunks = match region.volatility {
         leviath_core::Volatility::Grows => append_only_chunks(&entries, CACHE_CHUNK_TOKENS),
         _ => vec![entries.join("\n\n")],
@@ -521,7 +525,11 @@ mod tests {
         for entry in entries(20, &"word ".repeat(200)) {
             region.add_entry(entry, 250).expect("fits");
         }
-        let contents: Vec<String> = region.content.iter().map(|e| e.content.clone()).collect();
+        let contents: Vec<String> = region
+            .content
+            .iter()
+            .map(|e| e.content.to_string())
+            .collect();
 
         let mut blocks = Vec::new();
         push_chunked(&mut blocks, &region, &contents, CacheHint::Always);

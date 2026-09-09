@@ -891,8 +891,9 @@ impl RunMeta {
 /// One content entry within a region, captured at snapshot time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegionEntrySnapshot {
-    /// The entry's text, exactly as it sat in the live region.
-    pub content: String,
+    /// The entry's parts, exactly as they sat in the live region. Reads as
+    /// text; a plain string in an older snapshot loads as one text part.
+    pub content: crate::region::EntryContent,
     /// The entry's token cost as counted when it was added, carried through the
     /// snapshot so a reload does not have to re-tokenize to rebuild budgets.
     pub tokens: usize,
@@ -1604,7 +1605,7 @@ mod tests {
                 current_tokens: 10,
                 max_tokens: 50,
                 entries: vec![RegionEntrySnapshot {
-                    content: "hi".to_string(),
+                    content: "hi".into(),
                     tokens: 1,
                     kind: crate::region::EntryKind::UserMessage,
                     metadata: Some(serde_json::json!({"a": 1})),

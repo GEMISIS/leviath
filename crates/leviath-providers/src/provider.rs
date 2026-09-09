@@ -454,6 +454,14 @@ impl From<&str> for MessageContent {
     }
 }
 
+impl From<leviath_core::region::EntryContent> for MessageContent {
+    /// The text an entry reads as. Assembly turns an entry's stored parts
+    /// into media blocks itself; this is the plain-text path.
+    fn from(c: leviath_core::region::EntryContent) -> Self {
+        MessageContent::Text(c.into_string())
+    }
+}
+
 impl MessageContent {
     /// Get the plain text content, concatenating text blocks if needed.
     pub fn as_text(&self) -> String {

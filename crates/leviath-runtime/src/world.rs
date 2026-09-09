@@ -358,12 +358,19 @@ impl PipelineWorld {
         // Retained so `flush_and_stop` can drain it on shutdown. Left to its own
         // devices otherwise: it exits when the world (and thus its PersistenceStage
         // sender) is dropped.
+        let blob_store = crate::blob_store::store_for(runs_dir.as_deref());
         let persist_task = runtime.spawn(persistence_worker(runs_dir, persist_rx));
         let ip_runtime = runtime.clone();
         let gp_runtime = runtime.clone();
 
         let mut world = World::new();
         world.insert_resource(OwnWorldId(id));
+        // Stored media parts and the registry that types them. The registry
+        // starts as the compiled defaults; a host layers the operator's
+        // `[media_types]` on by replacing the resource, as it does telemetry.
+        world.insert_resource(crate::blob_store::BlobStoreHandle(blob_store));
+        world.insert_resource(crate::blob_store::MediaRegistryHandle::default());
+        world.insert_resource(crate::blob_store::MediaLimits::default());
         world.insert_resource(Providers(providers));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
@@ -2772,7 +2779,7 @@ mod tests {
                 current_tokens: 4,
                 max_tokens: 10_000,
                 entries: vec![RegionEntrySnapshot {
-                    content: "restored turn".to_string(),
+                    content: "restored turn".into(),
                     tokens: 4,
                     kind: EntryKind::UserMessage,
                     metadata: None,

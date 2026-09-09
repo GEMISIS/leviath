@@ -62,6 +62,7 @@
 
 // Public because [`tool_bridge::ToolJob`] carries a `CancelToken`, so anything
 // handing work to the tool lane needs to name the type.
+pub mod blob_store;
 pub mod cancel;
 pub(crate) mod compaction_bridge;
 pub mod components;

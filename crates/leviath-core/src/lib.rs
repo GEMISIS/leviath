@@ -21,6 +21,7 @@ pub mod interaction;
 pub mod layout;
 pub mod lifecycle;
 pub mod manifest;
+pub mod media;
 pub mod output;
 pub mod panic_payload;
 pub mod paths;

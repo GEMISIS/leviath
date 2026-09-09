@@ -515,6 +515,42 @@ fn config_check_names_a_script_provider_whose_file_is_missing() {
     );
 }
 
+/// A `[media_types]` row the registry refuses is skipped by the daemon, which
+/// then types that file by the built-in table. The config still loads, so
+/// this is a note on an OK line, naming the row.
+#[test]
+fn config_check_notes_a_media_types_row_that_will_not_load() {
+    let config: Config = toml::from_str(
+        "default_provider = \"anthropic\"\n[media_types.\"model/obj\"]\nfamilies = \"model\"\n",
+    )
+    .expect("the table takes arbitrary rows, so the typo deserializes");
+    let check = checked(
+        "doctor-config_check_notes_a_media_types_row_that_will_not_load",
+        &config,
+        &ProviderRegistry::new(),
+    );
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.detail.contains("[media_types] is ignored") && check.detail.contains("model/obj"),
+        "got: {}",
+        check.detail
+    );
+    let clean: Config = toml::from_str(
+        "default_provider = \"anthropic\"\n[media_types.\"model/obj\"]\ntext = true\n",
+    )
+    .unwrap();
+    let check = checked(
+        "doctor-config_check_accepts_a_good_media_types_row",
+        &clean,
+        &ProviderRegistry::new(),
+    );
+    assert!(
+        !check.detail.contains("media_types"),
+        "got: {}",
+        check.detail
+    );
+}
+
 /// A `[rate_limits]` entry naming no provider throttles nothing, and the
 /// unknown-key check cannot see it: the table takes arbitrary keys, so the
 /// typo deserializes perfectly.

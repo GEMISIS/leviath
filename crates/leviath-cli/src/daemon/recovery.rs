@@ -1056,7 +1056,7 @@ mod tests {
                 current_tokens: 4,
                 max_tokens: 100_000,
                 entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
-                    content: "earlier turn".to_string(),
+                    content: "earlier turn".to_string().into(),
                     tokens: 4,
                     kind: leviath_core::region::EntryKind::UserMessage,
                     metadata: None,
@@ -1444,7 +1444,7 @@ mod tests {
                 max_tokens: 100_000,
                 entries: vec![
                     leviath_core::run_meta::RegionEntrySnapshot {
-                        content: "done".to_string(),
+                        content: "done".to_string().into(),
                         tokens: 1,
                         kind: EntryKind::AssistantTurn {
                             tool_calls: vec![leviath_core::region::SerializedToolCall {
@@ -1460,7 +1460,7 @@ mod tests {
                         reasoning: None,
                     },
                     leviath_core::run_meta::RegionEntrySnapshot {
-                        content: "Wrote it".to_string(),
+                        content: "Wrote it".to_string().into(),
                         tokens: 1,
                         kind: EntryKind::ToolResult {
                             tool_call_id: "c1".to_string(),

@@ -308,7 +308,7 @@ mod tests {
 
     fn entry(content: &str) -> RegionEntrySnapshot {
         RegionEntrySnapshot {
-            content: content.to_string(),
+            content: content.to_string().into(),
             tokens: 5,
             kind: Default::default(),
             metadata: None,
