@@ -226,7 +226,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/media` | The effective [media registry](/docs/media#the-registry): every type row and where it came from |
-| `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
+| `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks, validators and media checks, and the global model providers and media checks. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/yolo` · `GET /api/yolo/{name}` · `POST /api/yolo/test` · `PUT /api/yolo` *(admin)* | The profiles behind `--yolo=<name>`: list them, read one, ask what one would decide for a call, replace the file. See [below](#yolo-profiles) |
@@ -1005,17 +1005,25 @@ with the reason each was passed over, so a file with a syntax error is told apar
 nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
 anything installed, and `/api/mcp/servers/{name}` already answers for them.
 
-`GET /api/scripts` is the same ground from the editor's side, over the five kinds of Rhai a machine
-can carry: `tool`, `region_hook`, `stage_hook`, `output_validator` and `provider`. Only tools have a
-directory an agent owns (`<agent>/tools/`, plus the global one); the hooks and the validator are
-named by path in the manifest and resolved against the agent's own directory, so the listing derives
-them from what the manifest declares and the read and write routes address them at
+`GET /api/scripts` is the same ground from the editor's side, over the six kinds of Rhai a machine
+can carry: `tool`, `region_hook`, `stage_hook`, `output_validator`, `media_check` and `provider`.
+Only tools have a directory an agent owns (`<agent>/tools/`, plus the global one); the hooks and the
+validator are named by path in the manifest and resolved against the agent's own directory, so the
+listing derives them from what the manifest declares and the read and write routes address them at
 `<agent>/<name>.rhai`.
+
+A [media check](/docs/rhai-media-checks) is named by a media row's `check`, and rows live in two
+places, so the kind is listed from both: the operator's rows (`media_types.toml` and
+`[media_types]` in the config) put their checks in the global half, resolved against the config's
+directory, and a blueprint's own `[media_types]` puts its checks beside the agent's hooks. Address
+one with `?agent=<name>` for the blueprint's, or without for the operator's. Check
+`scripts.media_checks` in the `capabilities` list before offering the kind.
 
 Every entry carries a `declared` flag, and an agent-scoped one also carries `relative_path`: where
 the file sits relative to the agent's own directory, `validators/a2ui.rhai`, which is the spelling
-that goes into a manifest. A machine-wide script has no `relative_path`, since no blueprint contains
-it.
+that goes into a manifest. A global media check carries it too, relative to the config's directory,
+since that is the spelling that goes into the row. A global tool or a provider has no
+`relative_path`, since nothing names either by path.
 
 `GET/PUT/DELETE /api/scripts/{kind}/{name}` reads and writes one file, scoped by `?agent=<name>` or,
 with no `agent`, the machine's own directory for that kind. `{name}` is the file without its `.rhai`
@@ -1477,6 +1485,7 @@ than that feature, not broken.
 | `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
 | `scripts.candidates` | `?include=candidates` on the script listing, plus `relative_path` and `declared` on every entry |
+| `scripts.media_checks` | `media_check` as a sixth script `kind`: the byte checks media rows name, beside the config for the operator's rows and beside the agent for a blueprint's |
 | `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config`: a gateway can be an OpenAI-compatible endpoint rather than a script |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |

@@ -447,12 +447,20 @@ The media registry as this install sees it, and what a file resolves to under it
 
 | Command | Flags |
 |---|---|
-| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, and which layer the row came from (`builtin`, `config`, `media_types.toml`) |
+| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `media_types.toml`) and the [check](/docs/rhai-media-checks) its bytes must pass |
+| `lev media show <TYPE>` | `--json`. One type as the registry resolves it: every field, the token rule spelled out, the check and whether it loaded, and the source of the most specific row |
+| `lev media check <FILE>` | `--type <MEDIA_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest, and the verdict of the type's check over the file's bytes when a row names one |
 | `lev media init` | `--force`. Write a commented example [`media_types.toml`](/docs/configuration#media_typestoml) beside your config |
-| `lev media check <FILE>` | `--type <MEDIA_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, and how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest |
+| `lev media add <TYPE>` | `--family <NAME>`, `--text` or `--binary`, `--tokens <RULE>` (`per_byte=0.25`, `per_pixel=750,max=1600`, `per_second=32`, `fixed=1000`), `--extensions a,b`, `--magic <HEX>`, `--stand-in <TEMPLATE>`, `--check <PATH>` or `--no-check`. Add a row to `media_types.toml`, or set the fields given on a row that is there; `<TYPE>` may be `type/*` for a whole family. The file is checked before it is written, a `--check` script compiled included, so a flag that would leave it unloadable is refused with the reason |
+| `lev media remove <TYPE>` | Take a row out of `media_types.toml` |
 
-Both read the registry as the daemon builds it and refuse to run on a row that does not load, the
-same fault `lev doctor` reports.
+`init` is optional. The registry works with no file at all, `add` creates the file when it has
+to, and the example `init` writes is a starting point for editing by hand, every field
+commented. The three readers use the registry as the daemon builds it and refuse to run on a row
+that does not load, the same fault `lev doctor` reports; `add` and `remove` edit the file in
+place and leave every other row, comment and blank line as you wrote them. An edit reaches the
+next run at once and every run already under way within the daemon's housekeeping interval of
+thirty seconds.
 
 ### `lev agent-client`
 

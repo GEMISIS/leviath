@@ -571,6 +571,11 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
         "[media_types.\"application/x-acme\"]\nfamily = \"model\"\n",
     )
     .unwrap();
+    // And a row of the blueprint's own, which its runs see on top.
+    let manifest = root.join("agents").join("own").join("agent.leviath");
+    let mut manifest_text = std::fs::read_to_string(&manifest).unwrap();
+    manifest_text.push_str("\n[media_types.\"application/x-mine\"]\nfamily = \"model\"\n");
+    std::fs::write(&manifest, manifest_text).unwrap();
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     dash.handle_key(key(KeyCode::Char('2')));
     assert_eq!(
@@ -598,6 +603,10 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     assert!(picker_open(&mut dash));
     let values = picker_values(&mut dash);
     assert!(values.contains(&"image/*".to_string()), "{values:?}");
+    assert!(
+        values.contains(&"application/x-mine".to_string()),
+        "{values:?}"
+    );
     assert!(values.contains(&"image/png".to_string()), "{values:?}");
     assert!(
         values.contains(&"application/x-acme".to_string()),

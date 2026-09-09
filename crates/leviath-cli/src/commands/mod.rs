@@ -47,6 +47,7 @@ pub mod doctor;
 pub(crate) mod list;
 pub mod mcp;
 pub(crate) mod media;
+pub(crate) mod media_rows;
 pub(crate) mod models;
 pub(crate) mod pack;
 pub(crate) mod policy;

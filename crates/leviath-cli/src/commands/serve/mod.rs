@@ -22,6 +22,7 @@ mod providers;
 mod request_limits;
 mod runs;
 mod scripts;
+mod scripts_media;
 mod search;
 #[cfg(test)]
 mod testutil;

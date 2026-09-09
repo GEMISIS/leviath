@@ -327,6 +327,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // circle the parameter exists to break: without it a console cannot tell
     // "this agent has no other scripts" from "this daemon does not look".
     "scripts.candidates",
+    // `media_check` as a sixth `kind` on the scripts routes: the byte checks
+    // a media row names, beside the config for the operator's rows and
+    // beside the agent for a blueprint's. Announced for the same reason
+    // `scripts.providers` is: a console offering the kind to an older
+    // daemon would put an editor in front of a 400.
+    "scripts.media_checks",
     "config.gateways",
     // `kind`, `header_names` and `models` on each gateway `GET /api/config`
     // reports, and `kind`, `headers` and `models` on what `PUT /api/config`

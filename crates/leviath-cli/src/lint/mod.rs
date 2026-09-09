@@ -453,6 +453,7 @@ pub(crate) fn lint_manifest(
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
+    findings.extend(lint_media_types(blueprint));
     for stage in &blueprint.stages {
         let keys = declared.stage(&stage.name);
         findings.extend(lint_declarations(stage, keys));
@@ -608,7 +609,9 @@ impl Declared {
 // than re-exported: `lint_manifest` is the only caller and the only entry point
 // anyone outside this module needs, so the individual checks stay internal.
 mod checks;
+mod media;
 use checks::*;
+use media::*;
 mod security;
 use security::*;
 
