@@ -7,7 +7,7 @@
 //! it configures rather than in a flat bag on `Stage`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::ValidationError;
 use crate::layout::ContextLayout;
@@ -667,6 +667,16 @@ pub struct Stage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_as_text: Vec<String>,
 
+    /// What each tool may be handed at this stage, as media type patterns
+    /// (`[stages.<name>.tool_accepts]`: `spawn_agent = ["image/*"]`). A
+    /// stored part outside a tool's list is out of that tool's reach here:
+    /// `spawn_agent`'s `parts`, a script's `read_part` and `list_parts`, and
+    /// `context_export` see only what the list allows. A tool absent from
+    /// the table has no limit beyond what it takes itself, and inline text
+    /// is never hidden by one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_accepts: BTreeMap<String, Vec<String>>,
+
     /// Whether this stage must call `submit_output` before it transitions.
     ///
     /// Unlike [`Self::required_tools`], which only keeps a blocking human tool
@@ -719,6 +729,7 @@ impl Stage {
             output: None,
             input_accepts: Vec::new(),
             input_as_text: Vec::new(),
+            tool_accepts: BTreeMap::new(),
             require_output: false,
             hooks: StageHooks::default(),
         }
@@ -773,6 +784,12 @@ impl Stage {
         self.available_tools
             .iter()
             .filter(|t| !super::is_tool_group_token(t))
+    }
+
+    /// The media type patterns `tool` may be handed at this stage, when the
+    /// stage limits it; `None` when it does not.
+    pub fn tool_limit(&self, tool: &str) -> Option<&[String]> {
+        self.tool_accepts.get(tool).map(Vec::as_slice)
     }
 
     /// Validate that this stage is well-formed.

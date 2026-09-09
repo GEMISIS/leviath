@@ -5910,6 +5910,9 @@ model = "claude-sonnet-5"
 [stages.cut.input]
 accepts = ["audio/wav"]
 as_text = ["model/*"]
+[stages.cut.tool_accepts]
+spawn_agent = ["Image/*", "audio/wav"]
+context_export = ["image/png"]
 [stages.cut.output]
 format = "markdown"
 [[stages.cut.output.artifacts]]
@@ -5928,6 +5931,16 @@ type = "text/*"
     let cut = &bp.stages[1];
     assert_eq!(bp.stage_inputs(cut), ["audio/wav"]);
     assert_eq!(cut.input_as_text, ["model/*"]);
+    assert_eq!(
+        cut.tool_limit("spawn_agent"),
+        Some(["image/*".to_string(), "audio/wav".to_string()].as_slice())
+    );
+    assert_eq!(
+        cut.tool_limit("context_export"),
+        Some(["image/png".to_string()].as_slice())
+    );
+    assert!(cut.tool_limit("read_file").is_none());
+    assert!(look.tool_accepts.is_empty());
     let spec = cut.output.as_ref().unwrap();
     assert_eq!(spec.artifacts.len(), 2);
     assert_eq!(spec.artifacts[0].name, "final");
@@ -5970,10 +5983,23 @@ fn artifact_declarations_are_checked_at_load() {
         ("[stages.s.input]\nbogus = 1\n", "bogus"),
         ("[stages.s.input]\naccepts = [\"nope\"]\n", "accepts"),
         ("[stages.s.input]\nas_text = 5\n", "input"),
+        (
+            "[stages.s.tool_accepts]\nspawn_agent = []\n",
+            "must list at least one media type",
+        ),
+        (
+            "[stages.s.tool_accepts]\nspawn_agent = \"image/*\"\n",
+            "tool_accepts has spawn_agent",
+        ),
     ] {
         let err = parse_manifest(&format!("{base}{tail}"))
             .unwrap_err()
             .to_string();
         assert!(err.contains(expect), "{tail}: {err}");
     }
+    // A limit table that is not a table.
+    let err = parse_manifest("[agent]\nname = \"a\"\n[stages.s]\ntool_accepts = 3\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("tool_accepts must be a table"), "{err}");
 }

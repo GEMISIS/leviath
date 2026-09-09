@@ -66,6 +66,7 @@ pub(crate) struct SubAgentHandle {
 fn parts_for_child(
     h: &SubAgentHandle,
     args: &serde_json::Value,
+    limit: Option<&[String]>,
 ) -> Result<Vec<leviath_core::media::InboundPart>, String> {
     let wanted: Vec<&str> = args
         .get("parts")
@@ -97,6 +98,16 @@ fn parts_for_child(
                         "'{name}' names no stored part of this run (a part's name or sha256 prefix)"
                     )
                 })?;
+            // The stage's limit for this tool, when it has one.
+            if let Some(limit) = limit
+                && !blob.media_type.matches_any(limit)
+            {
+                return Err(format!(
+                    "'{name}' is {}; at this stage spawn_agent may be handed only {}",
+                    blob.media_type,
+                    limit.join(", ")
+                ));
+            }
             let bytes = media
                 .store
                 .read(&media.run_id, &blob.sha256)
@@ -125,9 +136,20 @@ pub(crate) use leviath_tools::is_subagent_tool;
 const WAIT_POLL: Duration = Duration::from_millis(500);
 
 /// Dispatch one sub-agent tool call, returning the textual result for the model.
+#[cfg(test)]
 pub(crate) async fn handle(h: &SubAgentHandle, tc: &ToolCall) -> String {
+    handle_within(h, tc, None).await
+}
+
+/// [`handle`], with what the stage lets `spawn_agent` be handed
+/// (`tool_accepts`), when it limits it.
+pub(crate) async fn handle_within(
+    h: &SubAgentHandle,
+    tc: &ToolCall,
+    limit: Option<&[String]>,
+) -> String {
     match tc.name.as_str() {
-        "spawn_agent" => spawn(h, &tc.arguments).await,
+        "spawn_agent" => spawn(h, &tc.arguments, limit).await,
         "check_agent" => check(h, str_arg(&tc.arguments, "agent_id")).await,
         "wait_for_agent" => wait(h, str_arg(&tc.arguments, "agent_id")).await,
         "send_to_agent" => send(h, &tc.arguments).await,
@@ -157,7 +179,7 @@ fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
     args.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
-async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
+async fn spawn(h: &SubAgentHandle, args: &serde_json::Value, limit: Option<&[String]>) -> String {
     let blueprint = str_arg(args, "blueprint");
     let task = str_arg(args, "task");
     if blueprint.is_empty() || task.is_empty() {
@@ -196,7 +218,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         .get("max_child_depth")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
-    let parts = match parts_for_child(h, args) {
+    let parts = match parts_for_child(h, args, limit) {
         Ok(parts) => parts,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
     };
@@ -482,7 +504,12 @@ mod tests {
             "x".to_string(),
             "x/agent.leviath".to_string(),
         ] {
-            let out = spawn(&h, &serde_json::json!({"blueprint": bad, "task": "go"})).await;
+            let out = spawn(
+                &h,
+                &serde_json::json!({"blueprint": bad, "task": "go"}),
+                None,
+            )
+            .await;
             assert!(
                 out.contains("own working directory"),
                 "{bad} must be refused: {out}"
@@ -525,6 +552,7 @@ mod tests {
                 "blueprint": elsewhere.path().to_string_lossy(),
                 "task": "go"
             }),
+            None,
         )
         .await;
         assert!(
@@ -866,6 +894,36 @@ task = { kind = "pinned", max_tokens = 1000 }
             assert!(parts[1].deliver.is_none());
         }
 
+        // The stage's limit for spawn_agent: a part outside it refuses the
+        // spawn by name, one inside it goes through.
+        let audio_only = ["audio/*".to_string()];
+        let out = handle_within(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go", "parts": ["hero.png"]}),
+            ),
+            Some(&audio_only),
+        )
+        .await;
+        assert!(out.starts_with("[error] cannot spawn"), "{out}");
+        assert!(
+            out.contains(
+                "'hero.png' is image/png; at this stage spawn_agent may be handed only audio/*"
+            ),
+            "{out}"
+        );
+        let images = ["image/*".to_string()];
+        let out = handle_within(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go", "parts": ["hero.png"]}),
+            ),
+            Some(&images),
+        )
+        .await;
+        assert!(out.contains("Spawned sub-agent"), "{out}");
         // A name the parent holds no part under, and a part whose bytes the
         // store has lost, each refuse the spawn by name.
         for (wanted, says) in [
@@ -896,11 +954,11 @@ task = { kind = "pinned", max_tokens = 1000 }
         .await;
         assert!(out.contains("no blob store"), "{out}");
         assert!(
-            parts_for_child(&h, &json!({"parts": []}))
+            parts_for_child(&h, &json!({"parts": []}), None)
                 .unwrap()
                 .is_empty()
         );
-        assert!(parts_for_child(&h, &json!({})).unwrap().is_empty());
+        assert!(parts_for_child(&h, &json!({}), None).unwrap().is_empty());
     }
 
     /// A run's `--model` covers the children it spawns as well. The child is

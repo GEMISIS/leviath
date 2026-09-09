@@ -205,6 +205,14 @@ same list.
   whose file the next stage's regions cannot take carries `!` on its label,
   and the explorer's caption names the type that would cross as a stand-in
   (#400).
+- `[stages.<name>.tool_accepts]`: what each tool may be handed at a stage,
+  as `tool = ["image/*"]`. A stored part outside the list is out of that
+  tool's reach there: `spawn_agent`'s `parts` refuses it by name, a script's
+  `list_parts` leaves it out and its `read_part` names the limit, and
+  `context_export` refuses it the same way. Inline text is never hidden.
+  `lev validate` prints each stage's limits and warns
+  (`tool-accepts-ungranted`) about a limit on a tool the stage does not
+  grant (#400).
 - The dashboard's agent editor writes the media keys: a region's `accepts`
   and `max_stored` on its panel, and a stage's `[input] accepts` and
   `as_text` and its `[[output.artifacts]]` declarations (name, type or

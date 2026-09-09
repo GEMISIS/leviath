@@ -367,7 +367,12 @@ fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default();
-        if takes.is_empty() && hands_back.is_empty() {
+        let limits: Vec<String> = stage
+            .tool_accepts
+            .iter()
+            .map(|(tool, list)| format!("{tool} to [{}]", list.join(", ")))
+            .collect();
+        if takes.is_empty() && hands_back.is_empty() && limits.is_empty() {
             continue;
         }
         let mut parts = Vec::new();
@@ -379,6 +384,9 @@ fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
         }
         if !hands_back.is_empty() {
             parts.push(format!("hands back {}", hands_back.join(", ")));
+        }
+        if !limits.is_empty() {
+            parts.push(format!("limits {}", limits.join(", ")));
         }
         lines.push(format!(
             "  Media, stage '{}': {}",
@@ -1387,6 +1395,8 @@ max_iterations = 5
 [stages.cut.input]
 accepts = ["audio/*", "image/*"]
 as_text = ["model/obj"]
+[stages.cut.tool_accepts]
+spawn_agent = ["image/*"]
 [[stages.cut.output.artifacts]]
 name = "final"
 type = "video/mp4"
@@ -1418,7 +1428,7 @@ accepts = ["audio/*"]
             lines,
             vec![
                 "  Media, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
-                 final (video/mp4, required), notes (text/*)"
+                 final (video/mp4, required), notes (text/*); limits spawn_agent to [image/*]"
                     .to_string(),
                 "  Media, stage 'ship': hands back bundle (application/zip)".to_string(),
                 "  Media, stage 'hear': takes audio/*".to_string(),

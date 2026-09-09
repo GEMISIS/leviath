@@ -41,6 +41,8 @@ pub(super) struct ToolStateParts<'a> {
     pub(super) stage_perms_by_index: Vec<HashMap<String, String>>,
     /// Per-stage required tools, indexed by stage.
     pub(super) stage_required_by_index: Vec<HashSet<String>>,
+    /// Per-stage `tool_accepts`, by canonical tool name, indexed by stage.
+    pub(super) stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>>,
     /// Agent-wide tool policies from the blueprint.
     pub(super) agent_perms: HashMap<String, String>,
     /// The blueprint's name, for policy lookup and messages.
@@ -92,6 +94,11 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         .get(parts.entry_index)
         .cloned()
         .unwrap_or_default();
+    let entry_limits = parts
+        .stage_tool_accepts_by_index
+        .get(parts.entry_index)
+        .cloned()
+        .unwrap_or_default();
     Arc::new(AgentToolState {
         // One budget per run, so the per-run ceiling spans every batch rather
         // than resetting with each one - and spans the seeds before them.
@@ -114,6 +121,8 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         stage_perms_by_index: Arc::new(parts.stage_perms_by_index),
         stage_required: Arc::new(StdMutex::new(entry_required)),
         stage_required_by_index: Arc::new(parts.stage_required_by_index),
+        stage_tool_accepts: Arc::new(StdMutex::new(entry_limits)),
+        stage_tool_accepts_by_index: Arc::new(parts.stage_tool_accepts_by_index),
         agent_perms: Arc::new(parts.agent_perms),
         blueprint_may_loosen: Arc::new(std::sync::atomic::AtomicBool::new(
             parts.config.security.allow_blueprint_permissions,

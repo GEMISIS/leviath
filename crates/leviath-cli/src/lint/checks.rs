@@ -1088,6 +1088,41 @@ fn evicts_at_its_bound(kind: &leviath_core::RegionKind) -> bool {
     )
 }
 
+/// A stage that limits what a tool may be handed, without granting the tool.
+///
+/// The limit is harmless, since a tool the stage never offers is never
+/// handed anything, but it is a sign the author meant to grant the tool or
+/// misspelled its name. Said only when the stage names its tools one by
+/// one: under a group grant (`@builtin`, `@scripts`) whether the tool is
+/// reached depends on the install, which is not the manifest's business.
+pub(super) fn lint_tool_accepts(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+    if !stage.tool_groups().is_empty() {
+        return Vec::new();
+    }
+    stage
+        .tool_accepts
+        .iter()
+        .filter(|(tool, _)| {
+            !stage
+                .named_tools()
+                .any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool))
+        })
+        .map(|(tool, list)| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "tool-accepts-ungranted",
+                format!(
+                    "limits '{tool}' to {} under tool_accepts but does not grant it, so the \
+                     limit never applies",
+                    list.join(", ")
+                ),
+            )
+            .in_stage(&stage.name)
+            .with_fix("add the tool to available_tools, or drop the limit")
+        })
+        .collect()
+}
+
 /// A stage whose regions take media none of its listed models can see.
 ///
 /// Such a run does not fail: every stored part reaches the model as its
