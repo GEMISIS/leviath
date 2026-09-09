@@ -359,6 +359,15 @@ pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 /// [`super::WorldHost::set_resumer`]; a no-op when none is set.
 pub type Resumer = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
+/// The daemon-installed hook run on every safety re-drive, whether or not
+/// anything woke the host: the place for work that has to happen while the
+/// daemon is otherwise idle. The daemon uses it to notice an edited
+/// `config.toml` or `media_types.toml` and re-apply the settings that reach
+/// runs already under way, so an edit lands within one re-drive interval
+/// rather than at the next spawn. Installed with
+/// [`super::WorldHost::set_housekeeper`]; a no-op when none is set.
+pub type Housekeeper = Box<dyn FnMut(&mut PipelineWorld) + Send>;
+
 /// An async hook the host awaits *before* servicing a top-level `Spawn` control
 /// op, so the daemon can do async preparation the sync spawner can't - e.g.
 /// lazily connecting the blueprint's MCP servers into the shared pool so

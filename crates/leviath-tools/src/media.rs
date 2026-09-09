@@ -7,15 +7,16 @@
 
 use std::sync::Arc;
 
-use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, Part};
+use leviath_core::media::{Blob, BlobStore, MediaType, Part, RegistryCell};
 
 /// Where a tool's bytes go, and what types them.
 #[derive(Clone)]
 pub struct ToolMedia {
     /// The run's blob store.
     pub store: Arc<dyn BlobStore>,
-    /// The registry that types bytes and prices them.
-    pub registry: Arc<MediaRegistry>,
+    /// The registry that types bytes and prices them: the run's own, read
+    /// through the cell the runtime swaps a reloaded registry into.
+    pub registry: Arc<RegistryCell>,
     /// The run the bytes belong to.
     pub run_id: String,
     /// The largest part a tool may store, in bytes (`[media] max_part_bytes`).
@@ -47,7 +48,7 @@ impl ToolMedia {
         }
         let reference = self
             .store
-            .put(&self.run_id, &blob, &self.registry)
+            .put(&self.run_id, &blob, &self.registry.load())
             .map_err(|e| format!("could not store '{name}': {e}"))?;
         Ok(Part::stored(reference).named(name))
     }
@@ -56,13 +57,13 @@ impl ToolMedia {
     /// `name`, letting the registry correct a declaration it cannot parse.
     pub fn type_of(&self, declared: Option<&str>, name: Option<&str>, bytes: &[u8]) -> MediaType {
         let declared = declared.and_then(|d| MediaType::parse(d).ok());
-        self.registry.resolve(declared.as_ref(), name, bytes)
+        self.registry.load().resolve(declared.as_ref(), name, bytes)
     }
 
     /// A file name for bytes that arrived without one: `stem` plus the type's
     /// first extension, or the stem alone when the registry knows none.
     pub fn name_for(&self, stem: &str, media_type: &MediaType) -> String {
-        match self.registry.info(media_type).extensions.first() {
+        match self.registry.load().info(media_type).extensions.first() {
             Some(ext) => format!("{stem}.{ext}"),
             None => stem.to_string(),
         }
@@ -72,12 +73,12 @@ impl ToolMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::MemoryBlobStore;
+    use leviath_core::media::{MediaRegistry, MemoryBlobStore};
 
     fn media(max: u64) -> ToolMedia {
         ToolMedia {
             store: Arc::new(MemoryBlobStore::new()),
-            registry: Arc::new(MediaRegistry::builtin()),
+            registry: Arc::new(RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         }
@@ -134,7 +135,7 @@ mod tests {
         assert!(Broken.list("r").unwrap().is_empty());
         let broken = ToolMedia {
             store: Arc::new(Broken),
-            registry: Arc::new(MediaRegistry::builtin()),
+            registry: Arc::new(RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: 1024,
         };

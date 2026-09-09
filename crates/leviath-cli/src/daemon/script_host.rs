@@ -2404,13 +2404,13 @@ mod tests {
 #[cfg(test)]
 mod parts_tests {
     use super::*;
-    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore};
+    use leviath_core::media::{Blob, BlobStore, MediaType, MemoryBlobStore};
 
     fn media_and_store() -> (Arc<leviath_tools::ToolMedia>, Arc<MemoryBlobStore>) {
         let store = Arc::new(MemoryBlobStore::new());
         let media = Arc::new(leviath_tools::ToolMedia {
             store: store.clone(),
-            registry: Arc::new(MediaRegistry::builtin()),
+            registry: Arc::new(leviath_core::media::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: 64,
         });
@@ -2445,14 +2445,14 @@ mod parts_tests {
                     MediaType::parse("image/png").unwrap(),
                     b"\x89PNG\r\n\x1a\nhero".to_vec(),
                 ),
-                &media.registry,
+                &media.registry.load(),
             )
             .unwrap();
         let wav = store
             .put(
                 "run-1",
                 &Blob::new(MediaType::parse("audio/wav").unwrap(), b"RIFFwav".to_vec()),
-                &media.registry,
+                &media.registry.load(),
             )
             .unwrap();
         let sha = png.sha256.clone();
@@ -2519,7 +2519,7 @@ mod parts_tests {
             b"\x89PNG\r\n\x1a\nhero".to_vec(),
         )
         .named("hero.png");
-        let r = store.put("run-1", &blob, &media.registry).unwrap();
+        let r = store.put("run-1", &blob, &media.registry.load()).unwrap();
         let sha = r.sha256.clone();
         parts
             .lock()

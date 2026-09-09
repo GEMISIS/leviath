@@ -204,6 +204,7 @@ pub(crate) fn spawn_agent(
             global_hints,
             global_nudge: leviath_core::NudgeConfig::default(),
             region_scripts: std::collections::HashMap::new(),
+            media_registry: None,
         },
     )
 }
@@ -234,6 +235,11 @@ pub struct SeededSpawn {
         String,
         std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
     >,
+    /// The run's media registry, when the host built one (with the
+    /// blueprint's checks compiled and attached). Left `None`, one is built
+    /// here from the world's registry and the blueprint's own rows, with no
+    /// checks.
+    pub media_registry: Option<crate::blob_store::RunMediaRegistry>,
 }
 
 /// Like `spawn_agent`, but seeds the context window from a name→content map
@@ -255,19 +261,33 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         global_hints,
         global_nudge,
         region_scripts,
+        media_registry,
     } = spawn;
     let seeds = &seeds;
+    // The registry this run types its bytes by: the host's, or the world's
+    // rows with the blueprint's `[media_types]` on top. A world without a
+    // registry (one assembled by hand in a test) has no run registry either.
+    let run_registry = match media_registry {
+        Some(registry) => Some(registry),
+        None => world
+            .get_resource::<crate::blob_store::MediaRegistryHandle>()
+            .map(|r| {
+                crate::blob_store::RunMediaRegistry::new(
+                    &r.0,
+                    blueprint.media_types.clone(),
+                    std::collections::BTreeMap::new(),
+                )
+            })
+            .transpose()
+            .map_err(|e| format!("[media_types]: {e}"))?,
+    };
     // Where attached bytes go, read before the world is borrowed for the
     // spawn. A world without a store (one assembled by hand in a test)
     // refuses a part rather than dropping it on the floor.
     let media_store = world
         .get_resource::<crate::blob_store::BlobStoreHandle>()
         .map(|s| s.0.clone())
-        .zip(
-            world
-                .get_resource::<crate::blob_store::MediaRegistryHandle>()
-                .map(|r| r.0.clone()),
-        );
+        .zip(run_registry.as_ref().map(|r| r.registry()));
     let max_part_bytes = world
         .get_resource::<crate::blob_store::MediaLimits>()
         .map_or(
@@ -449,6 +469,9 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     ));
     if let Some(detector) = repetition {
         world.entity_mut(entity).insert(detector);
+    }
+    if let Some(registry) = run_registry {
+        world.entity_mut(entity).insert(registry);
     }
     if let Some(routing) = stage0_routing {
         world

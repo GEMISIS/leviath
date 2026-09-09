@@ -516,6 +516,7 @@ pub(crate) fn dispatch_tools(
                     &mut window,
                     &crate::media_tools::MediaToolContext {
                         media: &media,
+                        entity,
                         run_id: &state.agent_id,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
                         tool_limit: blueprint
@@ -632,7 +633,7 @@ pub(crate) fn dispatch_tools(
                     .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
                     .unwrap_or_default();
                 // The store the artifacts go into, when this world has one.
-                let (sources, _) = media.hydration_inputs();
+                let (sources, _) = media.hydration_inputs(entity);
                 let sink =
                     sources
                         .as_ref()

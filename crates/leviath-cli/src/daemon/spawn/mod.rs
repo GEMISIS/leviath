@@ -11,7 +11,7 @@
 //! whole path is synchronous - which lets it run straight from the host's
 //! control loop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -206,17 +206,40 @@ fn load_blueprint(
     Ok((content, blueprint))
 }
 
-/// The run's blob store as the tools see it: the world's store and
-/// registry, keyed by this run, under the operator's size ceiling.
-fn tool_media(world: &World, run_id: &str) -> leviath_tools::ToolMedia {
+/// The registry this run types its bytes by: the world's rows (the
+/// operator's, kept current by the config reload) with the blueprint's own
+/// `[media_types]` layered on top, and the blueprint's checks compiled
+/// beside its other scripts. A world without a registry (a test's) starts
+/// from the compiled defaults.
+///
+/// Cannot fail here: the manifest parser layered these rows once already,
+/// and a row that layers over nothing layers over anything, since one row
+/// never constrains another; `checks` is keyed by the registry's own keys.
+fn run_media_registry(
+    world: &World,
+    blueprint: &Blueprint,
+    checks: BTreeMap<String, Arc<dyn leviath_core::media::MediaCheck>>,
+) -> leviath_runtime::blob_store::RunMediaRegistry {
+    let base = world
+        .get_resource::<leviath_runtime::blob_store::MediaRegistryHandle>()
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
+    leviath_runtime::blob_store::RunMediaRegistry::new(&base, blueprint.media_types.clone(), checks)
+        .expect("the manifest parser accepted these rows")
+}
+
+/// The run's blob store as the tools see it: the world's store and the
+/// run's registry, keyed by this run, under the operator's size ceiling.
+fn tool_media(
+    world: &World,
+    run_id: &str,
+    registry: &leviath_runtime::blob_store::RunMediaRegistry,
+) -> leviath_tools::ToolMedia {
     let store = world
         .get_resource::<leviath_runtime::blob_store::BlobStoreHandle>()
         .map(|s| s.0.clone())
         .unwrap_or_else(|| Arc::new(leviath_core::media::MemoryBlobStore::new()));
-    let registry = world
-        .get_resource::<leviath_runtime::blob_store::MediaRegistryHandle>()
-        .map(|r| r.0.clone())
-        .unwrap_or_default();
+    let registry = registry.cell();
     let max_part_bytes = world
         .get_resource::<leviath_runtime::blob_store::MediaLimits>()
         .map_or(
@@ -574,7 +597,12 @@ fn build_agent_inner(
     // that a live run is up but blind to paths its author designed it around.
     let read_path_counts =
         read_path_grant_counts(&blueprint, deps.config, std::path::Path::new(&args.workdir));
-    let media = Arc::new(tool_media(world, &args.run_id));
+    // The run's media registry, before the tools are built over it: the
+    // blueprint's checks are compiled here, with the same fence its other
+    // scripts get, and a broken one is a spawn error.
+    let media_checks = resolve_media_checks(&blueprint, &args.blueprint_path)?;
+    let run_registry = run_media_registry(world, &blueprint, media_checks);
+    let media = Arc::new(tool_media(world, &args.run_id, &run_registry));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy)
         .with_shell_env(shell_env_policy(deps.config))
@@ -966,6 +994,7 @@ fn build_agent_inner(
             },
             global_nudge: deps.config.nudge.clone(),
             region_scripts,
+            media_registry: Some(run_registry),
         },
     )?;
 
@@ -1756,6 +1785,42 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(err.contains("hooks/brain.rhai"), "got: {err}");
     }
 
+    /// A blueprint's media check that cannot be loaded stops the spawn, the
+    /// way its other scripts do, before any tokens are spent.
+    #[tokio::test]
+    async fn build_agent_fails_fast_on_a_media_check_it_cannot_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [media_types.\"application/x-acme-scene\"]\ncheck = \"checks/gone.rhai\"\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let err = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &args,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot read media check"), "got: {err}");
+        assert!(err.contains("gone.rhai"), "got: {err}");
+    }
+
     /// The run id becomes a directory name and everything a run writes lands
     /// under it. The persistence lane joins it to the runs directory without
     /// checking, so the check belongs at the boundary that accepts the request.
@@ -1766,7 +1831,9 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn tool_media_reads_the_worlds_store_or_falls_back_to_memory() {
         let bare = World::new();
-        let m = tool_media(&bare, "run-x");
+        let bp = validator_blueprint(None, None);
+        let registry = run_media_registry(&bare, &bp, BTreeMap::new());
+        let m = tool_media(&bare, "run-x", &registry);
         assert_eq!(m.run_id, "run-x");
         assert_eq!(
             m.max_part_bytes,
@@ -1781,7 +1848,76 @@ system = { kind = "pinned", max_tokens = 1000 }
             max_part_bytes: 7,
             ..Default::default()
         });
-        assert_eq!(tool_media(&world, "r").max_part_bytes, 7);
+        assert_eq!(tool_media(&world, "r", &registry).max_part_bytes, 7);
+        // The tools read the run's registry through the cell the runtime
+        // swaps a reload into, so the two never disagree about a type.
+        let obj = leviath_core::media::MediaType::parse("model/obj").unwrap();
+        assert_eq!(m.name_for("a", &obj), "a.obj");
+        let rows: toml::Table = toml::from_str("[\"model/obj\"]\nextensions = [\"o\"]\n").unwrap();
+        registry
+            .rebuild(
+                &leviath_core::media::MediaRegistry::builtin()
+                    .layered(&rows, "e")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(m.name_for("a", &obj), "a.o");
+    }
+
+    /// A blueprint's `[media_types]` checks are compiled beside its other
+    /// scripts, fenced to its directory, and refuse bytes on the run.
+    #[test]
+    fn resolve_media_checks_compiles_the_rows_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::create_dir_all(dir.path().join("checks")).unwrap();
+        std::fs::write(
+            dir.path().join("checks/scene.rhai"),
+            "fn check(bytes, media_type) { if bytes.len() < 4 { return \"too short\"; } () }",
+        )
+        .unwrap();
+        let mut bp = validator_blueprint(None, None);
+        bp.media_types = toml::from_str(
+            "[\"application/x-acme-scene\"]\nfamily = \"model\"\ncheck = \"checks/scene.rhai\"\n\
+             [\"model/obj\"]\ntext = true\n",
+        )
+        .unwrap();
+        let checks = resolve_media_checks(&bp, &manifest.to_string_lossy()).expect("compiles");
+        assert_eq!(checks.len(), 1);
+        let scene = leviath_core::media::MediaType::parse("application/x-acme-scene").unwrap();
+        assert_eq!(
+            checks["application/x-acme-scene"].check(&scene, b"ab"),
+            Err("too short".to_string())
+        );
+        // On the run: the store refuses what the check refuses.
+        let registry = run_media_registry(&World::new(), &bp, checks);
+        let media = tool_media(&World::new(), "run-c", &registry);
+        let short = leviath_core::media::Blob::new(scene.clone(), b"ab".to_vec()).named("a.scene");
+        let err = media.store(short).unwrap_err();
+        assert!(err.contains("too short"), "{err}");
+        let fine = leviath_core::media::Blob::new(scene, b"ACME1".to_vec()).named("b.scene");
+        assert!(media.store(fine).is_ok());
+
+        // Missing, escaping and broken scripts are each named.
+        bp.media_types = toml::from_str("[\"x/y\"]\ncheck = \"checks/gone.rhai\"\n").unwrap();
+        let err = resolve_media_checks(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(err.contains("cannot read media check"), "{err}");
+        bp.media_types = toml::from_str("[\"x/y\"]\ncheck = \"../escape.rhai\"\n").unwrap();
+        let err = resolve_media_checks(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(
+            err.contains("media check '../escape.rhai' resolves outside"),
+            "{err}"
+        );
+        std::fs::write(dir.path().join("checks/broken.rhai"), "fn check(a) { () }").unwrap();
+        bp.media_types = toml::from_str("[\"x/y\"]\ncheck = \"checks/broken.rhai\"\n").unwrap();
+        let err = resolve_media_checks(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(
+            err.contains("media check for x/y failed to compile"),
+            "{err}"
+        );
+        bp.media_types = toml::from_str("[png]\ncheck = \"checks/scene.rhai\"\n").unwrap();
+        let err = resolve_media_checks(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("[media_types]:"), "{err}");
     }
 
     #[tokio::test]

@@ -66,18 +66,33 @@ stand_in = "[{type} {size}] {name}"
 | `extensions` | Extensions, without the dot, that imply this type |
 | `magic` | A hex prefix that identifies the bytes |
 | `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
+| `check` | A [Rhai script](/docs/rhai-media-checks) that refuses bytes which are not what they claim; `""` lifts a broader row's check |
 
 Rows layer. The compiled defaults come first, then a `[media_types]` table in your config, then
-[`media_types.toml`](/docs/configuration#media_typestoml) beside it. A row names only what it
-changes: adding
-an extension to `image/png` keeps its family and token rule. `lev media list` prints the
-effective table with the source of every row, and `lev media check <file>` says what type a
-file resolves to, what its stand-in looks like, and how it reaches a model; `lev models list
---accepts <type>` names the models that take it natively.
+[`media_types.toml`](/docs/configuration#media_typestoml) beside it, then the
+[`[media_types]` a blueprint carries](/docs/agents#media-types-the-agent-brings), which reach
+that agent's runs only. A row names only what it changes: adding an extension to `image/png`
+keeps its family and token rule. `lev media add <type>` writes a row from the command line,
+`lev media list` prints the effective table with the source of every row, and
+`lev media check <file>` says what type a file resolves to, what its stand-in looks like, and
+how it reaches a model; `lev models list --accepts <type>` names the models that take it
+natively.
+
+Every run reads its own copy of the table: the operator's rows with the blueprint's on top,
+built when the run spawns. Edit `media_types.toml` or the config while runs are live and they
+pick the change up too, within the daemon's housekeeping interval of thirty seconds; a new run
+sees it at once.
 
 A file's type is decided in a fixed order: the type the sender declared, then the registry's
 magic prefixes, then the extension, then valid UTF-8 counts as `text/plain`, and anything else
 is `application/octet-stream`.
+
+A type is a claim, and the claim is checked in two places. Its spelling is checked wherever a
+type is written: lowercase `type/subtype`, no parameters, `type/*` only where a capability or
+an `accepts` list is declared. Whether the bytes are that type is checked only when a row names
+a `check`: the script runs once, where bytes are stored, so an upload, a tool result, a
+`read_file`, a model's reply and an artifact are all refused with the reason when they are not
+what they claim. Without one, a declared type is taken at its word, as every provider takes it.
 
 ## What a model sees
 
@@ -204,5 +219,5 @@ inline_text_bytes = 1048576      # text kept inside the entry before it is store
 max_stored_per_request = 100     # stored parts one model request carries
 ```
 
-`lev doctor` reports a `[media_types]` row that will not load; the daemon skips such a row and
-types that file by the built-in table until it is fixed.
+`lev doctor` reports a `[media_types]` row that will not load, or a `check` it cannot compile;
+the daemon keeps the built-in table until it is fixed.

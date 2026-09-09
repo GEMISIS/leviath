@@ -1192,9 +1192,10 @@ Your rows in the media registry, which says what each [media type](/docs/media) 
 `LEVIATH_CONFIG_PATH` points when that is set). A key is a `type/subtype` or a `type/*`
 pattern; name only what you change, and every other field resolves from the built-in table (the
 exact type, then `type/*`, then `*/*`). `lev media init` writes this example to start from; the
-[live copy](/schema/media_types.example.toml) is the one the tests check, `lev media list` prints
-the table the file makes with each row's source, and an edit reaches the next run without a
-restart.
+[live copy](/schema/media_types.example.toml) is the one the tests check, `lev media add` and
+`lev media remove` edit rows in place, and `lev media list` prints the table the file makes with
+each row's source. An edit reaches the next run at once and every run already under way within
+the daemon's housekeeping interval of thirty seconds, with nothing restarted.
 
 ```toml
 ["model/obj"]
@@ -1217,9 +1218,11 @@ stand_in = "[{type} {size}] {name}"
 | `extensions` | Extensions, without the dot, that imply this type |
 | `magic` | A hex prefix that identifies the bytes |
 | `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
+| `check` | A [Rhai script](/docs/rhai-media-checks), relative to this file's directory, whose `check(bytes, media_type)` refuses bytes that are not what they claim; `""` lifts a check a broader row put on the type |
 
-A misspelled key inside a row is refused, and a file that will not load is skipped by the
-daemon and reported by `lev doctor`, named by path. A `[media_types]` block cut out of an
+A misspelled key inside a row is refused, a `check` that cannot be read or compiled is refused
+with its row named, and a file that will not load is skipped by the daemon and reported by
+`lev doctor`, named by path. A `[media_types]` block cut out of an
 older `config.toml` loads as it was, wrapper and all. A run's tools may not write the file
 (`lock_permission_files`), since what a file is typed as decides what a model is shown.
 

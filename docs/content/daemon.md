@@ -218,6 +218,12 @@ profile and again when such a run resumes, so an edited rule is in force for the
 when the run is built: `questions`, `checkpoints` and `gate`. Those reach the next run, not one
 in flight. Bare `--yolo` never reads the file.
 
+[`media_types.toml`](/docs/configuration#media_typestoml) and a `[media_types]` table in the
+config reload, and they are the one thing that reaches a run already under way without waiting
+for anything: the daemon re-reads both files on its own timer, every thirty seconds, and rebuilds
+every live run's registry over the new rows, so a type you add while a run is going types that
+run's next file. A new run reads the files as it spawns.
+
 `[observability]` reloads too. Turn export on, point it at a different collector, rename the
 service, or turn it off, and the next run emits into what the file says now. The verbosity of the
 daemon's own log is not part of that; it is one of the three things below that still need a

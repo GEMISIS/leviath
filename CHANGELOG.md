@@ -213,6 +213,25 @@ same list.
   source, `lev doctor` names it when it will not load, and
   `lock_permission_files` keeps a run's tools out of it. An edit reaches
   the next run without a restart (#400).
+- Every run types its bytes by its own copy of the media registry: the
+  operator's rows with the blueprint's own `[media_types]` layered on top,
+  built at spawn and read by the tools, the request builder and the message
+  path alike. A blueprint's rows reach that agent's runs only, are checked
+  when the manifest is parsed (a misspelled field fails `lev validate` and
+  the spawn), and travel with the agent (#400).
+- An edit to `media_types.toml` or to `[media_types]` in the config reaches
+  runs already under way, not only the next one. The daemon re-reads both on
+  its own timer, every thirty seconds, and rebuilds every live run's registry
+  over the new rows; a new run reads them as it spawns (#400).
+- A media row may name a `check`: a Rhai script beside the file that names
+  it whose `check(bytes, media_type)` refuses bytes that are not what they
+  claim. It runs once, where bytes are stored, so an upload, a tool result, a
+  `read_file`, a model's reply and a `submit_output` artifact are all refused
+  with the reason when they fail it; a check that cannot run refuses too. The
+  operator's checks are compiled when the registry is built and reported by
+  `lev doctor` when they will not load; a blueprint's at spawn, fenced to the
+  blueprint's directory like its other scripts. Nothing checks the bytes of a
+  type whose row names no check, as before (#400).
 - `[stages.<name>.tool_accepts]`: what each tool may be handed at a stage,
   as `tool = ["image/*"]`. A stored part outside the list is out of that
   tool's reach there: `spawn_agent`'s `parts` refuses it by name, a script's

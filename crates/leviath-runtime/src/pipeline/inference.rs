@@ -369,7 +369,7 @@ pub(crate) struct SystemBlockHashes(pub Vec<u64>);
 /// one is optional because a world assembled by hand in a test installs none
 /// of them, and each has a built-in answer for that case.
 #[derive(bevy_ecs::system::SystemParam)]
-pub(crate) struct DispatchTuning<'w> {
+pub(crate) struct DispatchTuning<'w, 's> {
     /// Which providers' circuits are open.
     pub circuits: Option<Res<'w, ProviderCircuits>>,
     /// When a circuit opens and how long it stays open.
@@ -377,7 +377,7 @@ pub(crate) struct DispatchTuning<'w> {
     /// The retry schedule.
     pub retry: Option<Res<'w, InferenceRetryTuning>>,
     /// The media store, registry and limits.
-    pub media: crate::blob_store::MediaParams<'w>,
+    pub media: crate::blob_store::MediaParams<'w, 's>,
 }
 
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
@@ -417,9 +417,6 @@ pub(crate) fn dispatch_inference(
     // embedded host, and most tests) gets the built-in schedule.
     let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
-    // Every `PipelineWorld` installs these; a world assembled by hand in a
-    // test may not, and then stored parts go out as their stand-ins.
-    let (media_resources, max_stored) = media.hydration_inputs();
     agents.par_iter().for_each(
         |(
             entity,
@@ -519,8 +516,12 @@ pub(crate) fn dispatch_inference(
                 let stream =
                     stage.stream_inference && provider.capabilities(&si.model).supports_streaming;
                 // The bytes of the request's stored parts are read in the
-                // job, off this thread, against what this model takes.
-                let hydration = media_resources.clone().map(|(store, registry)| {
+                // job, off this thread, against what this model takes, typed
+                // by this run's registry. Every `PipelineWorld` installs the
+                // store; a world assembled by hand in a test may not, and
+                // then stored parts go out as their stand-ins.
+                let (media_resources, max_stored) = media.hydration_inputs(entity);
+                let hydration = media_resources.map(|(store, registry)| {
                     crate::inference_bridge::JobHydration {
                         store,
                         run_id: state.agent_id.clone(),

@@ -78,6 +78,38 @@ pub(super) fn script_within_blueprint(
     }
 }
 
+/// Compile every media check the blueprint's `[media_types]` rows name,
+/// keyed by the row's type or pattern.
+///
+/// A hard spawn error like the validators, and for the same reason: a
+/// check that cannot run refuses every file of its type, and the first file
+/// is not the moment to learn that.
+pub(crate) fn resolve_media_checks(
+    blueprint: &Blueprint,
+    blueprint_path: &str,
+) -> Result<BTreeMap<String, Arc<dyn leviath_core::media::MediaCheck>>, String> {
+    let base = std::path::Path::new(blueprint_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    // The rows were checked when the manifest was parsed; layering them again
+    // here is the one way to walk them with their keys normalised.
+    let declared = leviath_core::media::MediaRegistry::empty()
+        .layered(&blueprint.media_types, "blueprint")
+        .map_err(|e| format!("[media_types]: {e}"))?
+        .declared_checks();
+    let mut compiled: BTreeMap<String, Arc<dyn leviath_core::media::MediaCheck>> = BTreeMap::new();
+    for (key, script, _) in declared {
+        let path = script_within_blueprint(&base, &script, "media check")?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read media check '{}': {e}", path.display()))?;
+        let check = leviath_scripting::media_check::compile(&script, &source)
+            .map_err(|e| format!("media check for {key} failed to compile: {e}"))?;
+        compiled.insert(key, Arc::new(check));
+    }
+    Ok(compiled)
+}
+
 pub(crate) fn resolve_output_validators(
     blueprint: &Blueprint,
     blueprint_path: &str,
