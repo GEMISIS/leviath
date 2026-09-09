@@ -3798,7 +3798,8 @@ mod tests {
             noop_progress(),
         )
         .await;
-        assert!(out[0].1.contains("yolo-ran"), "{}", out[0].1);
+        let result = out[0].1.clone();
+        assert!(result.contains("yolo-ran"), "{result}");
         assert!(hub.pending().is_empty(), "allowed means unprompted");
 
         let hub = InteractionHub::new();
@@ -3814,7 +3815,8 @@ mod tests {
             hub,
         )
         .await;
-        assert!(out[0].1.contains("asked-first"), "{}", out[0].1);
+        let result = out[0].1.clone();
+        assert!(result.contains("asked-first"), "{result}");
     }
 
     /// A resume reads the named profile from the file as it stands: an edit
@@ -3875,8 +3877,9 @@ mod tests {
                 noop_progress(),
             )
             .await;
-            assert!(out[0].1.contains("[denied]"), "{}", out[0].1);
-            assert!(out[0].1.contains("is yolo.toml"), "{}", out[0].1);
+            let result = out[0].1.clone();
+            assert!(result.contains("[denied]"), "{result}");
+            assert!(result.contains("is yolo.toml"), "{result}");
             assert!(!cfg.join("yolo.toml").exists(), "nothing was written");
 
             let unlocked = Config {

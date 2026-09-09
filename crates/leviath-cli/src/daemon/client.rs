@@ -1777,4 +1777,62 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         })
         .await;
     }
+
+    /// A profiled spawn prints what the profile keeps before the daemon is
+    /// asked, on the single path and the batch path, and an unknown name
+    /// stops a batch before its first run.
+    #[tokio::test]
+    async fn a_profiled_spawn_prints_its_holds_before_the_daemon_is_asked() {
+        crate::config::with_isolated_config_path_async("spawn-yolo-holds", |cfg| async move {
+            std::fs::write(
+                cfg.join("yolo.toml"),
+                "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n",
+            )
+            .unwrap();
+            let args = SpawnArgs {
+                run_id: "wide-researcher-1785900000-0123456789ab".to_string(),
+                yolo: true,
+                yolo_profile: Some("careful".to_string()),
+                ..SpawnArgs::default()
+            };
+            let one = tempfile::tempdir().unwrap();
+            let (id, server) = fake_daemon_serving(
+                one.path(),
+                vec![r#"{"result":"spawned","run_id":"a-1-000000000001"}"#],
+            );
+            send_spawn(&ControlClient::new(id), args.clone(), false)
+                .await
+                .expect("one spawn");
+            server.await.unwrap();
+
+            let many = tempfile::tempdir().unwrap();
+            let (id, server) = fake_daemon_serving(
+                many.path(),
+                vec![
+                    r#"{"result":"spawned","run_id":"a-1-000000000002"}"#,
+                    r#"{"result":"spawned","run_id":"a-1-000000000003"}"#,
+                ],
+            );
+            send_spawn_batch(&ControlClient::new(id), args.clone(), 2, false)
+                .await
+                .expect("a batch");
+            server.await.unwrap();
+
+            let none = tempfile::tempdir().unwrap();
+            let id = control_id(&none.path().join("no-daemon"));
+            let err = send_spawn_batch(
+                &ControlClient::new(id),
+                SpawnArgs {
+                    yolo_profile: Some("nope".to_string()),
+                    ..args
+                },
+                2,
+                false,
+            )
+            .await
+            .expect_err("an unknown profile stops the batch");
+            assert!(err.to_string().contains("no yolo profile"), "{err}");
+        })
+        .await;
+    }
 }

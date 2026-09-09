@@ -717,6 +717,50 @@ fn args_scope_a_command_to_paths() {
         shell(&p, &rig, "rm -r -f target/debug", ToolPolicy::Ask).policy,
         ToolPolicy::Ask
     );
+    // Climbing past the start of a relative workdir names nothing either.
+    let relative = p.decide(&DecideInput {
+        tool: "shell",
+        arguments: &json!({ "command": "rm -r ../../target" }),
+        configured: ToolPolicy::Ask,
+        launch_allowed: false,
+        kind: ToolKind::Builtin,
+        workdir: Path::new("./wd"),
+        home: Some(&rig.home),
+        platform: POSIX,
+    });
+    assert_eq!(relative.policy, ToolPolicy::Ask);
+    // A resolvable word against a pattern nothing along which exists: the
+    // pattern stays as written and matches nothing.
+    let absolute_word = p.decide(&DecideInput {
+        tool: "shell",
+        arguments: &json!({ "command": format!("rm -r {}/target/x", rig.workdir.display()) }),
+        configured: ToolPolicy::Ask,
+        launch_allowed: false,
+        kind: ToolKind::Builtin,
+        workdir: Path::new("./no-such-wd"),
+        home: Some(&rig.home),
+        platform: POSIX,
+    });
+    assert_eq!(absolute_word.policy, ToolPolicy::Ask);
+    // A pattern written through a symlinked directory meets a word resolved
+    // through it: `/tmp` is `/private/tmp` on macOS, and a workdir given as
+    // the former must still scope the latter.
+    let linked = rig.workdir.parent().unwrap().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&rig.workdir, &linked).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&linked).unwrap();
+    let through_link = p.decide(&DecideInput {
+        tool: "shell",
+        arguments: &json!({ "command": "rm -r target/x" }),
+        configured: ToolPolicy::Ask,
+        launch_allowed: false,
+        kind: ToolKind::Builtin,
+        workdir: &linked,
+        home: Some(&rig.home),
+        platform: POSIX,
+    });
+    assert_eq!(through_link.policy, ToolPolicy::Allow);
     // Climbing past the root names nothing.
     let deep = "../".repeat(64);
     assert_eq!(

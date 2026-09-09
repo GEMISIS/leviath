@@ -162,18 +162,15 @@ pub(super) async fn put_profiles(
 ) -> Result<Json<YoloListing>, ApiError> {
     YoloFile::from_toml(&req.text).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let path = yolo_path();
-    let write = || -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, &req.text)
-    };
-    write().map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to write {}: {e}", path.display()),
-        )
-    })?;
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)
+        .and_then(|()| std::fs::write(&path, &req.text))
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write {}: {e}", path.display()),
+            )
+        })?;
     Ok(Json(listing()))
 }
 
@@ -244,6 +241,25 @@ mod tests {
                 std::fs::read_to_string(cfg.join("yolo.toml")).unwrap(),
                 EXAMPLE_TOML
             );
+
+            // A write that fails is a 500 naming the path.
+            std::fs::remove_file(cfg.join("yolo.toml")).unwrap();
+            std::fs::create_dir(cfg.join("yolo.toml")).unwrap();
+            let failed = put_profiles(
+                State(state()),
+                Json(WriteYoloReq {
+                    text: EXAMPLE_TOML.to_string(),
+                }),
+            )
+            .await
+            .expect_err("a directory in the way");
+            assert_eq!(failed.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(
+                failed.1.0.error.contains("failed to write"),
+                "{}",
+                failed.1.0.error
+            );
+            std::fs::remove_dir(cfg.join("yolo.toml")).unwrap();
 
             // A file broken by hand is reported, with no profiles.
             std::fs::write(cfg.join("yolo.toml"), "[").unwrap();
