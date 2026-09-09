@@ -128,7 +128,21 @@ erroring, and the stream ends after `shutdown()`.
 that produced it. Reading it from the event avoids a second call and avoids racing the write to
 disk.
 
-`AgentWorld::result(&run_id)` asks for the same thing at any point while the run is loaded.
+`AgentWorld::result(&run_id)` asks for the same thing at any point while the run is loaded. Its
+`artifacts` are the files the run produced, each with a path relative to the workdir, a media
+type, a size and the hash the run's blob store holds it under.
+
+Files go in the same way. `SpawnSpec::attach` puts an `InboundPart` on the spawn, typed by the
+run's registry unless the part declares a type and landing in the task region unless it names
+another; `send_message_with` sends a message with files; and an `InteractionResponse::text` answer
+takes files through `with_parts`. A `@path` inside the text is not resolved here, since an
+embedder has no working directory to resolve it against; attach the file and keep the name in the
+text, and the model reads the same name.
+
+```rust
+let spec = SpawnSpec::new(source, "edit @hero.png so the arm is longer", cwd)
+    .attach(InboundPart::from_bytes("hero.png", std::fs::read("hero.png")?));
+```
 
 Ask for a shape when you spawn. The label reaches the model untouched, so your own house format
 works with no support from this crate.

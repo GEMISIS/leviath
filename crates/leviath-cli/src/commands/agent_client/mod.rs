@@ -40,7 +40,7 @@ use leviath_agent_client::{
     PROTOCOL_VERSION, PromptCapabilities, RequestPermissionResult, SessionCancelParams,
     SessionNewParams, SessionNewResult, SessionPromptParams, SessionPromptResult, SessionUpdate,
     SessionUpdateParams, StopReason, error_codes, flatten_prompt, is_permission_request,
-    parse_region_markers, permission_request,
+    parse_region_markers, permission_request, prompt_parts,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 use leviath_core::run_meta::RunStatus;
@@ -288,8 +288,8 @@ impl Server {
             agent_capabilities: AgentCapabilities {
                 load_session: false,
                 prompt_capabilities: PromptCapabilities {
-                    image: false,
-                    audio: false,
+                    image: true,
+                    audio: true,
                     embedded_context: true,
                 },
             },
@@ -370,21 +370,28 @@ impl Server {
         let params: SessionPromptParams = params
             .and_then(|p| serde_json::from_value(p).ok())
             .unwrap_or_default();
-        let text = flatten_prompt(&params.prompt);
-        if text.is_empty() {
+        let parts = prompt_parts(&params.prompt);
+        let mut text = flatten_prompt(&params.prompt);
+        if text.is_empty() && parts.is_empty() {
             self.write(&JsonRpcMessage::error_response(
                 id,
                 error_codes::INVALID_PARAMS,
-                "prompt has no usable text content",
+                "prompt has no usable content",
             ))
             .await;
             return;
+        }
+        // A prompt that is only files still needs words the model can read
+        // the files against; naming them is the least that says something.
+        if text.is_empty() {
+            let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+            text = format!("Attached: {}", names.join(", "));
         }
         // Parse `---region:<name>---` markers; with none, the whole text is the
         // `task` region (back-compat).
         let regions = parse_region_markers(&text);
         let task = regions.get("task").cloned().unwrap_or_default();
-        let stop_reason = self.run_turn(reader, task, regions).await;
+        let stop_reason = self.run_turn(reader, task, regions, parts).await;
         self.write(&JsonRpcMessage::response(
             id,
             &SessionPromptResult { stop_reason },
@@ -413,6 +420,7 @@ impl Server {
         reader: &mut BoxReader,
         task: String,
         regions: std::collections::HashMap<String, String>,
+        parts: Vec<leviath_core::media::InboundPart>,
     ) -> StopReason {
         // Subscribe before spawning so no event between spawn and subscribe is
         // missed. An unreachable daemon ends the turn as a refusal.
@@ -426,7 +434,7 @@ impl Server {
             .expect("session present")
             .session_id
             .clone();
-        let run_id = match self.start_run(task, regions).await {
+        let run_id = match self.start_run(task, regions, parts).await {
             RunStart::Ready(run_id) => run_id,
             // The agent already finished and won't take another message - the
             // turn is simply over, not a failure.
@@ -557,11 +565,13 @@ impl Server {
 
     /// Spawn the agent on the first prompt, or deliver a message on later ones.
     /// `regions` seeds named caller-input regions on the first (spawning) prompt;
-    /// on later prompts the text is delivered as a message and `regions` is unused.
+    /// on later prompts the text is delivered as a message and `regions` is
+    /// unused. `parts` are the prompt's files, on the task either way.
     async fn start_run(
         &mut self,
         task: String,
         regions: std::collections::HashMap<String, String>,
+        parts: Vec<leviath_core::media::InboundPart>,
     ) -> RunStart {
         let existing = self
             .session
@@ -577,7 +587,7 @@ impl Server {
                             agent_id: run_id.clone(),
                             content: task,
                             target_region: None,
-                            parts: Vec::new(),
+                            parts,
                         })
                         .await,
                     Ok(ControlResponse::Ok { ok: true })
@@ -590,8 +600,14 @@ impl Server {
             }
             None => {
                 let session = self.session.as_ref().expect("session present");
-                let spawn =
-                    spawn_args(&session.blueprint, &task, &session.cwd, &self.args, regions);
+                let spawn = spawn_args(
+                    &session.blueprint,
+                    &task,
+                    &session.cwd,
+                    &self.args,
+                    regions,
+                    parts,
+                );
                 match self.control.spawn(spawn).await {
                     Ok(ControlResponse::Spawned { run_id }) => {
                         self.session.as_mut().expect("session present").run_id =
@@ -755,7 +771,7 @@ impl Server {
         let params = SessionUpdateParams {
             session_id: session_id.to_string(),
             update: SessionUpdate::AgentMessageChunk {
-                content: ContentBlock::text(text),
+                content: Box::new(ContentBlock::text(text)),
             },
         };
         self.write(&JsonRpcMessage::notification("session/update", &params))
@@ -788,6 +804,29 @@ impl Server {
         let text = format!("\n\n--- final output{shape} ---\n{}", output.content);
         for chunk in split_chunks(&text) {
             self.emit_chunk(session_id, chunk).await;
+        }
+        // The files the run produced, as links the host can open itself:
+        // the protocol's `resource_link` block, pointing into the session's
+        // working directory where the run wrote them.
+        let cwd = self
+            .session
+            .as_ref()
+            .map(|s| s.cwd.clone())
+            .unwrap_or_default();
+        for artifact in &output.artifacts {
+            let path = std::path::Path::new(&cwd).join(&artifact.path);
+            let params = SessionUpdateParams {
+                session_id: session_id.to_string(),
+                update: SessionUpdate::AgentMessageChunk {
+                    content: Box::new(ContentBlock::resource_link(
+                        crate::commands::result::export::file_url(&path),
+                        artifact.name.clone(),
+                        artifact.media_type.to_string(),
+                    )),
+                },
+            };
+            self.write(&JsonRpcMessage::notification("session/update", &params))
+                .await;
         }
     }
 

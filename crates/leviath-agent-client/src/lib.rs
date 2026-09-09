@@ -29,7 +29,7 @@ pub mod mapping;
 pub mod protocol;
 
 pub use mapping::{
-    flatten_prompt, is_permission_request, parse_region_markers, permission_request,
+    flatten_prompt, is_permission_request, parse_region_markers, permission_request, prompt_parts,
     stop_reason_for, stop_reason_for_label,
 };
 pub use protocol::{
