@@ -225,11 +225,24 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
+| `GET /api/yolo` · `GET /api/yolo/{name}` · `POST /api/yolo/test` · `PUT /api/yolo` *(admin)* | The profiles behind `--yolo=<name>`: list them, read one, ask what one would decide for a call, replace the file. See [below](#yolo-profiles) |
 | `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
 | `POST /api/update` *(admin)* · `GET /api/update/jobs/{id}` | Carry that plan out, and read where it got to. See [below](#pressing-the-button) |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+
+### Spawning under a yolo profile
+
+`POST /api/agents` takes `"yolo": true` for a plain unattended run, and `"yolo_profile":
+"<name>"` to run under a named profile from [`yolo.toml`](/docs/configuration#yolotoml) instead.
+A profile implies `yolo`, so the two need not both be sent. A name the file does not have fails
+the spawn with a 400 that lists the profiles it does have. Under `--no-remote-yolo` a profile is
+refused with `yolo` and `allow`: the operator's flag says nothing about which one.
+
+The run listing and `GET /api/agents/{id}` carry the name back as `yolo_profile` beside
+`unattended`, so a console can show that a run is unattended *under* something rather than
+unattended outright.
 
 ### Answering a question
 
@@ -699,6 +712,81 @@ Changing a cap is a manifest write: `PUT /api/blueprints/{name}` with the manife
 which are errors rather than quiet fallbacks. The workers still share the daemon's inference pool
 (`[limits] max_concurrent_inferences`, 8 by default), so an unlimited fan-out queues at the model
 rather than running away.
+
+## Yolo profiles
+
+The profiles a run can be launched under with `--yolo=<name>` live in
+[`yolo.toml`](/docs/configuration#yolotoml) beside the config, and these four routes are `lev
+yolo` over HTTP. Every one of them reads the file as it stands at that moment, the same way a
+spawn does, so what they report is what the next run gets.
+
+`GET /api/yolo` lists what is there:
+
+```json
+{
+  "path": "/home/you/.leviath/yolo.toml",
+  "exists": true,
+  "profiles": [
+    {
+      "name": "careful",
+      "default": "ask",
+      "questions": "ask",
+      "checkpoints": "ask",
+      "gate": "auto",
+      "tool_rules": [1, 2, 0],
+      "shell_rules": [3, 1, 1]
+    }
+  ]
+}
+```
+
+`tool_rules` and `shell_rules` are `[allow, ask, deny]` counts. A file that does not load comes
+back with `exists: true`, an `error` naming the line, and no profiles, because that is what a
+spawn naming one would be refused with. A missing file is `exists: false` with no error.
+
+`GET /api/yolo/{name}` is one profile in full: `{"name", "spec", "holds"}`, where `spec` is the
+profile as parsed (the same keys the file has) and `holds` is the list of things this profile
+still puts to a person, as `lev run` prints before a run starts. `404` for a name the file does
+not have, and for no file at all; `422` when the file does not load.
+
+`POST /api/yolo/test` asks what a profile would decide for one call, without running anything:
+
+```json
+{
+  "profile": "careful",
+  "tool": "shell",
+  "command": "rm -r target/debug",
+  "workdir": "/home/you/project"
+}
+```
+
+`command` is for the shell; any other tool takes its `arguments` as an object. `workdir` is where
+relative paths in the command resolve, defaulting to the server's own. `configured` (`allow`,
+`ask` or `deny`) stands in for what the config layers resolve the tool to, otherwise that is read
+from the config in force; `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool
+comes from for `@group` rules, otherwise it is guessed from the name; `allowed: true` decides as
+if `--allow <tool>` had been passed. The answer:
+
+```json
+{
+  "profile": "careful",
+  "tool": "shell",
+  "configured": "ask",
+  "policy": "allow",
+  "reason": "shell allow rule \"rm -r*\""
+}
+```
+
+`policy` is what the run would do: `allow` runs it without a prompt, `ask` opens the ordinary
+approval prompt, `deny` refuses it. `reason` names the rule, the config, or the profile's default
+that decided it. This is the same code path the daemon runs on a real call, so a decision here is
+the decision a run would make. `400` for a `kind` or `configured` word that is not one of the
+listed values, or `arguments` that are not an object.
+
+`PUT /api/yolo` replaces the whole file: `{"text": "<the file, as TOML>"}`. The text is parsed
+first, and a save that would not load is refused with `400` and the same message a spawn would
+give, leaving the file on disk as it was. It answers with the listing `GET` returns. Admin only,
+for the reason `PUT /api/config` is: a profile is a grant of permissions.
 
 ## Asking how to upgrade
 

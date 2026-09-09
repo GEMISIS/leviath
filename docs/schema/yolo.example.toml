@@ -1,0 +1,62 @@
+# Named yolo profiles for `lev run --yolo=<name>`.
+#
+# Bare `--yolo` approves every tool call the config does not deny, answers the
+# model's questions itself, and approves every stage checkpoint. A profile is
+# that taken apart: each table below is a name you can pass, and says which
+# calls run unprompted, which still go through the ordinary approval prompt
+# (the one you would see without --yolo), and which are refused. Edits apply
+# to the next `lev run` and to a run when it resumes; nothing needs restarting.
+#
+# `lev yolo list` shows what is here, `lev yolo test <name> --tool shell
+# --command "rm -r target"` shows what a profile would decide.
+
+[careful]
+# What happens to a call no rule below names, when the config would ask:
+# "allow" runs it (bare --yolo), "ask" leaves the prompt in place.
+default = "ask"
+# The model's questions (ask_user_*, present_for_review, edit_document):
+# "ask" offers them and they come to you, "auto" answers them itself.
+questions = "ask"
+# Stage checkpoints (interaction points): "ask" opens every prompt, "auto"
+# approves them, apart from any the blueprint marks unattended = "ask".
+checkpoints = "ask"
+# Taint-gate prompts, where taint tracking is on: "ask" or "auto".
+gate = "auto"
+
+[careful.tools]
+# Tool names (any spelling), globs over MCP names, or @builtin / @subagent /
+# @scripts / @mcp / @all. deny wins over ask, ask over allow. A tool the
+# config already allows stays allowed under `default = "ask"`; ask and deny
+# lists tighten even those.
+allow = ["@builtin"]
+ask = ["web_fetch", "install_tool"]
+deny = []
+
+# Shell rules refine the shell tool. `command` is the leading words, one glob
+# per word; `args` globs every remaining word (relative patterns are under
+# the run's workdir, `~` is your home, a path word is matched by the path it
+# really resolves to). A line's verdict is that of its strictest command, so
+# `cargo test && curl x` is only as free as `curl`.
+[[careful.shell.allow]]
+command = "cargo *"
+
+[[careful.shell.allow]]
+command = "git status"
+
+[[careful.shell.allow]]
+command = "rm -r*"
+args = ["target/**", "-*"]
+
+[[careful.shell.ask]]
+command = "git push*"
+
+[[careful.shell.deny]]
+command = "curl"
+
+[build-only]
+# Only the listed things run without asking; everything else prompts.
+default = "ask"
+[build-only.tools]
+allow = ["read_file", "read_files", "list_dir"]
+[[build-only.shell.allow]]
+command = "cargo build*"

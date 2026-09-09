@@ -595,6 +595,8 @@ pub(super) struct SpawnCommand {
     pub(super) workdir: String,
     /// Whether the run approves its own tool calls.
     pub(super) yolo: bool,
+    /// The yolo profile it does that under, when one was picked.
+    pub(super) yolo_profile: Option<String>,
 }
 
 /// The result of a [`SpawnCommand`], drained each tick and shown as a toast.

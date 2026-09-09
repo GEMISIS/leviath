@@ -49,6 +49,10 @@
     },
     {
       "name": "providers"
+    },
+    {
+      "name": "yolo",
+      "description": "The named profiles behind `lev run --yolo=<name>`."
     }
   ],
   "paths": {
@@ -1605,6 +1609,404 @@
           },
           "409": {
             "description": "Another live doctor run is already in progress"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/yolo": {
+      "get": {
+        "tags": [
+          "yolo"
+        ],
+        "summary": "The profiles behind `--yolo=<name>`",
+        "description": "Lists `yolo.toml` as it stands, the same file a spawn reads: where it is, whether it exists and loads, and each profile's default, its three human knobs (`questions`, `checkpoints`, `gate`) and how many tool and shell rules of each kind it has. A file that does not load comes back with `exists: true`, an `error` naming the line, and no profiles, because that is what a spawn naming one would be refused with.",
+        "responses": {
+          "200": {
+            "description": "The listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The `yolo.toml` the profiles are read from."
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Why the file does not load, when it does not; the profiles are then empty. Absent while it loads."
+                    },
+                    "profiles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "default": {
+                            "type": "string",
+                            "enum": [
+                              "allow",
+                              "ask"
+                            ]
+                          },
+                          "questions": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "checkpoints": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "gate": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "tool_rules": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            },
+                            "description": "`[allow, ask, deny]` entry counts."
+                          },
+                          "shell_rules": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            },
+                            "description": "`[allow, ask, deny]` rule counts."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "yolo"
+        ],
+        "summary": "Replace `yolo.toml`",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed: a profile is a grant of permissions, so writing the file is the same category of act as writing the config. The text is parsed and compiled first, and a save that would not load answers 400 with the same message a spawn would give, leaving the file on disk as it was. Answers with the listing `GET` returns.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "The whole file, as TOML."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The `yolo.toml` the profiles are read from."
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Why the file does not load, when it does not; the profiles are then empty. Absent while it loads."
+                    },
+                    "profiles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "default": {
+                            "type": "string",
+                            "enum": [
+                              "allow",
+                              "ask"
+                            ]
+                          },
+                          "questions": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "checkpoints": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "gate": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "auto"
+                            ]
+                          },
+                          "tool_rules": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            },
+                            "description": "`[allow, ask, deny]` entry counts."
+                          },
+                          "shell_rules": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            },
+                            "description": "`[allow, ask, deny]` rule counts."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/yolo/test": {
+      "post": {
+        "tags": [
+          "yolo"
+        ],
+        "summary": "What a profile would decide for one call",
+        "description": "The same code path a run takes, without running anything, so the answer here is the run's answer. `command` is for the shell; any other tool takes `arguments` as an object. `workdir` is where relative paths resolve, defaulting to the server's own. `configured` (`allow`, `ask`, `deny`) stands in for what the config layers resolve the tool to, otherwise that is read from the config in force; `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool comes from for `@group` rules, otherwise it is guessed from the name; `allowed` decides as if `--allow <tool>` had been passed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "profile",
+                  "tool"
+                ],
+                "properties": {
+                  "profile": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "arguments": {
+                    "type": "object"
+                  },
+                  "workdir": {
+                    "type": "string"
+                  },
+                  "configured": {
+                    "type": "string",
+                    "enum": [
+                      "allow",
+                      "ask",
+                      "deny"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "builtin",
+                      "subagent",
+                      "script",
+                      "mcp"
+                    ]
+                  },
+                  "allowed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The decision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "string"
+                    },
+                    "tool": {
+                      "type": "string"
+                    },
+                    "configured": {
+                      "type": "string",
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "description": "What the config layers resolved the tool to, before the profile."
+                    },
+                    "policy": {
+                      "type": "string",
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "description": "What the run would do: run it unprompted, open the ordinary approval prompt, or refuse it."
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "The rule, the config, or the profile default that decided it."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/yolo/{name}": {
+      "get": {
+        "tags": [
+          "yolo"
+        ],
+        "summary": "One profile in full",
+        "description": "`{\"name\", \"spec\", \"holds\"}`: the profile as parsed (the same keys the file has) and the list of things it still puts to a person, as `lev run` prints before a profiled run starts. 404 for a name the file does not have and for no file at all; 422 when the file does not load.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "spec": {
+                      "type": "object"
+                    },
+                    "holds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
           },
           "503": {
             "$ref": "#/components/responses/Overloaded"

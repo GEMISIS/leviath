@@ -62,6 +62,13 @@ impl Dashboard {
         // setting, and one that survived out of sight is one somebody can
         // leave on and forget.
         self.new_run_yolo = false;
+        self.new_run_yolo_profile = None;
+        // The profiles as the file stands now, so a profile added since the
+        // dashboard started is on the cycle. A file that will not load offers
+        // none: a spawn naming one would be refused anyway.
+        self.new_run_profiles = crate::yolo::load_current()
+            .map(|file| file.profiles().cloned().collect())
+            .unwrap_or_default();
         self.close_file_ref();
         self.refresh_new_run_agents();
         self.select_last_launched_agent();
@@ -175,12 +182,17 @@ impl Dashboard {
             task,
             workdir: self.new_run_ctx.workdir.display().to_string(),
             yolo: self.new_run_yolo,
+            yolo_profile: self.new_run_yolo_profile.clone(),
         });
         // An unattended start is the warning the toggle gave, restated at the
         // moment it takes effect; an attended one is work in flight, not done.
-        let (how, level) = match self.new_run_yolo {
-            true => (" unattended", ToastLevel::Warning),
-            false => ("", ToastLevel::Progress),
+        let (how, level) = match (self.new_run_yolo, &self.new_run_yolo_profile) {
+            (true, Some(profile)) => (
+                format!(" unattended under '{profile}'"),
+                ToastLevel::Warning,
+            ),
+            (true, None) => (" unattended".to_string(), ToastLevel::Warning),
+            (false, _) => (String::new(), ToastLevel::Progress),
         };
         self.toast(format!("Starting '{}'{how}…", agent.name), level);
         self.add_log(format!("run requested: {}", agent.name));
@@ -295,16 +307,46 @@ impl Dashboard {
     /// not the next read as the toggle misbehaving rather than remembering.
     /// Turning it off never asks: nothing needs confirming about deciding to
     /// be asked more.
+    ///
+    /// With profiles in `yolo.toml`, the key steps through them after plain
+    /// yolo, each one narrower than the last is likely to be, and then off:
+    /// off, on, `careful`, `build-only`, off. Every step past the first is a
+    /// step toward asking more, so none of them asks first.
     pub(super) fn toggle_new_run_yolo(&mut self) {
-        if self.new_run_yolo {
-            self.new_run_yolo = false;
-            self.toast(
-                "Unattended OFF: runs will ask you before each tool call",
-                ToastLevel::Info,
-            );
+        if !self.new_run_yolo {
+            self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
             return;
         }
-        self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
+        let position = self
+            .new_run_yolo_profile
+            .as_ref()
+            .and_then(|current| {
+                self.new_run_profiles
+                    .iter()
+                    .position(|p| &p.name == current)
+            })
+            .map_or(0, |i| i + 1);
+        match self.new_run_profiles.get(position).cloned() {
+            Some(profile) => {
+                self.new_run_yolo_profile = Some(profile.name.clone());
+                let keeps = match profile.holds().first() {
+                    Some(first) => format!("keeps for you: {first}"),
+                    None => "keeps nothing for you".to_string(),
+                };
+                self.toast(
+                    format!("Unattended under '{}': {keeps}", profile.name),
+                    ToastLevel::Warning,
+                );
+            }
+            None => {
+                self.new_run_yolo = false;
+                self.new_run_yolo_profile = None;
+                self.toast(
+                    "Unattended OFF: runs will ask you before each tool call",
+                    ToastLevel::Info,
+                );
+            }
+        }
     }
 
     /// Apply a yes to that warning.
@@ -494,7 +536,10 @@ fn yolo_warning() -> Confirm {
                  interaction timeout expires.",
             ),
             Line::from(""),
-            Line::from("Ctrl-Y turns it off again."),
+            Line::from(
+                "Ctrl-Y again steps through the profiles in yolo.toml, each narrower than \
+                 plain unattended, and then turns it off.",
+            ),
         ],
         "Run unattended",
         "Keep asking me",
@@ -565,7 +610,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         model: None,
         workdir: &cmd.workdir,
         yolo: cmd.yolo,
-        yolo_profile: None,
+        yolo_profile: cmd.yolo_profile.clone(),
         allow: Vec::new(),
         max_depth: None,
         // Region seeds are a `lev run` command line; this screen writes a task.
@@ -1458,6 +1503,7 @@ mod tests {
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
                 yolo: false,
+                yolo_profile: None,
             })
             .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
@@ -1508,6 +1554,7 @@ mod tests {
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
                 yolo: false,
+                yolo_profile: None,
             },
         )
         .await;
@@ -1533,6 +1580,7 @@ mod tests {
                 task: "t".to_string(),
                 workdir: dir.path().display().to_string(),
                 yolo: false,
+                yolo_profile: None,
             })
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
@@ -1716,5 +1764,87 @@ mod tests {
             .expect("a start toast");
         assert!(!start.message.contains("unattended"), "{}", start.message);
         assert_eq!(start.level, ToastLevel::Progress);
+    }
+
+    /// With profiles in `yolo.toml`, Ctrl-Y steps through them after plain
+    /// yolo and then off, the help bar names the one showing, and the run
+    /// carries it.
+    #[test]
+    fn the_unattended_toggle_steps_through_the_profiles() {
+        crate::config::with_isolated_config_path("dash-yolo-profiles", |cfg| {
+            std::fs::write(
+                cfg.join("yolo.toml"),
+                "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\n[loose]\ndefault = \"allow\"\n",
+            )
+            .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+            let mut dash = dash_at(dir.path());
+            dash.open_new_run_screen();
+            assert_eq!(dash.new_run_profiles.len(), 2);
+
+            dash.handle_key(ctrl(KeyCode::Char('y')));
+            dash.handle_key(key(KeyCode::Char('y')));
+            assert!(dash.new_run_yolo);
+            assert!(dash.new_run_yolo_profile.is_none(), "plain yolo first");
+
+            dash.handle_key(ctrl(KeyCode::Char('y')));
+            assert!(dash.pending_confirm.is_none(), "a narrower step never asks");
+            assert_eq!(dash.new_run_yolo_profile.as_deref(), Some("careful"));
+            assert!(
+                dash.new_run_help_bar_text()
+                    .contains("unattended: on (careful)")
+            );
+            let toast = dash
+                .toasts
+                .last()
+                .map(|t| t.message.clone())
+                .unwrap_or_default();
+            assert!(
+                toast.contains("under 'careful'") && toast.contains("keeps for you"),
+                "{toast}"
+            );
+
+            dash.handle_key(ctrl(KeyCode::Char('y')));
+            assert_eq!(dash.new_run_yolo_profile.as_deref(), Some("loose"));
+            let toast = dash
+                .toasts
+                .last()
+                .map(|t| t.message.clone())
+                .unwrap_or_default();
+            assert!(toast.contains("keeps nothing"), "{toast}");
+
+            // The run carries the profile that was showing.
+            dash.new_run_focus = NewRunPane::Task;
+            dash.new_run_task.area_mut().insert_str("do the thing");
+            dash.submit_new_run();
+            let cmd = dash
+                .spawn_cmd_rx_for_test()
+                .try_recv()
+                .expect("a run was sent");
+            assert!(cmd.yolo);
+            assert_eq!(cmd.yolo_profile.as_deref(), Some("loose"));
+            let start = dash
+                .toasts
+                .iter()
+                .find(|t| t.message.starts_with("Starting"))
+                .expect("a start toast");
+            assert!(start.message.contains("under 'loose'"), "{}", start.message);
+
+            // Past the last profile is off, with nothing remembered.
+            dash.new_run_screen = true;
+            dash.new_run_yolo = true;
+            dash.new_run_yolo_profile = Some("loose".to_string());
+            dash.handle_key(ctrl(KeyCode::Char('y')));
+            assert!(!dash.new_run_yolo);
+            assert!(dash.new_run_yolo_profile.is_none());
+
+            // Re-opening forgets the profile with the switch.
+            dash.new_run_yolo = true;
+            dash.new_run_yolo_profile = Some("careful".to_string());
+            dash.open_new_run_screen();
+            assert!(!dash.new_run_yolo);
+            assert!(dash.new_run_yolo_profile.is_none());
+        });
     }
 }

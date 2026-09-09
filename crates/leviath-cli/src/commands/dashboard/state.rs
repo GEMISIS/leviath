@@ -232,6 +232,13 @@ pub(crate) struct Dashboard {
     /// consequences, and a toggle that survives out of sight is one a user can
     /// leave on and forget.
     pub(super) new_run_yolo: bool,
+    /// The yolo profile runs started from this screen run under, when
+    /// unattended is on and `Ctrl-Y` has stepped past plain yolo. `None` with
+    /// `new_run_yolo` set is the bare flag.
+    pub(super) new_run_yolo_profile: Option<String>,
+    /// The profiles `yolo.toml` defined when the screen opened, in file
+    /// order, which `Ctrl-Y` steps through after plain yolo.
+    pub(super) new_run_profiles: Vec<std::sync::Arc<crate::yolo::YoloProfile>>,
     /// Paths the screen reads its agents and file candidates from.
     pub(super) new_run_ctx: NewRunContext,
     /// The Agents screen (`a`): catalog and editor. Boxed: it carries a

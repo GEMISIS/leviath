@@ -114,8 +114,8 @@ jobs:
       # and the check below did not name it.
       - name: Add the machine-readable schemas
         run: |
-          cp docs/schema/*.json docs/schema/config.example.toml docs-out/
-          for f in blueprint.schema.json config.schema.json openapi.json config.example.toml; do
+          cp docs/schema/*.json docs/schema/config.example.toml docs/schema/yolo.example.toml docs-out/
+          for f in blueprint.schema.json config.schema.json openapi.json config.example.toml yolo.example.toml; do
             test -s "docs-out/$f" || { echo "missing docs-out/$f"; exit 1; }
           done
 

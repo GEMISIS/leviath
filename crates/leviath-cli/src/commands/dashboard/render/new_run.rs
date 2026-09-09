@@ -231,9 +231,10 @@ impl Dashboard {
     /// dialog declined by an Enter meant as "yes" left a person believing
     /// the opposite of what the next run would do.
     pub(in crate::commands::dashboard) fn new_run_help_bar_text(&self) -> String {
-        let unattended = match self.new_run_yolo {
-            true => "unattended: on",
-            false => "unattended: off",
+        let unattended = match (self.new_run_yolo, &self.new_run_yolo_profile) {
+            (true, Some(profile)) => format!("unattended: on ({profile})"),
+            (true, None) => "unattended: on".to_string(),
+            (false, _) => "unattended: off".to_string(),
         };
         match (self.new_run_file_ref, self.new_run_focus) {
             (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ".to_string(),
