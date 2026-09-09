@@ -125,8 +125,9 @@ mod tests {
     }
 
     /// Every way a link stays a name: no URI, another scheme, not a URI at
-    /// all, a host in the URI, a missing file, a directory, an empty file,
-    /// one over the ceiling, one outside the working directory, and a
+    /// all, a host in the URI (no file path on Unix), a path with no drive
+    /// (no file path on Windows), a missing file, a directory, an empty
+    /// file, one over the ceiling, one outside the working directory, and a
     /// working directory that is not there.
     #[test]
     fn a_link_that_cannot_be_read_stays_a_name() {
@@ -146,6 +147,7 @@ mod tests {
             link("https://example.com/a.png", "a.png", "image/png"),
             link("::not a uri::", "x", ""),
             link("file://server/share/a.txt", "a.txt", ""),
+            link("file:///nodrive/a.txt", "a.txt", ""),
             link(&file_url(&dir.path().join("missing.txt")), "m", ""),
             link(&file_url(dir.path()), "dir", ""),
             link(&file_url(&empty), "empty", ""),
