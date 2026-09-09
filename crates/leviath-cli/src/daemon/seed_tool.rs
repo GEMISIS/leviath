@@ -208,7 +208,8 @@ pub(crate) fn production_runner(
                 tool,
                 args.clone(),
                 ctx.script_host.clone(),
-            ));
+            )
+            .into_string());
         }
         match is_builtin {
             true => {

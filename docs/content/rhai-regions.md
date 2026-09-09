@@ -75,6 +75,10 @@ can emit static scaffolding). `ctx`:
   "region":  { "name": "brain", "budget": 80000, "current_tokens": 1234, "entry_count": 7 },
   "entries": [ {
       "content": "...", "tokens": 12, "timestamp": 1710000000, "key": null,
+      // every part of the entry, in order: inline text carries `text`, a stored
+      // part carries `sha256`, `size`, `width`, `height`, `tokens`, `stand_in`
+      "parts": [ { "media_type": "text/plain", "text": "..." },
+                 { "media_type": "image/png", "name": "hero.png", "sha256": "...", "size": 9012 } ],
       "kind": "text" | "user_message" | "assistant_turn" | "tool_result",
       // assistant_turn only:
       "tool_calls": [ { "id": "...", "name": "...", "arguments": { } } ],
@@ -89,6 +93,12 @@ can emit static scaffolding). `ctx`:
 `render` returns either a string (one system block, empty string means nothing) or a map with
 `system` (a string or an array of strings) and `messages` (typed `role`/`content` entries, optionally
 carrying `tool_calls` or `tool_results`).
+
+`content` is always the entry's text rendering, a stored part appearing in it as its stand-in, so a
+script that only ever reads `content` keeps working when images arrive. `parts` is there for a
+render that wants to count them, group them, or drop the bulky ones from what it emits. What a
+script emits is text; a stored part reaches the model through the region's own entries, not through
+`render`'s output.
 
 Providers reject a request where a tool call has no matching result, or the other way round. Leviath
 strips any unpaired tool block before sending, so a script with a bug in it cannot produce a request

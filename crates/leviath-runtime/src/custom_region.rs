@@ -80,6 +80,14 @@ fn entry_to_json(entry: &RegionEntry) -> serde_json::Value {
         "tokens": entry.tokens,
         "timestamp": entry.timestamp,
         "key": entry.key,
+        // Every part, text included, in order: what a render that wants to
+        // place an image itself reads. `content` stays the rendering.
+        "parts": entry
+            .content
+            .parts()
+            .iter()
+            .map(leviath_scripting::parts::part_summary)
+            .collect::<Vec<_>>(),
     });
     let (kind, extra) = match &entry.kind {
         EntryKind::Text => ("text", None),
@@ -787,6 +795,8 @@ mod tests {
         assert_eq!(entries[3]["kind"], json!("tool_result"));
         assert_eq!(entries[3]["tool_call_id"], json!("c1"));
         assert_eq!(entries[3]["is_error"], json!(true));
+        assert_eq!(entries[0]["parts"][0]["text"], json!("plain"));
+        assert_eq!(entries[0]["parts"][0]["media_type"], json!("text/plain"));
     }
 
     // ─── render: happy paths ─────────────────────────────────────────────

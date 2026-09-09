@@ -109,6 +109,8 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
                 "name": m.name,
                 "description": m.description,
                 "requires": m.required_caps,
+                "accepts": m.accepts,
+                "produces": m.produces,
                 "available": crate::daemon::spawn::current_platform_satisfies(&m.required_caps),
                 "params": params,
             })
@@ -158,6 +160,12 @@ fn print_human(dir_label: &str, report: &ToolsReport) {
         if !meta.required_caps.is_empty() {
             println!("      requires: {}", meta.required_caps.join(", "));
         }
+        if !meta.accepts.is_empty() {
+            println!("      accepts: {}", meta.accepts.join(", "));
+        }
+        if !meta.produces.is_empty() {
+            println!("      produces: {}", meta.produces.join(", "));
+        }
     }
     for s in &report.skipped {
         println!("  ✗ {}: {}", s.path.display(), s.reason);
@@ -197,7 +205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("upper.rhai"),
-            "// @tool upper\n// @description Upper-case text\n// @param text string required \"in\"\n// @requires network\nparams.text",
+            "// @tool upper\n// @description Upper-case text\n// @param text string required \"in\"\n// @requires network\n// @accepts text/*\n// @produces text/plain\nparams.text",
         )
         .unwrap();
         std::fs::write(
@@ -215,6 +223,8 @@ mod tests {
         assert_eq!(report.valid.len(), 1);
         assert_eq!(report.valid[0].name, "upper");
         assert_eq!(report.valid[0].required_caps, ["network"]);
+        assert_eq!(report.valid[0].accepts, ["text/*"]);
+        assert_eq!(report.valid[0].produces, ["text/plain"]);
         assert_eq!(report.skipped.len(), 1);
         assert!(report.skipped[0].reason.to_lowercase().contains("tool"));
     }
@@ -247,6 +257,8 @@ mod tests {
                 },
             ],
             required_caps: vec![],
+            accepts: vec![],
+            produces: vec![],
         };
         assert_eq!(params_summary(&meta), "a:string!, b:integer");
     }
@@ -320,7 +332,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("zeta.rhai"),
-            "// @tool zeta\n// @description Full tool\n// @param x string required\n// @requires network\nparams.x",
+            "// @tool zeta\n// @description Full tool\n// @param x string required\n// @requires network\n// @accepts image/*\n// @produces image/png\nparams.x",
         )
         .unwrap();
         std::fs::write(dir.path().join("alpha.rhai"), "// @tool alpha\n1").unwrap();

@@ -224,6 +224,9 @@ pub(crate) struct AgentToolState {
     /// The host functions script tools call, with `[tool_script_permissions]`
     /// enforcement (Layer 3) already baked in.
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
+    /// The stored parts the runtime offered from the window before the
+    /// current batch, which the script host reads by name. Shared with it.
+    pub offered_parts: Arc<StdMutex<Vec<leviath_core::media::Part>>>,
     /// Present only for `dynamic_tools` agents: everything needed to re-discover
     /// and re-advertise this agent's tools mid-run.
     pub dynamic: Option<Arc<DynamicToolCtx>>,
@@ -497,7 +500,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         .unwrap_or_else(PoisonError::into_inner)
         .contains(&tc.name)
     {
-        return execute_script_tool(state, tc).await.into();
+        return execute_script_tool(state, tc).await;
     }
     if is_builtin {
         let result = state.builtins.execute(&tc.name, tc.arguments.clone()).await;
@@ -587,7 +590,7 @@ fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
 }
 
 /// Run a Rhai script tool on a blocking thread and return its result string.
-async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
+async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> EntryContent {
     let Some(tool) = state
         .script_tools
         .lock()
@@ -596,7 +599,7 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
         .cloned()
     else {
         // Name was in `script_tool_names` but the tool is gone - treat as unknown.
-        return format!("[error] unknown script tool: {}", tc.name);
+        return format!("[error] unknown script tool: {}", tc.name).into();
     };
     let host = state.script_host.clone();
     let args = tc.arguments.clone();
@@ -613,8 +616,8 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
 /// panics are contained inside `leviath_scripting`, leaving the arm unreachable
 /// from a test, while this body is directly unit-testable with a real
 /// `JoinError`. Mirrors `leviath_providers::rhai_provider`'s `task_failed`.
-fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
-    format!("[error] script tool panicked: {e}")
+fn script_tool_join_failed(e: tokio::task::JoinError) -> EntryContent {
+    format!("[error] script tool panicked: {e}").into()
 }
 
 /// Charge the run for a write the call declares, the moment it is queued.
@@ -982,6 +985,15 @@ impl CliToolService {
 }
 
 impl ToolService for CliToolService {
+    fn offer_parts(&self, entity: Entity, parts: Vec<leviath_core::media::Part>) {
+        if let Some(state) = self.state_for(entity) {
+            *state
+                .offered_parts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = parts;
+        }
+    }
+
     fn sync_stage(&self, entity: Entity, stage_index: usize, stage_name: &str) {
         // Take a handle and drop the `states` guard before touching anything
         // else. `states` is the process-wide map of *every* agent's tool state,
@@ -1216,6 +1228,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         })
@@ -1279,6 +1292,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         })
@@ -1364,6 +1378,7 @@ mod tests {
             script_tools: Arc::new(StdMutex::new(set)),
             script_tool_names: Arc::new(StdMutex::new(script_tool_names)),
             script_host: host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
@@ -1697,6 +1712,7 @@ mod tests {
             script_tools: Arc::new(StdMutex::new(leviath_scripting::ScriptToolSet::default())),
             script_tool_names: Arc::new(StdMutex::new(HashSet::new())),
             script_host: no_script_fields().2,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: Some(Arc::new(DynamicToolCtx {
                 scan_dirs: vec![scan_dir],
                 reserved_names: HashSet::new(),
@@ -1983,6 +1999,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
@@ -2361,6 +2378,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
@@ -2432,6 +2450,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
@@ -2857,6 +2876,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
@@ -2871,6 +2891,16 @@ mod tests {
         assert_eq!(
             *state.stage_required.lock().unwrap(),
             HashSet::from(["ask_user_text".to_string()])
+        );
+
+        // The runtime's offer lands on the state the script host shares.
+        service.offer_parts(e, vec![leviath_core::media::Part::text("x")]);
+        assert_eq!(state.offered_parts.lock().unwrap().len(), 1);
+        service.offer_parts(e, Vec::new());
+        assert!(state.offered_parts.lock().unwrap().is_empty());
+        service.offer_parts(
+            Entity::from_raw_u32(4242).expect("a small literal index is always a valid entity id"),
+            Vec::new(),
         );
 
         // An out-of-range index leaves perms as-is but still updates the name.
@@ -3429,6 +3459,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            offered_parts: Arc::new(StdMutex::new(Vec::new())),
             dynamic: None,
             config_source: test_config_source(),
         });
