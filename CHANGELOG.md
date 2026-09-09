@@ -105,6 +105,16 @@ same list.
   reads every member's dependencies and refuses a list that names a crate
   before one it depends on. The rest of 0.5.8 was published by hand from the
   tag in that order.
+- `lev add` on a bundle file installs the blueprint under the name its
+  `agent.leviath` declares. It used the file's stem, and `lev pack` names its
+  output `<name>-<version>.leviath-bundle`, so installing a packed `coder`
+  put `coder-1.2.0` on disk: `lev list` and the API showed `coder`, because
+  they read the manifest, while `lev run coder`, `lev validate coder` and
+  `lev remove coder` looked for a directory that was not there. The file's
+  stem is now only the fallback for a bundle whose manifest declares no name,
+  and a manifest name that is not a plain directory name is refused the same
+  way a directory install refuses it. An install made before this fix keeps
+  its old directory; `lev remove <name>-<version>` clears it.
 
 ## 0.5.9 - 2026-09-02
 
