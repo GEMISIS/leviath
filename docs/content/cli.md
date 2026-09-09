@@ -38,7 +38,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
 | `-m`, `--model <MODEL>` | Model override for the whole run, as `provider/model` or a bare model name. Fan-out workers and sub-agents inherit it |
 | `--workdir <DIR>` | Working directory for the run, defaulting to where you ran the command. See below |
-| `--yolo` | Run unattended. See below |
+| `--yolo[=PROFILE]` | Run unattended, or under a named profile from `yolo.toml`. The equals sign is required. See below |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
@@ -67,6 +67,15 @@ approval, because everything after that gate writes code. `lev run --yolo` print
 before the run starts, and `lev validate` reports it as `holds-under-yolo`.
 
 `--yolo` can turn an `ask` into an `allow`, but it can never lift a `deny`.
+
+**`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/configuration#yolotoml)
+says which tool calls and shell commands run unprompted, which still go through the ordinary
+approval prompt, and which are refused, and whether the model's questions, the stage checkpoints
+and the taint gate still come to you. The equals sign is required: `lev run --yolo coder` keeps
+meaning "run coder, plain yolo". A name the file does not have stops the run before the daemon is
+asked, and lists the names it does have. Before a profiled run starts, `lev run` prints what the
+profile keeps for you, above the blueprint's own held checkpoints. `lev yolo list` shows the
+profiles you have.
 
 Region seed flags are dynamic, because region names come from the blueprint. Any `--<name>` that is
 not one of the flags above is read as a seed for the region called `<name>`, and a value starting
@@ -970,6 +979,31 @@ Manage [taint tracking](/docs/security#taint-tracking-experimental) policy rules
 | `lev policy list` | | List current rules, static and scripted |
 | `lev policy add <TOOL>` | `--target <PATTERN>`, `--max-sensitivity <public\|internal\|private>` (default `internal`) | Add an allowlist rule |
 | `lev policy test <TOOL>` | `--target <PATTERN>`, `--taint <public\|internal\|private>` (default `private`) | Check whether a call would be gated |
+
+### `lev yolo`
+
+The profiles behind [`--yolo=<name>`](/docs/configuration#yolotoml): what you have, what one
+says, and what it would decide. Every subcommand reads `yolo.toml` as it stands, the same way a
+spawn does, so what it prints is what the next run gets.
+
+| Command | Flags | Purpose |
+|---|---|---|
+| `lev yolo list` | `--json` | One line per profile: its default, the three human knobs, and how many rules of each kind it has |
+| `lev yolo show <NAME>` | `--json` | The profile in full, as TOML, with what it keeps for a person |
+| `lev yolo test <NAME> --tool <TOOL>` | `--command <LINE>`, `--args <JSON>`, `--workdir <DIR>`, `--configured <allow\|ask\|deny>`, `--kind <builtin\|subagent\|script\|mcp>`, `--allowed`, `--json` | What the profile would decide for one call, and which rule decided it |
+| `lev yolo init` | `--force` | Write a commented example `yolo.toml` beside your config |
+
+`test` is the same code path a run takes, so its answer is the run's answer. `--configured`
+stands in for what the config layers resolve the tool to; left off, that is read from your
+`config.toml`. `--allowed` decides as if `--allow <tool>` had been passed. A shell line is judged
+with `--command`; any other tool takes its arguments as `--args '{"url": "..."}'`.
+
+```bash
+lev yolo init
+lev yolo test careful --tool shell --command "rm -r target/debug"
+lev yolo test careful --tool shell --command "cargo test && curl https://x" --json
+lev run coder --yolo=careful -t "tidy the build"
+```
 
 ## Environment
 

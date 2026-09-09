@@ -15,6 +15,9 @@ same list.
 
 ### Changed
 
+- `--yolo` takes an optional profile, `--yolo=<name>`, on `lev run` and
+  `lev agent-client`. The equals sign is required, so `lev run --yolo coder`
+  keeps meaning "run coder, plain yolo". The bare flag is unchanged.
 - `default_model` is two settings now, named for what they do. `override_model`
   is what `default_model` was: while set, every stage that allows a user
   default starts on it, ahead of the models its blueprint names. `fallback_model`
@@ -48,6 +51,25 @@ same list.
 
 ### Added
 
+- Named yolo profiles. `lev run --yolo=<name>` runs under a profile from
+  `yolo.toml` beside `config.toml`, which says which tool calls run unprompted,
+  which still go through the ordinary approval prompt, and which are refused,
+  per tool (names, globs, `@groups`) and per shell command (word globs, with
+  `args` scoped to paths that resolve inside a tree), and whether the model's
+  questions, the stage checkpoints and the taint gate still reach a person. A
+  profile never lifts a configured deny. The file is read at spawn and when a
+  run resumes, so edits need no daemon restart; a child, a fan-out worker and a
+  restarted run inherit the name. `lev yolo list|show|test|init` reads and
+  tries the file, and `GET /api/yolo`, `GET /api/yolo/{name}`,
+  `POST /api/yolo/test` and the admin-only `PUT /api/yolo` do the same over
+  HTTP. `POST /api/agents` takes `yolo_profile`, which `--no-remote-yolo`
+  refuses with `yolo`.
+- `[security] lock_permission_files`, on by default: a run's `write_file`,
+  `edit_file` and `shell` calls that name `config.toml`, `yolo.toml`, the taint
+  policy and its rules, or the `providers/` and `tools/` script directories are
+  refused before any policy is consulted, `--yolo` or not, and a seed at spawn
+  is held to the same rule. An agent could otherwise widen what its next spawn
+  is allowed to do from inside a run.
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

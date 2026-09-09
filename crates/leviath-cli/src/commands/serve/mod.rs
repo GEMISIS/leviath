@@ -31,6 +31,7 @@ mod update;
 mod update_cache;
 mod update_job;
 mod websocket;
+mod yolo;
 
 #[cfg(test)]
 #[path = "event_seam_tests.rs"]
@@ -152,6 +153,11 @@ fn api_router() -> Router<AppState> {
         // Doctor - the offline half of the checks `lev doctor` runs, returned
         // as data. The billed half is behind `--allow-admin` too.
         .route("/api/doctor", get(doctor::run_doctor))
+        // Yolo profiles - what `--yolo=<name>` can name, and what each would
+        // decide. Reads only; the write is mounted under `--allow-admin`.
+        .route("/api/yolo", get(yolo::list_profiles))
+        .route("/api/yolo/test", post(yolo::test_profile))
+        .route("/api/yolo/{name}", get(yolo::get_profile))
         // Update - how this copy was installed, and what upgrades it. The
         // console has no other way to know, and printed a macOS-only command
         // to everyone because of it.
@@ -485,6 +491,9 @@ async fn execute_with_shutdown(
             // Config-write persists provider secrets to disk, so it is gated the
             // same way as MCP admin: unmounted (404) unless --allow-admin.
             .route("/api/config", put(config::put_config))
+            // A yolo profile is a grant of permissions, so writing the file is
+            // the same category of act as writing the config.
+            .route("/api/yolo", put(yolo::put_profiles))
             // The probe makes this host open a connection to any address the
             // caller names, the same act as testing an MCP server, and it
             // exists to precede the write above. Gated with it; there is no
@@ -830,6 +839,7 @@ mod tests {
         ("tree", include_str!("tree.rs")),
         ("update", include_str!("update.rs")),
         ("websocket", include_str!("websocket.rs")),
+        ("yolo", include_str!("yolo.rs")),
     ];
 
     /// The `StatusCode::` constants a handler can name, as numbers. A

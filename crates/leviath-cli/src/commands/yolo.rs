@@ -204,7 +204,7 @@ fn render_show(profile: &YoloProfile, json: bool) -> anyhow::Result<String> {
 /// `--configured` override, else the user's global `[tool_permissions]` over
 /// the built-in default, clamped by `write_file`'s answer for a shell line
 /// that redirects, as the tool lane does.
-fn configured_policy(
+pub(crate) fn configured_policy(
     args: &TestArgs,
     config: Option<&crate::config::Config>,
 ) -> anyhow::Result<ToolPolicy> {
@@ -272,12 +272,14 @@ fn kind_of(args: &TestArgs) -> anyhow::Result<ToolKind> {
     }
 }
 
-/// The decision for one call, and why.
-fn render_test(
+/// The decision for one call, as the object both `--json` and the API hand
+/// back: the profile, the tool, what the config said, what the profile
+/// decided, and why.
+pub(crate) fn decision_json(
     profile: &YoloProfile,
     args: &TestArgs,
     configured: ToolPolicy,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<serde_json::Value> {
     let arguments = arguments_of(args)?;
     let kind = kind_of(args)?;
     let workdir = match &args.workdir {
@@ -295,26 +297,37 @@ fn render_test(
         home: home.as_deref(),
         platform: Platform::host(),
     });
+    Ok(serde_json::json!({
+        "profile": profile.name,
+        "tool": args.tool,
+        "configured": policy_word(configured),
+        "policy": policy_word(decision.policy),
+        "reason": decision.reason,
+    }))
+}
+
+/// The decision for one call, and why.
+fn render_test(
+    profile: &YoloProfile,
+    args: &TestArgs,
+    configured: ToolPolicy,
+) -> anyhow::Result<String> {
+    let decision = decision_json(profile, args, configured)?;
     if args.json {
-        return Ok(serde_json::to_string_pretty(&serde_json::json!({
-            "profile": profile.name,
-            "tool": args.tool,
-            "configured": policy_word(configured),
-            "policy": policy_word(decision.policy),
-            "reason": decision.reason,
-        }))?);
+        return Ok(serde_json::to_string_pretty(&decision)?);
     }
+    let policy = decision["policy"].as_str().unwrap_or_default();
     Ok(format!(
         "{}: {} ({})\n  configured by the config layers: {}\n  under --yolo={}: {}",
         args.tool,
-        policy_word(decision.policy),
-        decision.reason,
+        policy,
+        decision["reason"].as_str().unwrap_or_default(),
         policy_word(configured),
         profile.name,
-        match decision.policy {
-            ToolPolicy::Allow => "runs without a prompt",
-            ToolPolicy::Ask => "goes through the ordinary approval prompt",
-            ToolPolicy::Deny => "is refused",
+        match policy {
+            "allow" => "runs without a prompt",
+            "ask" => "goes through the ordinary approval prompt",
+            _ => "is refused",
         }
     ))
 }
@@ -361,6 +374,19 @@ mod tests {
             allowed: false,
             json: false,
         }
+    }
+
+    /// The published copy is the embedded one: `configuration.md` links the
+    /// live file and `lev yolo init` writes the embedded text, and the two
+    /// must not drift.
+    #[test]
+    fn the_published_example_is_the_embedded_one() {
+        let published = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/schema/yolo.example.toml"
+        ))
+        .expect("docs/schema/yolo.example.toml");
+        assert_eq!(published, EXAMPLE_TOML);
     }
 
     #[test]

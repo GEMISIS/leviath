@@ -584,6 +584,30 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     Check::ok("config", format!("{detail}  (note: {})", notes.join("; ")))
 }
 
+/// The `yolo` check: whether `yolo.toml` loads, when there is one.
+///
+/// No file is no finding - most installs never write one - so the check is
+/// absent rather than a line saying nothing is wrong. A file that will not
+/// load is a failure, because every `--yolo=<name>` is refused until it does,
+/// and a file that loads lists the names a run can use.
+fn yolo_check() -> Option<Check> {
+    match crate::yolo::load_current() {
+        Ok(file) if !file.exists() => None,
+        Ok(file) => {
+            let names = file.names();
+            let detail = match names.is_empty() {
+                true => "yolo.toml defines no profiles".to_string(),
+                false => format!("profiles: {}", names.join(", ")),
+            };
+            Some(Check::ok("yolo", detail))
+        }
+        Err(e) => Some(Check::fail(
+            "yolo",
+            format!("{e}; every `lev run --yolo=<name>` is refused until it loads"),
+        )),
+    }
+}
+
 /// The `config` check for a file that will not load.
 ///
 /// It says three things, and the third is the one nothing said before: where
@@ -1029,6 +1053,7 @@ pub(crate) async fn run_checks_with(
         }
     };
     checks.push(config_check(&config, &registry));
+    checks.extend(yolo_check());
     // Ask the daemon who it is before judging its environment. `List` is
     // idempotent and local, and it is only sent to force the handshake that
     // fills `link().daemon` - the reply itself is not the point, and a daemon

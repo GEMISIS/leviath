@@ -192,6 +192,8 @@ impl Dashboard {
             pending_open_run: None,
             help_scroll: std::cell::Cell::new(0),
             new_run_yolo: false,
+            new_run_yolo_profile: None,
+            new_run_profiles: Vec::new(),
             new_run_ctx,
             agent_builder: None,
             layout_store_path: None,

@@ -1738,3 +1738,41 @@ fn the_codex_check_falls_back_when_the_grant_names_no_account() {
         assert_eq!(check.detail, "signed in");
     });
 }
+
+/// `yolo.toml` is checked only when it is there: no file is no finding, a
+/// file that loads names its profiles, and one that does not is a failure
+/// because every `--yolo=<name>` is refused until it does.
+#[test]
+fn the_yolo_check_follows_the_file() {
+    crate::config::with_isolated_config_path("doctor-yolo", |dir| {
+        assert!(yolo_check().is_none(), "no file, no check");
+        std::fs::write(dir.join("yolo.toml"), "").unwrap();
+        let empty = yolo_check().expect("an empty file is still a file");
+        assert!(matches!(empty.status, CheckStatus::Ok), "{empty:?}");
+        assert!(
+            empty.detail.contains("defines no profiles"),
+            "{}",
+            empty.detail
+        );
+        std::fs::write(
+            dir.join("yolo.toml"),
+            "[careful]\ndefault = \"ask\"\n\n[loose]\ndefault = \"allow\"\n",
+        )
+        .unwrap();
+        let loaded = yolo_check().expect("a check");
+        assert!(matches!(loaded.status, CheckStatus::Ok));
+        assert!(
+            loaded.detail.contains("careful, loose"),
+            "{}",
+            loaded.detail
+        );
+        std::fs::write(dir.join("yolo.toml"), "[careful]\nblock = 1\n").unwrap();
+        let broken = yolo_check().expect("a check");
+        assert!(matches!(broken.status, CheckStatus::Fail));
+        assert!(
+            broken.detail.contains("refused until it loads"),
+            "{}",
+            broken.detail
+        );
+    });
+}
