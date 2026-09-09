@@ -264,6 +264,37 @@
           ],
           "default": "reject",
           "description": "What happens to a submission when the validator itself cannot run: it threw, ran out of operations, or returned the wrong type. reject (the default) refuses the submission and sends the script's error back to the model as retry feedback; accept records the answer unchecked. The broken script is flagged on the run either way."
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Files the stage hands back beside its answer, by name and type. A submission is checked against them: a required one must be present, and one that is present must be of the declared type. Accepted files are stored as parts of the run and served by the API.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "What the submission calls it: final, scene, track."
+              },
+              "type": {
+                "type": "string",
+                "description": "The media type it must be, or a pattern it must match (video/*)."
+              },
+              "required": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether a submission without it is refused."
+              },
+              "description": {
+                "type": "string",
+                "description": "What it is for, shown to the model."
+              }
+            }
+          }
         }
       }
     },
@@ -314,6 +345,27 @@
         },
         "output": {
           "$ref": "#/$defs/outputSpec"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "What this stage takes as typed parts, beyond what the regions it sees already say.",
+          "properties": {
+            "accepts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Media type patterns the stage takes as parts (image/*, audio/wav). Left off, the union of the visible regions' accepts. Shown by lev validate and used to prefer a model that covers them."
+            },
+            "as_text": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Media type patterns whose parts reach this stage's model as text whatever the model takes: the text bypass, forced. For a type the registry already calls text this changes nothing."
+            }
+          }
         },
         "required_tools": {
           "type": "array",

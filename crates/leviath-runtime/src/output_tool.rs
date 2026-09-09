@@ -96,6 +96,9 @@ pub(crate) struct OutputContext<'a> {
     pub stage_names: &'a [String],
     /// Where relative artifact paths resolve from.
     pub workdir: Option<&'a std::path::Path>,
+    /// The run's blob store and registry, for typing and storing artifacts.
+    /// `None` types them with the built-in registry and stores nothing.
+    pub sink: Option<&'a crate::context_setup::PartSink<'a>>,
 }
 
 /// Apply a `submit_output` call.
@@ -120,6 +123,7 @@ pub(crate) fn handle_output_tool(
         stage,
         stage_names,
         workdir,
+        sink,
     } = *ctx;
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
         return ("[error] missing 'content' argument".to_string(), None);
@@ -224,8 +228,9 @@ pub(crate) fn handle_output_tool(
     // Refused rather than silently dropped: an answer whose artifact list
     // quietly lost an entry sends the caller looking for a file that was named
     // and then forgotten.
-    let artifacts = match resolve_artifacts(args, workdir) {
-        Ok(paths) => paths,
+    let declared = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
+    let ingested = match artifacts::resolve(args, workdir, declared, sink) {
+        Ok(ingested) => ingested,
         Err(message) => return (message, None),
     };
 
@@ -235,10 +240,25 @@ pub(crate) fn handle_output_tool(
         stage.to_string(),
         now,
     )
-    .with_artifacts(artifacts);
-    mirror_into_region(window, &output.content);
+    .with_artifacts(ingested.records);
+    mirror_into_region(window, &output.content, ingested.parts);
 
     let mut ack = "Recorded as this run's final output.".to_string();
+    if !output.artifacts.is_empty() {
+        let listed: Vec<String> = output
+            .artifacts
+            .iter()
+            .map(|a| {
+                format!(
+                    "{} ({}, {})",
+                    a.name,
+                    a.media_type,
+                    leviath_core::media::human_size(a.size)
+                )
+            })
+            .collect();
+        ack.push_str(&format!(" Artifacts: {}.", listed.join(", ")));
+    }
     if output.truncated {
         ack.push_str(&format!(
             " It exceeded the {} KiB limit and was truncated; submit a shorter answer, or write \
@@ -249,52 +269,6 @@ pub(crate) fn handle_output_tool(
     (ack, Some(output))
 }
 
-/// Split the `artifacts` argument into paths that resolve inside `workdir` and
-/// paths that do not.
-///
-/// The same containment rule the files endpoint enforces when serving one, so a
-/// path that survives here is a path a consumer can actually fetch. A missing
-/// file is fine: an agent may name something it is about to finish writing, and
-/// `resolves_within` checks where a path lands rather than whether it exists.
-fn resolve_artifacts(
-    args: &serde_json::Value,
-    workdir: Option<&std::path::Path>,
-) -> Result<Vec<String>, String> {
-    let listed: Vec<&str> = args
-        .get("artifacts")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|p| !p.trim().is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if listed.is_empty() {
-        return Ok(Vec::new());
-    }
-    // No workdir means nothing to resolve against, so nothing can be verified.
-    // Unreachable for a real run (every one carries its metadata); loud rather
-    // than silent if it ever is.
-    let Some(workdir) = workdir else {
-        return Err(
-            "[error] cannot record artifacts: this run has no working directory to resolve \
-             them against"
-                .to_string(),
-        );
-    };
-    let (kept, rejected): (Vec<&str>, Vec<&str>) = listed
-        .into_iter()
-        .partition(|p| leviath_core::resolves_within(&workdir.join(p), workdir));
-    match rejected.is_empty() {
-        true => Ok(kept.into_iter().map(str::to_string).collect()),
-        false => Err(format!(
-            "[error] these artifact paths do not resolve inside the working directory: {}",
-            rejected.join(", ")
-        )),
-    }
-}
-
 /// Mirror the submission into the pinned `final_output` region, replacing
 /// whatever was there.
 ///
@@ -302,7 +276,11 @@ fn resolve_artifacts(
 /// output on the component, which is what every consumer actually reads. The
 /// region exists so the answer stays in the agent's own context (a later stage
 /// can revise it) and so it appears in `context.json`.
-fn mirror_into_region(window: &mut ContextWindow, content: &str) {
+fn mirror_into_region(
+    window: &mut ContextWindow,
+    content: &str,
+    parts: Vec<leviath_core::media::Part>,
+) {
     // Read the budget and clear in one borrow. Asking for the region twice
     // leaves a second "what if it is missing" branch that the first check has
     // already ruled out, so nothing can ever take it.
@@ -319,6 +297,23 @@ fn mirror_into_region(window: &mut ContextWindow, content: &str) {
     // Through the window method rather than the region directly, so a custom
     // region's `on_write` hook fires - the same reason `context_write` does it.
     let _ = window.add_to_region(FINAL_OUTPUT_REGION, mirrored, tokens);
+    // Each stored artifact as its own entry, so a later stage sees the file
+    // the way it sees any other part: by stand-in, or natively when its
+    // model takes the type.
+    for part in parts {
+        let name = part.name.clone().unwrap_or_default();
+        let content = leviath_core::region::EntryContent::from_parts(vec![
+            leviath_core::media::Part::text(format!("artifact '{name}':")),
+            part,
+        ]);
+        let tokens = content.tokens_hint();
+        let _ = window.add_content_entry(
+            FINAL_OUTPUT_REGION,
+            leviath_core::EntryKind::Text,
+            content,
+            tokens,
+        );
+    }
 }
 
 /// Trim `content` to fit `budget` tokens, marking it when cut.
@@ -339,6 +334,8 @@ fn fit_to_region(content: &str, budget: usize) -> String {
         leviath_core::truncate_at_boundary(content, room)
     )
 }
+
+mod artifacts;
 
 #[cfg(test)]
 mod tests;

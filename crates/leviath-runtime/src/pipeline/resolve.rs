@@ -142,6 +142,48 @@ pub(crate) fn resolve_stage_candidates(
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
 ) -> Vec<ModelEntry> {
+    resolve_stage_candidates_for(model_cfg, model_override, defaults, registry, &[])
+}
+
+/// [`resolve_stage_candidates`], with the media the stage takes.
+///
+/// `needs` is what the stage's regions accept beyond text. A candidate whose
+/// model takes all of it moves ahead of one that does not, in an otherwise
+/// stable order, so a stage reading a storyboard lands on the model that
+/// can see it when the blueprint lists such a model anywhere. A pinned
+/// `provider/model` override is never reordered: the caller asked for it.
+pub(crate) fn resolve_stage_candidates_for(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+    needs: &[String],
+) -> Vec<ModelEntry> {
+    let mut candidates = resolve_candidates_in_order(model_cfg, model_override, defaults, registry);
+    let needs: Vec<String> = needs.iter().filter(|n| *n != "*/*").cloned().collect();
+    if needs.is_empty() || candidates.len() < 2 {
+        return candidates;
+    }
+    let covers = |entry: &ModelEntry| {
+        registry
+            .get(&entry.provider)
+            .is_some_and(|p| p.media(&entry.model).covers(&needs))
+    };
+    let (seeing, blind): (Vec<ModelEntry>, Vec<ModelEntry>) =
+        candidates.drain(..).partition(covers);
+    if seeing.is_empty() {
+        return blind;
+    }
+    seeing.into_iter().chain(blind).collect()
+}
+
+/// The candidates in blueprint order, before any media preference.
+fn resolve_candidates_in_order(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Vec<ModelEntry> {
     let (override_provider, override_model) = match model_override {
         Some(ov) if ov.contains('/') => {
             let (p, m) = ov
@@ -852,8 +894,13 @@ pub fn resolve_stages(
         .stages
         .iter()
         .map(|stage| {
-            let mut candidates =
-                resolve_stage_candidates(&stage.model, model_override, defaults, registry);
+            let mut candidates = resolve_stage_candidates_for(
+                &stage.model,
+                model_override,
+                defaults,
+                registry,
+                &blueprint.stage_inputs(stage),
+            );
             let head = candidates.remove(0);
             // `registry.has` also consults the script layer, so a `.rhai`
             // provider sitting on disk counts as usable and is never
@@ -1137,6 +1184,7 @@ mod tests {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: None,
                     refusal: None,
+                    media: None,
                 }),
             );
         }
@@ -1154,6 +1202,8 @@ mod tests {
         catalog: Option<Vec<String>>,
         /// What it says about refusing something outside that catalogue.
         refusal: Option<String>,
+        /// What its models take, when the test cares; text only otherwise.
+        media: Option<leviath_providers::ModelMedia>,
     }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
@@ -1176,6 +1226,11 @@ mod tests {
         }
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
+        }
+        fn media(&self, _m: &str) -> leviath_providers::ModelMedia {
+            self.media
+                .clone()
+                .unwrap_or_else(leviath_providers::ModelMedia::text_only)
         }
         fn serves_model(&self, model_key: &str) -> Option<String> {
             self.serves
@@ -1203,6 +1258,7 @@ mod tests {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
                     refusal: None,
+                    media: None,
                 }),
             );
         }
@@ -1522,6 +1578,7 @@ mod tests {
                 refusal: Some(
                     "your ChatGPT plus plan does not include it. Available: gpt-5.5".to_string(),
                 ),
+                media: None,
             }),
         );
 
@@ -1793,6 +1850,52 @@ mod tests {
         let registry = registry_serving(&[("anthropic", &["claude-sonnet-5"][..])]);
         let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
         assert_eq!(pairs(&got), vec![("anthropic", "claude-sonnet-5")]);
+    }
+
+    #[test]
+    fn a_stage_that_takes_media_prefers_a_model_that_sees_it() {
+        let mut registry = registry_with(&["blind"]);
+        registry.register(
+            "seeing".to_string(),
+            Arc::new(FakeProvider {
+                media: Some(leviath_providers::ModelMedia::new(
+                    &["text/*", "image/*"],
+                    &["text/*"],
+                )),
+                ..Default::default()
+            }),
+        );
+        let cfg = model_cfg(vec![("blind", "text-only"), ("seeing", "vision")]);
+        let needs = vec!["image/*".to_string()];
+        let got =
+            resolve_stage_candidates_for(&cfg, None, &ModelDefaults::default(), &registry, &needs);
+        assert_eq!(
+            pairs(&got),
+            vec![("seeing", "vision"), ("blind", "text-only")]
+        );
+        // Nothing needed, or nothing that sees: the blueprint's order stands.
+        let got =
+            resolve_stage_candidates_for(&cfg, None, &ModelDefaults::default(), &registry, &[]);
+        assert_eq!(
+            pairs(&got),
+            vec![("blind", "text-only"), ("seeing", "vision")]
+        );
+        let got = resolve_stage_candidates_for(
+            &cfg,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            &["audio/*".to_string(), "*/*".to_string()],
+        );
+        assert_eq!(
+            pairs(&got),
+            vec![("blind", "text-only"), ("seeing", "vision")]
+        );
+        // One candidate has nothing to be reordered against.
+        let one = model_cfg(vec![("blind", "text-only")]);
+        let got =
+            resolve_stage_candidates_for(&one, None, &ModelDefaults::default(), &registry, &needs);
+        assert_eq!(pairs(&got), vec![("blind", "text-only")]);
     }
 
     #[test]
@@ -2484,6 +2587,7 @@ mod tests {
                 schema: None,
                 validator: None,
                 on_validator_error: None,
+                artifacts: Vec::new(),
             }),
         );
         let resolved = resolve_one(&bp, None);

@@ -160,6 +160,7 @@ impl Default for RetryPolicy {
 /// A unit of inference work the dispatch system hands to the worker pool.
 /// What a job needs to fill its media blocks with bytes right before sending:
 /// where the bytes are, what the model takes, and how many to send.
+#[derive(Clone)]
 pub(crate) struct JobHydration {
     /// The run's blob store.
     pub store: Arc<dyn leviath_core::media::BlobStore>,
@@ -171,12 +172,31 @@ pub(crate) struct JobHydration {
     pub media: leviath_providers::ModelMedia,
     /// The most stored parts one request carries with their bytes.
     pub max_stored: usize,
+    /// Media type patterns the stage sends as text whatever the model takes.
+    pub as_text: Vec<String>,
 }
 
 impl JobHydration {
     /// Fill `request`'s media blocks, logging what happened when anything
     /// was left out.
     fn apply(&self, request: &mut InferenceRequest) {
+        // The stage's own bypass: a part of a type it named reaches the
+        // model as text unless the part itself said otherwise.
+        if !self.as_text.is_empty() {
+            for message in &mut request.messages {
+                let leviath_providers::MessageContent::Blocks(blocks) = &mut message.content else {
+                    continue;
+                };
+                for block in blocks {
+                    if let leviath_providers::ContentBlock::Media { part, deliver, .. } = block
+                        && deliver.is_none()
+                        && part.media_type.matches_any(&self.as_text)
+                    {
+                        *deliver = Some(leviath_core::media::Delivery::Text);
+                    }
+                }
+            }
+        }
         let fetch =
             |blob: &leviath_core::media::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
         let report = leviath_providers::media::hydrate_request(
@@ -1625,12 +1645,64 @@ mod tests {
             registry,
             media: ModelMedia::new(&["text/*", "image/*"], &["text/*"]),
             max_stored: 10,
+            as_text: Vec::new(),
         };
         hydration.apply(&mut request);
+        // The stage's `as_text` sends a type the registry calls binary as
+        // text, when its bytes read as text; a part that chose native keeps it.
+        let scene = Blob::new(
+            MediaType::parse("application/x-scene").unwrap(),
+            b"v 1 2 3".to_vec(),
+        )
+        .named("scene.bin");
+        let scene = Part::stored(
+            hydration
+                .store
+                .put("run-1", &scene, &hydration.registry)
+                .unwrap(),
+        )
+        .named("scene.bin");
+        let mut as_text = test_request();
+        as_text.messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::media(&scene).unwrap(),
+                ContentBlock::media(
+                    &stored
+                        .clone()
+                        .delivered(leviath_core::media::Delivery::Native),
+                )
+                .unwrap(),
+            ]),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+        as_text.messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("plain".to_string()),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+        let forced = JobHydration {
+            as_text: vec!["application/*".to_string(), "image/*".to_string()],
+            ..hydration.clone()
+        };
+        forced.apply(&mut as_text);
         let blocks_of = |content: &MessageContent| match content {
             MessageContent::Blocks(blocks) => blocks.clone(),
             MessageContent::Text(_) => Vec::new(),
         };
+        let forced_blocks = blocks_of(&as_text.messages[0].content);
+        assert_eq!(
+            forced_blocks[0],
+            ContentBlock::Text {
+                text: "v 1 2 3".to_string()
+            }
+        );
+        assert!(
+            forced_blocks[1].is_hydrated_media(),
+            "a part that chose native keeps it"
+        );
         assert!(blocks_of(&MessageContent::Text("t".into())).is_empty());
         let blocks = blocks_of(&request.messages[0].content);
         assert!(blocks[0].is_hydrated_media());

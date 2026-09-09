@@ -527,6 +527,7 @@ pub(crate) fn dispatch_inference(
                         registry,
                         media: provider.media(&si.model),
                         max_stored,
+                        as_text: config.map(|c| c.as_text.clone()).unwrap_or_default(),
                     }
                 });
                 let job = InferenceJob {

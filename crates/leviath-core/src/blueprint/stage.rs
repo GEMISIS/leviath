@@ -653,6 +653,20 @@ pub struct Stage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output::OutputSpec>,
 
+    /// Media type patterns this stage takes as parts, when the regions it
+    /// sees do not already say (`[stages.<name>.input] accepts`). Empty means
+    /// "whatever the visible regions accept"; see
+    /// [`Blueprint::stage_inputs`](crate::Blueprint::stage_inputs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_accepts: Vec<String>,
+
+    /// Media type patterns whose parts reach this stage's model as text,
+    /// whatever the model takes (`[stages.<name>.input] as_text`): the text
+    /// bypass, forced. For a type the registry already calls text this
+    /// changes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_as_text: Vec<String>,
+
     /// Whether this stage must call `submit_output` before it transitions.
     ///
     /// Unlike [`Self::required_tools`], which only keeps a blocking human tool
@@ -703,6 +717,8 @@ impl Stage {
             sandbox: None,
             tool_result_routing: None,
             output: None,
+            input_accepts: Vec::new(),
+            input_as_text: Vec::new(),
             require_output: false,
             hooks: StageHooks::default(),
         }

@@ -111,6 +111,24 @@ same list.
   hydrate send the stand-in. The journal and `context.json` never hold
   base64. `[media] max_stored_per_request` caps how many parts one request
   carries, oldest dropped first (#400).
+- Stages declare typed inputs and outputs. `[stages.<name>.input] accepts`
+  states what a stage takes as parts (else the union of its visible regions'
+  `accepts`), and `as_text` names types whose parts reach the model as text
+  whatever it takes; a stage listing several models is resolved onto the one
+  that can see what it takes. `[[stages.<name>.output.artifacts]]` declares
+  the files a stage hands back by `name`, `type`, `required` and
+  `description`, and `submit_output` takes each as a path or as
+  `{ name, path, type }`: every file must exist inside the working
+  directory, a required one that is missing or a declared one of the wrong
+  type is refused back to the model, and each accepted file is typed,
+  hashed, stored as a part of the run and mirrored into `final_output`.
+  `artifacts` on the answer, in `meta.json`, on `GET /api/agents/{id}/result`
+  and on the completion webhook is now a list of `{ name, path, media_type,
+  size, sha256 }` rather than paths; an answer recorded before this reads
+  back with each path's file name and an unknown type. `lev result` lists
+  them with their types and hashes, `lev validate` prints what each stage
+  takes and hands back and warns `media-unseen` when a stage's models cannot
+  see a type its regions take (#400).
 - Rhai scripts handle parts. A script tool reads a stored part's bytes with
   `read_part(name)` (by file name or hash prefix), stores new bytes with
   `write_part(bytes [, type [, name]])`, sees what the run holds with

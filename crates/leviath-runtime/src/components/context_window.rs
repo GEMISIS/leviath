@@ -60,6 +60,9 @@ pub(crate) struct InferenceConfig {
     /// `[stages.<name>.model] request_timeout_secs`. When `Some`, it overrides the
     /// default inference job timeout at dispatch; when `None`, the default applies.
     pub request_timeout_secs: Option<u64>,
+    /// Media type patterns whose parts reach this stage's model as text
+    /// whatever the model takes: `[stages.<name>.input] as_text`.
+    pub as_text: Vec<String>,
 }
 
 /// Per-entity tool result routing configuration.

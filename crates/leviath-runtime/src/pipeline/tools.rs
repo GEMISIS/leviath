@@ -627,6 +627,17 @@ pub(crate) fn dispatch_tools(
                 let stage_names: Vec<String> = blueprint
                     .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
                     .unwrap_or_default();
+                // The store the artifacts go into, when this world has one.
+                let (sources, _) = media.hydration_inputs();
+                let sink =
+                    sources
+                        .as_ref()
+                        .map(|(store, registry)| crate::context_setup::PartSink {
+                            store: store.as_ref(),
+                            registry,
+                            run_id: &state.agent_id,
+                            max_part_bytes: media.max_part_bytes(),
+                        });
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     &crate::output_tool::OutputContext {
@@ -635,6 +646,7 @@ pub(crate) fn dispatch_tools(
                         stage: &state.current_stage,
                         stage_names: &stage_names,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                        sink: sink.as_ref(),
                     },
                     chrono::Utc::now().timestamp(),
                     &mut window,

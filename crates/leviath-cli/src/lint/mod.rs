@@ -462,6 +462,7 @@ pub(crate) fn lint_manifest(
         findings.extend(lint_models(stage, env));
         findings.extend(lint_output_stage(stage));
         findings.extend(lint_fanout_escape(stage));
+        findings.extend(lint_stage_media(blueprint, stage));
     }
 
     // Worst first, stable within a severity so the order a check ran in is the

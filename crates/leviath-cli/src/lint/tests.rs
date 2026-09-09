@@ -3370,3 +3370,75 @@ fn a_silent_native_provider_is_not_reported_as_unchecked() {
         "a native provider that publishes nothing is not `catalog-unchecked`"
     );
 }
+
+// ─── Media a stage takes but its models cannot see ───────────────────────────
+
+#[test]
+fn a_stage_taking_media_its_models_cannot_see_is_warned_once() {
+    let manifest = r#"
+[agent]
+name = "artist"
+version = "0.1.0"
+description = "d"
+
+[stages.look]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 10
+available_tools = ["read_file"]
+
+[stages.listen]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Hears"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.listen.input]
+accepts = ["audio/*"]
+
+[stages.hears_anyway]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "gemini", model = "gemini-2.5-pro" }] }
+description = "Hears"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.hears_anyway.input]
+accepts = ["audio/*"]
+
+[stages.open_route]
+mode = "autonomous"
+model = { models = [{ model = "something" }] }
+description = "Unknown"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.open_route.input]
+accepts = ["audio/*"]
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 1000 }
+storyboard = { kind = "pinned", max_tokens = 1000, accepts = ["image/*"] }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#;
+    let findings = lint(manifest, &LintEnv::default());
+    let unseen = with_code(&findings, "media-unseen");
+    assert_eq!(unseen.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(unseen[0].stage.as_deref(), Some("listen"));
+    assert!(
+        unseen[0].message.contains("takes audio/*"),
+        "{}",
+        unseen[0].message
+    );
+    assert!(
+        unseen[0].message.contains("anthropic/claude-sonnet-5"),
+        "{}",
+        unseen[0].message
+    );
+    assert!(
+        unseen[0]
+            .fix
+            .as_deref()
+            .unwrap_or_default()
+            .contains("as_text")
+    );
+}

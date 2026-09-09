@@ -202,6 +202,7 @@ pub fn output_request(
         schema,
         validator: None,
         on_validator_error: None,
+        artifacts: Vec::new(),
     }))
 }
 

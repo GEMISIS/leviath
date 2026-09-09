@@ -89,6 +89,7 @@ pub(super) fn spawn_args(
                 schema: None,
                 validator: None,
                 on_validator_error: None,
+                artifacts: Vec::new(),
             }),
         },
         parts: Vec::new(),

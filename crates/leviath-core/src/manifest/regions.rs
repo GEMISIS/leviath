@@ -406,7 +406,7 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
 /// catch.
 /// `accepts = ["text/*", "image/png"]`: each entry a media type or a
 /// `type/*` pattern. Absent or empty means anything.
-fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
+pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };

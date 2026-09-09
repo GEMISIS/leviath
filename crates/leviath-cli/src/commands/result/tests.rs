@@ -103,15 +103,27 @@ fn artifacts_are_listed_under_the_answer() {
         42,
     )
     .with_artifacts(vec![
-        "data/dataset.csv".to_string(),
-        "charts/trend.svg".to_string(),
+        leviath_core::output::Artifact::from_path("data/dataset.csv"),
+        leviath_core::output::Artifact {
+            name: "trend".to_string(),
+            path: "charts/trend.svg".to_string(),
+            media_type: leviath_core::media::MediaType::parse("image/svg+xml").unwrap(),
+            size: 2048,
+            sha256: "abcdef0123456789".repeat(4),
+        },
     ]);
 
     let out = shown(Some(&answer), false, false).expect("there is an answer");
 
     assert!(out.contains("Files produced (2):"), "{out}");
-    assert!(out.contains("  data/dataset.csv\n"), "{out}");
-    assert!(out.contains("  charts/trend.svg\n"), "{out}");
+    assert!(
+        out.contains("  dataset.csv  data/dataset.csv  application/octet-stream  0 B\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  trend  charts/trend.svg  image/svg+xml  2 KB  sha256:abcdef012345\n"),
+        "{out}"
+    );
 }
 
 /// `--raw` is for a shell pipeline, so it is the answer and nothing else: no
@@ -120,7 +132,9 @@ fn artifacts_are_listed_under_the_answer() {
 fn raw_output_carries_no_file_list() {
     let answer =
         leviath_core::output::FinalOutput::new("just the answer", None, "present".to_string(), 42)
-            .with_artifacts(vec!["data/dataset.csv".to_string()]);
+            .with_artifacts(vec![leviath_core::output::Artifact::from_path(
+                "data/dataset.csv",
+            )]);
 
     let out = shown(Some(&answer), false, true).expect("there is an answer");
 

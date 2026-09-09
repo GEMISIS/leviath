@@ -303,6 +303,9 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
     for line in input_lines(blueprint) {
         println!("{line}");
     }
+    for line in media_lines(blueprint) {
+        println!("{line}");
+    }
 
     let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
     if is_graph {
@@ -335,6 +338,55 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
                 .join(" → ")
         );
     }
+}
+
+/// One line per stage that takes media or hands back declared artifacts:
+/// what `lev run --attach` may aim at it, and what `lev result` will list.
+fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let mut lines = Vec::new();
+    for stage in &blueprint.stages {
+        let takes: Vec<String> = blueprint
+            .stage_inputs(stage)
+            .into_iter()
+            .filter(|p| p != "*/*")
+            .collect();
+        let hands_back: Vec<String> = stage
+            .output
+            .as_ref()
+            .map(|o| {
+                o.artifacts
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} ({}{})",
+                            a.name,
+                            a.media_type,
+                            if a.required { ", required" } else { "" }
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if takes.is_empty() && hands_back.is_empty() {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if !takes.is_empty() {
+            parts.push(format!("takes {}", takes.join(", ")));
+        }
+        if !stage.input_as_text.is_empty() {
+            parts.push(format!("as text: {}", stage.input_as_text.join(", ")));
+        }
+        if !hands_back.is_empty() {
+            parts.push(format!("hands back {}", hands_back.join(", ")));
+        }
+        lines.push(format!(
+            "  Media, stage '{}': {}",
+            stage.name,
+            parts.join("; ")
+        ));
+    }
+    lines
 }
 
 /// Outcome of the real, testable logic in [`execute`]. Kept distinct from
@@ -1315,6 +1367,64 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
 conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 "#
         )
+    }
+
+    #[test]
+    fn media_lines_say_what_each_stage_takes_and_hands_back() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.plan]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Plan"
+max_iterations = 5
+
+[stages.cut]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Cut"
+max_iterations = 5
+[stages.cut.input]
+accepts = ["audio/*", "image/*"]
+as_text = ["model/obj"]
+[[stages.cut.output.artifacts]]
+name = "final"
+type = "video/mp4"
+required = true
+[[stages.cut.output.artifacts]]
+name = "notes"
+type = "text/*"
+
+[stages.ship]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Ship"
+max_iterations = 5
+[[stages.ship.output.artifacts]]
+name = "bundle"
+type = "application/zip"
+
+[stages.hear]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Hear"
+max_iterations = 5
+[stages.hear.input]
+accepts = ["audio/*"]
+"#,
+        );
+        let lines = media_lines(&parse(&toml));
+        assert_eq!(
+            lines,
+            vec![
+                "  Media, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
+                 final (video/mp4, required), notes (text/*)"
+                    .to_string(),
+                "  Media, stage 'ship': hands back bundle (application/zip)".to_string(),
+                "  Media, stage 'hear': takes audio/*".to_string(),
+            ]
+        );
+        print_success(&parse(&toml));
     }
 
     #[test]

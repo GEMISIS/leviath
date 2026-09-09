@@ -8,6 +8,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use super::artifact_types::ArtifactResp;
 use super::events::ServerEvent;
 use crate::config::Config;
 use crate::daemon::config_reload::ConfigReloader;
@@ -683,10 +684,10 @@ pub(crate) struct FinalOutputResp {
     pub submitted_at: i64,
     /// Whether the answer hit the size cap and was cut short.
     pub truncated: bool,
-    /// Files the run produced, as workdir-relative paths. Fetch one with
+    /// Files the run produced, typed and hashed. Fetch one with
     /// `GET /api/agents/{id}/files?path=`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<String>,
+    pub artifacts: Vec<ArtifactResp>,
 }
 
 impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
@@ -697,7 +698,7 @@ impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
             stage: o.stage,
             submitted_at: o.submitted_at,
             truncated: o.truncated,
-            artifacts: o.artifacts,
+            artifacts: o.artifacts.into_iter().map(ArtifactResp::from).collect(),
         }
     }
 }

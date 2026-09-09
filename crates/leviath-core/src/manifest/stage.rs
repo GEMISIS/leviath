@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// The keys of a `[stages.<name>.input]` table.
+const INPUT_KEYS: &[&str] = &["accepts", "as_text"];
+
 /// Every key `parse_stage` reads off a `[stages.<name>]` table.
 ///
 /// Kept beside the parser because it is only true of the parser: a key added
@@ -19,6 +22,7 @@ pub(super) const STAGE_KEYS: &[&str] = &[
     "context",
     "description",
     "hooks",
+    "input",
     "interaction_points",
     "max_attempts",
     "max_items",
@@ -496,6 +500,20 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             &format!("stage '{stage_name}': output"),
             output_table,
         )?);
+    }
+
+    // `[stages.<name>.input]`: what the stage takes as parts, when the
+    // regions it sees do not already say, and which types reach its model
+    // as text whatever the model takes.
+    if let Some(input_table) = table_of(stage_value, "input") {
+        reject_unknown_keys(
+            &format!("stage '{stage_name}': input"),
+            input_table,
+            INPUT_KEYS,
+        )?;
+        let where_ = format!("stage '{stage_name}': input");
+        stage.input_accepts = super::regions::parse_accepts(&where_, input_table.get("accepts"))?;
+        stage.input_as_text = super::regions::parse_accepts(&where_, input_table.get("as_text"))?;
     }
 
     // Parse accepts_messages flag: whether mid-run user messages are

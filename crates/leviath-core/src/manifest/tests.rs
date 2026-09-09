@@ -5881,3 +5881,99 @@ fn a_stage_sandbox_refuses_an_unknown_key_naming_it() {
         "{err}"
     );
 }
+
+#[test]
+fn a_stage_declares_what_it_takes_and_hands_back() {
+    let bp = parse_manifest(
+        r#"
+[agent]
+name = "artist"
+
+[context.regions]
+brief = { kind = "pinned", accepts = ["text/*"] }
+storyboard = { kind = "pinned", accepts = ["image/*", "image/png"] }
+scratch = { kind = "temporary" }
+
+[stages.look]
+mode = "autonomous"
+[stages.look.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+[stages.look.context]
+hide = ["scratch"]
+
+[stages.cut]
+mode = "autonomous"
+[stages.cut.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+[stages.cut.input]
+accepts = ["audio/wav"]
+as_text = ["model/*"]
+[stages.cut.output]
+format = "markdown"
+[[stages.cut.output.artifacts]]
+name = "final"
+type = "Video/MP4"
+required = true
+description = "the cut"
+[[stages.cut.output.artifacts]]
+name = "notes"
+type = "text/*"
+"#,
+    )
+    .unwrap();
+    let look = &bp.stages[0];
+    assert_eq!(bp.stage_inputs(look), ["image/*", "image/png"]);
+    let cut = &bp.stages[1];
+    assert_eq!(bp.stage_inputs(cut), ["audio/wav"]);
+    assert_eq!(cut.input_as_text, ["model/*"]);
+    let spec = cut.output.as_ref().unwrap();
+    assert_eq!(spec.artifacts.len(), 2);
+    assert_eq!(spec.artifacts[0].name, "final");
+    assert_eq!(spec.artifacts[0].media_type, "video/mp4");
+    assert!(spec.artifacts[0].required);
+    assert_eq!(spec.artifacts[0].description.as_deref(), Some("the cut"));
+    assert!(!spec.artifacts[1].required);
+    // A region that takes anything reports `*/*`.
+    let open = parse_manifest(
+        "[agent]\nname = \"o\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\n\n[stages.s]\nmode = \"autonomous\"\n[stages.s.model]\nprovider = \"anthropic\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    assert_eq!(open.stage_inputs(&open.stages[0]), ["*/*"]);
+}
+
+#[test]
+fn artifact_declarations_are_checked_at_load() {
+    let base = "[agent]\nname = \"a\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\n\n[stages.s]\nmode = \"autonomous\"\n[stages.s.model]\nprovider = \"anthropic\"\nmodel = \"m\"\n";
+    for (tail, expect) in [
+        (
+            "[stages.s.output]\nartifacts = 5\n",
+            "must be a list of tables",
+        ),
+        (
+            "[stages.s.output]\nartifacts = [\"x\"]\n",
+            "must be a table",
+        ),
+        (
+            "[[stages.s.output.artifacts]]\ntype = \"video/mp4\"\n",
+            "needs a name",
+        ),
+        (
+            "[[stages.s.output.artifacts]]\nname = \"final\"\n",
+            "needs a type",
+        ),
+        (
+            "[[stages.s.output.artifacts]]\nname = \"final\"\ntype = \"video\"\n",
+            "not type/subtype",
+        ),
+        ("[stages.s.input]\nbogus = 1\n", "bogus"),
+        ("[stages.s.input]\naccepts = [\"nope\"]\n", "accepts"),
+        ("[stages.s.input]\nas_text = 5\n", "input"),
+    ] {
+        let err = parse_manifest(&format!("{base}{tail}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(expect), "{tail}: {err}");
+    }
+}
