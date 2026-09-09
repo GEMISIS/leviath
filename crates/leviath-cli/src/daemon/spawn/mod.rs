@@ -231,6 +231,13 @@ struct RunRecordParts {
     tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>>,
     security: leviath_core::taint::SecurityConfig,
     mcp_overrides: std::collections::HashMap<String, leviath_core::policy::McpToolOverride>,
+    /// The yolo profile's answer to the two spawn-time markers: whether
+    /// stage-boundary checkpoints approve themselves, and whether the taint
+    /// gate does. Both false for an attended run.
+    auto_checkpoints: bool,
+    auto_gate: bool,
+    /// The profile's name when `--yolo=<name>` named one.
+    yolo_profile: Option<String>,
 }
 
 /// Record the run on its entity: metadata, counters, and the markers that
@@ -258,6 +265,7 @@ fn attach_run_record(
         title: None,
         title_error: None,
         unattended: args.yolo,
+        yolo_profile: parts.yolo_profile,
         read_paths: parts.read_path_counts,
         output_request: args.output.clone(),
         model_override: args.model.clone(),
@@ -302,9 +310,11 @@ fn attach_run_record(
             });
         // `--yolo` means run unattended, so a blueprint's stage-boundary
         // checkpoints are approved rather than parked on a deps.hub nobody is
-        // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
+        // watching - unless the yolo profile keeps them (`checkpoints =
+        // "ask"`). (`.then_some(..).into_iter()` keeps the non-yolo path
         // branch-free, matching the taint-gate marker below.)
-        args.yolo
+        parts
+            .auto_checkpoints
             .then_some(leviath_runtime::components::InteractionAutoApprove)
             .into_iter()
             .for_each(|marker| {
@@ -329,9 +339,10 @@ fn attach_run_record(
                     leviath_runtime::pipeline::ToolSensitivities(sensitivities),
                 ));
                 // `--yolo` means run unattended: waive taint-gate prompts (the
-                // tool-policy wildcard below doesn't cover them), so a headless run
-                // never blocks on a gate no one can answer.
-                if args.yolo {
+                // tool policy doesn't cover them), so a headless run never
+                // blocks on a gate no one can answer - unless the profile keeps
+                // them (`gate = "ask"`).
+                if parts.auto_gate {
                     entity_mut.insert(leviath_runtime::components::GateAutoApprove);
                 }
                 // `Option`'s iterator enables tracking without a dead "no window" arm
@@ -465,6 +476,20 @@ fn build_agent_inner(
 ) -> Result<Entity, String> {
     // 0. Everything that can be judged from the request alone.
     check_spawn_request(args)?;
+    // The yolo profile, read from `yolo.toml` as it stands now: `None` for an
+    // attended run, the built-in default for bare `--yolo`. A name the file
+    // does not have fails the spawn here, before anything is on disk but the
+    // placeholder - the person asked for a specific set of rules.
+    let profile = crate::yolo::resolve_for_spawn(args.yolo, args.yolo_profile.as_deref())
+        .map_err(|e| e.to_string())?;
+    // Whether the human tools are cut and auto-answered: yolo, under a
+    // profile that does not keep the model's questions for a person.
+    let unattended_tools = profile.as_ref().is_some_and(|p| p.spec.questions.is_auto());
+    let yolo_profile_name = args
+        .yolo
+        .then(|| args.yolo_profile.clone())
+        .flatten()
+        .filter(|name| !name.is_empty());
 
     // 1. Load the blueprint (the client resolves the manifest path).
     let (content, blueprint) = load_blueprint(args, deps.config)?;
@@ -587,7 +612,7 @@ fn build_agent_inner(
                 defs: &all_tool_defs,
                 owners: deps.mcp_tool_owners,
             },
-            args.yolo,
+            unattended_tools,
             args.output.as_ref(),
         )?
     };
@@ -679,15 +704,16 @@ fn build_agent_inner(
     // `seed = { tools = [...] }` needs them: a seeded call answers to the
     // same policy a mid-run call does, and a seeded *script* tool needs the
     // host it would run under. Everything they read is already bound.
-    // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
-    // allows tool `X` outright.
+    // Launch overrides: `--allow X` allows tool `X` outright. `--yolo` is not
+    // an override any more but a profile (`profile` above), applied after the
+    // config layers by `crate::yolo::apply_profile`; bare `--yolo` is the
+    // profile that allows everything the config does not deny, which is the
+    // wildcard it used to write here.
     let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
-    if args.yolo {
-        launch_overrides.insert("*".to_string(), crate::config::ToolPolicy::Allow);
-    }
     for tool in &args.allow {
         launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
     }
+    let workdir_path = std::path::PathBuf::from(&args.workdir);
     // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
     // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
     // policy for that built-in (evaluated against the entry stage).
@@ -709,7 +735,7 @@ fn build_agent_inner(
     let script_allow = crate::daemon::script_host::resolve_script_permissions(
         &effective_script_perms,
         &|builtin| {
-            crate::tools::resolve_policy(
+            let configured = crate::tools::resolve_policy(
                 builtin,
                 true,
                 &launch_overrides,
@@ -717,6 +743,17 @@ fn build_agent_inner(
                 &agent_perms,
                 &agent_scoped_perms,
                 deps.config.security.allow_blueprint_permissions,
+            );
+            // A script's `inherit` answers to the profile as the tool lane
+            // does, by name: there is no call here to read arguments from.
+            crate::yolo::apply_profile(
+                profile.as_deref(),
+                builtin,
+                &serde_json::Value::Null,
+                configured,
+                crate::tools::launch_allows(&launch_overrides, builtin),
+                crate::yolo::ToolKind::Builtin,
+                &workdir_path,
             )
         },
     );
@@ -781,6 +818,10 @@ fn build_agent_inner(
         let seed_agent = agent_perms.clone();
         let seed_global = agent_scoped_perms.clone();
         let seed_may_loosen = deps.config.security.allow_blueprint_permissions;
+        let seed_profile = profile.clone();
+        let seed_workdir = workdir_path.clone();
+        let seed_builtins = builtin_names.clone();
+        let seed_scripts = script_tool_names.clone();
         let tool_policy = crate::daemon::seed_tool::SeedToolPolicy::new(
             crate::daemon::seed_tool::production_runner(
                 crate::daemon::seed_tool::SeedToolContext {
@@ -791,16 +832,35 @@ fn build_agent_inner(
                     mcp: deps.shared_mcp.clone(),
                     writes: writes.clone(),
                 },
-                Arc::new(move |name: &str, is_builtin: bool| {
-                    crate::daemon::seed_tool::SeedToolPermissions {
-                        launch: &seed_launch,
-                        stage: &seed_stage,
-                        agent: &seed_agent,
-                        global: &seed_global,
-                        may_loosen: seed_may_loosen,
-                    }
-                    .resolve(name, is_builtin)
-                }),
+                Arc::new(
+                    move |name: &str, is_builtin: bool, arguments: &serde_json::Value| {
+                        let configured = crate::daemon::seed_tool::SeedToolPermissions {
+                            launch: &seed_launch,
+                            stage: &seed_stage,
+                            agent: &seed_agent,
+                            global: &seed_global,
+                            may_loosen: seed_may_loosen,
+                        }
+                        .resolve(name, is_builtin);
+                        // The profile has the same say over a seed as over a
+                        // mid-run call. Under bare `--yolo` that is what lets a
+                        // seeded `shell` run at all: a seed refuses `ask`, and the
+                        // profile is what turns it into `allow`.
+                        crate::yolo::apply_profile(
+                            seed_profile.as_deref(),
+                            name,
+                            arguments,
+                            configured,
+                            crate::tools::launch_allows(&seed_launch, name),
+                            crate::yolo::ToolKind::classify(
+                                name,
+                                seed_builtins.contains(name),
+                                seed_scripts.contains(name),
+                            ),
+                            &seed_workdir,
+                        )
+                    },
+                ),
             ),
         );
         resolve_seeds(
@@ -908,6 +968,11 @@ fn build_agent_inner(
             tool_sensitivities,
             security: security.clone(),
             mcp_overrides,
+            auto_checkpoints: profile
+                .as_ref()
+                .is_some_and(|p| p.spec.checkpoints.is_auto()),
+            auto_gate: profile.as_ref().is_some_and(|p| p.spec.gate.is_auto()),
+            yolo_profile: yolo_profile_name.clone(),
         },
     );
 
@@ -919,6 +984,7 @@ fn build_agent_inner(
         max_depth: max_child_depth,
         no_seed_commands: args.no_seed_commands,
         unattended: args.yolo,
+        yolo_profile: yolo_profile_name.clone(),
         model_override: args.model.clone(),
     };
     // Build the dynamic-tools re-resolution context and tag the entity
@@ -934,7 +1000,7 @@ fn build_agent_inner(
             mcp_owners: deps.mcp_tool_owners.clone(),
             stage_available,
             stage_required,
-            unattended: args.yolo,
+            unattended: unattended_tools,
             dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     });
@@ -959,7 +1025,9 @@ fn build_agent_inner(
         script_tool_names,
         script_host,
         dynamic,
-        unattended: args.yolo,
+        unattended: unattended_tools,
+        yolo: profile,
+        yolo_profile: yolo_profile_name,
         blueprint_safe: blueprint_safe.as_ref(),
         blueprint_read_paths: blueprint_read_paths.as_ref(),
         workdir: std::path::PathBuf::from(&args.workdir),
@@ -1286,6 +1354,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             callback_url: None,
             callback_secret: None,
             yolo: false,
+            yolo_profile: None,
             no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
@@ -3675,6 +3744,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             callback_url: None,
             callback_secret: None,
             yolo: false,
+            yolo_profile: None,
             no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
@@ -5051,5 +5121,191 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
                 "{name} tells the user to pass --task but declares no region to hold one"
             );
         }
+    }
+
+    const PROFILES_TOML: &str = "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\
+        checkpoints = \"ask\"\ngate = \"ask\"\n\n[loose]\ndefault = \"allow\"\n";
+
+    /// A profile that keeps the human mechanisms leaves every marker off: the
+    /// run is still yolo (its tool calls answer to the profile), but a
+    /// checkpoint opens, the gate asks, and the model's questions are offered.
+    /// One that keeps nothing is bare `--yolo` with a name on it.
+    #[tokio::test]
+    async fn build_agent_under_a_profile_keeps_what_the_profile_keeps() {
+        crate::config::with_isolated_config_path_async("spawn_profile_keeps", |cfg| async move {
+            std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
+            for (name, auto) in [("careful", false), ("loose", true)] {
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = dir.path().join("agent.leviath");
+                std::fs::write(
+                    &manifest,
+                    "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                     [security]\ntaint_tracking = true\n\n\
+                     [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+                )
+                .unwrap();
+                let (mut world, cli) = test_world();
+                let hub = InteractionHub::new();
+                let mut args = spawn_args(&manifest.to_string_lossy());
+                args.yolo = true;
+                args.yolo_profile = Some(name.to_string());
+                let entity = build_agent(
+                    world.world_mut(),
+                    SpawnDeps {
+                        tool_service: cli.as_ref(),
+                        config: &Config::default(),
+                        shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                        mcp_tool_defs: &[],
+                        mcp_tool_owners: &Default::default(),
+                        hub: &hub,
+                        now_secs: 100,
+                        subagent_tx: sub_tx(),
+                    },
+                    &args,
+                )
+                .expect("spawn succeeds");
+                assert_eq!(
+                    world
+                        .world()
+                        .get::<leviath_runtime::components::GateAutoApprove>(entity)
+                        .is_some(),
+                    auto,
+                    "{name}: gate marker"
+                );
+                assert_eq!(
+                    world
+                        .world()
+                        .get::<leviath_runtime::components::InteractionAutoApprove>(entity)
+                        .is_some(),
+                    auto,
+                    "{name}: checkpoint marker"
+                );
+                let meta = world
+                    .world()
+                    .get::<RunMetadata>(entity)
+                    .expect("run metadata attached");
+                assert!(meta.unattended, "{name}: still a yolo run");
+                assert_eq!(meta.yolo_profile.as_deref(), Some(name));
+                let state = cli.take(entity).expect("tool state registered");
+                assert_eq!(state.unattended, auto, "{name}: questions routing");
+                let profile = state.yolo.get();
+                assert_eq!(
+                    profile.as_ref().as_ref().map(|p| p.name.as_str()),
+                    Some(name)
+                );
+                let handle = state.subagent.as_ref().expect("a sub-agent handle");
+                assert!(handle.unattended);
+                assert_eq!(handle.yolo_profile.as_deref(), Some(name));
+            }
+        })
+        .await;
+    }
+
+    /// A name the file does not have stops the spawn and lists what it does
+    /// have. Without `yolo`, a stray name is not even looked up.
+    #[tokio::test]
+    async fn build_agent_refuses_a_profile_the_file_does_not_have() {
+        crate::config::with_isolated_config_path_async("spawn_profile_unknown", |cfg| async move {
+            std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("agent.leviath");
+            std::fs::write(
+                &manifest,
+                "[agent]\nname = \"a\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                 [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+            )
+            .unwrap();
+            let (mut world, cli) = test_world();
+            let config = Config::default();
+            let hub = InteractionHub::new();
+            let owners = Default::default();
+            let deps = || SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &owners,
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            };
+            let mut args = spawn_args(&manifest.to_string_lossy());
+            args.yolo = true;
+            args.yolo_profile = Some("nope".to_string());
+            let err = build_agent(world.world_mut(), deps(), &args).expect_err("unknown profile");
+            assert!(err.contains("no yolo profile named \"nope\""), "{err}");
+            assert!(err.contains("careful, loose"), "{err}");
+
+            std::fs::remove_file(cfg.join("yolo.toml")).unwrap();
+            args.yolo = false;
+            let entity = build_agent(world.world_mut(), deps(), &args)
+                .expect("an attended run ignores the name");
+            let meta = world.world().get::<RunMetadata>(entity).expect("metadata");
+            assert!(!meta.unattended);
+            assert!(meta.yolo_profile.is_none());
+            assert!(cli.take(entity).expect("state").yolo.get().is_none());
+        })
+        .await;
+    }
+
+    /// A seed answers to the profile as a mid-run call does. Bare `--yolo`
+    /// is what lets a seeded `shell` run at all - a seed refuses `ask` - and a
+    /// profile whose default asks leaves the region empty rather than running
+    /// it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_seed_answers_to_the_yolo_profile() {
+        crate::config::with_isolated_config_path_async("spawn_profile_seed", |cfg| async move {
+            std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
+            for (profile, expect_ran) in [(None, true), (Some("careful"), false), (Some("loose"), true)] {
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = dir.path().join("agent.leviath");
+                std::fs::write(
+                    &manifest,
+                    "[agent]\nname = \"seeded\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                     [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+                     [context.regions]\n\
+                     task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
+                     environment = { kind = \"pinned\", max_tokens = 1000, \
+                     seed = { tools = [{ name = \"shell\", args = { command = \"echo seeded\" } }] } }\n",
+                )
+                .unwrap();
+                let (mut world, cli) = test_world();
+                let mut args = spawn_args(&manifest.to_string_lossy());
+                args.workdir = dir.path().to_string_lossy().to_string();
+                args.yolo = true;
+                args.yolo_profile = profile.map(str::to_string);
+                let entity = build_agent(
+                    world.world_mut(),
+                    SpawnDeps {
+                        tool_service: cli.as_ref(),
+                        config: &Config::default(),
+                        shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                        mcp_tool_defs: &[],
+                        mcp_tool_owners: &Default::default(),
+                        hub: &InteractionHub::new(),
+                        now_secs: 100,
+                        subagent_tx: sub_tx(),
+                    },
+                    &args,
+                )
+                .expect("spawn succeeds");
+                let window = world
+                    .world()
+                    .get::<leviath_runtime::components::ContextWindow>(entity)
+                    .expect("the agent has a window");
+                let content: String = window
+                    .regions
+                    .iter()
+                    .find(|r| r.name == "environment")
+                    .expect("the seeded region exists")
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(content.contains("seeded"), expect_ran, "{profile:?}: {content}");
+            }
+        })
+        .await;
     }
 }

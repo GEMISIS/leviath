@@ -158,7 +158,8 @@ pub(crate) struct SeedToolContext {
 /// A closure rather than [`SeedToolPermissions`] itself, so the spawn path can
 /// hand over the layered resolution it already built without this module
 /// learning its shape or borrowing its four maps for the runner's lifetime.
-pub(crate) type SeedPolicyResolver = Arc<dyn Fn(&str, bool) -> ToolPolicy + Send + Sync>;
+pub(crate) type SeedPolicyResolver =
+    Arc<dyn Fn(&str, bool, &serde_json::Value) -> ToolPolicy + Send + Sync>;
 
 /// Build the runner a real spawn uses.
 pub(crate) fn production_runner(
@@ -170,9 +171,10 @@ pub(crate) fn production_runner(
         // The same three fences the tool lane applies to a mid-run call, in the
         // same order. A seed needs them most: it is the one call that runs
         // before anyone could have been asked.
-        let policy = resolve(name, is_builtin);
-        let policy =
-            crate::tools::clamp_by_effect(name, args, policy, &|| resolve("write_file", true));
+        let policy = resolve(name, is_builtin, args);
+        let policy = crate::tools::clamp_by_effect(name, args, policy, &|| {
+            resolve("write_file", true, &serde_json::Value::Null)
+        });
         if let Some(refusal) = seed_policy_refusal(name, policy) {
             return Err(refusal);
         }
@@ -431,7 +433,7 @@ mod tests {
     /// Every call allowed, which is what an unconfigured environment tool
     /// already resolves to.
     fn allow_all() -> SeedPolicyResolver {
-        Arc::new(|_, _| ToolPolicy::Allow)
+        Arc::new(|_, _, _| ToolPolicy::Allow)
     }
 
     /// No ambient runtime: `block_on_daemon` builds one of its own, which is
@@ -464,12 +466,12 @@ mod tests {
     #[test]
     fn a_denied_tool_is_refused_before_it_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let refuse: SeedPolicyResolver = Arc::new(|_, _| ToolPolicy::Deny);
+        let refuse: SeedPolicyResolver = Arc::new(|_, _, _| ToolPolicy::Deny);
         let runner = production_runner(ctx_over(dir.path(), Default::default()), refuse);
         let err = runner("current_time", &serde_json::json!({})).expect_err("refused");
         assert!(err.contains("denied"), "{err}");
         // An `ask` is refused too, for want of anyone to ask.
-        let ask: SeedPolicyResolver = Arc::new(|_, _| ToolPolicy::Ask);
+        let ask: SeedPolicyResolver = Arc::new(|_, _, _| ToolPolicy::Ask);
         let runner = production_runner(ctx_over(dir.path(), Default::default()), ask);
         let err = runner("current_time", &serde_json::json!({})).expect_err("refused");
         assert!(err.contains("nobody to prompt"), "{err}");
@@ -495,7 +497,7 @@ mod tests {
     #[test]
     fn a_seed_redirect_answers_to_the_write_policy() {
         let dir = tempfile::tempdir().unwrap();
-        let deny_writes: SeedPolicyResolver = Arc::new(|name, _| match name {
+        let deny_writes: SeedPolicyResolver = Arc::new(|name, _, _| match name {
             "write_file" => ToolPolicy::Deny,
             _ => ToolPolicy::Allow,
         });
@@ -560,13 +562,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, bool)>::new()));
         let captured = seen.clone();
-        let resolver: SeedPolicyResolver = Arc::new(move |name: &str, is_builtin: bool| {
-            captured
-                .lock()
-                .unwrap()
-                .push((name.to_string(), is_builtin));
-            ToolPolicy::Deny
-        });
+        let resolver: SeedPolicyResolver =
+            Arc::new(move |name: &str, is_builtin: bool, _: &serde_json::Value| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), is_builtin));
+                ToolPolicy::Deny
+            });
         let runner = production_runner(ctx_over(dir.path(), Default::default()), resolver);
         let _ = runner("current_time", &serde_json::json!({}));
         let _ = runner("acme__thing", &serde_json::json!({}));

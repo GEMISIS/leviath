@@ -116,12 +116,15 @@ impl FanOutSpawner for DaemonFanOutSpawner {
                         md.agent_path.clone(),
                         md.workdir.clone(),
                         md.run_id.clone(),
-                        md.unattended,
+                        // The profile travels with the bit: a worker of a
+                        // `careful` parent is `careful`, not bare `--yolo`.
+                        (md.unattended, md.yolo_profile.clone()),
                         md.output_request.clone(),
                         md.model_override.clone(),
                     )
                 })
                 .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
+        let (unattended, yolo_profile) = unattended;
 
         let (resolve_path, entry_stage) =
             resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
@@ -134,6 +137,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             model: model_override,
             workdir: &workdir,
             yolo: unattended,
+            yolo_profile,
             allow: Vec::new(),
             max_depth: None,
             // Fan-out workers get their split of the parent task via `task`.
@@ -501,6 +505,7 @@ mod tests {
             callback_url: None,
             callback_secret: None,
             yolo,
+            yolo_profile: None,
             no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
@@ -829,5 +834,42 @@ mod tests {
                 .unwrap()
                 .ends_with("broken")
         );
+    }
+
+    /// A worker of a profiled parent runs under the same profile. Handing it
+    /// only the bit would spawn it under bare `--yolo`, which is wider than
+    /// what the person launched.
+    #[tokio::test]
+    async fn spawn_worker_inherits_the_parents_yolo_profile() {
+        crate::config::with_isolated_config_path_async("fanout_yolo_profile", |home| async move {
+            std::fs::write(home.join("yolo.toml"), "[careful]\ndefault = \"ask\"\n").unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("agent.leviath");
+            std::fs::write(&manifest, two_stage_manifest()).unwrap();
+            let (mut world, spawner, parent) =
+                world_with_parent_yolo(&manifest.to_string_lossy(), true);
+            world
+                .world_mut()
+                .get_mut::<RunMetadata>(parent)
+                .expect("parent metadata")
+                .yolo_profile = Some("careful".to_string());
+
+            let child = spawner
+                .spawn_worker(
+                    world.world_mut(),
+                    parent,
+                    &cfg(Some("second"), None, None),
+                    "item-1",
+                    &serde_json::json!({"k": "v"}),
+                )
+                .expect("worker spawns");
+            let md = world
+                .world()
+                .get::<RunMetadata>(child)
+                .expect("worker has run metadata");
+            assert!(md.unattended);
+            assert_eq!(md.yolo_profile.as_deref(), Some("careful"));
+        })
+        .await;
     }
 }

@@ -31,6 +31,7 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         tool_calls: 0,
         last_progress_at: None,
         unattended: false,
+        yolo_profile: None,
         empty_output: false,
         read_paths: None,
         has_final_output: false,

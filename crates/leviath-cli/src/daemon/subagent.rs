@@ -38,6 +38,9 @@ pub(crate) struct SubAgentHandle {
     /// with it whenever the parent is waiting on it. The operator asked for an
     /// unattended run; the tree is the run.
     pub unattended: bool,
+    /// The parent run's yolo profile, inherited with `unattended`: a child of
+    /// a `careful` run is a `careful` run, not a bare `--yolo` one.
+    pub yolo_profile: Option<String>,
     /// The parent run's `--model` override, inherited by children.
     ///
     /// The docs call the override absolute - it "overrides everything" - and a
@@ -164,6 +167,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         model: h.model_override.clone(),
         workdir: &h.workdir,
         yolo: h.unattended,
+        yolo_profile: h.yolo_profile.clone(),
         allow: Vec::new(),
         max_depth: child_max_depth,
         regions: // Sub-agents receive their whole task via `full_task`; no region flags.
@@ -398,6 +402,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            yolo_profile: None,
             model_override: None,
         };
 
@@ -438,6 +443,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            yolo_profile: None,
             model_override: None,
         };
         let out = spawn(
@@ -470,6 +476,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            yolo_profile: None,
             model_override: None,
         }
     }
@@ -1305,5 +1312,27 @@ task = { kind = "pinned", max_tokens = 1000 }
         )
         .await;
         assert!(seen.lock().unwrap()[0].output.is_none());
+    }
+
+    /// The profile travels with the bit: a child of a `careful` run is a
+    /// `careful` run, not a bare `--yolo` one.
+    #[tokio::test]
+    async fn spawn_hands_the_parents_yolo_profile_to_the_child() {
+        let bp = temp_blueprint();
+        let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        h.unattended = true;
+        h.yolo_profile = Some("careful".to_string());
+        let out = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go"}),
+            ),
+        )
+        .await;
+        assert!(out.contains("Spawned sub-agent"), "{out}");
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].yolo);
+        assert_eq!(seen[0].yolo_profile.as_deref(), Some("careful"));
     }
 }

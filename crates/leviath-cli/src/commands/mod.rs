@@ -61,3 +61,4 @@ pub(crate) mod timeline;
 pub(crate) mod tools;
 pub mod update;
 pub(crate) mod validate;
+pub(crate) mod yolo;

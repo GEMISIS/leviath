@@ -328,7 +328,7 @@ system_prompt = "Do it"
     .unwrap();
     let args = AgentClientArgs {
         agent: Some(dir.to_string_lossy().to_string()),
-        yolo: false,
+        yolo: None,
         no_seed_commands: false,
         allow: vec![],
         max_depth: None,

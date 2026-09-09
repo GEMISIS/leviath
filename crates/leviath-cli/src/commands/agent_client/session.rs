@@ -72,7 +72,8 @@ pub(super) fn spawn_args(
         metadata: Default::default(),
         callback_url: None,
         callback_secret: None,
-        yolo: args.yolo,
+        yolo: args.yolo.is_some(),
+        yolo_profile: args.yolo.clone().filter(|name| !name.is_empty()),
         no_seed_commands: args.no_seed_commands,
         allow: args.allow.clone(),
         max_depth: args.max_depth,
@@ -157,7 +158,7 @@ system_prompt = "Plan the work"
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
         let args = AgentClientArgs {
             agent: None,
-            yolo: true,
+            yolo: Some(String::new()),
             no_seed_commands: false,
             allow: vec!["bash".to_string()],
             max_depth: Some(2),
@@ -198,7 +199,7 @@ system_prompt = "Plan the work"
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
         let args = AgentClientArgs {
             agent: None,
-            yolo: false,
+            yolo: None,
             no_seed_commands: false,
             allow: vec![],
             max_depth: None,
@@ -218,5 +219,31 @@ system_prompt = "Plan the work"
         // No schema from this path: a CLI flag is a poor place to compose one,
         // and the blueprint can declare it instead.
         assert!(spec.schema.is_none());
+    }
+
+    /// `--yolo=<name>` on the ACP server names a profile; the bare flag names
+    /// none.
+    #[test]
+    fn spawn_args_carry_a_yolo_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("coder");
+        write_blueprint(&dir, "coder");
+        let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
+        let mut args = AgentClientArgs {
+            agent: None,
+            yolo: Some("careful".to_string()),
+            no_seed_commands: false,
+            allow: Vec::new(),
+            max_depth: None,
+            output_format: None,
+            output_instructions: None,
+        };
+        let spawn = spawn_args(&resolved, "t", "/work", &args, Default::default());
+        assert!(spawn.yolo);
+        assert_eq!(spawn.yolo_profile.as_deref(), Some("careful"));
+        args.yolo = Some(String::new());
+        let spawn = spawn_args(&resolved, "t", "/work", &args, Default::default());
+        assert!(spawn.yolo);
+        assert!(spawn.yolo_profile.is_none());
     }
 }

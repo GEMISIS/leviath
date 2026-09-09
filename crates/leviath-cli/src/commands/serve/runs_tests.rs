@@ -167,6 +167,7 @@ fn fields_accepts_the_optional_ones_that_only_some_runs_carry() {
         "waiting_on",
         "output_request",
         "model_override",
+        "yolo_profile",
     ] {
         let r = resolve_ok(&[("fields", optional)]);
         let fields = r.fields.expect("fields set");
