@@ -515,11 +515,13 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
         // regions and its checklist. Nothing leaves the machine, so none is a
         // channel the gate watches.
         "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
-        | "todo_add" | "todo_done" | "todo_note" => ToolClassification::new(
-            TaintLevel::Internal,
-            ToolDirection::Internal,
-            TaintLevel::Public,
-        ),
+        | "context_attach" | "context_export" | "todo_add" | "todo_done" | "todo_note" => {
+            ToolClassification::new(
+                TaintLevel::Internal,
+                ToolDirection::Internal,
+                TaintLevel::Public,
+            )
+        }
         // `submit_output` records the answer the caller gets back, and the
         // caller is not always on this machine: `lev serve` hands it to any
         // reader of `GET /api/agents/{id}/result`, and the dashboard shows
@@ -1161,6 +1163,8 @@ mod tests {
             "context_read",
             "context_delete",
             "context_list",
+            "context_attach",
+            "context_export",
             "todo_add",
             "todo_done",
             "todo_note",

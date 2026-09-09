@@ -41,6 +41,8 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "context_read",
     "context_delete",
     "context_list",
+    "context_attach",
+    "context_export",
     "todo_add",
     "todo_done",
     "todo_note",
@@ -338,6 +340,59 @@ impl BuiltinTools {
                         }
                     },
                     "required": ["region", "content"]
+                }),
+            },
+            Tool {
+                name: "context_attach".to_string(),
+                description: "Put a file from the working directory into a section of your context window as a typed part (an image, a recording, a model, a document): a model that takes the type sees the bytes, and a tool that takes a part can be handed it by name. Give a key so a newer version of the same thing replaces the older one, and a caption so the part reads as more than a file name.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the context window section to put the part in"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "The file, relative to the working directory"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Key for the entry. Replaces an existing entry with the same key."
+                        },
+                        "caption": {
+                            "type": "string",
+                            "description": "Text stored beside the part, describing it"
+                        },
+                        "type": {
+                            "type": "string",
+                            "description": "The media type (type/subtype), when the file's bytes and name do not say"
+                        },
+                        "deliver": {
+                            "type": "string",
+                            "enum": ["native", "text", "stand_in"],
+                            "description": "How the part reaches the model: as its own type, as text, or as a one-line stand-in"
+                        }
+                    },
+                    "required": ["region", "path"]
+                }),
+            },
+            Tool {
+                name: "context_export".to_string(),
+                description: "Write a stored part from your context window into the working directory, so a shell tool or a script can work on its bytes. Name it by its file name or by the start of its sha256, both shown where the part appears in your context.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The part's file name, or the start of its sha256"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Where to write it, relative to the working directory. Defaults to the part's own file name."
+                        }
+                    },
+                    "required": ["name"]
                 }),
             },
             Tool {

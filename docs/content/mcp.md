@@ -99,6 +99,13 @@ keeps meaning that however your `config.toml` is ordered.
 Calls route back to the owning server under the tool's original name, so the server never sees the
 qualified form.
 
+A result's text blocks reach the model as text. Its `image` and `audio` blocks, and an embedded
+`resource` carrying a `blob`, are decoded and stored as typed [parts](/docs/media) on the same
+result, typed by the server's `mimeType` (corrected by the registry when that does not parse) and
+named after the resource URI or, for a bare block, after the tool. A `resource_link` is described
+in the text with its URI and type, since its bytes were never sent. A part the run cannot hold
+(over `[media] max_part_bytes`) is described in the text instead of dropped.
+
 Tools used to be advertised bare, with the server prefixed only on a clash, so a blueprint written
 against that naming grants `create_issue` where the tool is now `github__create_issue`. Such a grant
 still resolves, **as long as exactly one server offers a tool by that name**. Two do and the name is

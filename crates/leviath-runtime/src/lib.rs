@@ -83,6 +83,7 @@ pub(crate) mod inference_usage;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub(crate) mod lane_supervisor;
+pub(crate) mod media_tools;
 pub(crate) mod output_tool;
 pub mod persistence;
 pub(crate) mod persistence_bridge;

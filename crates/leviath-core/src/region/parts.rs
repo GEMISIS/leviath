@@ -77,6 +77,35 @@ impl EntryContent {
         self.stored().count()
     }
 
+    /// The inline text alone, without the stand-ins the stored parts render
+    /// as: what a caller that will rebuild the content around the same
+    /// stored parts starts from.
+    pub fn inline_text(&self) -> String {
+        let mut out = String::new();
+        for p in &self.parts {
+            if let PartBody::Inline(s) = &p.body {
+                if !out.is_empty() && !out.ends_with('\n') && !s.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(s);
+            }
+        }
+        out
+    }
+
+    /// The tokens this content is expected to cost, without a registry: the
+    /// text heuristic for inline text and the estimate each stored part
+    /// carried out of the store.
+    pub fn tokens_hint(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|p| match &p.body {
+                PartBody::Inline(s) => crate::text::estimate_tokens(s),
+                PartBody::Stored(b) => b.tokens,
+            })
+            .sum()
+    }
+
     /// The same content with `part` appended.
     pub fn with_part(mut self, part: Part) -> Self {
         self.parts.push(part);
@@ -466,6 +495,26 @@ mod tests {
             err.to_string().contains("cannot hold a stored part"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn inline_text_and_token_hint_leave_the_stand_ins_out() {
+        let c = EntryContent::from_parts(vec![
+            Part::text("one"),
+            stored("a.png"),
+            Part::text(""),
+            Part::text("two\n"),
+            Part::text("three"),
+        ]);
+        assert_eq!(c.inline_text(), "one\ntwo\nthree");
+        assert_eq!(
+            c.tokens_hint(),
+            crate::text::estimate_tokens("one")
+                + stored("a.png").blob().unwrap().tokens
+                + crate::text::estimate_tokens("two\n")
+                + crate::text::estimate_tokens("three")
+        );
+        assert_eq!(EntryContent::text("").inline_text(), "");
     }
 
     #[test]

@@ -50,7 +50,7 @@ fn tool_done(at: i64) -> RunRecord {
     RunRecord::ToolCallDone {
         iteration: 1,
         call_id: "c1".to_string(),
-        result: "ok".to_string(),
+        result: "ok".to_string().into(),
         at,
     }
 }

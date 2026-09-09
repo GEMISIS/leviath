@@ -106,7 +106,7 @@ async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
         Box::new(move || {
             Box::pin(async move {
                 let response = asking.ask(req("q1")).await;
-                vec![("q1".to_string(), response.value.unwrap_or_default())]
+                vec![("q1".to_string(), response.value.unwrap_or_default().into())]
             })
         }),
     );
@@ -120,7 +120,7 @@ async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
         Box::new(move || {
             Box::pin(async move {
                 answering.answer(InteractionResponse::text("q1", "hello"));
-                vec![("answered".to_string(), "ok".to_string())]
+                vec![("answered".to_string(), "ok".into())]
             })
         }),
     );
@@ -131,7 +131,12 @@ async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
             .await
             .expect("both batches finished")
             .expect("an outcome arrived");
-        answers.extend(outcome.results);
+        answers.extend(
+            outcome
+                .results
+                .into_iter()
+                .map(|(id, r)| (id, r.into_string())),
+        );
     }
     answers.sort();
     assert_eq!(
@@ -431,7 +436,9 @@ fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
         &RunRecord::ToolCallDone {
             iteration: 1,
             call_id: "c1".to_string(),
-            result: "[denied] User declined tool call 'bash'. Feedback: use the API".to_string(),
+            result: "[denied] User declined tool call 'bash'. Feedback: use the API"
+                .to_string()
+                .into(),
             at: 0,
         },
     )

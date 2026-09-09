@@ -46,6 +46,10 @@ pub struct ExecutionResult {
     pub data: Value,
     /// Concatenated text content for convenience
     pub text: String,
+    /// The binary blocks the server returned (`image`, `audio`, and a
+    /// `resource` carrying a `blob`), decoded, each typed by the server's
+    /// `mimeType`. The caller stores them; the executor has nowhere to.
+    pub blobs: Vec<leviath_core::media::Blob>,
 }
 
 /// A registered server's client, shared with every call in flight to it.
@@ -304,22 +308,50 @@ impl ToolExecutor {
 
     /// Map a ToolResult into an ExecutionResult.
     ///
-    /// Only the model-readable blocks contribute to `text`; binary payloads
-    /// (image/audio) and bare resource links do not, and an unmodelled block is
+    /// The model-readable blocks contribute to `text`; the binary payloads
+    /// (image, audio, a resource carrying a blob) are decoded into `blobs`
+    /// for the caller to store; a bare resource link is described in the
+    /// text, since its bytes were never sent; and an unmodelled block is
     /// skipped with a warning rather than failing the call.
     fn map_result(tool_result: ToolResult) -> ExecutionResult {
-        let mut parts: Vec<&str> = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
+        let mut blobs = Vec::new();
         for content in &tool_result.content {
             match content {
-                ToolResultContent::Text { text } => parts.push(text.as_str()),
+                ToolResultContent::Text { text } => parts.push(text.clone()),
                 ToolResultContent::Resource { resource } => {
                     if let Some(text) = resource.text.as_deref() {
-                        parts.push(text);
+                        parts.push(text.to_string());
+                    }
+                    if let Some(blob) = resource.blob.as_deref() {
+                        let name = resource
+                            .uri
+                            .rsplit('/')
+                            .find(|s| !s.is_empty())
+                            .unwrap_or(&resource.uri)
+                            .to_string();
+                        push_blob(&mut blobs, blob, resource.mime_type.as_deref(), Some(name));
                     }
                 }
-                ToolResultContent::Image { .. }
-                | ToolResultContent::Audio { .. }
-                | ToolResultContent::ResourceLink { .. } => {}
+                ToolResultContent::Image { data, mime_type }
+                | ToolResultContent::Audio { data, mime_type } => {
+                    push_blob(&mut blobs, data, Some(mime_type), None);
+                }
+                ToolResultContent::ResourceLink {
+                    uri,
+                    name,
+                    mime_type,
+                    ..
+                } => {
+                    let label = match name.is_empty() {
+                        true => uri.clone(),
+                        false => format!("{name} ({uri})"),
+                    };
+                    parts.push(match mime_type {
+                        Some(t) => format!("[link: {label}, {t}]"),
+                        None => format!("[link: {label}]"),
+                    });
+                }
                 ToolResultContent::Unknown => {
                     tracing::warn!("Skipping unrecognized MCP content block in tool result");
                 }
@@ -342,8 +374,37 @@ impl ToolExecutor {
             success: !tool_result.is_error,
             data,
             text,
+            blobs,
         }
     }
+}
+
+/// Decode one base64 payload into `blobs`, typed by the server's `mimeType`
+/// (or `application/octet-stream` when it sent none or nonsense). A payload
+/// that is not base64 is dropped with a warning: the server's bug, and not a
+/// reason to fail a call whose text may still be useful.
+fn push_blob(
+    blobs: &mut Vec<leviath_core::media::Blob>,
+    data: &str,
+    mime_type: Option<&str>,
+    name: Option<String>,
+) {
+    use base64::Engine;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Skipping an MCP binary block that is not base64: {e}");
+            return;
+        }
+    };
+    let media_type = mime_type
+        .and_then(|t| leviath_core::media::MediaType::parse(t).ok())
+        .unwrap_or_else(leviath_core::media::octet_stream);
+    let mut blob = leviath_core::media::Blob::new(media_type, bytes);
+    if let Some(name) = name {
+        blob = blob.named(name);
+    }
+    blobs.push(blob);
 }
 
 impl Default for ToolExecutor {
@@ -761,6 +822,7 @@ mod tests {
             success: true,
             data: serde_json::json!("test"),
             text: "hello".to_string(),
+            blobs: Vec::new(),
         };
         let cloned = result.clone();
         assert!(cloned.success);
@@ -773,6 +835,7 @@ mod tests {
             success: false,
             data: Value::Null,
             text: "error".to_string(),
+            blobs: Vec::new(),
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("success"));
@@ -838,35 +901,68 @@ mod tests {
     }
 
     #[test]
-    fn map_result_skips_binary_blocks() {
-        let text = text_of(vec![
-            ToolResultContent::Text {
-                text: "before".to_string(),
-            },
-            ToolResultContent::Image {
-                data: "YWJj".to_string(),
-                mime_type: "image/png".to_string(),
-            },
-            ToolResultContent::Audio {
-                data: "YWJj".to_string(),
-                mime_type: "audio/wav".to_string(),
-            },
-            ToolResultContent::Text {
-                text: "after".to_string(),
-            },
-        ]);
-        assert_eq!(text, "before\nafter");
+    fn map_result_decodes_binary_blocks_beside_the_text() {
+        let _guard = always_on_tracing_guard();
+        let result = ToolExecutor::map_result(ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "before".to_string(),
+                },
+                ToolResultContent::Image {
+                    data: "YWJj".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+                ToolResultContent::Audio {
+                    data: " YWJj ".to_string(),
+                    mime_type: "not a type".to_string(),
+                },
+                ToolResultContent::Image {
+                    data: "!!!".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+                ToolResultContent::Text {
+                    text: "after".to_string(),
+                },
+            ],
+            structured_content: None,
+            is_error: false,
+        });
+        assert_eq!(result.text, "before\nafter");
+        assert_eq!(
+            result.blobs.len(),
+            2,
+            "the block that is not base64 is dropped"
+        );
+        assert_eq!(result.blobs[0].media_type.as_str(), "image/png");
+        assert_eq!(result.blobs[0].bytes, b"abc");
+        assert_eq!(result.blobs[0].name, None);
+        assert_eq!(
+            result.blobs[1].media_type.as_str(),
+            "application/octet-stream",
+            "a mime type that does not parse falls back"
+        );
     }
 
     #[test]
-    fn map_result_skips_resource_links() {
-        let text = text_of(vec![ToolResultContent::ResourceLink {
-            uri: "file:///x".to_string(),
-            name: "x".to_string(),
-            description: None,
-            mime_type: None,
-        }]);
-        assert_eq!(text, "");
+    fn map_result_describes_resource_links() {
+        let text = text_of(vec![
+            ToolResultContent::ResourceLink {
+                uri: "file:///x".to_string(),
+                name: "x".to_string(),
+                description: None,
+                mime_type: None,
+            },
+            ToolResultContent::ResourceLink {
+                uri: "https://h/report.pdf".to_string(),
+                name: String::new(),
+                description: None,
+                mime_type: Some("application/pdf".to_string()),
+            },
+        ]);
+        assert_eq!(
+            text,
+            "[link: x (file:///x)]\n[link: https://h/report.pdf, application/pdf]"
+        );
     }
 
     #[test]
@@ -906,16 +1002,38 @@ mod tests {
     }
 
     #[test]
-    fn map_result_embedded_resource_blob_contributes_no_text() {
-        let text = text_of(vec![ToolResultContent::Resource {
-            resource: EmbeddedResource {
-                uri: "file:///a.png".to_string(),
-                text: None,
-                blob: Some("YWJj".to_string()),
-                mime_type: Some("image/png".to_string()),
-            },
-        }]);
-        assert_eq!(text, "");
+    fn map_result_embedded_resource_blob_is_a_named_blob() {
+        let result = ToolExecutor::map_result(ToolResult {
+            content: vec![
+                ToolResultContent::Resource {
+                    resource: EmbeddedResource {
+                        uri: "file:///dir/a.png".to_string(),
+                        text: None,
+                        blob: Some("YWJj".to_string()),
+                        mime_type: Some("image/png".to_string()),
+                    },
+                },
+                ToolResultContent::Resource {
+                    resource: EmbeddedResource {
+                        uri: "///".to_string(),
+                        text: None,
+                        blob: Some("YWJj".to_string()),
+                        mime_type: None,
+                    },
+                },
+            ],
+            structured_content: None,
+            is_error: false,
+        });
+        assert_eq!(result.text, "");
+        assert_eq!(result.blobs.len(), 2);
+        assert_eq!(result.blobs[0].name.as_deref(), Some("a.png"));
+        assert_eq!(result.blobs[0].media_type.as_str(), "image/png");
+        assert_eq!(result.blobs[1].name.as_deref(), Some("///"));
+        assert_eq!(
+            result.blobs[1].media_type.as_str(),
+            "application/octet-stream"
+        );
     }
 
     // ─── tool-name sanitization ───────────────────────────────────────────

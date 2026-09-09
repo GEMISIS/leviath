@@ -2373,7 +2373,7 @@ fn collect_tools_buffers_one_tool_log_line_per_call() {
     tx.send(ToolOutcome {
         elapsed: std::time::Duration::ZERO,
         entity: e,
-        results: vec![("c1".to_string(), "file\nbody".to_string())],
+        results: vec![("c1".to_string(), "file\nbody".into())],
     })
     .unwrap();
 
@@ -4030,7 +4030,7 @@ impl ToolService for EchoService {
             Box::pin(async move {
                 calls
                     .into_iter()
-                    .map(|c| (c.id, format!("ran {}", c.name)))
+                    .map(|c| (c.id, format!("ran {}", c.name).into()))
                     .collect()
             })
         })
@@ -4340,7 +4340,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
     assert_eq!(job.entity, e);
     // Run the produced closure (covers the service's exec path).
     let results = (job.exec)().await;
-    assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
+    assert_eq!(results, vec![("t".to_string(), "ran n".into())]);
 }
 
 // ── batch journaling at dispatch ────────
@@ -4360,7 +4360,8 @@ impl ToolService for ReportingService {
                 calls
                     .into_iter()
                     .map(|c| {
-                        let r = format!("ran {}", c.name);
+                        let r: leviath_core::region::EntryContent =
+                            format!("ran {}", c.name).into();
                         progress(&c.id, &r);
                         (c.id, r)
                     })
@@ -4449,7 +4450,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     let results = (job.exec)().await;
     assert_eq!(
         results,
-        vec![("c_lane".to_string(), "ran read_file".to_string())]
+        vec![("c_lane".to_string(), "ran read_file".into())]
     );
     let (_, record, ack) = append_msg(prx.try_recv().expect("completion journaled"));
     assert!(ack.is_none(), "per-call appends are fire-and-forget");
@@ -4653,11 +4654,10 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
 #[tokio::test]
 async fn barrier_then_runs_after_the_ack() {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let exec: BoxedToolExec =
-        Box::new(|| Box::pin(async { vec![("c".to_string(), "r".to_string())] }));
+    let exec: BoxedToolExec = Box::new(|| Box::pin(async { vec![("c".to_string(), "r".into())] }));
     tx.send(()).unwrap();
     let wrapped = barrier_then(exec, rx, std::time::Duration::from_secs(5));
-    assert_eq!(wrapped().await, vec![("c".to_string(), "r".to_string())]);
+    assert_eq!(wrapped().await, vec![("c".to_string(), "r".into())]);
 }
 
 #[tokio::test]
@@ -5125,7 +5125,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     // Applied through a system rather than by hand, because that is how
     // `collect_tools` calls it - including the deferred commands that release
     // the stage.
-    let results = vec![(pending.sites[0].id.clone(), "FRESH".to_string())];
+    let results = vec![(pending.sites[0].id.clone(), "FRESH".into())];
     let mut apply = Schedule::default();
     apply.add_systems(
         move |mut q: Query<(Entity, &PendingStageSeeds, &mut ContextWindow)>,
@@ -5194,7 +5194,7 @@ fn collect_tools_routes_a_seed_batch_to_its_region_not_to_the_conversation() {
     tx.send(ToolOutcome {
         elapsed: std::time::Duration::ZERO,
         entity: e,
-        results: vec![("stage-seed-0".to_string(), "NOW".to_string())],
+        results: vec![("stage-seed-0".to_string(), "NOW".into())],
     })
     .unwrap();
 
@@ -6452,13 +6452,10 @@ fn taint_block_message_renders_blocked_and_falls_back() {
 fn merge_in_call_order_fills_missing_with_empty() {
     let calls = vec![tc("a", "x"), tc("b", "y")];
     // Only "a" has a result; "b" falls back to empty, in call order.
-    let merged = merge_in_call_order(&calls, &[("a".to_string(), "ra".to_string())]);
+    let merged = merge_in_call_order(&calls, &[("a".to_string(), "ra".into())]);
     assert_eq!(
         merged,
-        vec![
-            ("a".to_string(), "ra".to_string()),
-            ("b".to_string(), String::new()),
-        ]
+        vec![("a".to_string(), "ra".into()), ("b".to_string(), "".into()),]
     );
 }
 
@@ -6512,7 +6509,7 @@ fn routed_result(
         &mut w,
         "resp",
         &[tc("c1", tool)],
-        &[("c1".to_string(), text.to_string())],
+        &[("c1".to_string(), text.to_string().into())],
         Some(routing),
         None,
         None,
@@ -6571,7 +6568,7 @@ fn apply_adds_assistant_turn_and_result_to_conversation() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "result".to_string())],
+        &[("c1".to_string(), "result".into())],
         None,
         None,
         None,
@@ -6605,7 +6602,7 @@ fn thought_signature_survives_the_full_context_round_trip() {
         &mut w,
         "resp",
         &[call],
-        &[("c1".to_string(), "result".to_string())],
+        &[("c1".to_string(), "result".into())],
         None,
         None,
         None,
@@ -6641,7 +6638,7 @@ fn apply_falls_back_when_region_missing() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "long result".to_string())],
+        &[("c1".to_string(), "long result".into())],
         None,
         None,
         None,
@@ -6656,7 +6653,7 @@ fn apply_routes_to_override_region() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "x".to_string())],
+        &[("c1".to_string(), "x".into())],
         Some(&r),
         None,
         None,
@@ -6675,7 +6672,7 @@ fn routing_away_pointer_previews_and_truncates_long_results() {
         &mut w,
         "read",
         &[tc("c1", "read_file")],
-        &[("c1".to_string(), long.clone())],
+        &[("c1".to_string(), long.clone().into())],
         Some(&r),
         None,
         None,
@@ -6736,7 +6733,7 @@ fn routing_away_keeps_pair_in_conversation_and_text_in_region() {
         &mut w,
         "I'll read it.",
         &[tc("c1", "read_file")],
-        &[("c1".to_string(), "FULL FILE BODY".to_string())],
+        &[("c1".to_string(), "FULL FILE BODY".into())],
         Some(&r),
         None,
         None,
@@ -6802,7 +6799,7 @@ fn routing_override_matches_bash_alias_to_shell() {
         &mut w,
         "run tests",
         &[tc("c1", "shell")],
-        &[("c1".to_string(), "All tests passed".to_string())],
+        &[("c1".to_string(), "All tests passed".into())],
         Some(&r),
         None,
         None,
@@ -6825,7 +6822,7 @@ fn apply_default_region_when_no_override() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "x".to_string())],
+        &[("c1".to_string(), "x".into())],
         Some(&r),
         None,
         None,
@@ -6841,7 +6838,7 @@ fn apply_routes_to_scratch_when_not_persist() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "x".to_string())],
+        &[("c1".to_string(), "x".into())],
         Some(&r),
         None,
         None,
@@ -6857,7 +6854,7 @@ fn apply_not_persist_without_scratch_uses_base_region() {
         &mut w,
         "r",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "x".to_string())],
+        &[("c1".to_string(), "x".into())],
         Some(&r),
         None,
         None,
@@ -6874,7 +6871,7 @@ fn apply_truncates_per_max_result_tokens() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), long)],
+        &[("c1".to_string(), long.into())],
         Some(&r),
         None,
         None,
@@ -6891,7 +6888,7 @@ fn apply_no_truncation_when_result_under_max() {
         &mut w,
         "r",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "short".to_string())], // 5 chars - under budget
+        &[("c1".to_string(), "short".into())], // 5 chars - under budget
         Some(&r),
         None,
         None,
@@ -6908,7 +6905,7 @@ fn apply_tags_taint_when_sensitivities_present() {
         &mut w,
         "resp",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "x".to_string())],
+        &[("c1".to_string(), "x".into())],
         None,
         Some(&sens),
         None,
@@ -6932,7 +6929,7 @@ fn apply_truncates_to_available_when_region_nearly_full() {
         &mut w,
         "r",
         &[tc("c1", "read")],
-        &[("c1".to_string(), big)],
+        &[("c1".to_string(), big.into())],
         None,
         None,
         None,
@@ -6969,7 +6966,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
     tx.send(ToolOutcome {
         elapsed: std::time::Duration::ZERO,
         entity: e,
-        results: vec![("c1".to_string(), "res".to_string())],
+        results: vec![("c1".to_string(), "res".into())],
     })
     .unwrap();
 
@@ -6995,7 +6992,7 @@ fn collect_tools_merges_stashed_context_results() {
     tx.send(ToolOutcome {
         elapsed: std::time::Duration::ZERO,
         entity: e,
-        results: vec![("c2".to_string(), "file body".to_string())],
+        results: vec![("c2".to_string(), "file body".into())],
     })
     .unwrap();
 
@@ -10941,8 +10938,8 @@ fn apply_file_tracking_tracks_reads_and_writes() {
         ),
     ];
     let mut merged = vec![
-        ("1".to_string(), "fn a() { /* long body */ }".to_string()),
-        ("2".to_string(), "written ok".to_string()),
+        ("1".to_string(), "fn a() { /* long body */ }".into()),
+        ("2".to_string(), "written ok".into()),
     ];
     apply_file_tracking(&mut w, &ft, &calls, &mut merged);
     assert!(merged[0].1.contains("Reference it there"));
@@ -10954,7 +10951,7 @@ fn apply_file_tracking_tracks_reads_and_writes() {
 fn apply_file_tracking_noop_without_a_hashmap_region() {
     let ft = ftc(true, true, None);
     let calls = vec![fcall("1", "read_file", serde_json::json!({"path": "a"}))];
-    let mut merged = vec![("1".to_string(), "body".to_string())];
+    let mut merged = vec![("1".to_string(), "body".into())];
     // No "files" region at all.
     let mut w1 = ContextWindow::new(100_000);
     apply_file_tracking(&mut w1, &ft, &calls, &mut merged);
@@ -10989,14 +10986,14 @@ fn apply_file_tracking_skips_errors_missing_path_other_tools_and_flags() {
         ),
     ];
     let mut merged = vec![
-        ("1".to_string(), "[error] boom".to_string()),
-        ("2".to_string(), "body".to_string()),
-        ("3".to_string(), "listing".to_string()),
-        ("4".to_string(), "written".to_string()),
-        ("5".to_string(), "[denied] nope".to_string()),
+        ("1".to_string(), "[error] boom".into()),
+        ("2".to_string(), "body".into()),
+        ("3".to_string(), "listing".into()),
+        ("4".to_string(), "written".into()),
+        ("5".to_string(), "[denied] nope".into()),
         (
-            "6".to_string(),
-            "[unavailable] 'write_file' is not available in this stage.".to_string(),
+            "6".into(),
+            "[unavailable] 'write_file' is not available in this stage.".into(),
         ),
     ];
     apply_file_tracking(&mut w, &ft, &calls, &mut merged);
@@ -11016,8 +11013,8 @@ fn apply_file_tracking_skips_errors_missing_path_other_tools_and_flags() {
         ),
     ];
     let mut merged2 = vec![
-        ("1".to_string(), "body".to_string()),
-        ("2".to_string(), "written".to_string()),
+        ("1".to_string(), "body".into()),
+        ("2".to_string(), "written".into()),
     ];
     apply_file_tracking(&mut w, &off, &calls2, &mut merged2);
     for (_, r) in &merged2 {
@@ -11060,7 +11057,7 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
     tx.send(ToolOutcome {
         elapsed: std::time::Duration::ZERO,
         entity: e,
-        results: vec![("c1".to_string(), "fn a() {}".to_string())],
+        results: vec![("c1".to_string(), "fn a() {}".into())],
     })
     .unwrap();
     run_collect_tools(&mut world);
@@ -11118,7 +11115,7 @@ fn count_modifications(
         results: calls
             .iter()
             .enumerate()
-            .map(|(i, (_, _, result))| (format!("c{i}"), (*result).to_string()))
+            .map(|(i, (_, _, result))| (format!("c{i}"), (*result).into()))
             .collect(),
     })
     .unwrap();
@@ -11276,12 +11273,12 @@ fn collect_tools_still_applies_results_without_stage_components() {
         elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![
-            ("c1".to_string(), "wrote it".to_string()),
+            ("c1".to_string(), "wrote it".into()),
             // Both the counted and the blocked path must tolerate the
             // missing components.
             (
                 "c2".to_string(),
-                "[denied] User declined tool call 'edit_file'.".to_string(),
+                "[denied] User declined tool call 'edit_file'.".into(),
             ),
         ],
     })
@@ -11455,8 +11452,8 @@ fn collect_tools_injects_repetition_nudge_when_looping() {
         elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![
-            ("c1".to_string(), "body".to_string()),
-            ("c2".to_string(), "body".to_string()),
+            ("c1".to_string(), "body".into()),
+            ("c2".to_string(), "body".into()),
         ],
     })
     .unwrap();
@@ -13409,8 +13406,8 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
         elapsed: std::time::Duration::from_millis(40),
         entity: e,
         results: vec![
-            ("c1".to_string(), "file body".to_string()),
-            ("c2".to_string(), "[error] denied".to_string()),
+            ("c1".to_string(), "file body".into()),
+            ("c2".to_string(), "[error] denied".into()),
         ],
     })
     .unwrap();
@@ -13648,9 +13645,9 @@ fn collect_tools_reports_finished_lane_calls() {
         // A success, a failure, and a result whose id matches no known call
         // (the tool name falls back to empty rather than panicking).
         results: vec![
-            ("c1".to_string(), "file body".to_string()),
-            ("c2".to_string(), "[error] denied".to_string()),
-            ("zz".to_string(), "stray".to_string()),
+            ("c1".to_string(), "file body".into()),
+            ("c2".to_string(), "[error] denied".into()),
+            ("zz".to_string(), "stray".into()),
         ],
     })
     .unwrap();
@@ -16215,7 +16212,10 @@ fn routed_to(region: &str) -> leviath_core::blueprint::ToolResultRouting {
     }
 }
 
-fn one_read_call() -> (Vec<crate::components::ToolCall>, Vec<(String, String)>) {
+fn one_read_call() -> (
+    Vec<crate::components::ToolCall>,
+    Vec<crate::tool_bridge::ToolResult>,
+) {
     (
         vec![crate::components::ToolCall {
             tool_id: "call-1".to_string(),
@@ -16223,7 +16223,7 @@ fn one_read_call() -> (Vec<crate::components::ToolCall>, Vec<(String, String)>) 
             arguments: serde_json::json!({"path": "manual.md"}),
             thought_signature: None,
         }],
-        vec![("call-1".to_string(), "the manual's full text".to_string())],
+        vec![("call-1".to_string(), "the manual's full text".into())],
     )
 }
 
@@ -16412,7 +16412,7 @@ fn a_hook_that_refuses_the_truncated_fallback_is_reported_as_a_rejection() {
         arguments: serde_json::json!({"path": "manual.md"}),
         thought_signature: None,
     }];
-    let results = vec![("call-1".to_string(), "x".repeat(2000))];
+    let results = vec![("call-1".to_string(), "x".repeat(2000).into())];
     apply_tool_results(
         &mut window,
         "",
@@ -16465,9 +16465,8 @@ fn a_path_tool_aimed_at_a_region_is_told_it_is_a_region() {
             thought_signature: None,
         }];
         let mut merged = vec![(
-            "c1".to_string(),
-            "[error] Failed to read 'raw_findings': No such file or directory (os error 2)"
-                .to_string(),
+            "c1".into(),
+            "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".into(),
         )];
         crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
         assert!(
@@ -16501,8 +16500,8 @@ fn the_batch_read_tool_gets_the_region_hint_too() {
         thought_signature: None,
     }];
     let mut merged = vec![(
-        "c1".to_string(),
-        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".to_string(),
+        "c1".into(),
+        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".into(),
     )];
     crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
     assert!(
@@ -16534,7 +16533,7 @@ fn a_partly_stored_result_reports_what_was_dropped() {
         arguments: serde_json::json!({ "path": "manual.md" }),
         thought_signature: None,
     }];
-    let results = vec![("call-1".to_string(), long)];
+    let results = vec![("call-1".to_string(), long.into())];
     apply_tool_results(
         &mut window,
         "",
@@ -16582,8 +16581,8 @@ fn a_directory_handed_to_read_file_names_list_dir() {
         thought_signature: None,
     }];
     let mut merged = vec![(
-        "c1".to_string(),
-        "[error] Failed to read '/Users/someone/papers': Is a directory (os error 21)".to_string(),
+        "c1".into(),
+        "[error] Failed to read '/Users/someone/papers': Is a directory (os error 21)".into(),
     )];
     crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
     assert!(merged[0].1.contains("use list_dir"), "{}", merged[0].1);
@@ -16602,7 +16601,7 @@ fn an_ordinary_missing_file_error_is_not_annotated() {
     }];
     let original =
         "[error] Failed to read 'notes.md': No such file or directory (os error 2)".to_string();
-    let mut merged = vec![("c1".to_string(), original.clone())];
+    let mut merged = vec![("c1".to_string(), original.clone().into())];
     crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
     assert_eq!(merged[0].1, original);
 }
@@ -16618,7 +16617,7 @@ fn a_successful_path_call_is_left_alone() {
         arguments: serde_json::json!({ "path": "raw_findings" }),
         thought_signature: None,
     }];
-    let mut merged = vec![("c1".to_string(), "the file's contents".to_string())];
+    let mut merged = vec![("c1".to_string(), "the file's contents".into())];
     crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
     assert_eq!(merged[0].1, "the file's contents");
 }
@@ -16635,8 +16634,8 @@ fn a_hidden_region_named_as_a_path_says_the_stage_does_not_carry_it() {
         thought_signature: None,
     }];
     let mut merged = vec![(
-        "c1".to_string(),
-        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".to_string(),
+        "c1".into(),
+        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".into(),
     )];
     crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
     assert!(
@@ -18053,5 +18052,103 @@ mod spawn_parts {
         assert!(err.contains("over the 2 byte ceiling"), "{err}");
         // No parts: the store is never consulted.
         assert!(spawn_agent_seeded(&mut world, seeded(Vec::new())).is_ok());
+    }
+}
+
+// ── media tools and typed tool results ──
+
+mod typed_tool_results {
+    use super::*;
+    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MemoryBlobStore, Part};
+    use leviath_core::region::EntryContent;
+
+    fn stored_png() -> Part {
+        let reg = MediaRegistry::builtin();
+        let blob = Blob::new(
+            leviath_core::media::MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nabc".to_vec(),
+        )
+        .named("shot.png");
+        let r = MemoryBlobStore::new().put("r", &blob, &reg).unwrap();
+        Part::stored(r).named("shot.png")
+    }
+
+    #[test]
+    fn a_media_tool_call_is_answered_inline_and_never_reaches_the_lane() {
+        let (mut world, mut jrx) = world_with_lane();
+        let mut call = tc("c1", "context_export");
+        call.arguments = serde_json::json!({});
+        let e = ready_for_tools(&mut world, vec![call]);
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
+        let conv = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .clone();
+        let answer = conv
+            .content
+            .iter()
+            .find(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+            .expect("the answer landed as a tool result");
+        assert!(
+            answer.content.contains("no blob store"),
+            "{}",
+            answer.content
+        );
+    }
+
+    #[test]
+    fn a_result_with_a_stored_part_keeps_the_part_and_prices_it() {
+        let mut w = ctx(&[("conversation", 1_000_000)]);
+        let part = stored_png();
+        let part_tokens = part.blob().unwrap().tokens;
+        let result = EntryContent::from_parts(vec![Part::text("here is the shot"), part]);
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "shell")],
+            &[("c1".to_string(), result)],
+            None,
+            None,
+            None,
+        );
+        let conv = w.get_region("conversation").unwrap();
+        let entry = conv
+            .content
+            .iter()
+            .find(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+            .unwrap();
+        assert_eq!(entry.content.parts().len(), 2);
+        assert!(entry.content.has_stored());
+        assert_eq!(
+            entry.tokens,
+            leviath_core::estimate_tokens("here is the shot") + part_tokens
+        );
+        assert_eq!(
+            entry.content.as_str(),
+            "here is the shot\n[image/png, 11 B] shot.png"
+        );
+
+        // A capped result keeps its part whole and caps the text alone.
+        let mut w = ctx(&[("conversation", 1_000_000), ("shots", 1_000_000)]);
+        let long = "x".repeat(4_000);
+        let result = EntryContent::from_parts(vec![Part::text(long), stored_png()]);
+        let r = routing("shots", &[], true, Some(100));
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "shell")],
+            &[("c1".to_string(), result)],
+            Some(&r),
+            None,
+            None,
+        );
+        let shots = w.get_region("shots").unwrap();
+        assert_eq!(shots.stored_count(), 1);
+        assert!(shots.content[0].content.as_str().contains("[...truncated]"));
     }
 }

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use bevy_ecs::entity::Entity;
 use leviath_core::interaction::{ApprovalScope, InteractionRequest};
+use leviath_core::region::EntryContent;
 use leviath_providers::ToolCall;
 use leviath_runtime::dynamic_interaction::{
     InteractionBackend, UnattendedInteraction, dispatch_dynamic_interaction,
@@ -473,7 +474,7 @@ pub(crate) struct DynamicToolCtx {
 /// or MCP executor. Script tools are checked first so a discovered `.rhai` tool
 /// dispatches to the Rhai engine; the compiled script and permission-enforcing
 /// host run on a blocking thread (the engine is synchronous).
-async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> String {
+async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> EntryContent {
     // Sub-agent tools (spawn/check/wait/send/kill) reach the world through the
     // host rather than the builtin/MCP executors.
     //
@@ -486,8 +487,8 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
     // that manifest's own command seeds and MCP servers.
     if crate::daemon::subagent::is_subagent_tool(&tc.name) {
         return match &state.subagent {
-            Some(handle) => crate::daemon::subagent::handle(handle, tc).await,
-            None => "[error] sub-agent tools are unavailable for this agent".to_string(),
+            Some(handle) => crate::daemon::subagent::handle(handle, tc).await.into(),
+            None => "[error] sub-agent tools are unavailable for this agent".into(),
         };
     }
     if state
@@ -496,7 +497,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         .unwrap_or_else(PoisonError::into_inner)
         .contains(&tc.name)
     {
-        return execute_script_tool(state, tc).await;
+        return execute_script_tool(state, tc).await.into();
     }
     if is_builtin {
         let result = state.builtins.execute(&tc.name, tc.arguments.clone()).await;
@@ -507,14 +508,61 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         // call serialises every MCP call in a batch behind the slowest server.
         // The client's own lock keeps calls to one server in order.
         let routed = state.mcp.lock().await.route(&tc.name);
-        super::seed_tool::mcp_text(match routed {
+        let result = match routed {
             Ok((client, original)) => {
                 leviath_mcp::ToolExecutor::call_routed(&client, &original, tc.arguments.clone())
                     .await
             }
             Err(e) => Err(e),
-        })
+        };
+        mcp_content(&tc.name, result, state.builtins.media())
     }
+}
+
+/// An MCP result as the region will hold it: the server's text, then every
+/// binary block it returned as a stored part. A failed call is text alone,
+/// prefixed as the seed reader expects; a binary block that cannot be stored
+/// (no store, over the ceiling) is described in the text instead of dropped.
+fn mcp_content(
+    tool: &str,
+    result: anyhow::Result<leviath_mcp::execution::ExecutionResult>,
+    media: Option<&leviath_tools::ToolMedia>,
+) -> EntryContent {
+    let blobs = match &result {
+        Ok(r) if r.success => r.blobs.clone(),
+        _ => Vec::new(),
+    };
+    let text = super::seed_tool::mcp_text(result);
+    if blobs.is_empty() {
+        return text.into();
+    }
+    let mut parts = vec![leviath_core::media::Part::text(text)];
+    for (i, mut blob) in blobs.into_iter().enumerate() {
+        let Some(media) = media else {
+            parts.push(leviath_core::media::Part::text(format!(
+                "[{} block of {} dropped: this run has no blob store]",
+                blob.media_type,
+                leviath_core::media::human_size(blob.bytes.len() as u64)
+            )));
+            continue;
+        };
+        blob.media_type = media.type_of(
+            Some(blob.media_type.as_str()),
+            blob.name.as_deref(),
+            &blob.bytes,
+        );
+        if blob.name.is_none() {
+            let name = media.name_for(&format!("{tool}-{}", i + 1), &blob.media_type);
+            blob = blob.named(name);
+        }
+        match media.store(blob) {
+            Ok(part) => parts.push(part),
+            Err(e) => parts.push(leviath_core::media::Part::text(format!(
+                "[block dropped: {e}]"
+            ))),
+        }
+    }
+    EntryContent::from_parts(parts)
 }
 
 /// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
@@ -605,7 +653,7 @@ pub(crate) async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
     progress: ToolProgress,
-) -> Vec<(String, String)> {
+) -> Vec<leviath_runtime::tool_bridge::ToolResult> {
     let stage_name = state
         .stage_name
         .lock()
@@ -614,7 +662,7 @@ pub(crate) async fn dispatch_tools(
 
     // Pass 1: sequential resolution. `slots[i].1 == None` means "execute in pass
     // 2"; the queued `(slot_index, is_builtin, call)` records what to run.
-    let mut slots: Vec<(String, Option<String>)> = Vec::with_capacity(calls.len());
+    let mut slots: Vec<(String, Option<EntryContent>)> = Vec::with_capacity(calls.len());
     let mut queued: Vec<(usize, bool, ToolCall)> = Vec::new();
     for tc in calls {
         let slot = slots.len();
@@ -640,6 +688,7 @@ pub(crate) async fn dispatch_tools(
         {
             // Journal the user's answer now: pass 2 hasn't run yet, and losing
             // an answered prompt to a crash means re-asking it on resume.
+            let result: EntryContent = result.into();
             progress(&tc.id, &result);
             slots.push((tc.id, Some(result)));
             continue;
@@ -652,6 +701,7 @@ pub(crate) async fn dispatch_tools(
         if let Some(refusal) =
             crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
         {
+            let refusal: EntryContent = refusal.into();
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));
             continue;
@@ -681,6 +731,7 @@ pub(crate) async fn dispatch_tools(
             state.builtins.workdir(),
             &state.writes,
         ) {
+            let refusal: EntryContent = refusal.into();
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));
             continue;
@@ -778,6 +829,7 @@ pub(crate) async fn dispatch_tools(
                      (`lev resume`); the run re-reads them and does not need restarting.",
                     tc.name
                 );
+                let result: EntryContent = result.into();
                 progress(&tc.id, &result);
                 slots.push((tc.id.clone(), Some(result)));
             }
@@ -802,7 +854,8 @@ pub(crate) async fn dispatch_tools(
                         queued.push((slot, is_builtin, tc));
                     }
                     Some(false) => {
-                        let result = declined_result(&tc.name, response.deny_feedback());
+                        let result: EntryContent =
+                            declined_result(&tc.name, response.deny_feedback()).into();
                         progress(&tc.id, &result);
                         slots.push((tc.id.clone(), Some(result)));
                     }
@@ -818,7 +871,8 @@ pub(crate) async fn dispatch_tools(
                             timeout_secs = timeout,
                             "approval prompt resolved unanswered; the call did not run"
                         );
-                        let result = unanswered_approval_result(&tc.name, timeout);
+                        let result: EntryContent =
+                            unanswered_approval_result(&tc.name, timeout).into();
                         progress(&tc.id, &result);
                         slots.push((tc.id.clone(), Some(result)));
                     }
@@ -1006,7 +1060,7 @@ impl ToolService for CliToolService {
                     None => calls
                         .into_iter()
                         .map(|c| {
-                            let result = "[error] agent has no tool state".to_string();
+                            let result: EntryContent = "[error] agent has no tool state".into();
                             progress(&c.id, &result);
                             (c.id, result)
                         })
@@ -1245,7 +1299,7 @@ mod tests {
         calls: Vec<ToolCall>,
         answer: impl Fn(&InteractionRequest) -> InteractionResponse + Send + 'static,
         hub: InteractionHub,
-    ) -> Vec<(String, String)> {
+    ) -> Results {
         let task = tokio::spawn(async move { dispatch_tools(state, calls, noop_progress()).await });
         // Wait for the interaction to register, answer it, then collect.
         let response = loop {
@@ -2325,9 +2379,9 @@ mod tests {
         )
         .await;
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0], ("c1".to_string(), "AAA".to_string()));
+        assert_eq!(out[0], ("c1".to_string(), "AAA".into()));
         assert!(out[1].0 == "c2" && out[1].1.contains("[denied]"));
-        assert_eq!(out[2], ("c3".to_string(), "BBB".to_string()));
+        assert_eq!(out[2], ("c3".to_string(), "BBB".into()));
     }
 
     /// Redirect containment at the layer that actually decides. Everything here
@@ -3497,17 +3551,26 @@ mod tests {
 
     /// The shared log a recording [`ToolProgress`] writes to.
     type ProgressLog = Arc<StdMutex<Vec<(String, String)>>>;
+    type Results = Vec<leviath_runtime::tool_bridge::ToolResult>;
 
     /// A recording [`ToolProgress`] plus the log it writes to.
     fn recording_progress() -> (ToolProgress, ProgressLog) {
         let log: ProgressLog = Arc::new(StdMutex::new(Vec::new()));
         let sink = log.clone();
-        let progress: ToolProgress = Arc::new(move |id: &str, result: &str| {
+        let progress: ToolProgress = Arc::new(move |id: &str, result| {
             sink.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((id.to_string(), result.to_string()));
         });
         (progress, log)
+    }
+
+    /// Results as the log records them: text alone.
+    fn texts(results: &Results) -> Vec<(String, String)> {
+        results
+            .iter()
+            .map(|(id, r)| (id.clone(), r.to_string()))
+            .collect()
     }
 
     #[tokio::test]
@@ -3530,7 +3593,7 @@ mod tests {
         )
         .await;
         let logged = log.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        assert_eq!(logged, out);
+        assert_eq!(logged, texts(&out));
         assert!(logged[0].1.contains("[denied]"));
     }
 
@@ -3552,7 +3615,7 @@ mod tests {
         )
         .await;
         let logged = log.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        assert_eq!(logged, out);
+        assert_eq!(logged, texts(&out));
         assert_eq!(
             logged[0],
             ("c1".to_string(), "User answered: Yes".to_string())
@@ -3582,7 +3645,7 @@ mod tests {
         assert!(hub.answer(response));
         let out = task.await.unwrap();
         let logged = log.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        assert_eq!(logged, out);
+        assert_eq!(logged, texts(&out));
         assert!(logged[0].1.contains("User declined"));
     }
 
@@ -3598,7 +3661,7 @@ mod tests {
         let results = exec().await;
         assert_eq!(
             log.lock().unwrap_or_else(PoisonError::into_inner).clone(),
-            results
+            texts(&results)
         );
     }
 
@@ -3893,5 +3956,89 @@ mod tests {
             assert!(state.protected.get().is_empty());
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod mcp_content_tests {
+    use super::*;
+    use leviath_core::media::{Blob, MediaRegistry, MediaType, MemoryBlobStore};
+
+    fn result(
+        success: bool,
+        blobs: Vec<Blob>,
+    ) -> anyhow::Result<leviath_mcp::execution::ExecutionResult> {
+        Ok(leviath_mcp::execution::ExecutionResult {
+            success,
+            data: serde_json::Value::Null,
+            text: "the answer".to_string(),
+            blobs,
+        })
+    }
+
+    fn png(name: Option<&str>) -> Blob {
+        let blob = Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nabc".to_vec(),
+        );
+        match name {
+            Some(n) => blob.named(n),
+            None => blob,
+        }
+    }
+
+    fn media(max: u64) -> leviath_tools::ToolMedia {
+        leviath_tools::ToolMedia {
+            store: Arc::new(MemoryBlobStore::new()),
+            registry: Arc::new(MediaRegistry::builtin()),
+            run_id: "run-1".to_string(),
+            max_part_bytes: max,
+        }
+    }
+
+    #[test]
+    fn binary_blocks_become_stored_parts_named_after_the_tool_or_the_resource() {
+        let m = media(1024);
+        let out = mcp_content(
+            "srv__shot",
+            result(true, vec![png(None), png(Some("hero.png"))]),
+            Some(&m),
+        );
+        assert_eq!(out.parts().len(), 3);
+        assert!(
+            out.as_str()
+                .starts_with("the answer\n[image/png, 11 B] srv__shot-1.png\n"),
+            "{out}"
+        );
+        assert_eq!(out.parts()[2].name.as_deref(), Some("hero.png"));
+        assert_eq!(out.stored_count(), 2);
+    }
+
+    #[test]
+    fn a_block_the_run_cannot_hold_is_described_instead() {
+        let out = mcp_content("t", result(true, vec![png(None)]), None);
+        assert_eq!(
+            out.as_str(),
+            "the answer\n[image/png block of 11 B dropped: this run has no blob store]"
+        );
+        assert!(!out.has_stored());
+        let small = media(4);
+        let out = mcp_content("t", result(true, vec![png(None)]), Some(&small));
+        assert!(
+            out.as_str()
+                .contains("[block dropped: 't-1.png' is 11 bytes, over the 4"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_call_and_a_text_only_call_are_text() {
+        let m = media(1024);
+        let out = mcp_content("t", result(false, vec![png(None)]), Some(&m));
+        assert_eq!(out, "[error] the answer");
+        let out = mcp_content("t", result(true, Vec::new()), Some(&m));
+        assert_eq!(out, "the answer");
+        let out = mcp_content("t", Err(anyhow::anyhow!("gone")), Some(&m));
+        assert_eq!(out, "[error] tool error: gone");
     }
 }

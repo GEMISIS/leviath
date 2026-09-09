@@ -159,7 +159,7 @@ pub(crate) fn start_stage_seeds(
 /// what leaves its previous content in place.
 pub(crate) fn seeded_content(
     sites: &[SeedCallSite],
-    results: &[(String, String)],
+    results: &[crate::tool_bridge::ToolResult],
 ) -> Vec<(String, String)> {
     let mut per_region: Vec<(String, Vec<String>)> = Vec::new();
     for site in sites {
@@ -188,7 +188,7 @@ pub(crate) fn seeded_content(
 pub(crate) fn apply_stage_seeds(
     entity: Entity,
     pending: &PendingStageSeeds,
-    results: &[(String, String)],
+    results: &[crate::tool_bridge::ToolResult],
     window: &mut ContextWindow,
     commands: &mut Commands,
 ) {
@@ -328,9 +328,9 @@ mod tests {
             ("s2", "tools", "which_command"),
         ]);
         let results = vec![
-            ("s0".to_string(), "{\"date\":\"2026-08-18\"}".to_string()),
-            ("s1".to_string(), "{\"locale\":\"en-US\"}".to_string()),
-            ("s2".to_string(), "{\"found\":true}".to_string()),
+            ("s0".to_string(), "{\"date\":\"2026-08-18\"}".into()),
+            ("s1".to_string(), "{\"locale\":\"en-US\"}".into()),
+            ("s2".to_string(), "{\"found\":true}".into()),
         ];
         let grouped = seeded_content(&sites, &results);
         assert_eq!(
@@ -362,10 +362,10 @@ mod tests {
             ("s3", "env", "which_command"),
         ]);
         let results = vec![
-            ("s0".to_string(), "[error] tool error: nope".to_string()),
-            ("s1".to_string(), "[denied] not allowed".to_string()),
-            ("s2".to_string(), "   \n".to_string()),
-            ("s3".to_string(), "found".to_string()),
+            ("s0".to_string(), "[error] tool error: nope".into()),
+            ("s1".to_string(), "[denied] not allowed".into()),
+            ("s2".to_string(), "   \n".into()),
+            ("s3".to_string(), "found".into()),
         ];
         let grouped = seeded_content(&sites, &results);
         assert_eq!(
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn a_region_whose_every_call_failed_is_left_alone() {
         let sites = sites_for(&[("s0", "env", "current_time")]);
-        let results = vec![("s0".to_string(), "[error] nope".to_string())];
+        let results = vec![("s0".to_string(), "[error] nope".into())];
         assert!(seeded_content(&sites, &results).is_empty());
     }
 
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn a_call_with_no_answer_is_skipped() {
         let sites = sites_for(&[("s0", "env", "current_time"), ("s1", "env", "locale_info")]);
-        let results = vec![("s1".to_string(), "en-US".to_string())];
+        let results = vec![("s1".to_string(), "en-US".into())];
         assert_eq!(
             seeded_content(&sites, &results),
             vec![("env".to_string(), "--- locale_info ---\nen-US".to_string())]

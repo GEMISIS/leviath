@@ -25,7 +25,7 @@ pub struct DynamicTools;
 /// each completion as a `ToolCallDone` record, so a crash mid-batch loses only
 /// the calls that genuinely never finished. Implementors that don't
 /// journal get a no-op.
-pub type ToolProgress = Arc<dyn Fn(&str, &str) + Send + Sync>;
+pub type ToolProgress = Arc<dyn Fn(&str, &leviath_core::region::EntryContent) + Send + Sync>;
 
 /// A [`ToolProgress`] that reports nowhere - for worlds without a persistence
 /// lane and for `ToolService` impls under test.
@@ -114,6 +114,14 @@ pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
 /// in order).
+/// Inline results, which are always text, in the shape the lane's carry.
+pub(crate) fn typed_results(results: &[(String, String)]) -> Vec<crate::tool_bridge::ToolResult> {
+    results
+        .iter()
+        .map(|(id, text)| (id.clone(), text.clone().into()))
+        .collect()
+}
+
 /// Collapse a possibly-multiline string to a single trimmed line capped at
 /// `max` characters (with an ellipsis when truncated), for one-line log entries.
 pub(crate) fn one_line(s: &str, max: usize) -> String {
@@ -127,8 +135,8 @@ pub(crate) fn one_line(s: &str, max: usize) -> String {
 
 pub(crate) fn merge_in_call_order(
     tool_calls: &[crate::components::ToolCall],
-    parts: &[(String, String)],
-) -> Vec<(String, String)> {
+    parts: &[crate::tool_bridge::ToolResult],
+) -> Vec<crate::tool_bridge::ToolResult> {
     tool_calls
         .iter()
         .map(|tc| {
@@ -358,6 +366,7 @@ pub(crate) fn dispatch_tools(
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     daemon: DaemonServices,
+    media: crate::blob_store::MediaParams,
     mut commands: Commands,
 ) {
     let DaemonServices {
@@ -490,6 +499,20 @@ pub(crate) fn dispatch_tools(
                     workdir: metadata.map(|m| m.workdir.as_str()),
                 };
                 let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);
+                context_results.push((c.tool_id.clone(), text));
+                continue;
+            }
+            if crate::media_tools::is_media_tool(&c.name) {
+                let text = crate::media_tools::handle_media_tool(
+                    &c.name,
+                    &c.arguments,
+                    &mut window,
+                    &crate::media_tools::MediaToolContext {
+                        media: &media,
+                        run_id: &state.agent_id,
+                        workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                    },
+                );
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
@@ -701,8 +724,8 @@ pub(crate) fn dispatch_tools(
             // request outright: "each tool_use must have a single result".
             // Deferring is safe because the agent parks on its workers, so no
             // request goes out carrying a `tool_use` that has no result yet.
-            let merged: Vec<(String, String)> =
-                merge_in_call_order(&result.tool_calls, &context_results)
+            let merged: Vec<crate::tool_bridge::ToolResult> =
+                merge_in_call_order(&result.tool_calls, &typed_results(&context_results))
                     .into_iter()
                     .filter(|(id, _)| id != &call_id)
                     .collect();
@@ -724,7 +747,7 @@ pub(crate) fn dispatch_tools(
 
         if lane_calls.is_empty() {
             // Nothing async to run - apply the context results now and loop back.
-            let merged = merge_in_call_order(&result.tool_calls, &context_results);
+            let merged = merge_in_call_order(&result.tool_calls, &typed_results(&context_results));
             // Log the calls here, because this batch never reaches
             // `collect_tools` - the usual writer of `[tool]` lines - and would
             // otherwise leave no trace anywhere a person can read. A batch of
@@ -777,7 +800,7 @@ pub(crate) fn dispatch_tools(
                             result: context_results
                                 .iter()
                                 .find(|(id, _)| id == &c.tool_id)
-                                .map(|(_, r)| r.clone()),
+                                .map(|(_, r)| r.clone().into()),
                             thought_signature: c.thought_signature.clone(),
                         })
                         .collect(),
@@ -795,13 +818,13 @@ pub(crate) fn dispatch_tools(
                 let sender = persist.0.clone();
                 let run_id = md.run_id.clone();
                 let iteration = state.iteration;
-                let progress: ToolProgress = Arc::new(move |call_id: &str, result: &str| {
+                let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
                     let _ = sender.send(PersistMsg::Append {
                         run_id: run_id.clone(),
                         record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
                             iteration,
                             call_id: call_id.to_string(),
-                            result: result.to_string(),
+                            result: result.clone(),
                             at: chrono::Utc::now().timestamp(),
                         }),
                         ack: None,
