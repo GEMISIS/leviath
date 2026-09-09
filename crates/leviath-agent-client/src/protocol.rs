@@ -152,11 +152,11 @@ pub struct JsonRpcError {
 
 /// One block of prompt or message content.
 ///
-/// Modelled as a permissive struct rather than a tagged enum: hosts send block
-/// kinds we do not advertise support for (`image`, `audio`, `resource_link`),
-/// and a strict enum would fail the whole prompt rather than skipping the block
-/// we cannot use. Unknown kinds deserialize with `text`/`resource` both `None`
-/// and are dropped by [`crate::flatten_prompt`].
+/// Modelled as a permissive struct rather than a tagged enum: a host may send
+/// a block kind this agent does not know, and a strict enum would fail the
+/// whole prompt rather than skipping the block. Unknown kinds deserialize
+/// with every optional field `None`; [`crate::flatten_prompt`] drops them
+/// and [`crate::prompt_parts`] takes the bytes of the ones that carry any.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContentBlock {
     /// The block kind: `text`, `resource`, `image`, `audio`, `resource_link`.
@@ -168,6 +168,18 @@ pub struct ContentBlock {
     /// The inlined resource, for `resource` blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<EmbeddedResource>,
+    /// The bytes, base64, for `image` and `audio` blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// The media type of `data`, or of what a `resource_link` points at.
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// What a `resource_link` points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// The name a `resource_link` shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ContentBlock {
@@ -177,6 +189,28 @@ impl ContentBlock {
             kind: "text".to_string(),
             text: Some(text.into()),
             resource: None,
+            data: None,
+            mime_type: None,
+            uri: None,
+            name: None,
+        }
+    }
+
+    /// A `resource_link` block: a file the host can fetch itself, which is
+    /// how a run's artifacts reach it.
+    pub fn resource_link(
+        uri: impl Into<String>,
+        name: impl Into<String>,
+        mime_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: "resource_link".to_string(),
+            text: None,
+            resource: None,
+            data: None,
+            mime_type: Some(mime_type.into()),
+            uri: Some(uri.into()),
+            name: Some(name.into()),
         }
     }
 }
@@ -193,6 +227,9 @@ pub struct EmbeddedResource {
     /// The resource's textual content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The resource's bytes, base64, when it is not text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
 }
 
 // ─── initialize ──────────────────────────────────────────────────────────────
@@ -364,8 +401,9 @@ pub struct SessionUpdateParams {
 pub enum SessionUpdate {
     /// A chunk of the agent's user-visible output.
     AgentMessageChunk {
-        /// The chunk's content.
-        content: ContentBlock,
+        /// The chunk's content. Boxed: a block carrying a resource link is
+        /// far larger than the usage variant beside it.
+        content: Box<ContentBlock>,
     },
     /// Context-window consumption, for host-side progress display.
     #[serde(rename_all = "camelCase")]
@@ -547,7 +585,7 @@ mod tests {
             &SessionUpdateParams {
                 session_id: "s1".to_string(),
                 update: SessionUpdate::AgentMessageChunk {
-                    content: ContentBlock::text("hi"),
+                    content: Box::new(ContentBlock::text("hi")),
                 },
             },
         );
@@ -611,7 +649,7 @@ mod tests {
     #[test]
     fn session_update_round_trips() {
         let update = SessionUpdate::AgentMessageChunk {
-            content: ContentBlock::text("out"),
+            content: Box::new(ContentBlock::text("out")),
         };
         assert_eq!(
             serde_json::from_str::<SessionUpdate>(&json(&update)).unwrap(),
@@ -720,6 +758,7 @@ mod tests {
             uri: "file:///a.rs".to_string(),
             mime_type: Some("text/rust".to_string()),
             text: Some("fn main() {}".to_string()),
+            blob: None,
         };
         assert_eq!(
             json(&full),
@@ -734,6 +773,7 @@ mod tests {
             uri: "u".to_string(),
             mime_type: None,
             text: None,
+            blob: None,
         };
         assert_eq!(json(&bare), r#"{"uri":"u"}"#);
     }
@@ -754,7 +794,12 @@ mod tests {
                 uri: "u".to_string(),
                 mime_type: None,
                 text: Some("body".to_string()),
+                blob: None,
             }),
+            data: None,
+            mime_type: None,
+            uri: None,
+            name: None,
         };
         assert_eq!(
             serde_json::from_str::<ContentBlock>(&json(&resource)).unwrap(),

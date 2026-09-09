@@ -61,6 +61,7 @@ pub(super) fn spawn_args(
     cwd: &str,
     args: &AgentClientArgs,
     regions: std::collections::HashMap<String, String>,
+    parts: Vec<leviath_core::media::InboundPart>,
 ) -> SpawnArgs {
     SpawnArgs {
         run_id: new_run_id(&blueprint.agent_name),
@@ -92,7 +93,7 @@ pub(super) fn spawn_args(
                 artifacts: Vec::new(),
             }),
         },
-        parts: Vec::new(),
+        parts,
     }
 }
 
@@ -169,7 +170,14 @@ system_prompt = "Plan the work"
         };
         let regions =
             std::collections::HashMap::from([("criteria".to_string(), "be safe".to_string())]);
-        let spawn = spawn_args(&resolved, "do the thing", "/work", &args, regions);
+        let spawn = spawn_args(
+            &resolved,
+            "do the thing",
+            "/work",
+            &args,
+            regions,
+            Vec::new(),
+        );
         assert_eq!(
             spawn.blueprint_path,
             resolved.manifest_path.to_string_lossy()
@@ -214,6 +222,7 @@ system_prompt = "Plan the work"
             "/work",
             &args,
             std::collections::HashMap::new(),
+            Vec::new(),
         );
         let spec = spawn.output.expect("the host asked for a shape");
         assert_eq!(spec.format.as_deref(), Some("a2ui"));

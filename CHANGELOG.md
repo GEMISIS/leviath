@@ -199,6 +199,15 @@ same list.
   under its answer in the Final view, and attaches the files a task names
   with `@path` when a run starts from the new-run screen, counting them on
   the task box as you type (#400).
+- `lev agent-client` advertises `image` and `audio` prompt capabilities. An
+  image or audio block's bytes, and a `resource` block's `blob`, become
+  parts on the task region (or on the message, on a later prompt), a prompt
+  that is only files gets a line naming them, and a `resource_link` is
+  named in the text and marked as not fetched. The files a run produced
+  follow its answer as `resource_link` blocks with a `file://` URI into the
+  session's working directory. Embedders get the same: `SpawnSpec::attach`,
+  `AgentWorld::send_message_with`, `InteractionResponse::with_parts`, and
+  `artifacts` on the answer (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

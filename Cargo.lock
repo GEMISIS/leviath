@@ -2447,6 +2447,7 @@ dependencies = [
 name = "leviath-agent-client"
 version = "0.5.9"
 dependencies = [
+ "base64 0.23.1",
  "leviath-core",
  "leviath-tools",
  "serde",

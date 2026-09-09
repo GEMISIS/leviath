@@ -73,6 +73,9 @@ pub struct SpawnSpec {
     /// [`schema`](leviath_core::output::OutputSpec::schema) is the one thing
     /// that makes the runtime check the answer.
     pub output: Option<leviath_core::output::OutputSpec>,
+    /// Files to put in the run's regions as typed parts: on the task region
+    /// unless a part names another. Built with [`SpawnSpec::attach`].
+    pub parts: Vec<leviath_core::media::InboundPart>,
 }
 
 impl SpawnSpec {
@@ -90,7 +93,16 @@ impl SpawnSpec {
             regions: HashMap::new(),
             metadata: HashMap::new(),
             output: None,
+            parts: Vec::new(),
         }
+    }
+
+    /// Attach a file to the run: bytes with a name, typed by the run's
+    /// registry unless the part declares a type, landing in the task region
+    /// unless the part names another.
+    pub fn attach(mut self, part: leviath_core::media::InboundPart) -> Self {
+        self.parts.push(part);
+        self
     }
 
     /// Ask for the final output in `format`, with optional guidance.
@@ -410,6 +422,7 @@ impl AgentWorld {
             workdir: spec.workdir.to_string_lossy().into_owned(),
             metadata: spec.metadata,
             output: spec.output,
+            parts: spec.parts,
             ..Default::default()
         };
         let run_id = self
@@ -458,11 +471,23 @@ impl AgentWorld {
     /// Deliver a message into a running agent's inbox. `false` when the
     /// world can no longer accept messages (shut down or shutting down).
     pub async fn send_message(&self, id: &RunId, content: &str) -> bool {
+        self.send_message_with(id, content, Vec::new()).await
+    }
+
+    /// [`send_message`](Self::send_message) with files: the text and every
+    /// part bound for its region land as one entry, and a part naming
+    /// another region lands there on its own.
+    pub async fn send_message_with(
+        &self,
+        id: &RunId,
+        content: &str,
+        parts: Vec<leviath_core::media::InboundPart>,
+    ) -> bool {
         self.ask(|reply| ControlOp::Message {
             agent_id: id.0.clone(),
             content: content.to_string(),
             target_region: None,
-            parts: Vec::new(),
+            parts,
             reply,
         })
         .await
@@ -723,6 +748,29 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert!(requested.example.is_none());
     }
 
+    /// Files attach to a spec one at a time and ride the spawn as inbound
+    /// parts, bound for the task region unless one names another.
+    #[test]
+    fn a_spawn_spec_carries_attached_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spec = SpawnSpec::new(
+            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
+            "edit @hero.png",
+            dir.path(),
+        )
+        .attach(leviath_core::media::InboundPart::from_bytes(
+            "hero.png",
+            vec![1, 2, 3],
+        ))
+        .attach(
+            leviath_core::media::InboundPart::from_bytes("notes.md", b"# n".to_vec())
+                .in_region("brief"),
+        );
+        assert_eq!(spec.parts.len(), 2);
+        assert!(spec.parts[0].region.is_none());
+        assert_eq!(spec.parts[1].region.as_deref(), Some("brief"));
+    }
+
     /// A spec that never asked for one requests nothing, so a blueprint's own
     /// declared shape is what applies.
     #[test]
@@ -880,6 +928,18 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         // the pause/resume round-trip.)
         assert!(!world.pause(&run_id).await);
         assert!(world.send_message(&run_id, "prefer something boring").await);
+        assert!(
+            world
+                .send_message_with(
+                    &run_id,
+                    "and see @sketch.png",
+                    vec![leviath_core::media::InboundPart::from_bytes(
+                        "sketch.png",
+                        b"\x89PNG\r\n\x1a\nsketch".to_vec()
+                    )],
+                )
+                .await
+        );
 
         // Answering resumes the run to completion.
         assert!(
