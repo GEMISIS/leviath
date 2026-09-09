@@ -41,10 +41,30 @@ fn bad_key(sha256: &str) -> io::Error {
     )
 }
 
+/// Bytes that fail the check their type puts on them.
+///
+/// Every store runs this first thing in `put`, so one line covers every
+/// ingress there is: the check a row names is asked once, where the bytes
+/// come to rest, and never has to be remembered at a call site.
+pub fn verify_blob(reg: &MediaRegistry, blob: &Blob) -> io::Result<()> {
+    reg.verify(&blob.media_type, &blob.bytes).map_err(|why| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} refused as {}: {why}",
+                blob.name.as_deref().unwrap_or("the bytes"),
+                blob.media_type
+            ),
+        )
+    })
+}
+
 /// Bytes, once per run, by hash.
 pub trait BlobStore: Send + Sync {
     /// Store `blob` for `run_id` and return its reference. Storing the same
-    /// bytes twice is one file and the same reference.
+    /// bytes twice is one file and the same reference. Bytes that fail the
+    /// check their type's row names are refused (`InvalidData`) with the
+    /// reason; see [`verify_blob`].
     fn put(&self, run_id: &str, blob: &Blob, reg: &MediaRegistry) -> io::Result<BlobRef>;
 
     /// The bytes stored under `sha256` for `run_id`.
@@ -89,6 +109,7 @@ impl MemoryBlobStore {
 
 impl BlobStore for MemoryBlobStore {
     fn put(&self, run_id: &str, blob: &Blob, reg: &MediaRegistry) -> io::Result<BlobRef> {
+        verify_blob(reg, blob)?;
         let r = blob.describe(reg);
         crate::sync::lock(&self.runs)
             .entry(run_id.to_string())
@@ -171,6 +192,50 @@ mod tests {
         assert!(store.has("run-b", &r1.sha256));
         assert!(store.copy("run-a", "run-c", &"0".repeat(64)).is_err());
         assert!(format!("{store:?}").contains("MemoryBlobStore"));
+    }
+
+    /// The check a row names runs where the bytes come to rest, so a store
+    /// refuses bytes that fail it with the reason and the name.
+    #[test]
+    fn a_store_refuses_bytes_that_fail_their_types_check() {
+        use crate::media::FnCheck;
+        let store = MemoryBlobStore::new();
+        let mut reg = MediaRegistry::builtin();
+        let table: toml::Table = toml::from_str("[\"image/png\"]\ncheck = \"png.rhai\"\n").unwrap();
+        reg.layer(&table, "t").unwrap();
+        reg.attach_check(
+            "image/png",
+            Arc::new(FnCheck::new(
+                "png",
+                |_: &MediaType, bytes: &[u8]| match bytes.starts_with(b"\x89PNG") {
+                    true => Ok(()),
+                    false => Err("no PNG signature".to_string()),
+                },
+            )),
+        )
+        .unwrap();
+        let png = MediaType::parse("image/png").unwrap();
+        let fake = Blob::new(png.clone(), b"GIF89a".to_vec()).named("shot.png");
+        let err = store.put("run-a", &fake, &reg).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "shot.png refused as image/png: no PNG signature"
+        );
+        assert!(
+            store.list("run-a").unwrap().is_empty(),
+            "nothing was stored"
+        );
+        let unnamed = Blob::new(png.clone(), b"GIF89a".to_vec());
+        assert!(
+            store
+                .put("run-a", &unnamed, &reg)
+                .unwrap_err()
+                .to_string()
+                .starts_with("the bytes refused as")
+        );
+        let real = Blob::new(png, b"\x89PNG\r\n\x1a\n".to_vec());
+        assert!(store.put("run-a", &real, &reg).is_ok());
     }
 
     #[test]

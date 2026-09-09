@@ -11,12 +11,21 @@
 //! Resolution is layered too. `image/png` inherits every field it does not
 //! set from `image/*`, which inherits from `*/*`, so a user row can add one
 //! extension without restating the family.
+//!
+//! A row may also name a `check`: something that looks at bytes claiming
+//! the type and refuses the ones that are not what they say. The row only
+//! carries the name (a script path, as written); whoever builds the
+//! registry compiles it and [`attaches`](MediaRegistry::attach_check) the
+//! result, and [`verify`](MediaRegistry::verify) runs it wherever bytes are
+//! stored.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use super::MediaType;
+use super::check::MediaCheck;
 
 /// The rows compiled into this crate.
 const DEFAULTS: &str = include_str!("../../media/defaults.toml");
@@ -145,6 +154,9 @@ pub struct MediaRow {
     pub magic: Option<String>,
     /// See [`MediaInfo::stand_in`].
     pub stand_in: Option<String>,
+    /// See [`MediaInfo::check`]. An empty string lifts a check a broader row
+    /// put on the type.
+    pub check: Option<String>,
 }
 
 /// Everything the engine wants to know about one media type, resolved.
@@ -163,6 +175,10 @@ pub struct MediaInfo {
     pub extensions: Vec<String>,
     /// The stand-in template, when a row set one. See [`MediaInfo::render_stand_in`].
     pub stand_in: Option<String>,
+    /// The check the bytes must pass to be stored as this type, as the row
+    /// wrote it (a script path). `None` when no row puts one on the type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
     /// Where the most specific row came from.
     pub source: String,
 }
@@ -226,6 +242,8 @@ struct Layered {
 #[derive(Debug, Clone)]
 pub struct MediaRegistry {
     rows: BTreeMap<String, Layered>,
+    /// The compiled checks, keyed like the rows that name them.
+    checks: BTreeMap<String, Arc<dyn MediaCheck>>,
 }
 
 /// Why a `[media_types]` table was refused.
@@ -258,6 +276,7 @@ impl MediaRegistry {
     pub fn empty() -> Self {
         Self {
             rows: BTreeMap::new(),
+            checks: BTreeMap::new(),
         }
     }
 
@@ -310,6 +329,12 @@ impl MediaRegistry {
             {
                 return Err(RegistryError::Magic(key.clone()));
             }
+            // A row naming a check (or lifting one) replaces whatever was
+            // compiled for the key under it; the new name is compiled and
+            // attached by whoever is layering.
+            if row.check.is_some() {
+                self.checks.remove(&key_norm);
+            }
             let merged = match self.rows.remove(&key_norm) {
                 Some(existing) => merge_rows(existing.row, row),
                 None => row,
@@ -323,6 +348,73 @@ impl MediaRegistry {
             );
         }
         Ok(())
+    }
+
+    /// This registry with `table` layered on top, as a new value.
+    pub fn layered(&self, table: &toml::Table, source: &str) -> Result<Self, RegistryError> {
+        let mut next = self.clone();
+        next.layer(table, source)?;
+        Ok(next)
+    }
+
+    /// Put a compiled check on `key`, the type or pattern of the row that
+    /// named it. The key is refused if it is not a type or a pattern.
+    pub fn attach_check(
+        &mut self,
+        key: &str,
+        check: Arc<dyn MediaCheck>,
+    ) -> Result<(), RegistryError> {
+        let key_norm = normalise_key(key).ok_or_else(|| RegistryError::Key(key.to_string()))?;
+        self.checks.insert(key_norm, check);
+        Ok(())
+    }
+
+    /// Every row that names a check, as `(key, check, source)`: what a
+    /// builder has to compile and attach, in key order.
+    pub fn declared_checks(&self) -> Vec<(String, String, String)> {
+        self.rows
+            .iter()
+            .filter_map(|(key, l)| {
+                l.row
+                    .check
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                    .map(|c| (key.clone(), c.to_string(), l.source.clone()))
+            })
+            .collect()
+    }
+
+    /// The compiled check `media_type` answers to: its own row's, else its
+    /// family's, else the floor's, stopping at a row that lifts the check
+    /// with an empty name. `None` when no row names one, or the row that
+    /// does has had nothing attached for it.
+    pub fn check_for(&self, media_type: &MediaType) -> Option<&Arc<dyn MediaCheck>> {
+        let chain = [
+            media_type.as_str().to_string(),
+            media_type.family_pattern(),
+            "*/*".to_string(),
+        ];
+        for key in chain {
+            let Some(l) = self.rows.get(&key) else {
+                continue;
+            };
+            match l.row.check.as_deref() {
+                Some(c) if c.trim().is_empty() => return None,
+                Some(_) => return self.checks.get(&key),
+                None => {}
+            }
+        }
+        None
+    }
+
+    /// Run the check for `media_type` over `bytes`, if a row put one on the
+    /// type. Bytes that fail come back with the reason; a type with no check
+    /// passes.
+    pub fn verify(&self, media_type: &MediaType, bytes: &[u8]) -> Result<(), String> {
+        match self.check_for(media_type) {
+            Some(check) => check.check(media_type, bytes),
+            None => Ok(()),
+        }
     }
 
     /// Every key this registry holds, with its source, in key order.
@@ -349,6 +441,7 @@ impl MediaRegistry {
         let mut tokens = TokenRule::PerByte(0.34);
         let mut extensions = Vec::new();
         let mut stand_in = None;
+        let mut check = None;
         let mut source = "fallback".to_string();
         let chain = [
             "*/*".to_string(),
@@ -372,6 +465,9 @@ impl MediaRegistry {
                 if let Some(s) = &l.row.stand_in {
                     stand_in = Some(s.clone());
                 }
+                if let Some(c) = &l.row.check {
+                    check = Some(c.clone()).filter(|c| !c.trim().is_empty());
+                }
                 source = l.source.clone();
             }
         }
@@ -382,6 +478,7 @@ impl MediaRegistry {
             tokens,
             extensions,
             stand_in,
+            check,
             source,
         }
     }
@@ -487,6 +584,7 @@ fn merge_rows(under: MediaRow, over: MediaRow) -> MediaRow {
         extensions: over.extensions.or(under.extensions),
         magic: over.magic.or(under.magic),
         stand_in: over.stand_in.or(under.stand_in),
+        check: over.check.or(under.check),
     }
 }
 
@@ -772,6 +870,96 @@ mod tests {
         let stray_max = serde_json::from_str::<TokenRule>("{\"fixed\":1,\"max\":2}").unwrap_err();
         assert!(stray_max.to_string().contains("max"));
         assert!(serde_json::from_str::<TokenRule>("{\"per_byte\":\"x\"}").is_err());
+    }
+
+    /// A row's `check` resolves like any other field, an empty one lifts it,
+    /// and the compiled object attached under the key is what `verify` runs.
+    #[test]
+    fn a_check_resolves_by_row_and_runs_when_attached() {
+        use crate::media::FnCheck;
+        let mut reg = MediaRegistry::builtin();
+        let table: toml::Table = toml::from_str(
+            "[\"image/*\"]\ncheck = \"checks/image.rhai\"\n[\"image/gif\"]\ncheck = \"\"\n",
+        )
+        .unwrap();
+        reg.layer(&table, "config").unwrap();
+        assert_eq!(
+            reg.info(&mt("image/png")).check.as_deref(),
+            Some("checks/image.rhai"),
+            "a subtype inherits the family's check"
+        );
+        assert_eq!(
+            reg.info(&mt("image/gif")).check,
+            None,
+            "an empty name lifts it"
+        );
+        assert_eq!(reg.info(&mt("audio/wav")).check, None);
+        assert_eq!(
+            reg.declared_checks(),
+            vec![(
+                "image/*".to_string(),
+                "checks/image.rhai".to_string(),
+                "config".to_string()
+            )]
+        );
+
+        // Declared but nothing attached: nothing runs.
+        assert!(reg.check_for(&mt("image/png")).is_none());
+        assert_eq!(reg.verify(&mt("image/png"), b"anything"), Ok(()));
+
+        let check = Arc::new(FnCheck::new(
+            "png-magic",
+            |t: &MediaType, bytes: &[u8]| match bytes.starts_with(b"\x89PNG") {
+                true => Ok(()),
+                false => Err(format!("not a {t} header")),
+            },
+        ));
+        reg.attach_check("Image/*", check.clone()).unwrap();
+        assert!(reg.check_for(&mt("image/png")).is_some());
+        assert_eq!(reg.verify(&mt("image/png"), b"\x89PNG\r\n"), Ok(()));
+        assert_eq!(
+            reg.verify(&mt("image/png"), b"GIF89a"),
+            Err("not a image/png header".to_string())
+        );
+        assert_eq!(
+            reg.verify(&mt("image/gif"), b"GIF89a"),
+            Ok(()),
+            "the lifted subtype is not checked"
+        );
+        assert_eq!(reg.verify(&mt("audio/wav"), b"RIFF"), Ok(()));
+        assert_eq!(
+            reg.verify(&mt("application/x-made-up"), b"??"),
+            Ok(()),
+            "a type with no row of its own walks up to the floor"
+        );
+        assert_eq!(
+            reg.attach_check("png", check).unwrap_err(),
+            RegistryError::Key("png".into())
+        );
+
+        // A later row naming a new check drops the compiled one under it,
+        // and a clone made before the swap keeps what it had.
+        let snapshot = reg.clone();
+        let renamed: toml::Table =
+            toml::from_str("[\"image/*\"]\ncheck = \"checks/image2.rhai\"\n").unwrap();
+        let next = reg.layered(&renamed, "file").unwrap();
+        assert!(next.check_for(&mt("image/png")).is_none());
+        assert_eq!(
+            next.info(&mt("image/png")).check.as_deref(),
+            Some("checks/image2.rhai")
+        );
+        assert!(snapshot.check_for(&mt("image/png")).is_some());
+        assert!(format!("{next:?}").contains("checks"));
+        // A row that does not mention `check` keeps the attached one.
+        let unrelated: toml::Table =
+            toml::from_str("[\"image/*\"]\nfamily = \"picture\"\n").unwrap();
+        let kept = reg.layered(&unrelated, "file").unwrap();
+        assert!(kept.check_for(&mt("image/png")).is_some());
+        assert!(reg.layered(&bad_key_table(), "file").is_err());
+    }
+
+    fn bad_key_table() -> toml::Table {
+        toml::from_str("[png]\nfamily = \"image\"").unwrap()
     }
 
     #[test]

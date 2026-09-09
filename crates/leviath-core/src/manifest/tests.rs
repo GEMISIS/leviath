@@ -2621,6 +2621,69 @@ any = { kind = "pinned" }
     }
 }
 
+/// A blueprint's `[media_types]` rows are carried as written, checked at
+/// parse so a bad row fails here rather than being skipped at the first file.
+#[test]
+fn parse_manifest_reads_and_checks_media_type_rows() {
+    let toml = r#"
+[agent]
+name = "scenes"
+
+[media_types."application/x-acme-scene"]
+family = "model"
+extensions = ["scene"]
+magic = "41434D45"
+check = "checks/scene.rhai"
+
+[media_types."model/obj"]
+text = true
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert_eq!(bp.media_types.len(), 2);
+    let reg = crate::media::MediaRegistry::builtin()
+        .layered(&bp.media_types, "blueprint")
+        .unwrap();
+    let scene = reg.info(&crate::media::MediaType::parse("application/x-acme-scene").unwrap());
+    assert_eq!(scene.family, "model");
+    assert_eq!(scene.check.as_deref(), Some("checks/scene.rhai"));
+    assert_eq!(scene.source, "blueprint");
+    // Round-trips through the blueprint's own serialisation, and an empty
+    // table is left out of it.
+    let json = serde_json::to_string(&bp).unwrap();
+    assert!(json.contains("\"media_types\""));
+    let back: crate::Blueprint = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.media_types, bp.media_types);
+    let plain = parse_manifest("[agent]\nname = \"plain\"\n").unwrap();
+    assert!(plain.media_types.is_empty());
+    assert!(
+        !serde_json::to_string(&plain)
+            .unwrap()
+            .contains("media_types")
+    );
+
+    for (bad, needle) in [
+        ("media_types = 3", "[media_types] must be a table"),
+        (
+            "[media_types.png]\nfamily = \"image\"",
+            "[media_types]: media_types key png",
+        ),
+        (
+            "[media_types.\"image/png\"]\nfamilies = 1",
+            "unknown field `families`",
+        ),
+        (
+            "[media_types.\"image/png\"]\nmagic = \"zz\"",
+            "magic must be hex",
+        ),
+    ] {
+        // The bad rows come first, so a bare key lands at the top level
+        // rather than inside `[agent]`.
+        let toml = format!("{bad}\n\n[agent]\nname = \"scenes\"\n");
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(err.contains(needle), "{bad}: {err}");
+    }
+}
+
 #[test]
 fn parse_manifest_stage_accepts_messages_false() {
     let toml = r#"

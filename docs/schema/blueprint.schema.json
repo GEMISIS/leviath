@@ -144,6 +144,53 @@
         }
       }
     },
+    "media_types": {
+      "type": "object",
+      "description": "Rows this agent adds to the media registry, keyed by type/subtype or type/*, layered over the operator's rows for this agent's runs. Name only what the row changes.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "family": {
+            "type": "string",
+            "description": "What providers key their encoders on: text, image, audio, video, document, model, binary, or a name of your own."
+          },
+          "text": {
+            "type": "boolean",
+            "description": "The bytes are UTF-8 and may travel inline and reach any text model as text."
+          },
+          "tokens": {
+            "type": "object",
+            "description": "Exactly one of per_byte, per_pixel (with max), per_second or fixed.",
+            "additionalProperties": false,
+            "properties": {
+              "per_byte": { "type": "number" },
+              "per_pixel": { "type": "integer" },
+              "max": { "type": "integer" },
+              "per_second": { "type": "integer" },
+              "fixed": { "type": "integer" }
+            }
+          },
+          "extensions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extensions, without the dot, that imply this type."
+          },
+          "magic": {
+            "type": "string",
+            "description": "A hex prefix that identifies the bytes."
+          },
+          "stand_in": {
+            "type": "string",
+            "description": "What a consumer that cannot take the type sees; {type} {name} {size} {dims} {duration}."
+          },
+          "check": {
+            "type": "string",
+            "description": "A Rhai script, relative to the blueprint's directory, whose check(bytes, media_type) refuses bytes that are not what they claim. An empty string lifts a check a broader row put on the type."
+          }
+        }
+      }
+    },
     "transforms": {
       "type": "array",
       "description": "How context maps when one blueprint hands off to another.",

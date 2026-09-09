@@ -8,6 +8,7 @@
 
 pub mod engine;
 pub mod functions;
+pub mod media_check;
 pub mod output_validator;
 pub mod parts;
 pub mod region_hook;
