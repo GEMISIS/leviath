@@ -7,6 +7,11 @@
 //! never reflows under the cursor: the fan-out rows are there on every
 //! stage and greyed until the mode is `fan_out`; the hint row is there on
 //! every path and greyed unless the path is a hint.
+//!
+//! A region, a declared file and a stage's loop back to itself are edited
+//! in a window over the editor rather than in the inspector's place: their
+//! panels are the same lists of fields, drawn by the same code, opened over
+//! the panel they came from and closed with Esc.
 
 use crate::blueprint_edit::{
     EdgeKind, ManifestDoc, RegionScope, Rule, StageModeView, TransformKind, WorkerKind,
@@ -17,30 +22,32 @@ use crate::blueprint_edit::{
 pub(in crate::commands::dashboard) enum StageTab {
     /// Mode, description, tries, prompts, fan-out.
     Behaviour,
-    /// The model chain and the tools.
+    /// The regions the stage reads and what each takes, what it takes beyond
+    /// them, what it reads as text, the answer's format and the files it
+    /// hands back.
+    Io,
+    /// The model chain, the tools, and what each tool may be handed.
     Model,
     /// Regions and tool routing.
     Context,
-    /// What the stage takes as parts and the files it hands back.
-    Media,
 }
 
 impl StageTab {
     /// The four tabs, in order.
     pub(in crate::commands::dashboard) const ALL: [StageTab; 4] = [
         StageTab::Behaviour,
+        StageTab::Io,
         StageTab::Model,
         StageTab::Context,
-        StageTab::Media,
     ];
 
     /// The tab's title.
     pub(in crate::commands::dashboard) fn title(self) -> &'static str {
         match self {
             StageTab::Behaviour => "Behaviour",
-            StageTab::Model => "Model & tools",
+            StageTab::Io => "Inputs & outputs",
+            StageTab::Model => "Models & tools",
             StageTab::Context => "Context",
-            StageTab::Media => "Media",
         }
     }
 }
@@ -56,13 +63,10 @@ pub(in crate::commands::dashboard) enum Panel {
     Edge { from: String, to: String },
     /// A worker blueprint drawn on the canvas, which is edited elsewhere.
     External(String),
-    /// A context region of a layout, opened from a region row; `back` is the
-    /// panel to return to.
-    Region {
-        scope: RegionScope,
-        name: String,
-        back: Box<Panel>,
-    },
+    /// A context region of a layout, opened in a window from a region row.
+    Region { scope: RegionScope, name: String },
+    /// One of a stage's declared files, opened in a window from its row.
+    Artifact { stage: String, index: usize },
 }
 
 /// One thing the inspector can edit.
@@ -130,26 +134,36 @@ pub(in crate::commands::dashboard) enum FieldId {
     RegionMessage,
     RegionSeed,
     RegionDescription,
-    /// The media type patterns the region takes.
+    /// The media type patterns the region takes (a chooser).
     RegionAccepts,
     /// The most stored parts the region keeps.
     RegionMaxStored,
     DeleteRegion,
-    /// `[stages.<name>.input] accepts`.
+    /// A region the stage reads, on its inputs tab; opens the region.
+    IoRegionRow(String),
+    /// `[stages.<name>.input] accepts` (a chooser).
     StageAccepts,
-    /// `[stages.<name>.input] as_text`.
+    /// `[stages.<name>.input] as_text` (a chooser).
     StageAsText,
-    /// The name of the stage's `n`th declared artifact; `x` on any of an
-    /// artifact's rows drops the declaration.
-    ArtifactName(usize),
-    /// The `n`th artifact's type or pattern.
-    ArtifactType(usize),
-    /// Whether the `n`th artifact must be present.
-    ArtifactRequired(usize),
-    /// What the `n`th artifact is for.
-    ArtifactDescription(usize),
-    /// Declare another artifact (asks its name).
+    /// `[stages.<name>.output] format`.
+    OutputFormat,
+    /// The stage's `n`th declared file; opens it, `x` drops it.
+    ArtifactRow(usize),
+    /// Declare another file (asks its name).
     AddArtifact,
+    /// The open file's name.
+    ArtifactName,
+    /// The open file's type or pattern (a chooser).
+    ArtifactType,
+    /// Whether the open file must be present.
+    ArtifactRequired,
+    /// What the open file is for.
+    ArtifactDescription,
+    /// Drop the open file's declaration.
+    DeleteArtifact,
+    /// What one of the stage's tools may be handed (a chooser); `x` lifts
+    /// the limit.
+    ToolLimitRow(String),
 }
 
 /// What a field holds and how it edits.
@@ -210,7 +224,8 @@ pub(in crate::commands::dashboard) fn fields(doc: &ManifestDoc, panel: &Panel) -
         Panel::Stage { name, tab } => stage_fields(doc, name, *tab),
         Panel::Edge { from, to } => edge_fields(doc, from, to),
         Panel::External(_) => Vec::new(),
-        Panel::Region { scope, name, .. } => region_fields(doc, scope, name),
+        Panel::Region { scope, name } => region_fields(doc, scope, name),
+        Panel::Artifact { stage, index } => artifact_fields(doc, stage, *index),
     }
 }
 
@@ -222,10 +237,20 @@ pub(in crate::commands::dashboard) fn panel_title(panel: &Panel) -> String {
         Panel::Edge { from, to } if from == to => format!("Path · {from} ↺ back to itself"),
         Panel::Edge { from, to } => format!("Path · {from} → {to}"),
         Panel::External(name) => format!("Worker blueprint · {name}"),
-        Panel::Region { scope, name, .. } => match scope {
+        Panel::Region { scope, name } => match scope {
             RegionScope::Shared => format!("Context region · {name} · shared layout"),
             RegionScope::Stage(stage) => format!("Context region · {name} · {stage}'s own layout"),
         },
+        Panel::Artifact { stage, index } => format!("File · {stage} hands back #{}", index + 1),
+    }
+}
+
+/// A list of media types as a row reads it, or `empty` for none.
+fn list_or(list: &[String], empty: &str) -> String {
+    if list.is_empty() {
+        empty.to_string()
+    } else {
+        list.join(", ")
     }
 }
 
@@ -461,6 +486,34 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 "Enter picks from every tool this install has, or a group such as @builtin; \
                  Space toggles one.",
             ));
+            // What each tool may be handed here: the tools named one by one
+            // (a group has no row of its own), then any limit on a tool the
+            // stage does not name, so it can still be lifted.
+            let mut limited: Vec<String> = stage
+                .tools
+                .iter()
+                .filter(|t| !t.starts_with('@'))
+                .cloned()
+                .collect();
+            for (tool, _) in &stage.tool_accepts {
+                if !limited.contains(tool) {
+                    limited.push(tool.clone());
+                }
+            }
+            for tool in limited {
+                let limit = stage
+                    .tool_accepts
+                    .iter()
+                    .find(|(t, _)| *t == tool)
+                    .map(|(_, list)| list.join(", "));
+                out.push(Field::new(
+                    FieldId::ToolLimitRow(tool.clone()),
+                    format!("  {tool} may be handed"),
+                    FieldValue::Row(limit.unwrap_or_else(|| "any type".to_string())),
+                    "What this tool may be handed at this stage; a part of any other type is \
+                     out of its reach here. Enter picks the types, x lifts the limit.",
+                ));
+            }
             out
         }
         StageTab::Context => {
@@ -543,53 +596,65 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
             ));
             out
         }
-        StageTab::Media => media_fields(&stage),
+        StageTab::Io => io_fields(doc, name, &stage),
     }
 }
 
-/// The media tab: what the stage takes beyond what its regions say, what it
-/// reads as text, and the files it declares it hands back.
-fn media_fields(stage: &crate::blueprint_edit::StageView) -> Vec<Field> {
-    let mut out = vec![
-        Field::new(
-            FieldId::StageAccepts,
-            "Takes, beyond its regions",
-            FieldValue::Text(stage.input_accepts.join(", ")),
-            "Media type patterns the stage takes as parts when its regions do not already \
-             say: image/*, audio/wav. Empty leaves it to the regions.",
-        ),
-        Field::new(
-            FieldId::StageAsText,
-            "Reads as text",
-            FieldValue::Text(stage.input_as_text.join(", ")),
-            "Types whose parts reach the model as text whatever it takes natively: \
-             model/obj, application/json.",
-        ),
-    ];
+/// The inputs and outputs tab: the regions the stage reads and what each
+/// takes, what it takes beyond them, what it reads as text, the answer's
+/// format, and the files it declares it hands back.
+fn io_fields(
+    doc: &ManifestDoc,
+    name: &str,
+    stage: &crate::blueprint_edit::StageView,
+) -> Vec<Field> {
+    let layout = doc.effective_regions(Some(name));
+    let mut out = Vec::new();
+    for (i, region) in layout.regions.iter().enumerate() {
+        out.push(Field::new(
+            FieldId::IoRegionRow(region.name.clone()),
+            if i == 0 { "Reads" } else { "  and" },
+            FieldValue::Row(format!(
+                "{}  {}",
+                region.name,
+                list_or(&region.accepts, "any type")
+            )),
+            "A region the stage sees, and the media it takes. Enter opens the region.",
+        ));
+    }
+    out.push(Field::new(
+        FieldId::StageAccepts,
+        "Takes, beyond its regions",
+        FieldValue::Row(list_or(&stage.input_accepts, "(what the regions take)")),
+        "Media type patterns the stage takes as parts when its regions do not already say. \
+         Enter picks the types, x leaves it to the regions.",
+    ));
+    out.push(Field::new(
+        FieldId::StageAsText,
+        "Reads as text",
+        FieldValue::Row(list_or(&stage.input_as_text, "(none)")),
+        "Types whose parts reach the model as text whatever it takes natively: model/obj, \
+         application/json. Enter picks the types, x clears them.",
+    ));
+    out.push(Field::new(
+        FieldId::OutputFormat,
+        "Answer format",
+        FieldValue::Text(stage.output_format.clone()),
+        "A label for the answer's shape (markdown, json, or a media type), carried to the \
+         model and recorded with the result.",
+    ));
     for (i, artifact) in stage.artifacts.iter().enumerate() {
         out.push(Field::new(
-            FieldId::ArtifactName(i),
-            format!("Hands back #{}", i + 1),
-            FieldValue::Text(artifact.name.clone()),
-            "What the submission calls the file. x on any of its rows drops the declaration.",
-        ));
-        out.push(Field::new(
-            FieldId::ArtifactType(i),
-            "  type",
-            FieldValue::Text(artifact.media_type.clone()),
-            "The media type the file must be, or a pattern it must match: video/mp4, image/*.",
-        ));
-        out.push(Field::new(
-            FieldId::ArtifactRequired(i),
-            "  required",
-            FieldValue::Toggle(artifact.required),
-            "A submission without this file is refused back to the model.",
-        ));
-        out.push(Field::new(
-            FieldId::ArtifactDescription(i),
-            "  description",
-            FieldValue::Text(artifact.description.clone()),
-            "What the file is for, shown to the model.",
+            FieldId::ArtifactRow(i),
+            if i == 0 { "Hands back" } else { "  and" },
+            FieldValue::Row(format!(
+                "{}  {}{}",
+                artifact.name,
+                artifact.media_type,
+                if artifact.required { "  required" } else { "" }
+            )),
+            "A file the stage submits beside its answer. Enter edits it, x drops the \
+             declaration.",
         ));
     }
     out.push(Field::new(
@@ -600,6 +665,46 @@ fn media_fields(stage: &crate::blueprint_edit::StageView) -> Vec<Field> {
          it is there and of the type.",
     ));
     out
+}
+
+/// The window for one declared file.
+fn artifact_fields(doc: &ManifestDoc, stage: &str, index: usize) -> Vec<Field> {
+    let Some(artifact) = doc.artifacts(stage).into_iter().nth(index) else {
+        return Vec::new();
+    };
+    vec![
+        Field::new(
+            FieldId::ArtifactName,
+            "Name",
+            FieldValue::Text(artifact.name),
+            "What the submission calls the file.",
+        ),
+        Field::new(
+            FieldId::ArtifactType,
+            "Type",
+            FieldValue::Row(artifact.media_type),
+            "The media type the file must be, or a pattern it must match: video/mp4, image/*. \
+             Enter picks one.",
+        ),
+        Field::new(
+            FieldId::ArtifactRequired,
+            "Required",
+            FieldValue::Toggle(artifact.required),
+            "A submission without this file is refused back to the model.",
+        ),
+        Field::new(
+            FieldId::ArtifactDescription,
+            "Description",
+            FieldValue::Text(artifact.description),
+            "What the file is for, shown to the model.",
+        ),
+        Field::new(
+            FieldId::DeleteArtifact,
+            "Drop this declaration",
+            FieldValue::Button,
+            "The stage no longer promises this file.",
+        ),
+    ]
 }
 
 /// `· 5% · min 800 · max 4000`, whichever a region has.
@@ -701,9 +806,9 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
         Field::new(
             FieldId::RegionAccepts,
             "Takes",
-            FieldValue::Text(region.accepts.join(", ")),
-            "Media type patterns the region takes: image/*, audio/wav. Empty takes \
-             anything; a write outside the list is refused with it.",
+            FieldValue::Row(list_or(&region.accepts, "any type")),
+            "Media type patterns the region takes: image/*, audio/wav. A write outside them \
+             is refused with the list. Enter picks the types, x takes anything again.",
         ),
         Field::new(
             FieldId::RegionMaxStored,

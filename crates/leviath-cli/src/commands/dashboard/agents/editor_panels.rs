@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use super::super::state::Dashboard;
 use super::super::types::ConfirmAction;
-use super::editor::PickerFor;
+use super::editor::{ModalBase, PickerFor, TYPE_ANOTHER};
 use super::inspector::{FieldId, Panel, REGION_KINDS};
 use crate::blueprint_edit::{
     ArtifactField, InputList, RegionField, RegionScope, RegionValue, Rule, TransformKind,
@@ -17,6 +17,15 @@ use crate::tui::widgets::confirm::Confirm;
 use crate::tui::widgets::line_edit::LineEdit;
 use crate::tui::widgets::picker::{Picker, PickerOption};
 use ratatui::text::Line;
+
+/// A word for a chooser row: what a family or a wildcard stands for.
+fn type_detail(value: &str) -> String {
+    match value.split_once('/') {
+        Some(("*", "*")) => "anything".to_string(),
+        Some((kind, "*")) => format!("every {kind} type"),
+        _ => String::new(),
+    }
+}
 
 /// `200k`, `1M`, `1.5M`: a context window as the picker shows it.
 pub(super) fn window_label(tokens: usize) -> String {
@@ -42,7 +51,15 @@ impl Dashboard {
     /// The scope of the region panel, when the inspector is on one.
     fn panel_region(&mut self) -> Option<(RegionScope, String)> {
         match &self.editor().panel {
-            Panel::Region { scope, name, .. } => Some((scope.clone(), name.clone())),
+            Panel::Region { scope, name } => Some((scope.clone(), name.clone())),
+            _ => None,
+        }
+    }
+
+    /// The declared file a window is open on, when one is.
+    fn panel_artifact(&mut self) -> Option<(String, usize)> {
+        match &self.editor().panel {
+            Panel::Artifact { stage, index } => Some((stage.clone(), *index)),
             _ => None,
         }
     }
@@ -63,10 +80,10 @@ impl Dashboard {
                     });
                 }
             }
-            FieldId::ArtifactRequired(i) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                let i = *i;
-                self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Required(on)));
+            FieldId::ArtifactRequired => {
+                if let Some((stage, i)) = self.panel_artifact() {
+                    self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Required(on)));
+                }
             }
             _ => {}
         }
@@ -251,6 +268,13 @@ impl Dashboard {
             FieldId::AddArtifact => {
                 self.editor().add_artifact = Some(LineEdit::new(String::new(), false));
             }
+            FieldId::DeleteArtifact => {
+                if let Some((stage, i)) = self.panel_artifact()
+                    && self.editor_mutate(|d| d.delete_artifact(&stage, i))
+                {
+                    self.editor_close_modal();
+                }
+            }
             FieldId::DeleteRegion => {
                 let Some((scope, name)) = self.panel_region() else {
                     return;
@@ -277,18 +301,10 @@ impl Dashboard {
         name: &str,
     ) {
         let (scope, name) = (scope.clone(), name.to_string());
-        // Where the panel came from, taken before the refresh forgets it.
-        let back = match &self.editor().panel {
-            Panel::Region { back, .. } => Some((**back).clone()),
-            _ => None,
-        };
-        if self.editor_mutate(|d| d.delete_region(&scope, &name))
-            && let Some(back) = back
-        {
-            let editor = self.editor();
-            editor.panel = back;
-            editor.panel_anchor = None;
-            editor.cursor = 0;
+        // The window closes with the region; the refresh would have closed
+        // it anyway, and this way the cursor lands where it was.
+        if self.editor_mutate(|d| d.delete_region(&scope, &name)) {
+            self.editor_close_modal();
         }
     }
 
@@ -318,24 +334,23 @@ impl Dashboard {
                     self.set_region_panel_name(&name);
                 }
             }
-            FieldId::StageAccepts | FieldId::StageAsText => {
+            // A typed list of types: the chooser's "another…" row lands
+            // here with what was picked already in the box.
+            FieldId::StageAccepts
+            | FieldId::StageAsText
+            | FieldId::RegionAccepts
+            | FieldId::ToolLimitRow(_)
+            | FieldId::ArtifactType => self.editor_write_types(id, split_list(&text)),
+            FieldId::OutputFormat => {
                 let stage = self.editor().panel_stage().expect("a stage field");
-                let which = if *id == FieldId::StageAccepts {
-                    InputList::Accepts
-                } else {
-                    InputList::AsText
-                };
-                let list = split_list(&text);
-                self.editor_mutate(|d| d.set_stage_input(&stage, which, &list));
+                self.editor_mutate(|d| d.set_output_format(&stage, &text));
             }
-            FieldId::ArtifactName(i)
-            | FieldId::ArtifactType(i)
-            | FieldId::ArtifactDescription(i) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                let i = *i;
+            FieldId::ArtifactName | FieldId::ArtifactDescription => {
+                let Some((stage, i)) = self.panel_artifact() else {
+                    return;
+                };
                 let field = match id {
-                    FieldId::ArtifactName(_) => ArtifactField::Name(text),
-                    FieldId::ArtifactType(_) => ArtifactField::Type(text),
+                    FieldId::ArtifactName => ArtifactField::Name(text),
                     _ => ArtifactField::Description(text),
                 };
                 self.editor_mutate(|d| d.set_artifact(&stage, i, field));
@@ -343,13 +358,11 @@ impl Dashboard {
             FieldId::RegionStrategy
             | FieldId::RegionMessage
             | FieldId::RegionSeed
-            | FieldId::RegionDescription
-            | FieldId::RegionAccepts => {
+            | FieldId::RegionDescription => {
                 let field = match id {
                     FieldId::RegionStrategy => RegionField::Strategy,
                     FieldId::RegionMessage => RegionField::RequiredMessage,
                     FieldId::RegionSeed => RegionField::Seed,
-                    FieldId::RegionAccepts => RegionField::Accepts,
                     _ => RegionField::Description,
                 };
                 if let Some((scope, name)) = self.panel_region() {
@@ -376,7 +389,7 @@ impl Dashboard {
             FieldId::RegionRow(name) => {
                 self.editor_open_region(RegionScope::Shared, name);
             }
-            FieldId::StageRegionRow(name) => {
+            FieldId::StageRegionRow(name) | FieldId::IoRegionRow(name) => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 let scope = if self.editor().doc.effective_regions(Some(&stage)).inherited {
                     RegionScope::Shared
@@ -385,6 +398,15 @@ impl Dashboard {
                 };
                 self.editor_open_region(scope, name);
             }
+            FieldId::ArtifactRow(i) => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                self.editor_open_artifact(&stage, *i);
+            }
+            FieldId::StageAccepts
+            | FieldId::StageAsText
+            | FieldId::RegionAccepts
+            | FieldId::ToolLimitRow(_)
+            | FieldId::ArtifactType => self.editor_open_type_chooser(id),
             FieldId::ModelEntry(i) => self.editor_open_model_picker(PickerFor::ReplaceModel(*i)),
             // The empty chain reads as a model row; Enter still adds.
             FieldId::AddModel => self.editor_open_model_picker(PickerFor::AddModel),
@@ -405,13 +427,15 @@ impl Dashboard {
             return;
         };
         match field.id {
-            FieldId::ArtifactName(i)
-            | FieldId::ArtifactType(i)
-            | FieldId::ArtifactRequired(i)
-            | FieldId::ArtifactDescription(i) => {
+            FieldId::ArtifactRow(i) => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 self.editor_mutate(|d| d.delete_artifact(&stage, i));
             }
+            // A list of types cleared: the stage's, a tool's, a region's.
+            FieldId::StageAccepts
+            | FieldId::StageAsText
+            | FieldId::RegionAccepts
+            | FieldId::ToolLimitRow(_) => self.editor_write_types(&field.id, Vec::new()),
             FieldId::ModelEntry(i) => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 let chain: Vec<String> = self
@@ -500,17 +524,36 @@ impl Dashboard {
         self.editor_mutate(|d| d.set_transform_rule(&from, &to, &region, rule));
     }
 
-    /// Open the region panel, remembering where to go back to.
-    pub(super) fn editor_open_region(&mut self, scope: RegionScope, name: &str) {
+    /// Open `panel` in a window over the panel the inspector shows, which
+    /// stays where it is until the window closes. A window never opens over
+    /// another: every row that opens one sits on a panel the inspector
+    /// shows, so the panel here is always the one to come back to.
+    fn editor_open_modal(&mut self, panel: Panel) {
         let editor = self.editor();
-        let back = Box::new(editor.panel.clone());
-        editor.panel_anchor = Some(editor.view.selection());
-        editor.panel = Panel::Region {
+        editor.modal = Some(ModalBase {
+            panel: editor.panel.clone(),
+            cursor: editor.cursor,
+            anchor: editor.view.selection(),
+        });
+        editor.panel = panel;
+        editor.cursor = 0;
+        editor.focus = super::editor::Focus::Inspector;
+    }
+
+    /// Open a region's window.
+    pub(super) fn editor_open_region(&mut self, scope: RegionScope, name: &str) {
+        self.editor_open_modal(Panel::Region {
             scope,
             name: name.to_string(),
-            back,
-        };
-        editor.cursor = 0;
+        });
+    }
+
+    /// Open a declared file's window.
+    pub(super) fn editor_open_artifact(&mut self, stage: &str, index: usize) {
+        self.editor_open_modal(Panel::Artifact {
+            stage: stage.to_string(),
+            index,
+        });
     }
 
     /// Open the path panel on a stage's loop back to itself. A loop is not
@@ -520,34 +563,182 @@ impl Dashboard {
     pub(super) fn editor_open_self_loop(&mut self, stage: &str) {
         let editor = self.editor();
         editor.view.select_stage(stage);
-        editor.panel_anchor = Some(editor.view.selection());
-        editor.panel = Panel::Edge {
-            from: stage.to_string(),
-            to: stage.to_string(),
+        // The window opens over the stage's behaviour tab, whichever panel
+        // led here: the canvas menu, or a fresh loop just connected.
+        editor.modal = None;
+        editor.panel = Panel::Stage {
+            name: stage.to_string(),
+            tab: super::inspector::StageTab::Behaviour,
         };
         editor.cursor = 0;
-        editor.focus = super::editor::Focus::Inspector;
+        self.editor_open_modal(Panel::Edge {
+            from: stage.to_string(),
+            to: stage.to_string(),
+        });
     }
 
-    /// Esc on a pushed panel: back to what opened it.
-    pub(super) fn editor_leave_region(&mut self) {
+    /// Esc on a window: back to the panel it was opened over. Nothing
+    /// happens when no window is up.
+    pub(super) fn editor_close_modal(&mut self) {
         let editor = self.editor();
-        if let Panel::Edge { from, .. } = &editor.panel {
-            let name = from.clone();
-            editor.panel = Panel::Stage {
-                name,
-                tab: super::inspector::StageTab::Behaviour,
-            };
-            editor.panel_anchor = None;
-            editor.cursor = 0;
+        let Some(base) = editor.modal.take() else {
+            return;
+        };
+        editor.panel = base.panel;
+        editor.cursor = base.cursor;
+        let count = editor.fields().len();
+        editor.cursor = editor.cursor.min(count.saturating_sub(1));
+    }
+
+    /// What a type field holds now, whether it takes one type or many, and
+    /// what the chooser is called.
+    fn type_field_state(&mut self, id: &FieldId) -> (Vec<String>, bool, String, String) {
+        let stage = self.editor().panel_stage();
+        let view = stage.as_deref().and_then(|s| self.editor().doc.stage(s));
+        match id {
+            FieldId::StageAccepts => (
+                view.map(|s| s.input_accepts).unwrap_or_default(),
+                false,
+                "What the stage takes, beyond its regions".to_string(),
+                "Media type patterns the stage takes as parts. Left empty, its regions decide."
+                    .to_string(),
+            ),
+            FieldId::StageAsText => (
+                view.map(|s| s.input_as_text).unwrap_or_default(),
+                false,
+                "What the stage reads as text".to_string(),
+                "Types whose parts reach the model as text whatever it takes natively.".to_string(),
+            ),
+            FieldId::ToolLimitRow(tool) => (
+                view.and_then(|s| {
+                    s.tool_accepts
+                        .into_iter()
+                        .find(|(t, _)| t == tool)
+                        .map(|(_, list)| list)
+                })
+                .unwrap_or_default(),
+                false,
+                format!("What {tool} may be handed here"),
+                "A part of any other type is out of the tool's reach at this stage; nothing \
+                 picked means whatever the tool takes."
+                    .to_string(),
+            ),
+            FieldId::ArtifactType => (
+                self.panel_artifact()
+                    .and_then(|(s, i)| self.editor().doc.artifacts(&s).into_iter().nth(i))
+                    .map(|a| vec![a.media_type])
+                    .unwrap_or_default(),
+                true,
+                "The file's type".to_string(),
+                "The media type the file must be, or a pattern it must match.".to_string(),
+            ),
+            _ => (
+                self.panel_region()
+                    .and_then(|(scope, name)| self.editor().doc.region(scope.stage(), &name))
+                    .map(|r| r.accepts)
+                    .unwrap_or_default(),
+                false,
+                "What the region takes".to_string(),
+                "Media type patterns the region takes; a write outside them is refused with \
+                 the list. Nothing picked takes anything."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The media type chooser for a field: every family, every type the
+    /// registry knows, whatever the field already holds, and a row to type
+    /// one in.
+    fn editor_open_type_chooser(&mut self, id: &FieldId) {
+        let (current, single, title, explain) = self.type_field_state(id);
+        let mut values = self.editor().media_types.clone();
+        for held in &current {
+            if !values.contains(held) {
+                values.push(held.clone());
+            }
+        }
+        let mut rows: Vec<PickerOption> = values
+            .iter()
+            .map(|value| PickerOption {
+                value: value.clone(),
+                detail: type_detail(value),
+            })
+            .collect();
+        rows.push(PickerOption {
+            value: TYPE_ANOTHER.to_string(),
+            detail: "a type/subtype or type/* the list does not have".to_string(),
+        });
+        let cursor = current
+            .first()
+            .and_then(|c| values.iter().position(|v| v == c))
+            .unwrap_or(0);
+        let mut picker = Picker::new(title, vec![explain], rows, cursor);
+        if !single {
+            picker.multi = Some(
+                values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| current.contains(v))
+                    .map(|(i, _)| i)
+                    .collect(),
+            );
+        }
+        self.editor().picker = Some((PickerFor::MediaTypes(id.clone()), picker));
+    }
+
+    /// What the type chooser settled on. The "another…" row opens the line
+    /// editor with the rest already in it, so one more can be typed.
+    pub(super) fn editor_settle_types(&mut self, id: &FieldId, chosen: Vec<String>) {
+        let (kept, another): (Vec<String>, Vec<String>) =
+            chosen.into_iter().partition(|v| v != TYPE_ANOTHER);
+        if !another.is_empty() {
+            let mut text = kept.join(", ");
+            if !text.is_empty() {
+                text.push_str(", ");
+            }
+            self.editor().line = Some((id.clone(), LineEdit::new(text, false)));
             return;
         }
-        if let Panel::Region { back, .. } = &editor.panel {
-            editor.panel = (**back).clone();
-            editor.panel_anchor = None;
-            editor.cursor = 0;
-            let count = editor.fields().len();
-            editor.cursor = editor.cursor.min(count.saturating_sub(1));
+        self.editor_write_types(id, kept);
+    }
+
+    /// Write a list of types to the field it belongs to.
+    fn editor_write_types(&mut self, id: &FieldId, types: Vec<String>) {
+        match id {
+            FieldId::StageAccepts | FieldId::StageAsText => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let which = if *id == FieldId::StageAccepts {
+                    InputList::Accepts
+                } else {
+                    InputList::AsText
+                };
+                self.editor_mutate(|d| d.set_stage_input(&stage, which, &types));
+            }
+            FieldId::ToolLimitRow(tool) => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                self.editor_mutate(|d| d.set_tool_accepts(&stage, tool, &types));
+            }
+            FieldId::ArtifactType => {
+                let Some((stage, i)) = self.panel_artifact() else {
+                    return;
+                };
+                let Some(first) = types.into_iter().next() else {
+                    return;
+                };
+                self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Type(first)));
+            }
+            _ => {
+                if let Some((scope, name)) = self.panel_region() {
+                    self.editor_mutate(|d| {
+                        d.set_region_field(
+                            &scope,
+                            &name,
+                            RegionField::Accepts,
+                            RegionValue::Text(types.join(", ")),
+                        )
+                    });
+                }
+            }
         }
     }
 
@@ -672,7 +863,10 @@ impl Dashboard {
                 let region = value.to_string();
                 self.editor_mutate(|d| d.set_tool_routing_override(&stage, &tool, &region));
             }
-            PickerFor::Tools | PickerFor::Field(_) | PickerFor::ConnectFrom(_) => {}
+            PickerFor::Tools
+            | PickerFor::Field(_)
+            | PickerFor::ConnectFrom(_)
+            | PickerFor::MediaTypes(_) => {}
         }
     }
 
@@ -688,18 +882,13 @@ impl Dashboard {
     }
 
     /// Enter on the add-artifact prompt: a new declaration on the stage the
-    /// panel shows, the cursor on its name.
+    /// panel shows, opened in its window so its type can be picked at once.
     pub(super) fn editor_add_artifact(&mut self, name: &str) {
         let stage = self.editor().panel_stage().expect("a stage field");
         let name = name.to_string();
         if self.editor_mutate(|d| d.add_artifact(&stage, &name)) {
-            let editor = self.editor();
-            let last = editor.doc.artifacts(&stage).len().saturating_sub(1);
-            let at = editor
-                .fields()
-                .iter()
-                .position(|f| f.id == FieldId::ArtifactName(last));
-            editor.cursor = at.unwrap_or(editor.cursor);
+            let last = self.editor().doc.artifacts(&stage).len().saturating_sub(1);
+            self.editor_open_artifact(&stage, last);
         }
     }
 

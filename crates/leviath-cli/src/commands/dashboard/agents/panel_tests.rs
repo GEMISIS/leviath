@@ -535,22 +535,53 @@ fn the_agent_panel_opens_a_shared_region_and_adds_one() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// ─── media ───────────────────────────────────────────────────────────────────
+// ─── inputs & outputs, and the tool limits ───────────────────────────────
+
+/// The chooser rows on screen, by their values, while a chooser is open.
+fn picker_values(dash: &mut Dashboard) -> Vec<String> {
+    dash.agents()
+        .editor
+        .as_ref()
+        .unwrap()
+        .picker
+        .as_ref()
+        .map(|(_, p)| p.options.iter().map(|o| o.value.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Move the open chooser's cursor onto `value` (the row must be there).
+fn picker_goto(dash: &mut Dashboard, value: &str) {
+    let at = picker_values(dash)
+        .iter()
+        .position(|v| v == value)
+        .unwrap_or_else(|| panic!("no chooser row {value}"));
+    let editor = dash.agents().editor.as_mut().unwrap();
+    let picker = &mut editor.picker.as_mut().unwrap().1;
+    picker.query = crate::tui::widgets::line_edit::LineEdit::new(String::new(), false);
+    picker.cursor = at;
+}
 
 #[test]
-fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
-    let (mut dash, root) = dashboard("media_tab");
+fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
+    let (mut dash, root) = dashboard("io_tab");
+    // The chooser reads the registry the daemon would: a row of the
+    // operator's shows up in it.
+    std::fs::write(
+        &dash.new_run_ctx.config_path,
+        "[media_types.\"application/x-acme\"]\nfamily = \"model\"\n",
+    )
+    .unwrap();
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
-    dash.handle_key(key(KeyCode::Char('4')));
+    dash.handle_key(key(KeyCode::Char('2')));
     assert_eq!(
         dash.agents().editor.as_ref().unwrap().panel,
         Panel::Stage {
             name: "work".into(),
-            tab: StageTab::Media
+            tab: StageTab::Io
         }
     );
     let screen = text(&mut dash);
-    assert!(screen.contains("4 Media"), "{screen}");
+    assert!(screen.contains("2 Inputs & outputs"), "{screen}");
     let stage = |dash: &mut Dashboard| {
         dash.agents()
             .editor
@@ -560,49 +591,114 @@ fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
             .stage("work")
             .unwrap()
     };
+    // What the stage takes: a chooser of families and registry types,
+    // Space picks, Enter keeps.
     goto(&mut dash, FieldId::StageAccepts);
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "image/*, audio/wav");
+    assert!(picker_open(&mut dash));
+    let values = picker_values(&mut dash);
+    assert!(values.contains(&"image/*".to_string()), "{values:?}");
+    assert!(values.contains(&"image/png".to_string()), "{values:?}");
+    assert!(
+        values.contains(&"application/x-acme".to_string()),
+        "{values:?}"
+    );
+    assert_eq!(values.last().map(String::as_str), Some("another…"));
+    picker_goto(&mut dash, "image/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    picker_goto(&mut dash, "audio/wav");
+    dash.handle_key(key(KeyCode::Char(' ')));
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(stage(&mut dash).input_accepts, ["image/*", "audio/wav"]);
+    // Reopened, the chooser has them picked and its cursor on the first.
+    dash.handle_key(key(KeyCode::Enter));
+    {
+        let editor = dash.agents().editor.as_ref().unwrap();
+        let picker = &editor.picker.as_ref().unwrap().1;
+        assert!(picker.is_chosen(picker.cursor));
+    }
+    dash.handle_key(key(KeyCode::Esc));
+    // "another…" opens the line editor with what was picked already in it.
     goto(&mut dash, FieldId::StageAsText);
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "model/obj");
+    picker_goto(&mut dash, "model/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    picker_goto(&mut dash, "another…");
+    dash.handle_key(key(KeyCode::Char(' ')));
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).input_as_text, ["model/obj"]);
-    // Declare a file: the button asks its name, the cursor lands on it, and
-    // its rows edit it.
+    assert!(dash.agents().editor.as_ref().unwrap().line.is_some());
+    type_str(&mut dash, "application/x-scene");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        stage(&mut dash).input_as_text,
+        ["model/*", "application/x-scene"]
+    );
+    // Reopened, a typed type the list never had is a row of its own.
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(picker_values(&mut dash).contains(&"application/x-scene".to_string()));
+    dash.handle_key(key(KeyCode::Esc));
+    // x clears a list.
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert!(stage(&mut dash).input_as_text.is_empty());
+    goto(&mut dash, FieldId::StageAccepts);
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert!(stage(&mut dash).input_accepts.is_empty());
+    // The answer format is typed.
+    goto(&mut dash, FieldId::OutputFormat);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "markdown");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).output_format, "markdown");
+    // Declaring a file asks its name and opens its window.
     goto(&mut dash, FieldId::AddArtifact);
     dash.handle_key(key(KeyCode::Enter));
     let screen = text(&mut dash);
     assert!(screen.contains("New artifact"), "{screen}");
+    // Esc on the name prompt declares nothing; an empty name neither.
+    dash.handle_key(key(KeyCode::Esc));
+    goto(&mut dash, FieldId::AddArtifact);
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(stage(&mut dash).artifacts.is_empty());
+    goto(&mut dash, FieldId::AddArtifact);
+    dash.handle_key(key(KeyCode::Enter));
     type_str(&mut dash, "final");
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts.len(), 1);
-    assert_eq!(
-        dash.agents()
-            .editor
-            .as_ref()
-            .unwrap()
-            .current_field()
-            .unwrap()
-            .id,
-        FieldId::ArtifactName(0)
-    );
-    goto(&mut dash, FieldId::ArtifactType(0));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Artifact { stage, index: 0 } if stage == "work"
+    ));
+    let screen = text(&mut dash);
+    assert!(screen.contains("File · work hands back #1"), "{screen}");
+    assert!(screen.contains("Esc closes this window"), "{screen}");
+    // The type is one pick; "another…" types one in.
+    goto(&mut dash, FieldId::ArtifactType);
     dash.handle_key(key(KeyCode::Enter));
-    for _ in 0..3 {
+    picker_goto(&mut dash, "video/mp4");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/mp4");
+    // "another…" with nothing typed leaves the type alone.
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "another…");
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/mp4");
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "another…");
+    dash.handle_key(key(KeyCode::Enter));
+    for _ in 0..10 {
         dash.handle_key(key(KeyCode::Backspace));
     }
-    type_str(&mut dash, "video/mp4");
+    type_str(&mut dash, "video/x-cut");
     dash.handle_key(key(KeyCode::Enter));
-    goto(&mut dash, FieldId::ArtifactRequired(0));
+    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/x-cut");
+    goto(&mut dash, FieldId::ArtifactRequired);
     dash.handle_key(key(KeyCode::Enter));
-    goto(&mut dash, FieldId::ArtifactDescription(0));
+    goto(&mut dash, FieldId::ArtifactDescription);
     dash.handle_key(key(KeyCode::Enter));
     type_str(&mut dash, "the cut");
     dash.handle_key(key(KeyCode::Enter));
-    goto(&mut dash, FieldId::ArtifactName(0));
+    goto(&mut dash, FieldId::ArtifactName);
     dash.handle_key(key(KeyCode::Enter));
     for _ in 0..5 {
         dash.handle_key(key(KeyCode::Backspace));
@@ -617,20 +713,57 @@ fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
             a.required,
             a.description.as_str()
         ),
-        ("cut", "video/mp4", true, "the cut")
+        ("cut", "video/x-cut", true, "the cut")
     );
-    let saved = dash.agents().editor.as_ref().unwrap().doc.to_toml();
-    assert!(
-        saved.contains("[[stages.work.output.artifacts]]"),
-        "{saved}"
+    // A window keeps the keys: Tab moves nothing, a click outside it is
+    // swallowed, a click on a row picks it and a second opens it.
+    dash.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dash.agents().editor.as_ref().unwrap().focus,
+        Focus::Inspector
     );
-    assert!(saved.contains("[stages.work.input]"), "{saved}");
-    // A name the stage already uses is refused with a message.
-    goto(&mut dash, FieldId::AddArtifact);
+    let _ = draw(&mut dash, 160, 50);
+    let hit = dash.agents().editor.as_ref().unwrap().modal_hit.clone();
+    assert!(!hit.rows.is_empty());
+    let press = |col: u16, row: u16| mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+    assert!(dash.handle_agents_mouse(press(0, 0)));
+    assert!(dash.handle_agents_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        hit.area.x + 2,
+        hit.rows[0]
+    )));
+    let required = 2;
+    // A click left of the window is swallowed without moving the cursor.
+    assert!(dash.handle_agents_mouse(press(0, hit.rows[required])));
+    assert_ne!(dash.agents().editor.as_ref().unwrap().cursor, required);
+    assert!(dash.handle_agents_mouse(press(hit.area.x + 2, hit.rows[required])));
+    assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, required);
+    assert!(dash.handle_agents_mouse(press(hit.area.x + 2, hit.rows[required])));
+    assert!(!stage(&mut dash).artifacts[0].required);
+    // Esc closes the window; the row it came from is under the cursor.
+    dash.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Stage {
+            name: "work".into(),
+            tab: StageTab::Io
+        }
+    );
+    let screen = text(&mut dash);
+    assert!(screen.contains("cut  video/x-cut"), "{screen}");
+    // Enter on the row reopens it; the drop button closes it with the file gone.
+    goto(&mut dash, FieldId::ArtifactRow(0));
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "cut");
+    goto(&mut dash, FieldId::DeleteArtifact);
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts.len(), 1);
+    assert!(stage(&mut dash).artifacts.is_empty());
+    assert!(dash.agents().editor.as_ref().unwrap().modal.is_none());
+    // x on a row drops a declaration too; a taken name is refused.
+    dash.editor_add_artifact("a");
+    dash.handle_key(key(KeyCode::Esc));
+    dash.editor_add_artifact("b");
+    dash.handle_key(key(KeyCode::Esc));
+    dash.editor_add_artifact("a");
     assert!(
         dash.agents()
             .editor
@@ -640,37 +773,36 @@ fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
             .as_deref()
             .is_some_and(|m| m.contains("taken"))
     );
-    // Esc on the name prompt adds nothing; an empty name neither.
-    goto(&mut dash, FieldId::AddArtifact);
-    dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(key(KeyCode::Esc));
-    dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts.len(), 1);
-    // The graph beside the inspector wears what the stage takes and gives.
     let screen = text(&mut dash);
-    assert!(screen.contains("◧ image/* audio/wav"), "{screen}");
-    assert!(screen.contains("▤ video/mp4"), "{screen}");
-    // x on any of a declaration's rows drops it.
-    dash.editor_add_artifact("b");
-    dash.editor_add_artifact("c");
-    dash.editor_add_artifact("d");
-    assert_eq!(stage(&mut dash).artifacts.len(), 4);
-    goto(&mut dash, FieldId::ArtifactDescription(3));
+    assert!(
+        screen.contains("Hands back") && screen.contains("  and"),
+        "{screen}"
+    );
+    goto(&mut dash, FieldId::ArtifactRow(1));
     dash.handle_key(key(KeyCode::Char('x')));
-    goto(&mut dash, FieldId::ArtifactType(2));
-    dash.handle_key(key(KeyCode::Char('x')));
-    goto(&mut dash, FieldId::ArtifactName(1));
-    dash.handle_key(key(KeyCode::Char('x')));
-    assert_eq!(stage(&mut dash).artifacts.len(), 1);
-    goto(&mut dash, FieldId::ArtifactRequired(0));
+    goto(&mut dash, FieldId::ArtifactRow(0));
     dash.handle_key(key(KeyCode::Char('x')));
     assert!(stage(&mut dash).artifacts.is_empty());
-    // The region panel: what it takes and how many stored parts it keeps.
-    dash.handle_key(key(KeyCode::Char('3')));
+    // The regions the stage reads open in the window from here too.
+    dash.handle_key(key(KeyCode::Char('4')));
     goto(&mut dash, FieldId::OwnLayout);
     dash.handle_key(key(KeyCode::Enter));
     dash.editor_add_region("shots");
+    dash.handle_key(key(KeyCode::Esc));
+    dash.editor_add_region("notes");
+    dash.handle_key(key(KeyCode::Esc));
+    dash.handle_key(key(KeyCode::Char('2')));
+    let screen = text(&mut dash);
+    assert!(
+        screen.contains("Reads") && screen.contains("notes  any type"),
+        "{screen}"
+    );
+    goto(&mut dash, FieldId::IoRegionRow("shots".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Region { name, .. } if name == "shots"
+    ));
     let region = |dash: &mut Dashboard| {
         dash.agents()
             .editor
@@ -682,9 +814,10 @@ fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
     };
     goto(&mut dash, FieldId::RegionAccepts);
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "image/png audio/*");
+    picker_goto(&mut dash, "image/png");
+    dash.handle_key(key(KeyCode::Char(' ')));
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(region(&mut dash).accepts, ["image/png", "audio/*"]);
+    assert_eq!(region(&mut dash).accepts, ["image/png"]);
     goto(&mut dash, FieldId::RegionMaxStored);
     dash.handle_key(key(KeyCode::Right));
     assert_eq!(region(&mut dash).max_stored, Some(1));
@@ -692,6 +825,139 @@ fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
     type_str(&mut dash, "2");
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(region(&mut dash).max_stored, Some(12));
+    goto(&mut dash, FieldId::RegionAccepts);
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert!(region(&mut dash).accepts.is_empty());
+    dash.handle_key(key(KeyCode::Esc));
+    let screen = text(&mut dash);
+    assert!(screen.contains("shots  any type"), "{screen}");
+    // The graph beside the inspector wears the badges as you edit.
+    goto(&mut dash, FieldId::StageAccepts);
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "audio/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    let screen = text(&mut dash);
+    assert!(screen.contains("◧ audio/*"), "{screen}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_models_tab_limits_what_each_tool_may_be_handed() {
+    let (mut dash, root) = dashboard("tool_limits");
+    open_stage(&mut dash, "own", "work", StageTab::Model);
+    dash.agents()
+        .editor
+        .as_mut()
+        .unwrap()
+        .doc
+        .set_tools(
+            "work",
+            &[
+                "@scripts".to_string(),
+                "read_file".to_string(),
+                "spawn_agent".to_string(),
+            ],
+        )
+        .unwrap();
+    dash.agents().editor.as_mut().unwrap().refresh();
+    // A group grant has no row of its own.
+    assert!(
+        !dash
+            .agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .fields()
+            .iter()
+            .any(|f| f.id == FieldId::ToolLimitRow("@scripts".into()))
+    );
+    let limits = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .stage("work")
+            .unwrap()
+            .tool_accepts
+    };
+    let screen = text(&mut dash);
+    assert!(screen.contains("spawn_agent may be handed"), "{screen}");
+    assert!(screen.contains("any type"), "{screen}");
+    goto(&mut dash, FieldId::ToolLimitRow("spawn_agent".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    let screen = text(&mut dash);
+    assert!(
+        screen.contains("What spawn_agent may be handed here"),
+        "{screen}"
+    );
+    picker_goto(&mut dash, "image/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    picker_goto(&mut dash, "audio/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        limits(&mut dash),
+        vec![(
+            "spawn_agent".to_string(),
+            vec!["image/*".to_string(), "audio/*".to_string()]
+        )]
+    );
+    let saved = dash.agents().editor.as_ref().unwrap().doc.to_toml();
+    assert!(saved.contains("[stages.work.tool_accepts]"), "{saved}");
+    // A second tool's limit sits beside the first, and reopening either
+    // chooser finds its own.
+    goto(&mut dash, FieldId::ToolLimitRow("read_file".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "text/*");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(limits(&mut dash).len(), 2);
+    dash.handle_key(key(KeyCode::Enter));
+    {
+        let editor = dash.agents().editor.as_ref().unwrap();
+        let picker = &editor.picker.as_ref().unwrap().1;
+        assert!(picker.is_chosen(picker.cursor));
+    }
+    dash.handle_key(key(KeyCode::Esc));
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(limits(&mut dash).len(), 1);
+    // A limit on a tool the stage no longer names keeps its row, so it can
+    // be lifted; x lifts it.
+    dash.agents()
+        .editor
+        .as_mut()
+        .unwrap()
+        .doc
+        .set_tools("work", &["read_file".to_string()])
+        .unwrap();
+    dash.agents().editor.as_mut().unwrap().refresh();
+    goto(&mut dash, FieldId::ToolLimitRow("spawn_agent".into()));
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert!(limits(&mut dash).is_empty());
+    assert!(
+        !dash
+            .agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .fields()
+            .iter()
+            .any(|f| f.id == FieldId::ToolLimitRow("spawn_agent".into()))
+    );
+    // The chooser on a tool row lands on the typed path too.
+    goto(&mut dash, FieldId::ToolLimitRow("read_file".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "another…");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "text/csv");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        limits(&mut dash),
+        vec![("read_file".to_string(), vec!["text/csv".to_string()])]
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -930,14 +1196,38 @@ fn the_region_panel_edits_every_field_and_deletes() {
             &Panel::Region {
                 scope: RegionScope::Stage("work".into()),
                 name: "ghost".into(),
-                back: Box::new(Panel::Agent),
             }
         )
         .is_empty()
     );
-    // The region-scoped helpers are inert off a region panel.
+    // The region-scoped helpers are inert off a region panel, the file
+    // ones off a file's window; a type chooser opened off its panel holds
+    // nothing yet; a delete that is refused leaves the panel alone.
     dash.editor_set_toggle_more(&FieldId::RegionRequired, true);
     assert!(!dash.editor_set_number_more(&FieldId::StageName, None));
+    dash.editor_set_toggle_more(&FieldId::ArtifactRequired, true);
+    dash.editor_set_toggle_more(&FieldId::StageMode, true);
+    dash.editor_commit_line_more(&FieldId::ArtifactName, "x");
+    dash.editor_commit_line_more(&FieldId::ArtifactType, "x/y");
+    dash.editor_commit_line_more(&FieldId::RegionAccepts, "image/*");
+    dash.editor_button_more(&FieldId::DeleteArtifact);
+    dash.editor_delete_region(&RegionScope::Shared, "ghost");
+    dash.editor_open_row(&FieldId::ArtifactType);
+    assert!(picker_open(&mut dash));
+    dash.handle_key(key(KeyCode::Esc));
+    dash.editor_open_row(&FieldId::RegionAccepts);
+    assert!(picker_open(&mut dash));
+    dash.handle_key(key(KeyCode::Esc));
+    assert!(
+        super::inspector::fields(
+            &dash.agents().editor.as_ref().unwrap().doc,
+            &Panel::Artifact {
+                stage: "work".into(),
+                index: 9,
+            }
+        )
+        .is_empty()
+    );
     dash.editor_pick_more(&FieldId::RegionKind, "pinned");
     dash.editor_commit_line_more(&FieldId::RegionName, "x");
     dash.editor_commit_line_more(&FieldId::RegionSeed, "x");
@@ -1119,8 +1409,8 @@ fn a_loop_back_to_the_same_stage_has_its_own_path_panel() {
     // Leaving from a stage panel with no anchor is the plain Esc: canvas.
     dash.handle_key(key(KeyCode::Esc));
     assert_eq!(dash.agents().editor.as_ref().unwrap().focus, Focus::Canvas);
-    // A leave with a stale anchor and a plain panel changes nothing.
-    dash.editor_leave_region();
+    // Closing with no window up changes nothing.
+    dash.editor_close_modal();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1495,9 +1785,9 @@ fn a_click_on_the_inspector_picks_rows_and_tabs() {
     let hit = dash.agents().editor.as_ref().unwrap().hit.clone();
     assert!(!hit.rows.is_empty());
     let (tab_row, tabs) = hit.tabs.clone().expect("a stage panel has tabs");
-    // A click on the third tab switches to it.
+    // A click on the last tab switches to it.
     let press = |col: u16, row: u16| mouse(MouseEventKind::Down(MouseButton::Left), col, row);
-    assert!(dash.handle_agents_mouse(press(tabs[2].0 + 1, tab_row)));
+    assert!(dash.handle_agents_mouse(press(tabs[3].0 + 1, tab_row)));
     assert_eq!(
         dash.agents().editor.as_ref().unwrap().panel,
         Panel::Stage {
@@ -1837,7 +2127,7 @@ fn the_helpers_are_inert_off_their_panels_and_rows() {
     dash.handle_key(key(KeyCode::Left));
     assert!(dash.agents().editor.as_ref().unwrap().overlay.is_none());
     // Enter on a plain status row opens nothing.
-    dash.handle_key(key(KeyCode::Char('3')));
+    dash.handle_key(key(KeyCode::Char('4')));
     goto(&mut dash, FieldId::ContextStatus);
     dash.handle_key(key(KeyCode::Enter));
     assert!(!picker_open(&mut dash));

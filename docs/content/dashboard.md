@@ -357,25 +357,37 @@ hidden, so the panel never reflows under the cursor:
   stage tries first, and the shared context regions (`Enter` on one opens it).
 - **A stage**, on four tabs (`1` to `4`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
-  has one, the prompts, its place in the file, delete. *Model & tools*: the model chain (the first is
-  tried first; `Enter` swaps an entry, `x` drops it, `←` `→` or a drag on its `⠿` grip move it, the
-  last row adds a fallback) and the tools it may use, picked from every tool this install has
-  (`Space` toggles, `Enter` keeps).
+  has one, the prompts, its place in the file, delete. *Inputs & outputs*: the regions the stage
+  reads and the [media](/docs/media) each takes (`Enter` opens one), what the stage takes beyond
+  them and what it reads as text whatever the model takes, the answer's format, and the files it
+  declares it hands back (`Enter` opens one, `x` drops it, the last row declares another and asks its
+  name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
+  drops it, `←` `→` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
+  use, picked from every tool this install has (`Space` toggles, `Enter` keeps), and under them what
+  each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another
+  agent with images only, or hand a tool that takes text and images only text here.
   *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
   it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
   tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
-  routing the tool). *Media*: what the stage takes as [parts](/docs/media) beyond what its regions
-  already say, the types it reads as text whatever the model takes, and the files it declares it
-  hands back (name, type or pattern, required, description; `x` on any of a file's rows drops the
-  declaration, the last row declares another and asks its name).
+  routing the tool).
 - **A path**: when it is taken, the hint the model routes on, whether it needs your approval, what
   context is carried across (everything, only pinned regions, everything summarized, or per-region
   rules: carry, summarize or drop each one, with the instructions the summary follows), delete.
-- **A context region**, opened from a region row: name, kind (each kind says what it does), share of
-  the context window and token cap, the sliding-window knobs when it is one, the media types it takes
-  and how many stored parts it keeps, whether it must be filled before the run goes on and what to say
-  if it is not, what seeds it, description, delete. `Esc` goes back to where the region was opened
-  from.
+
+A region, a declared file and a stage's loop back to itself open in a window over the editor rather
+than in the inspector's place, so the panel they came from stays in view; `Esc` closes the window.
+
+- **A context region**: name, kind (each kind says what it does), share of the context window and
+  token cap, the sliding-window knobs when it is one, the media types it takes and how many stored
+  parts it keeps, whether it must be filled before the run goes on and what to say if it is not, what
+  seeds it, description, delete.
+- **A declared file**: name, type or pattern, whether it is required, description, and a button to
+  drop the declaration.
+
+Every media type field is one chooser: the families (`image/*`, `audio/*`, and so on), every type
+the registry knows (the built-in table, then your [`media_types.toml`](/docs/configuration#media_typestoml)),
+and an *another…* row that takes a `type/subtype` or `type/*` the list does not have. `Space`
+picks as many as the field takes, `Enter` keeps them, `x` on the field clears it.
 
 The models the chooser offers come from every provider in your config (asked when the screen
 opens, so the list fills in a moment later) on top of the built-in catalog, marked with the context
@@ -424,9 +436,9 @@ On the inspector:
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
 | `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
 | `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
-| `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration |
-| `1` `2` `3` `4` | A stage's tabs: behaviour, model & tools, context, media |
-| `Esc` | Back: a region or a loop's path returns to where it was opened from; otherwise to the graph |
+| `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration, a list of types |
+| `1` `2` `3` `4` | A stage's tabs: behaviour, inputs & outputs, models & tools, context |
+| `Esc` | Close the window a region, a file or a loop is open in; otherwise back to the graph |
 | mouse | Click a row to pick it (again to open it); click a tab to switch to it; drag a model's `⠿` grip to move it in the chain |
 
 A stage's model chain is a priority order, and the `⠿` grip at the start of each model row is how

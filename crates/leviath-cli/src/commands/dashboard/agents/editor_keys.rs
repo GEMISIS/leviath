@@ -77,7 +77,8 @@ impl Dashboard {
                 let editor = self.editor();
                 editor.problems_open = !editor.problems_open;
             }
-            KeyCode::Tab => {
+            // A window keeps the keys until it closes.
+            KeyCode::Tab if self.editor().modal.is_none() => {
                 let editor = self.editor();
                 editor.focus = match editor.focus {
                     Focus::Canvas => Focus::Inspector,
@@ -124,8 +125,8 @@ impl Dashboard {
     fn editor_inspector_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
-                if self.editor().panel_anchor.is_some() {
-                    self.editor_leave_region();
+                if self.editor().modal.is_some() {
+                    self.editor_close_modal();
                 } else {
                     self.editor().focus = Focus::Canvas;
                 }
@@ -277,6 +278,25 @@ impl Dashboard {
         if editor.overlay.is_some() || editor.line.is_some() || editor.add_stage.is_some() {
             return false;
         }
+        // A window takes every click: one on its rows picks or opens a row,
+        // one anywhere else is swallowed, so nothing under it moves.
+        if editor.modal.is_some() {
+            if event.kind != MouseEventKind::Down(MouseButton::Left) {
+                return true;
+            }
+            let hit = editor.modal_hit.clone();
+            if let Some(i) = hit.rows.iter().position(|y| *y == event.row)
+                && event.column >= hit.area.x
+                && event.column < hit.area.x + hit.area.width
+            {
+                let was = editor.cursor;
+                editor.cursor = i;
+                if was == i {
+                    self.editor_activate();
+                }
+            }
+            return true;
+        }
         // A drag that began on a grip owns the mouse until it is released,
         // wherever the pointer wanders. Answering these itself is what stops
         // the fall-through from starting a text selection over the inspector
@@ -356,12 +376,22 @@ impl Dashboard {
         match outcome {
             PickerOutcome::Pending => self.editor().picker = Some((purpose, picker)),
             PickerOutcome::Cancelled => {}
-            PickerOutcome::ChosenMany(chosen) => self.editor_settle_tools(&chosen),
+            PickerOutcome::ChosenMany(chosen) => match purpose {
+                PickerFor::MediaTypes(id) => {
+                    let values = chosen
+                        .iter()
+                        .map(|i| picker.options[*i].value.clone())
+                        .collect();
+                    self.editor_settle_types(&id, values);
+                }
+                _ => self.editor_settle_tools(&chosen),
+            },
             PickerOutcome::Chosen(index) => {
                 let value = picker.options[index].value.clone();
                 match purpose {
                     PickerFor::Field(id) => self.editor_pick(&id, &value),
                     PickerFor::ConnectFrom(from) => self.editor_connect(&from, &value),
+                    PickerFor::MediaTypes(id) => self.editor_settle_types(&id, vec![value]),
                     other => self.editor_settle_more(other, &value),
                 }
             }
@@ -460,7 +490,7 @@ impl Dashboard {
         match self.editor().panel.clone() {
             Panel::Stage { name, .. } => self.editor_request_delete_stage(&name),
             Panel::Edge { from, to } => self.editor_delete_edge(&from, &to),
-            Panel::Agent | Panel::External(_) | Panel::Region { .. } => {
+            Panel::Agent | Panel::External(_) | Panel::Region { .. } | Panel::Artifact { .. } => {
                 self.editor().message = Some("Select a stage or a path to delete".to_string());
             }
         }

@@ -45,6 +45,57 @@ pub(in crate::commands::dashboard) enum PickerFor {
     RoutingTool,
     /// Where a tool's results land.
     RoutingRegion(String),
+    /// The media types of a field: what a region or a stage takes, what a
+    /// tool may be handed, a declared file's type.
+    MediaTypes(FieldId),
+}
+
+/// The panel a window was opened over, kept while the window is up: the
+/// inspector goes on showing it, and Esc brings it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands::dashboard) struct ModalBase {
+    /// The panel under the window.
+    pub(in crate::commands::dashboard) panel: Panel,
+    /// Its cursor.
+    pub(in crate::commands::dashboard) cursor: usize,
+    /// The canvas selection the window was opened from: it stays up while
+    /// that holds.
+    pub(in crate::commands::dashboard) anchor: Selection,
+}
+
+/// The chooser row that means "type one in": a media type the list does
+/// not have.
+pub(in crate::commands::dashboard) const TYPE_ANOTHER: &str = "another…";
+
+/// The media types the choosers offer: every family, then every type the
+/// registry knows, read the way the daemon reads it (the compiled defaults,
+/// the config's rows, `media_types.toml`).
+fn media_type_options(config_path: &std::path::Path) -> Vec<String> {
+    let registry = crate::config::Config::load_from_path_public(config_path)
+        .ok()
+        .and_then(|c| c.media_registry().ok())
+        .unwrap_or_else(leviath_core::media::MediaRegistry::builtin);
+    let mut out: Vec<String> = [
+        "*/*",
+        "text/*",
+        "image/*",
+        "audio/*",
+        "video/*",
+        "application/*",
+        "model/*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let mut keys: Vec<String> = registry
+        .keys()
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| !out.contains(key))
+        .collect();
+    keys.sort();
+    out.extend(keys);
+    out
 }
 
 /// A full-screen overlay over the editor.
@@ -104,9 +155,14 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) add_region: Option<LineEdit>,
     /// The name of an artifact about to be declared.
     pub(in crate::commands::dashboard) add_artifact: Option<LineEdit>,
-    /// The canvas selection a pushed panel (a region, a stage's loop back
-    /// to itself) was opened from: the panel stays while it holds.
-    pub(in crate::commands::dashboard) panel_anchor: Option<Selection>,
+    /// The panel a window (a region, a declared file, a stage's loop back
+    /// to itself) was opened over, while one is up. `panel` and `cursor`
+    /// are then the window's.
+    pub(in crate::commands::dashboard) modal: Option<ModalBase>,
+    /// Where the last frame put the window's rows, for the mouse.
+    pub(in crate::commands::dashboard) modal_hit: InspectorHits,
+    /// The media types the choosers offer.
+    pub(in crate::commands::dashboard) media_types: Vec<String>,
     pub(in crate::commands::dashboard) overlay: Option<Overlay>,
     /// The right-click menu, while one is open.
     pub(in crate::commands::dashboard) menu: Option<super::context_menu::ContextMenu>,
@@ -260,18 +316,28 @@ impl Editor {
     /// Bring the panel in line with the canvas selection, keeping a stage
     /// panel's tab across stages.
     pub(in crate::commands::dashboard) fn sync_panel(&mut self) {
-        // A pushed panel (a region, a loop back to the same stage) stays
-        // while the selection that opened it holds and what it shows exists.
+        // A window (a region, a declared file, a loop back to the same
+        // stage) stays up while the selection that opened it holds and what
+        // it shows exists.
         let pushed = match &self.panel {
-            Panel::Region { scope, name, .. } => self.doc.region(scope.stage(), name).is_some(),
+            Panel::Region { scope, name } => self.doc.region(scope.stage(), name).is_some(),
+            Panel::Artifact { stage, index } => self.doc.artifacts(stage).len() > *index,
             Panel::Edge { from, to } if from == to => self.doc.edge(from, to).is_some(),
             _ => false,
         };
-        if pushed && self.panel_anchor.as_ref() == Some(&self.view.selection()) {
+        if pushed
+            && self
+                .modal
+                .as_ref()
+                .is_some_and(|m| m.anchor == self.view.selection())
+        {
             return;
         }
-        self.panel_anchor = None;
-        let tab = match &self.panel {
+        // The tab to keep is the one under the window, when one is up:
+        // a region deleted from its window lands back on the tab it was
+        // opened from.
+        let under = self.modal.take().map(|m| m.panel);
+        let tab = match under.as_ref().unwrap_or(&self.panel) {
             Panel::Stage { tab, .. } => *tab,
             _ => StageTab::Behaviour,
         };
@@ -447,6 +513,7 @@ impl Dashboard {
         models.sort();
         models.dedup();
         let tools = tool_choices(&dir, &name, &doc);
+        let media_types = media_type_options(&self.new_run_ctx.config_path);
         let mut editor = Editor {
             name,
             is_new,
@@ -465,7 +532,9 @@ impl Dashboard {
             add_stage: None,
             add_region: None,
             add_artifact: None,
-            panel_anchor: None,
+            modal: None,
+            modal_hit: InspectorHits::default(),
+            media_types,
             overlay: None,
             menu: None,
             place_next: None,
