@@ -863,7 +863,7 @@ fn the_inspector_edits_every_kind_of_field() {
     );
     // Mode: cycle with the arrows, then through the chooser to fan-out.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::StageMode);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -875,8 +875,8 @@ fn the_inspector_edits_every_kind_of_field() {
             .mode,
         crate::blueprint_edit::StageModeView::InteractivePoints
     );
-    dash.handle_key(key(KeyCode::Left));
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
+    dash.handle_key(key(KeyCode::Char('h')));
     assert_eq!(
         dash.agents()
             .editor
@@ -904,7 +904,7 @@ fn the_inspector_edits_every_kind_of_field() {
     );
     // The fan-out rows are live now: worker kind, worker, merge, caps, policy.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerKind);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     dash.handle_key(key(KeyCode::Enter));
     dash.handle_key(key(KeyCode::Enter));
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
@@ -922,7 +922,7 @@ fn the_inspector_edits_every_kind_of_field() {
         .fan_out;
     assert_eq!(fan.worker.as_ref().map(|(_, v)| v.as_str()), Some("finish"));
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MergeStage);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -936,7 +936,7 @@ fn the_inspector_edits_every_kind_of_field() {
             .as_deref(),
         Some("finish")
     );
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     assert_eq!(
         dash.agents()
             .editor
@@ -950,8 +950,8 @@ fn the_inspector_edits_every_kind_of_field() {
         None
     );
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MaxWorkers);
-    dash.handle_key(key(KeyCode::Right));
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -964,9 +964,9 @@ fn the_inspector_edits_every_kind_of_field() {
             .max_workers,
         Some(2)
     );
-    dash.handle_key(key(KeyCode::Left));
-    dash.handle_key(key(KeyCode::Left));
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
+    dash.handle_key(key(KeyCode::Char('h')));
+    dash.handle_key(key(KeyCode::Char('h')));
     assert_eq!(
         dash.agents()
             .editor
@@ -979,7 +979,7 @@ fn the_inspector_edits_every_kind_of_field() {
             .max_workers,
         None
     );
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MaxItems);
     dash.handle_key(key(KeyCode::Enter));
     type_str(&mut dash, "7");
@@ -1001,7 +1001,7 @@ fn the_inspector_edits_every_kind_of_field() {
     dash.handle_key(key(KeyCode::Enter));
     assert!(text(&mut dash).contains("is not a whole number"));
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::OnWorkerFailure);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -1037,7 +1037,7 @@ fn the_inspector_edits_every_kind_of_field() {
         None
     );
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerKind);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert!(
         dash.agents()
             .editor
@@ -1068,7 +1068,7 @@ fn the_inspector_edits_every_kind_of_field() {
     );
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MaxWorkers);
     dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert!(dash.agents().editor.as_ref().unwrap().line.is_none());
     // Description, tries, revisits, allow complete.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::StageDescription);
@@ -1087,7 +1087,7 @@ fn the_inspector_edits_every_kind_of_field() {
             .ends_with('!')
     );
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MaxIterations);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -1115,8 +1115,8 @@ fn the_inspector_edits_every_kind_of_field() {
         None
     );
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MaxRevisits);
-    dash.handle_key(key(KeyCode::Right));
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -1155,7 +1155,7 @@ fn the_inspector_edits_every_kind_of_field() {
             .allow_complete,
         Some(true)
     );
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(
         dash.agents()
             .editor
@@ -1858,8 +1858,8 @@ fn the_corners_of_the_editor() {
     let fields = dash.agents().editor.as_ref().unwrap().fields();
     let at = |id: FieldId| fields.iter().position(|f| f.id == id).unwrap();
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::StageMode);
-    dash.handle_key(key(KeyCode::Right));
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
+    dash.handle_key(key(KeyCode::Char('l')));
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MergeStage);
     dash.handle_key(key(KeyCode::Enter));
     assert!(text(&mut dash).contains("Merge stage"));

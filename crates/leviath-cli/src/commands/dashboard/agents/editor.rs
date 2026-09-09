@@ -320,6 +320,15 @@ impl Editor {
         self.fields().into_iter().nth(self.cursor)
     }
 
+    /// The tab a stage panel is on; `None` on every other panel and under a
+    /// window.
+    pub(in crate::commands::dashboard) fn panel_tab(&self) -> Option<StageTab> {
+        match (&self.modal, &self.panel) {
+            (None, Panel::Stage { tab, .. }) => Some(*tab),
+            _ => None,
+        }
+    }
+
     /// Bring the panel in line with the canvas selection, keeping a stage
     /// panel's tab across stages.
     pub(in crate::commands::dashboard) fn sync_panel(&mut self) {

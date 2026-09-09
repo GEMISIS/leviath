@@ -204,15 +204,13 @@ impl Dashboard {
             let mut spans = Vec::new();
             let mut x = inner.x;
             let mut tabs = Vec::new();
-            for (i, t) in StageTab::ALL.iter().enumerate() {
-                let on = t == tab;
-                let text = format!(" {} {} ", i + 1, t.title());
+            for (i, t, text) in tab_strip(inner.width) {
                 let w = text.chars().count() as u16;
                 tabs.push((x, x + w));
                 x += w;
                 spans.push(Span::styled(
                     text,
-                    if on {
+                    if t == *tab {
                         Style::default()
                             .fg(C_ACTIVE)
                             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -220,6 +218,7 @@ impl Dashboard {
                         Style::default().fg(C_DIM)
                     },
                 ));
+                let _ = i;
             }
             hits.tabs = Some((inner.y, tabs));
             lines.push(Line::from(spans));
@@ -255,8 +254,12 @@ impl Dashboard {
                 Panel::Agent => {
                     "Select a stage or a path on the canvas to edit it; Tab moves here.".to_string()
                 }
+                Panel::Stage { .. } => {
+                    "Tab moves the keys here; ↑↓ pick a row, Enter edits it, ←→ switch tabs."
+                        .to_string()
+                }
                 _ => {
-                    "Tab moves the keys here; ↑↓ pick a row, Enter edits it, ←→ change it in place."
+                    "Tab moves the keys here; ↑↓ pick a row, Enter edits it, h l change it in place."
                         .to_string()
                 }
             });
@@ -265,8 +268,11 @@ impl Dashboard {
         hits.rows.retain(|y| *y < inner.y + body_h);
         hits.grips.retain(|(_, r)| r.y < inner.y + body_h);
         editor.hit = hits;
+        // Never wrapped: every line was cut to the width when it was made,
+        // and a wrapped line would put every row under it one line below
+        // where the click map says it is.
         frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Paragraph::new(lines),
             Rect {
                 height: body_h,
                 ..inner
@@ -314,7 +320,7 @@ impl Dashboard {
         hits.rows.retain(|y| *y < inner.y + body_h);
         editor.modal_hit = hits;
         frame.render_widget(
-            Paragraph::new(painted.lines).wrap(Wrap { trim: false }),
+            Paragraph::new(painted.lines),
             Rect {
                 height: body_h,
                 ..inner
@@ -419,20 +425,31 @@ impl Dashboard {
                     hint("+ -", "zoom"),
                     hint("drag", "move / connect"),
                 ],
-                Focus::Inspector => vec![
-                    hint("esc", "canvas"),
-                    hint("^s", "save"),
-                    hint("?", "help"),
-                    hint("↑↓", "row"),
-                    hint("enter", "edit"),
-                    hint("←→", "change"),
-                    hint("x", "remove"),
-                    hint("1-4", "tab"),
-                    hint("tab", "canvas"),
-                    hint("^z", "undo"),
-                    hint("click", "pick a row"),
-                    hint("drag ⠿", "reorder"),
-                ],
+                Focus::Inspector => {
+                    let mut hints = vec![
+                        hint("esc", "canvas"),
+                        hint("^s", "save"),
+                        hint("?", "help"),
+                        hint("↑↓", "row"),
+                        hint("enter", "edit"),
+                    ];
+                    // On a stage the arrows walk the tabs and h/l change a
+                    // row; anywhere else there are no tabs to walk.
+                    if editor.panel_tab().is_some() {
+                        hints.push(hint("←→ 1-4", "tab"));
+                        hints.push(hint("h l", "change"));
+                    } else {
+                        hints.push(hint("←→", "change"));
+                    }
+                    hints.extend([
+                        hint("x", "remove"),
+                        hint("tab", "canvas"),
+                        hint("^z", "undo"),
+                        hint("click", "pick a row"),
+                        hint("drag ⠿", "reorder"),
+                    ]);
+                    hints
+                }
             }
         };
         draw_hint_bar(frame, area, None, &hints, false);
@@ -497,7 +514,7 @@ fn field_lines(
     start_y: u16,
     with_grips: bool,
 ) -> PaintedRows {
-    let label_w = 23usize;
+    let label_w = label_width(fields);
     // Two columns wider than the label and its gutter: the grip sits in
     // the gap, blank on rows nothing can be done with.
     let value_w = (inner.width as usize).saturating_sub(label_w + GRIP_W as usize + 3);
@@ -525,12 +542,15 @@ fn field_lines(
             .line
             .as_ref()
             .filter(|(id, _)| focused && *id == field.id);
+        // Dim only when the row cannot be edited right now: a value left at
+        // its default is dimmed by `value_text`, and a label that dimmed with
+        // it read as a row that could not be touched.
         let label_style = if !field.enabled {
             Style::default().fg(C_DIM)
         } else if on {
             Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(C_MUTED)
+            Style::default()
         };
         let grabbable = with_grips && matches!(field.id, FieldId::ModelEntry(_));
         let mut spans = vec![
@@ -545,7 +565,7 @@ fn field_lines(
         let is_button = matches!(field.value, FieldValue::Button);
         if !is_button {
             spans.push(Span::styled(
-                format!("{:<label_w$}", field.label),
+                format!("{:<label_w$}", fit(&field.label, label_w)),
                 label_style,
             ));
         }
@@ -564,6 +584,46 @@ fn field_lines(
         painted.lines.push(Line::from(spans));
     }
     painted
+}
+
+/// The stage tabs as one line that fits `width`: the full titles when they
+/// do, the short ones otherwise, each with its number and the tab it is.
+///
+/// The strip used to be the full titles whatever the width, and at the
+/// inspector's usual width it wrapped onto a second line, which cut the
+/// last tab in two and put every row one line below where the click map
+/// had it.
+fn tab_strip(width: u16) -> Vec<(usize, StageTab, String)> {
+    let strip = |short: bool| -> Vec<(usize, StageTab, String)> {
+        StageTab::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let title = if short { t.short_title() } else { t.title() };
+                (i, *t, format!(" {} {title} ", i + 1))
+            })
+            .collect()
+    };
+    let full = strip(false);
+    let fits = full
+        .iter()
+        .map(|(_, _, text)| text.chars().count())
+        .sum::<usize>()
+        <= width as usize;
+    if fits { full } else { strip(true) }
+}
+
+/// The label column's width for these rows: as wide as the widest label,
+/// within bounds, so a long label is cut rather than pushing its value into
+/// the next line.
+fn label_width(fields: &[Field]) -> usize {
+    fields
+        .iter()
+        .filter(|f| !matches!(f.value, FieldValue::Button))
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(12)
+        .clamp(12, 26)
 }
 
 /// The fields as they should be drawn while a model is in the air: the chain's

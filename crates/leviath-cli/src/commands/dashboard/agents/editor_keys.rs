@@ -147,20 +147,32 @@ impl Dashboard {
                 editor.cursor = editor.fields().len().saturating_sub(1);
             }
             KeyCode::Enter => self.editor_activate(),
+            // On a stage the arrows walk the tabs, as they do on every tabbed
+            // screen; `h` and `l` change a row in place. Elsewhere there are
+            // no tabs and the arrows change the row.
+            KeyCode::Left | KeyCode::Right if self.editor().panel_tab().is_some() => {
+                let tab = self.editor().panel_tab().expect("checked just above");
+                let delta = if code == KeyCode::Left { -1 } else { 1 };
+                self.editor_set_tab(tab.step(delta));
+            }
             KeyCode::Left | KeyCode::Char('h') => self.editor_adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => self.editor_adjust(1),
             KeyCode::Char(c @ '1'..='4') => {
-                let tab = StageTab::ALL[(c as usize) - ('1' as usize)];
-                let editor = self.editor();
-                if let Panel::Stage { name, .. } = &editor.panel {
-                    editor.panel = Panel::Stage {
-                        name: name.clone(),
-                        tab,
-                    };
-                    editor.cursor = 0;
-                }
+                self.editor_set_tab(StageTab::ALL[(c as usize) - ('1' as usize)]);
             }
             _ => {}
+        }
+    }
+
+    /// Switch a stage panel to `tab`; nothing on any other panel.
+    fn editor_set_tab(&mut self, tab: StageTab) {
+        let editor = self.editor();
+        if let Panel::Stage { name, .. } = &editor.panel {
+            editor.panel = Panel::Stage {
+                name: name.clone(),
+                tab,
+            };
+            editor.cursor = 0;
         }
     }
 

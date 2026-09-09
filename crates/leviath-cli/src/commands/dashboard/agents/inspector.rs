@@ -50,6 +50,23 @@ impl StageTab {
             StageTab::Context => "Context",
         }
     }
+
+    /// The title when the four do not fit on one line of the inspector.
+    pub(in crate::commands::dashboard) fn short_title(self) -> &'static str {
+        match self {
+            StageTab::Behaviour => "Behaviour",
+            StageTab::Io => "In & out",
+            StageTab::Model => "Models",
+            StageTab::Context => "Context",
+        }
+    }
+
+    /// The tab after `self`, wrapping round; `delta` of `-1` the one before.
+    pub(in crate::commands::dashboard) fn step(self, delta: isize) -> StageTab {
+        let at = StageTab::ALL.iter().position(|t| *t == self).unwrap_or(0) as isize;
+        let n = StageTab::ALL.len() as isize;
+        StageTab::ALL[(at + delta).rem_euclid(n) as usize]
+    }
 }
 
 /// What the inspector is showing.
@@ -508,7 +525,7 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                     .map(|(_, list)| list.join(", "));
                 out.push(Field::new(
                     FieldId::ToolLimitRow(tool.clone()),
-                    format!("  {tool} may be handed"),
+                    format!("  {tool} accepts"),
                     FieldValue::Row(limit.unwrap_or_else(|| "any type".to_string())),
                     "What this tool may be handed at this stage; a part of any other type is \
                      out of its reach here. Enter picks the types, x lifts the limit.",

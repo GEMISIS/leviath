@@ -213,7 +213,11 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "edit the row: type, choose, flip, open, or press the button",
                 ),
                 (
-                    "← → / h l",
+                    "← →",
+                    "on a stage: the previous / next tab; elsewhere, change the row in place",
+                ),
+                (
+                    "h / l",
                     "change the row in place: cycle a choice, step a number, flip a toggle",
                 ),
                 (
@@ -228,7 +232,7 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "enter on a region, a file or a loop",
                     "opens it in a window over the editor; esc closes the window",
                 ),
-                ("← → on a model", "move it earlier or later in the chain"),
+                ("h / l on a model", "move it earlier or later in the chain"),
                 (
                     "drag ⠿",
                     "pick a model up by its grip and drop it anywhere in the chain; the rest of the row still selects text",
