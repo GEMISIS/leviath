@@ -313,8 +313,13 @@ mod tests {
 
     #[test]
     fn a_file_url_is_absolute_and_encoded() {
-        let url = file_url(Path::new("/tmp/my dir/a%b.png"));
-        assert_eq!(url, "file:///tmp/my%20dir/a%25b.png");
+        // An absolute path on every OS: `/tmp/...` is relative on Windows and
+        // would be joined to the cwd, drive letter and all.
+        let absolute = std::env::temp_dir().join("my dir").join("a%b.png");
+        let url = file_url(&absolute);
+        assert!(url.starts_with("file:///"), "{url}");
+        assert!(url.ends_with("/my%20dir/a%25b.png"), "{url}");
+        assert!(!url.contains(' ') && !url.contains('\\'), "{url}");
         let relative = file_url(Path::new("rel.png"));
         assert!(relative.starts_with("file:///"), "{relative}");
         assert!(relative.ends_with("/rel.png"), "{relative}");

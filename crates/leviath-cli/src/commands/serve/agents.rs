@@ -1289,9 +1289,11 @@ system_prompt = "Plan the work"
         let workdir = tempfile::tempdir().unwrap();
         let boundary = "levboundary";
         let mut body = Vec::new();
+        // Through the JSON encoder, not a raw interpolation: a Windows workdir
+        // carries backslashes, which a bare `"{}"` turns into invalid escapes.
         let request = format!(
-            "{{\"blueprint\":\"spawnable\",\"task\":\"cut it\",\"workdir\":\"{}\"}}",
-            workdir.path().to_string_lossy()
+            "{{\"blueprint\":\"spawnable\",\"task\":\"cut it\",\"workdir\":{}}}",
+            serde_json::to_string(&*workdir.path().to_string_lossy()).unwrap()
         );
         body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{request}\r\n").as_bytes());
         body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"part:storyboard\"; filename=\"frame1.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes());
@@ -1344,9 +1346,10 @@ system_prompt = "Plan the work"
         let workdir = tempfile::tempdir().unwrap();
         std::fs::write(workdir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nhero").unwrap();
         std::fs::write(workdir.path().join("brief.md"), "# brief").unwrap();
-        let wd = workdir.path().to_string_lossy();
+        // Encoded, so a Windows path's backslashes survive as JSON.
+        let wd = serde_json::to_string(&*workdir.path().to_string_lossy()).unwrap();
         let body = format!(
-            "{{\"blueprint\":\"spawnable\",\"task\":\"edit @hero.png please\",\"workdir\":\"{wd}\",\
+            "{{\"blueprint\":\"spawnable\",\"task\":\"edit @hero.png please\",\"workdir\":{wd},\
              \"regions\":{{\"brief\":\"read @brief.md and @nothing.md\"}},\
              \"parts\":[{{\"path\":\"brief.md\",\"region\":\"notes\",\"caption\":\"c\"}}]}}"
         );
@@ -1364,7 +1367,7 @@ system_prompt = "Plan the work"
         assert_eq!(parts[2]["region"], "brief");
 
         let body = format!(
-            "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":\"{wd}\",\
+            "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":{wd},\
              \"parts\":[{{\"path\":\"../outside.png\"}}]}}"
         );
         let (status, _) = spawn_parts_seen("application/json", body.into_bytes()).await;
@@ -1373,11 +1376,9 @@ system_prompt = "Plan the work"
         // here) fails the spawn, whether the task or a region named it.
         std::fs::write(workdir.path().join("empty.png"), b"").unwrap();
         for body in [
+            format!("{{\"blueprint\":\"spawnable\",\"task\":\"see @empty.png\",\"workdir\":{wd}}}"),
             format!(
-                "{{\"blueprint\":\"spawnable\",\"task\":\"see @empty.png\",\"workdir\":\"{wd}\"}}"
-            ),
-            format!(
-                "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":\"{wd}\",\
+                "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":{wd},\
                  \"regions\":{{\"brief\":\"see @empty.png\"}}}}"
             ),
         ] {
