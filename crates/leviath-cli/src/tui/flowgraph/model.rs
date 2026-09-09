@@ -195,6 +195,30 @@ impl StageEdge {
 }
 
 impl StageNode {
+    /// What a box is sized for: the id, or more when the badge row needs
+    /// it. A box is `hint + 10` cells wide and its badge row gets `hint + 7`
+    /// of them, so the loop, end and media badges that never change are
+    /// counted here and a stage that takes or hands back files gets a box
+    /// that shows it.
+    pub(crate) fn width_hint(&self) -> usize {
+        let id = self.id.trim_start_matches("ext:").chars().count();
+        let mut badges: Vec<String> = Vec::new();
+        if self.self_loop {
+            badges.push("↺ loops".to_string());
+        }
+        if self.is_terminal || self.allow_complete {
+            badges.push("⏹ can end".to_string());
+        }
+        if !self.inputs.is_empty() {
+            badges.push(format!("◧ {}", self.inputs.join(" ")));
+        }
+        if !self.outputs.is_empty() {
+            badges.push(format!("▤ {}", self.outputs.join(" ")));
+        }
+        let row = badges.join(" · ").chars().count();
+        id.max(row.saturating_sub(7))
+    }
+
     /// The word the node shows for what it is.
     pub(crate) fn kind_label(&self) -> &'static str {
         match &self.kind {
@@ -550,6 +574,21 @@ worker_agent = "uploader"
         assert!(edge(&g, "check", "publish").unseen.is_empty());
         assert!(edge(&g, "publish", "ext:uploader").unseen.is_empty());
         assert!(g.node("ext:uploader").unwrap().inputs.is_empty());
+        // A box is sized for its badges when they outgrow the name: render's
+        // row is `◧ image/* audio/wav · ▤ video/mp4 text/markdown`, 47
+        // cells, less the 7 the box already allows past the id.
+        assert_eq!(render.width_hint(), 40);
+        assert_eq!(g.node("ext:uploader").unwrap().width_hint(), 8);
+        // A loop and an end count too.
+        let looped = graph(
+            "[agent]\nname = \"l\"\n[stages.plan]\n[stages.plan.transitions.plan]\n[stages.plan.transitions.done]\n[stages.done]\n[stages.done.transitions]\n",
+        );
+        // recover can end and inherits the shared layout: `⏹ can end · ◧
+        // image/* audio/wav` is 31 cells; check's `◧ video/*` fits its name.
+        assert_eq!(g.node("recover").unwrap().width_hint(), 24);
+        assert_eq!(g.node("check").unwrap().width_hint(), 5);
+        assert_eq!(looped.node("plan").unwrap().width_hint(), 4);
+        assert_eq!(looped.node("done").unwrap().width_hint(), 4);
     }
 
     #[test]

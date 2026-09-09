@@ -9,7 +9,10 @@ use super::super::state::Dashboard;
 use super::super::types::ConfirmAction;
 use super::editor::PickerFor;
 use super::inspector::{FieldId, Panel, REGION_KINDS};
-use crate::blueprint_edit::{RegionField, RegionScope, RegionValue, Rule, TransformKind};
+use crate::blueprint_edit::{
+    ArtifactField, InputList, RegionField, RegionScope, RegionValue, Rule, TransformKind,
+    split_list,
+};
 use crate::tui::widgets::confirm::Confirm;
 use crate::tui::widgets::line_edit::LineEdit;
 use crate::tui::widgets::picker::{Picker, PickerOption};
@@ -44,14 +47,28 @@ impl Dashboard {
         }
     }
 
-    /// A toggle the core does not know: the region's `required`.
+    /// A toggle the core does not know: the region's `required`, an
+    /// artifact's.
     pub(super) fn editor_set_toggle_more(&mut self, id: &FieldId, on: bool) {
-        if *id == FieldId::RegionRequired
-            && let Some((scope, name)) = self.panel_region()
-        {
-            self.editor_mutate(|d| {
-                d.set_region_field(&scope, &name, RegionField::Required, RegionValue::Flag(on))
-            });
+        match id {
+            FieldId::RegionRequired => {
+                if let Some((scope, name)) = self.panel_region() {
+                    self.editor_mutate(|d| {
+                        d.set_region_field(
+                            &scope,
+                            &name,
+                            RegionField::Required,
+                            RegionValue::Flag(on),
+                        )
+                    });
+                }
+            }
+            FieldId::ArtifactRequired(i) => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let i = *i;
+                self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Required(on)));
+            }
+            _ => {}
         }
     }
 
@@ -63,6 +80,7 @@ impl Dashboard {
             FieldId::RegionMinTokens => RegionField::MinTokens,
             FieldId::RegionMaxItems => RegionField::MaxItems,
             FieldId::RegionOverflow => RegionField::Overflow,
+            FieldId::RegionMaxStored => RegionField::MaxStored,
             _ => return false,
         };
         if let Some((scope, name)) = self.panel_region() {
@@ -230,6 +248,9 @@ impl Dashboard {
                 );
                 self.editor().picker = Some((PickerFor::RoutingTool, picker));
             }
+            FieldId::AddArtifact => {
+                self.editor().add_artifact = Some(LineEdit::new(String::new(), false));
+            }
             FieldId::DeleteRegion => {
                 let Some((scope, name)) = self.panel_region() else {
                     return;
@@ -297,14 +318,38 @@ impl Dashboard {
                     self.set_region_panel_name(&name);
                 }
             }
+            FieldId::StageAccepts | FieldId::StageAsText => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let which = if *id == FieldId::StageAccepts {
+                    InputList::Accepts
+                } else {
+                    InputList::AsText
+                };
+                let list = split_list(&text);
+                self.editor_mutate(|d| d.set_stage_input(&stage, which, &list));
+            }
+            FieldId::ArtifactName(i)
+            | FieldId::ArtifactType(i)
+            | FieldId::ArtifactDescription(i) => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let i = *i;
+                let field = match id {
+                    FieldId::ArtifactName(_) => ArtifactField::Name(text),
+                    FieldId::ArtifactType(_) => ArtifactField::Type(text),
+                    _ => ArtifactField::Description(text),
+                };
+                self.editor_mutate(|d| d.set_artifact(&stage, i, field));
+            }
             FieldId::RegionStrategy
             | FieldId::RegionMessage
             | FieldId::RegionSeed
-            | FieldId::RegionDescription => {
+            | FieldId::RegionDescription
+            | FieldId::RegionAccepts => {
                 let field = match id {
                     FieldId::RegionStrategy => RegionField::Strategy,
                     FieldId::RegionMessage => RegionField::RequiredMessage,
                     FieldId::RegionSeed => RegionField::Seed,
+                    FieldId::RegionAccepts => RegionField::Accepts,
                     _ => RegionField::Description,
                 };
                 if let Some((scope, name)) = self.panel_region() {
@@ -353,12 +398,20 @@ impl Dashboard {
         }
     }
 
-    /// `x` on a row: drop a model from the chain, stop routing a tool.
+    /// `x` on a row: drop a model from the chain, stop routing a tool, drop
+    /// an artifact declaration.
     pub(super) fn editor_remove_row(&mut self) {
         let Some(field) = self.editor().current_field() else {
             return;
         };
         match field.id {
+            FieldId::ArtifactName(i)
+            | FieldId::ArtifactType(i)
+            | FieldId::ArtifactRequired(i)
+            | FieldId::ArtifactDescription(i) => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                self.editor_mutate(|d| d.delete_artifact(&stage, i));
+            }
             FieldId::ModelEntry(i) => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 let chain: Vec<String> = self
@@ -632,6 +685,22 @@ impl Dashboard {
             .filter_map(|i| all.get(*i).map(|t| t.name.clone()))
             .collect();
         self.editor_mutate(|d| d.set_tools(&stage, &tools));
+    }
+
+    /// Enter on the add-artifact prompt: a new declaration on the stage the
+    /// panel shows, the cursor on its name.
+    pub(super) fn editor_add_artifact(&mut self, name: &str) {
+        let stage = self.editor().panel_stage().expect("a stage field");
+        let name = name.to_string();
+        if self.editor_mutate(|d| d.add_artifact(&stage, &name)) {
+            let editor = self.editor();
+            let last = editor.doc.artifacts(&stage).len().saturating_sub(1);
+            let at = editor
+                .fields()
+                .iter()
+                .position(|f| f.id == FieldId::ArtifactName(last));
+            editor.cursor = at.unwrap_or(editor.cursor);
+        }
     }
 
     /// Enter on the add-region prompt: a new region in the stage's own

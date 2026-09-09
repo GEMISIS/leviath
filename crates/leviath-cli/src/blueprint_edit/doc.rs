@@ -173,6 +173,14 @@ pub(crate) struct StageView {
     /// Whether the stage has a `transitions` table with nothing in it: the
     /// run can end here.
     pub is_terminal: bool,
+    /// `[stages.<name>.input] accepts`: what the stage takes as parts when
+    /// its regions do not already say.
+    pub input_accepts: Vec<String>,
+    /// `[stages.<name>.input] as_text`: types whose parts reach the model as
+    /// text whatever it takes.
+    pub input_as_text: Vec<String>,
+    /// The files the stage declares it hands back, in declaration order.
+    pub artifacts: Vec<super::media::ArtifactView>,
 }
 
 /// When a path is taken.
@@ -384,6 +392,11 @@ pub(crate) struct RegionView {
     pub overflow: Option<u64>,
     /// `description`, or empty.
     pub description: String,
+    /// `accepts`: the media type patterns the region takes; empty is
+    /// anything.
+    pub accepts: Vec<String>,
+    /// `max_stored`: the most stored parts it keeps across its entries.
+    pub max_stored: Option<u64>,
 }
 
 /// The layout a stage runs with.
@@ -545,6 +558,9 @@ fn stage_view(name: &str, item: &Item) -> StageView {
                 .and_then(Item::as_table_like)
                 .is_some(),
             is_terminal: transitions.is_some_and(|t| t.is_empty()),
+            input_accepts: super::media::input_list(item, super::media::InputList::Accepts),
+            input_as_text: super::media::input_list(item, super::media::InputList::AsText),
+            artifacts: super::media::artifacts_of(item),
         }
     }
 }
@@ -783,6 +799,8 @@ fn region_view(name: &str, table: &dyn TableLike) -> RegionView {
         description: get_str(table, "description")
             .unwrap_or_default()
             .to_string(),
+        accepts: get_strings(table, "accepts"),
+        max_stored: get_int(table, "max_stored").and_then(|n| u64::try_from(n).ok()),
     }
 }
 

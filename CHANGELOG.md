@@ -206,6 +206,13 @@ same list.
   whose file the next stage's regions cannot take carries `!` on its label,
   and the explorer's caption names the type that would cross as a stand-in
   (#400).
+- The dashboard's agent editor writes the media keys: a region's `accepts`
+  and `max_stored` on its panel, and a stage's `[input] accepts` and
+  `as_text` and its `[[output.artifacts]]` declarations (name, type or
+  pattern, required, description) on a fourth stage tab, *Media* (`4`),
+  where `x` on a file's row drops the declaration and the last row
+  declares another. The keys round-trip the way the runtime reads them,
+  and the graph beside the inspector wears the badges as you edit (#400).
 - `lev agent-client` advertises `image` and `audio` prompt capabilities. An
   image or audio block's bytes, and a `resource` block's `blob`, become
   parts on the task region (or on the message, on a later prompt), a prompt

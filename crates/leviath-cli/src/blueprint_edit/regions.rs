@@ -10,7 +10,7 @@ use super::doc::ManifestDoc;
 use super::stages::set_or_remove_int;
 use super::tables::{
     child_mut, ensure_child, ensure_parent, get_str, remove_and_report_empty, rename_key, set_bool,
-    set_or_remove_str, set_str,
+    set_or_remove_str, set_str, set_strings,
 };
 use super::{EditError, require_name};
 
@@ -58,6 +58,10 @@ pub(crate) enum RegionField {
     Overflow,
     /// `description`.
     Description,
+    /// `accepts`, typed as a list: commas or spaces between patterns.
+    Accepts,
+    /// `max_stored`, at least 1.
+    MaxStored,
 }
 
 /// A value for a [`RegionField`].
@@ -201,6 +205,17 @@ impl ManifestDoc {
             }
             (RegionField::Description, RegionValue::Text(t)) => {
                 set_or_remove_str(table, "description", &t);
+            }
+            (RegionField::Accepts, RegionValue::Text(t)) => {
+                let list = super::media::split_list(&t);
+                if list.is_empty() {
+                    table.remove("accepts");
+                } else {
+                    set_strings(table, "accepts", &list);
+                }
+            }
+            (RegionField::MaxStored, RegionValue::Number(n)) => {
+                set_or_remove_int(table, "max_stored", n.map(|n| n.max(1)));
             }
             (RegionField::Seed, RegionValue::Text(t)) => {
                 let is_table = table
