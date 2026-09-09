@@ -10,7 +10,11 @@
 //! this answers for a run that finished last week as readily as one that
 //! finished a second ago.
 
+use std::path::PathBuf;
+
 use clap::Args;
+
+pub(crate) mod export;
 
 /// Arguments for `lev result`.
 #[derive(Args, Debug)]
@@ -26,6 +30,20 @@ pub struct ResultArgs {
     /// what a shell pipeline wants.
     #[arg(long)]
     pub raw: bool,
+
+    /// Write one produced file's bytes to stdout, by the name the run gave it
+    /// (or into `--out`, when both are given).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["json", "raw"])]
+    pub artifact: Option<String>,
+
+    /// Write the produced files into this directory: every one, or only the
+    /// `--artifact` one. Prints each path written.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["json", "raw"])]
+    pub out: Option<PathBuf>,
+
+    /// Hand one produced file to the operating system to open, by name.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["json", "raw", "artifact", "out"])]
+    pub open: Option<String>,
 }
 
 /// Execute `lev result`.
@@ -35,20 +53,44 @@ pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
     // `meta.json` says whether there is an answer and how big; the bytes are in
     // the sidecar beside it.
     let output = crate::runstate::read_final_output(&args.run_id);
+    // A missing answer is a failure exit rather than empty output, so
+    // `lev result <id> > answer.txt` in a script does not silently write an
+    // empty file and carry on.
+    let no_answer = || {
+        anyhow::anyhow!(
+            "run '{}' produced no final output (status: {}). Only an agent that calls \
+             `submit_output` has an answer to show; see `lev ps` for what it did.",
+            args.run_id,
+            meta.status
+        )
+    };
+    let files = export::FileRequest::from_flags(
+        args.artifact.as_deref(),
+        args.out.as_deref(),
+        args.open.as_deref(),
+    );
+    if let Some(request) = files {
+        let output = output.as_ref().ok_or_else(no_answer)?;
+        let mut stdout = std::io::stdout().lock();
+        let lines = export::deliver(
+            &args.run_id,
+            &meta.workdir,
+            output,
+            request,
+            leviath_sys::open_url,
+            &mut stdout,
+        )?;
+        for line in lines {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     match render(&args.run_id, output.as_ref(), args.json, args.raw) {
         Some(out) => {
             print!("{out}");
             Ok(())
         }
-        // A missing answer is a failure exit rather than empty output, so
-        // `lev result <id> > answer.txt` in a script does not silently write an
-        // empty file and carry on.
-        None => anyhow::bail!(
-            "run '{}' produced no final output (status: {}). Only an agent that calls \
-             `submit_output` has an answer to show; see `lev ps` for what it did.",
-            args.run_id,
-            meta.status
-        ),
+        None => Err(no_answer()),
     }
 }
 

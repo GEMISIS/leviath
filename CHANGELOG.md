@@ -176,6 +176,17 @@ same list.
   region, and a region that refuses the part's type or is over `[media]
   max_part_bytes` refuses the spawn by name, or drops the part from a
   message and keeps the text (#400).
+- Files come back out from the command line. `lev result --artifact <name>`
+  streams one produced file to stdout, `--out <dir>` writes every produced
+  file (or the named one) into a directory, and `--open <name>` hands one
+  to the operating system; the bytes come from the run's store when the
+  answer recorded a hash, else from the working directory. `lev blobs
+  <run>` lists every stored part a run holds with its type, size, shape,
+  tokens, hash and regions, and `lev blobs <run> <name-or-hash>` fetches
+  one to stdout, `--out` a path, or `--open`. `lev media list` prints the
+  effective media registry with each row's source and `lev media check
+  <file>` says what a file resolves to and how a model would see it. `lev
+  context --full` shows each stored part as its own row (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

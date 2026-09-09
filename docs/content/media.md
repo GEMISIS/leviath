@@ -71,7 +71,8 @@ Rows layer. The compiled defaults come first, then your config, then the bluepri
 `[media_types]`, then rows a Rhai provider declares. A row names only what it changes: adding
 an extension to `image/png` keeps its family and token rule. `lev media list` prints the
 effective table with the source of every row, and `lev media check <file>` says what type a
-file resolves to, what its stand-in looks like, and which of your configured models accept it.
+file resolves to, what its stand-in looks like, and how it reaches a model; `lev models list
+--accepts <type>` names the models that take it natively.
 
 A file's type is decided in a fixed order: the type the sender declared, then the registry's
 magic prefixes, then the extension, then valid UTF-8 counts as `text/plain`, and anything else

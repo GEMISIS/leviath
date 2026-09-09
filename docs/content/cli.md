@@ -440,6 +440,19 @@ rather than printing an empty table, since there is nothing an empty table could
 A provider the built-in table knows but this install has no credential for is still an empty table
 and still exits 0.
 
+### `lev media`
+
+The media registry as this install sees it, and what a file resolves to under it. See
+[Media](/docs/media) for what a row means.
+
+| Command | Flags |
+|---|---|
+| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, and which layer the row came from (`builtin`, `config`) |
+| `lev media check <FILE>` | `--type <MEDIA_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, and how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest |
+
+Both read `[media_types]` from the config and refuse to run on a table that does not load, the
+same fault `lev doctor` reports.
+
 ### `lev agent-client`
 
 Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as JSON-RPC on stdio.
@@ -479,13 +492,17 @@ config grants.
 | `lev resume <RUN_ID>` | | Un-pause a run |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
-| `lev result <RUN_ID>` | `--json`, `--raw` | Print what the agent handed back. See [below](#lev-result) |
+| `lev result <RUN_ID>` | `--json`, `--raw`, `--artifact`, `--out`, `--open` | Print what the agent handed back, or hand out the files it produced. See [below](#lev-result) |
+| `lev blobs <RUN_ID> [PART]` | `--json`, `--out`, `--open` | List the files a run holds as stored parts, or fetch one. See [below](#lev-blobs-run-id-part) |
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the
 work rather than only record the outcome, and the on-disk write is the fallback.
 
-`lev context --full` includes each region's entry contents instead of per-region summaries.
+`lev context --full` includes each region's entry contents instead of per-region summaries. An
+entry that carries files shows each as its own row: the stand-in the model would see, the hash,
+the token estimate, and a delivery override when the entry has one. The summary counts a region's
+stored parts beside its entries, and `--json` carries every part as it was recorded.
 
 ### `lev result`
 
@@ -501,11 +518,42 @@ lev result agent-abc123 --json   # the answer plus its shape and stage
 A run that produced no answer exits non-zero rather than printing nothing. So
 `lev result <id> > answer.txt` in a script cannot quietly write an empty file.
 
-Files the run produced are listed under the answer. Fetch one however you normally would; the paths
-are relative to the run's working directory.
+Files the run produced are listed under the answer, with their type, size and hash. Three flags
+hand them out without a trip to the working directory:
+
+```bash
+lev result agent-abc123 --artifact final > trailer.mp4   # one file's bytes, by the name the stage gave it
+lev result agent-abc123 --out ./delivered                # every file into a directory, each path printed
+lev result agent-abc123 --artifact final --out ./here    # just that one, into a directory
+lev result agent-abc123 --open final                     # hand one to whatever the OS opens it with
+```
+
+The bytes come from the run's own store when the answer recorded a hash, so they are what the
+stage submitted even if the working directory has moved on; a file the store does not hold is read
+from the working directory instead. `--open` writes the file under the system temp directory
+first, so it has a name and an extension the opener can type it by. Nothing in `lev` plays or
+draws a file.
 
 Only an agent that calls `submit_output` has an answer to show. See
 [Final outputs](/docs/outputs) for how a blueprint asks for one.
+
+### `lev blobs <RUN-ID> [PART]`
+
+Every file a run holds as a stored part, whatever put it there: an attachment on `lev run`, a
+`read_file` on an image, an MCP server's audio block, a `context_attach`, a submitted artifact.
+Read from the run's `context.json` and its `blobs/` directory, so it needs no daemon.
+
+```bash
+lev blobs agent-abc123                       # name, type, size, shape, tokens, hash, and the regions holding each
+lev blobs agent-abc123 --json
+lev blobs agent-abc123 hero.png > hero.png   # one part's bytes, by name
+lev blobs agent-abc123 ab12cdef --out ./     # by a hash prefix (six characters or more), into a directory
+lev blobs agent-abc123 hero.png --out x.png  # to a path
+lev blobs agent-abc123 hero.png --open       # hand it to the OS
+```
+
+A part the context names but the store no longer holds is listed with a note and cannot be
+fetched. A part with no name exports as its short hash plus the extension its type implies.
 
 ### `lev respond [REQUEST_ID] [VALUE]`
 

@@ -174,6 +174,9 @@ async fn execute_prints_an_answer_written_to_a_run_directory() {
             run_id: "run-answered".to_string(),
             json: false,
             raw: true,
+            artifact: None,
+            out: None,
+            open: None,
         })
         .await
         .expect("the answer is there to print");
@@ -201,6 +204,9 @@ async fn execute_fails_when_the_run_never_answered() {
             run_id: "run-silent".to_string(),
             json: false,
             raw: false,
+            artifact: None,
+            out: None,
+            open: None,
         })
         .await
         .expect_err("no answer is a failure exit");
@@ -220,6 +226,9 @@ async fn execute_fails_for_a_run_that_does_not_exist() {
             run_id: "no-such-run".to_string(),
             json: false,
             raw: false,
+            artifact: None,
+            out: None,
+            open: None,
         })
         .await
         .expect_err("an unknown run is an error");
@@ -236,4 +245,86 @@ fn an_answer_ending_in_a_newline_is_not_given_another() {
         .expect("there is an answer");
     assert!(out.ends_with("already terminated\n"), "{out:?}");
     assert!(!out.ends_with("\n\n"), "{out:?}");
+}
+
+/// The file flags go through the same run directory: one artifact into a
+/// directory, and a run with no answer refused before any file is looked for.
+#[tokio::test]
+async fn execute_writes_a_produced_file_into_a_directory() {
+    crate::runstate::with_isolated_runs_dir_async("result-execute-files", |_| async {
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::write(workdir.path().join("chart.svg"), b"<svg/>").unwrap();
+        let mut meta = crate::runstate::RunMeta::new(
+            "run-files".to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            workdir.path().to_string_lossy().to_string(),
+            1,
+        );
+        let answer =
+            leviath_core::output::FinalOutput::new("done", None, "present".to_string(), 42)
+                .with_artifacts(vec![leviath_core::output::Artifact::from_path("chart.svg")]);
+        meta.final_output = Some(answer.descriptor());
+        crate::runstate::create_run(&meta).expect("run dir");
+        crate::runstate::write_final_output(
+            &crate::runstate::run_dir("run-files"),
+            &answer.content,
+        )
+        .expect("sidecar");
+
+        let dest = tempfile::tempdir().unwrap();
+        execute(ResultArgs {
+            run_id: "run-files".to_string(),
+            json: false,
+            raw: false,
+            artifact: Some("chart.svg".to_string()),
+            out: Some(dest.path().to_path_buf()),
+            open: None,
+        })
+        .await
+        .expect("the file is written");
+        assert_eq!(
+            std::fs::read(dest.path().join("chart.svg")).unwrap(),
+            b"<svg/>"
+        );
+        let err = execute(ResultArgs {
+            run_id: "run-files".to_string(),
+            json: false,
+            raw: false,
+            artifact: Some("nope".to_string()),
+            out: None,
+            open: None,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no file named 'nope'"), "{err}");
+
+        let silent = crate::runstate::RunMeta::new(
+            "run-quiet".to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&silent).expect("run dir");
+        let err = execute(ResultArgs {
+            run_id: "run-quiet".to_string(),
+            json: false,
+            raw: false,
+            artifact: None,
+            out: Some(dest.path().to_path_buf()),
+            open: None,
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("produced no final output"),
+            "{err}"
+        );
+    })
+    .await;
 }

@@ -48,6 +48,9 @@ pub enum Commands {
     /// List and inspect available models
     Models(commands::models::ModelsArgs),
 
+    /// Show the media registry, and what a file resolves to under it
+    Media(commands::media::MediaArgs),
+
     /// Inspect and move the secrets Leviath holds
     Auth(commands::auth::AuthArgs),
 
@@ -127,6 +130,9 @@ pub enum Commands {
     /// Show a run's context-window history (from its run.lvr archive)
     Context(commands::context::ContextArgs),
 
+    /// List the files a run holds as stored parts, and fetch one
+    Blobs(commands::blobs::BlobsArgs),
+
     /// Show a run's per-stage token ledger, where a staged agent's cost lives
     Stages(commands::stages::StagesArgs),
 
@@ -170,6 +176,7 @@ Setup and configuration:
   providers     Show configured providers and set their priority order
   doctor        Check that provider wiring works, end to end
   models        List and inspect available models
+  media         Show the media registry, and what a file resolves to under it
   auth          Inspect and move the secrets Leviath holds
   mcp           Manage MCP tool servers and their authentication
   approvals     Show what runs without an approval prompt, and why
@@ -200,6 +207,7 @@ Running agents:
 Inspecting runs:
   result        Print what an agent handed back when a run finished
   context       Show a run's context-window history (from its run.lvr archive)
+  blobs         List the files a run holds as stored parts, and fetch one
   stages        Show a run's per-stage token ledger, where a staged agent's cost lives
   timeline      Show where a run's wall-clock time went: model calls, tools, waiting on children
 
@@ -353,6 +361,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => ex.dashboard(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
+        Commands::Media(args) => commands::media::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Approvals(args) => commands::approvals::execute(args).await,
@@ -362,6 +371,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
+        Commands::Blobs(args) => commands::blobs::execute(args).await,
         Commands::Stages(args) => commands::stages::execute(args).await,
         Commands::Timeline(args) => commands::timeline::execute(args).await,
         Commands::Result(args) => commands::result::execute(args).await,
@@ -857,9 +867,38 @@ mod tests {
             run_id: "no-such-run-xyzzy".to_string(),
             json: false,
             raw: false,
+            artifact: None,
+            out: None,
+            open: None,
         };
         let result = dispatch(Commands::Result(args), &MockRisky).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_blobs_and_media_variants_are_routed() {
+        // A run that is not there errors, which shows the routing reached it.
+        let blobs = commands::blobs::BlobsArgs {
+            run_id: "no-such-run-xyzzy".to_string(),
+            part: None,
+            out: None,
+            open: false,
+            json: false,
+        };
+        assert!(dispatch(Commands::Blobs(blobs), &MockRisky).await.is_err());
+        // A file that is not there errors the same way, before any config is
+        // consulted for anything the test would have to isolate.
+        crate::config::with_isolated_config_path_async("dispatch-media", |_dir| async move {
+            let media = commands::media::MediaArgs {
+                command: commands::media::MediaCommand::Check(commands::media::CheckArgs {
+                    file: std::path::PathBuf::from("/no/such/file.png"),
+                    media_type: None,
+                    json: false,
+                }),
+            };
+            assert!(dispatch(Commands::Media(media), &MockRisky).await.is_err());
+        })
+        .await;
     }
 
     #[tokio::test]
