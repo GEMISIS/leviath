@@ -418,6 +418,198 @@ pub(crate) fn escaping_write_refusal_for(
     ))
 }
 
+/// A file or directory a run may not change: one of the places that decide
+/// what agents may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProtectedPath {
+    pub path: std::path::PathBuf,
+    /// What it is, for the refusal.
+    pub label: &'static str,
+}
+
+/// The places `[security] lock_permission_files` keeps a run's tools out of,
+/// or nothing when it is off.
+///
+/// Each is either where a permission is granted (`config.toml`, `yolo.toml`,
+/// the taint policy and its rules) or code every later run executes (the
+/// provider and tool scripts). Writing any of them from inside a run is an
+/// agent changing what the next spawn will let it do.
+pub(crate) fn permission_files(config: &Config) -> Vec<ProtectedPath> {
+    if !config.security.lock_permission_files {
+        return Vec::new();
+    }
+    let mut out = vec![
+        ProtectedPath {
+            path: Config::config_path(),
+            label: "config.toml",
+        },
+        ProtectedPath {
+            path: crate::yolo::yolo_path(),
+            label: "yolo.toml",
+        },
+        ProtectedPath {
+            path: crate::commands::policy::policy_path(),
+            label: "the taint policy",
+        },
+        ProtectedPath {
+            path: crate::commands::policy::rules_dir(),
+            label: "the taint-gate rules",
+        },
+    ];
+    out.extend(leviath_core::providers_dir().map(|path| ProtectedPath {
+        path,
+        label: "the provider scripts",
+    }));
+    out.extend(leviath_core::tools_dir().map(|path| ProtectedPath {
+        path,
+        label: "the global tool scripts",
+    }));
+    out
+}
+
+/// Refuse a call that would write one of `protected`, or `None` when it
+/// touches none of them.
+///
+/// Checked before policy, `--yolo` or not: this is containment, like the
+/// redirect fence beside it, and no permission makes it allowed. `write_file`
+/// and `edit_file` are judged by their `path`. A shell line is judged by every
+/// word and redirect target that resolves into a protected place, with a `cd`
+/// earlier in the line moving where relative words resolve, and then by its
+/// raw text against each protected location's spellings (`~/...`,
+/// `$HOME/...`), which is what a quoted script or a heredoc carries. Reads
+/// through the shell are refused with the writes, because the shell does not
+/// say which a program does; `read_file` and `list_dir` are untouched.
+pub(crate) fn protected_path_refusal(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+    home: Option<&std::path::Path>,
+    protected: &[ProtectedPath],
+) -> Option<String> {
+    if protected.is_empty() {
+        return None;
+    }
+    match leviath_tools::canonical_tool_name(tool_name) {
+        "write_file" | "edit_file" => {
+            let path = arguments.get("path")?.as_str()?;
+            let hit = protected_hit(path, workdir, home, protected)?;
+            Some(protected_refusal(path, hit))
+        }
+        "shell" => {
+            let command = arguments.get("command")?.as_str()?;
+            shell_protected_refusal(command, workdir, home, protected)
+        }
+        _ => None,
+    }
+}
+
+/// The protected place `word` names, if any, once `~` is expanded, a
+/// relative path is joined to `cwd`, and symlinks are followed as far as the
+/// path exists.
+fn protected_hit<'a>(
+    word: &str,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+    protected: &'a [ProtectedPath],
+) -> Option<&'a ProtectedPath> {
+    let expanded = expand_home_word(word, home)?;
+    let joined = match expanded.is_absolute() {
+        true => expanded,
+        false => cwd.join(expanded),
+    };
+    // Both sides through the same resolution: a protected file that does not
+    // exist yet (`yolo.toml` before `lev yolo init`) still has an existing
+    // parent whose symlinks decide what it really names.
+    let target = leviath_core::canonicalize_for_match(&joined)?;
+    protected.iter().find(|p| {
+        let root = leviath_core::canonicalize_for_match(&p.path).unwrap_or_else(|| p.path.clone());
+        target.starts_with(root)
+    })
+}
+
+/// `~` and `~/rest` against `home`; anything else as written. `None` for a
+/// `~` with no home to expand to, which names nothing checkable.
+fn expand_home_word(word: &str, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if word == "~" {
+        return home.map(std::path::Path::to_path_buf);
+    }
+    match word.strip_prefix("~/") {
+        Some(rest) => home.map(|h| h.join(rest)),
+        None => Some(std::path::PathBuf::from(word)),
+    }
+}
+
+/// [`protected_path_refusal`] for a shell line.
+fn shell_protected_refusal(
+    command: &str,
+    workdir: &std::path::Path,
+    home: Option<&std::path::Path>,
+    protected: &[ProtectedPath],
+) -> Option<String> {
+    if let Some(segments) =
+        crate::shell_keys::matchable_segments(command, crate::shell_keys::BACKSLASH_ESCAPES)
+    {
+        let mut cwd = workdir.to_path_buf();
+        for segment in &segments {
+            for word in &segment.words {
+                if let Some(hit) = protected_hit(word, &cwd, home, protected) {
+                    return Some(protected_refusal(word, hit));
+                }
+            }
+            // `cd` moves where the rest of the line's relative words land.
+            if let [program, target, ..] = segment.words.as_slice()
+                && program == "cd"
+                && let Some(next) = expand_home_word(target, home)
+            {
+                cwd = match next.is_absolute() {
+                    true => next,
+                    false => cwd.join(next),
+                };
+            }
+        }
+    }
+    for target in crate::shell_keys::write_target_paths(command) {
+        if let Some(hit) = protected_hit(&target, workdir, home, protected) {
+            return Some(protected_refusal(&target, hit));
+        }
+    }
+    // Text the reader cannot place - a quoted script, an expansion, a
+    // heredoc body - still spells the location out, so that is what is
+    // checked there.
+    for p in protected {
+        for spelling in location_spellings(&p.path, home) {
+            if command.contains(&spelling) {
+                return Some(protected_refusal(&spelling, p));
+            }
+        }
+    }
+    None
+}
+
+/// The ways a shell line spells `path`: as written, and through the home
+/// directory as `~/...`, `$HOME/...` and `${HOME}/...`.
+fn location_spellings(path: &std::path::Path, home: Option<&std::path::Path>) -> Vec<String> {
+    let absolute = path.to_string_lossy().into_owned();
+    let mut spellings = vec![absolute.clone()];
+    if let Some(rest) = home.and_then(|h| path.strip_prefix(h).ok()) {
+        let rest = rest.to_string_lossy();
+        for prefix in ["~", "$HOME", "${HOME}"] {
+            spellings.push(format!("{prefix}/{rest}"));
+        }
+    }
+    spellings
+}
+
+fn protected_refusal(shown: &str, hit: &ProtectedPath) -> String {
+    format!(
+        "[denied] '{shown}' is {} ({}), one of the files that decide what agents may do, and a \
+         run may not change it. Edit it yourself, or turn off `[security] \
+         lock_permission_files` in config.toml.",
+        hit.label,
+        hit.path.display()
+    )
+}
+
 /// How many bytes this call declares it will write, when that is knowable
 /// before it runs.
 ///
@@ -2650,5 +2842,185 @@ mod policy_tests {
         assert!(launch_allows(&launch, "bash"));
         assert!(!launch_allows(&launch, "web_fetch"));
         assert!(!launch_allows(&launch, "read_file"));
+    }
+
+    // ─── the permission-file lock ─────────────────────────────────────────
+
+    /// A home with the permission files where a real install keeps them, and
+    /// a workdir beside it, so `~`, absolute and relative spellings all have
+    /// somewhere real to land.
+    struct LockRig {
+        _dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        workdir: std::path::PathBuf,
+        protected: Vec<ProtectedPath>,
+    }
+
+    fn lock_rig() -> LockRig {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        // Canonical from the start, as a real home is: the `$HOME` spellings
+        // are built by stripping it off each protected path.
+        let home = std::fs::canonicalize(dir.path().join("home")).unwrap();
+        let data = home.join(".leviath");
+        std::fs::create_dir_all(data.join("tools")).unwrap();
+        std::fs::write(data.join("config.toml"), "").unwrap();
+        std::fs::write(data.join("yolo.toml"), "").unwrap();
+        let workdir = dir.path().join("work");
+        std::fs::create_dir_all(workdir.join("src")).unwrap();
+        std::fs::write(workdir.join("config.toml"), "").unwrap();
+        let protected = vec![
+            ProtectedPath {
+                path: data.join("config.toml"),
+                label: "config.toml",
+            },
+            ProtectedPath {
+                path: data.join("yolo.toml"),
+                label: "yolo.toml",
+            },
+            ProtectedPath {
+                path: data.join("tools"),
+                label: "the global tool scripts",
+            },
+        ];
+        LockRig {
+            _dir: dir,
+            home,
+            workdir: std::fs::canonicalize(&workdir).unwrap(),
+            protected,
+        }
+    }
+
+    fn lock_check(rig: &LockRig, tool: &str, args: serde_json::Value) -> Option<String> {
+        protected_path_refusal(tool, &args, &rig.workdir, Some(&rig.home), &rig.protected)
+    }
+
+    #[test]
+    fn the_file_tools_may_not_write_a_permission_file() {
+        let rig = lock_rig();
+        let yolo = rig.home.join(".leviath/yolo.toml");
+        let refusal =
+            lock_check(&rig, "write_file", serde_json::json!({"path": yolo})).expect("refused");
+        assert!(refusal.contains("[denied]"), "{refusal}");
+        assert!(refusal.contains("is yolo.toml"), "{refusal}");
+        assert!(refusal.contains("lock_permission_files"), "{refusal}");
+        // Relative to the workdir, through the data dir, and by `~`.
+        assert!(
+            lock_check(
+                &rig,
+                "edit_file",
+                serde_json::json!({"path": "../home/.leviath/config.toml"})
+            )
+            .is_some()
+        );
+        assert!(
+            lock_check(
+                &rig,
+                "write_file",
+                serde_json::json!({"path": "~/.leviath/tools/x.rhai"})
+            )
+            .is_some()
+        );
+        // The workdir's own config.toml is the project's, not Leviath's.
+        assert!(
+            lock_check(
+                &rig,
+                "write_file",
+                serde_json::json!({"path": "config.toml"})
+            )
+            .is_none()
+        );
+        assert!(
+            lock_check(
+                &rig,
+                "write_file",
+                serde_json::json!({"path": "src/main.rs"})
+            )
+            .is_none()
+        );
+        // No path, another tool, or no lock: nothing to refuse.
+        assert!(lock_check(&rig, "write_file", serde_json::json!({})).is_none());
+        assert!(lock_check(&rig, "read_file", serde_json::json!({"path": yolo})).is_none());
+        assert!(
+            protected_path_refusal(
+                "write_file",
+                &serde_json::json!({"path": yolo}),
+                &rig.workdir,
+                Some(&rig.home),
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_shell_line_naming_a_permission_file_is_refused() {
+        let rig = lock_rig();
+        let yolo = rig.home.join(".leviath/yolo.toml").display().to_string();
+        for line in [
+            "rm ~/.leviath/yolo.toml".to_string(),
+            format!("mv {yolo} /tmp/x"),
+            "echo x >> ~/.leviath/yolo.toml".to_string(),
+            "sed -i 's/ask/allow/' ~/.leviath/yolo.toml".to_string(),
+            "cd ~/.leviath && rm yolo.toml".to_string(),
+            "cd ~/.leviath; cd tools && rm x.rhai".to_string(),
+            "cp x ../home/.leviath/tools/".to_string(),
+            "python3 -c \"open('$HOME/.leviath/yolo.toml','w')\"".to_string(),
+            "python3 -c \"open('${HOME}/.leviath/config.toml','w')\"".to_string(),
+            format!("echo `x` {yolo}"),
+            "ls ~/.leviath/tools".to_string(),
+        ] {
+            let refusal = lock_check(&rig, "shell", serde_json::json!({"command": line}));
+            assert!(refusal.is_some(), "{line} should be refused");
+        }
+        for line in [
+            "ls -la",
+            "cat config.toml",
+            "cd src && cargo test",
+            "echo x > out.txt",
+            "cd ~ && ls",
+            "echo `x`",
+        ] {
+            assert!(
+                lock_check(&rig, "shell", serde_json::json!({"command": line})).is_none(),
+                "{line}"
+            );
+        }
+        assert!(lock_check(&rig, "shell", serde_json::json!({})).is_none());
+        // With no home, `~` names nothing and the `$HOME` spellings do not exist.
+        let none = protected_path_refusal(
+            "shell",
+            &serde_json::json!({"command": "rm ~/.leviath/yolo.toml"}),
+            &rig.workdir,
+            None,
+            &rig.protected,
+        );
+        assert!(none.is_none());
+        let abs = protected_path_refusal(
+            "shell",
+            &serde_json::json!({"command": format!("rm {yolo}")}),
+            &rig.workdir,
+            None,
+            &rig.protected,
+        );
+        assert!(abs.is_some());
+    }
+
+    #[test]
+    fn permission_files_follow_the_lock_switch() {
+        crate::config::with_isolated_config_path("permission-files", |dir| {
+            let mut config = Config::default();
+            assert!(config.security.lock_permission_files, "on by default");
+            let files = permission_files(&config);
+            let labels: Vec<&str> = files.iter().map(|p| p.label).collect();
+            assert!(labels.contains(&"config.toml"), "{labels:?}");
+            assert!(labels.contains(&"yolo.toml"), "{labels:?}");
+            assert!(labels.contains(&"the taint policy"), "{labels:?}");
+            assert!(labels.contains(&"the taint-gate rules"), "{labels:?}");
+            assert_eq!(files[0].path, dir.join("config.toml"));
+            assert_eq!(files[1].path, dir.join("yolo.toml"));
+            config.security.lock_permission_files = false;
+            assert!(permission_files(&config).is_empty());
+        });
     }
 }

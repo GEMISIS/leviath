@@ -161,6 +161,23 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub allow_blueprint_permissions: bool,
 
+    /// Keep a run's tools away from the files that decide what agents may do.
+    ///
+    /// **On by default.** `config.toml`, `yolo.toml`, the taint gate's
+    /// `policy.toml` and `rules/`, and the `providers/` and `tools/` script
+    /// directories are where permissions are granted and where code every
+    /// later run executes is kept. With this on, `write_file`, `edit_file`
+    /// and a `shell` line that names one of them are refused before any
+    /// policy is consulted, `--yolo` or not, so an agent cannot widen its
+    /// own permissions from inside a run and have the next spawn honour them.
+    ///
+    /// This closes the tool surfaces, not every path to the disk: a
+    /// `[sandbox]` is the boundary for an agent you do not trust. Turn it off
+    /// only for an agent whose job is to manage this machine's Leviath
+    /// install.
+    #[serde(default = "leviath_core::default_true")]
+    pub lock_permission_files: bool,
+
     /// Machine-wide read grants for agents that declare `[read_paths]`.
     ///
     /// Entries use the same three forms as a blueprint's `[read_paths] allow`:
@@ -219,6 +236,7 @@ impl Default for SecurityConfig {
             allow_blueprint_read_paths: false,
             allow_blueprint_safe_commands: false,
             allow_blueprint_permissions: false,
+            lock_permission_files: true,
             read_paths: Vec::new(),
             credential_store: leviath_core::CredentialStoreKind::File,
         }

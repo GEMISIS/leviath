@@ -151,6 +151,8 @@ pub(crate) struct SeedToolContext {
     /// The run's write budget, shared with the tool lane so what a seed
     /// writes at spawn counts against the same ceiling as turn one.
     pub writes: Arc<crate::daemon::tool_service::WriteBudget>,
+    /// The files no run may change, the same list the tool lane refuses.
+    pub protected: Vec<crate::tools::ProtectedPath>,
 }
 
 /// Decides one seeded call's policy: `(tool name, is_builtin) -> policy`.
@@ -180,6 +182,15 @@ pub(crate) fn production_runner(
         }
         let workdir = ctx.builtins.workdir();
         if let Some(refusal) = crate::tools::escaping_write_refusal(name, args, workdir) {
+            return Err(refusal);
+        }
+        if let Some(refusal) = crate::tools::protected_path_refusal(
+            name,
+            args,
+            workdir,
+            crate::yolo::home().as_deref(),
+            &ctx.protected,
+        ) {
             return Err(refusal);
         }
         if let Some(refusal) = crate::tools::write_budget_refusal(name, args, workdir, &ctx.writes)
@@ -409,6 +420,7 @@ mod tests {
         let builtin_names = builtins.names().into_iter().collect();
         SeedToolContext {
             writes,
+            protected: Vec::new(),
             builtins,
             builtin_names,
             script_tools: scripts,
@@ -676,5 +688,26 @@ for line in sys.stdin:
         assert_eq!(perms.resolve("system_info", true), ToolPolicy::Allow);
         // While a mutating one still defaults to `ask`, which a seed refuses.
         assert_eq!(perms.resolve("write_file", true), ToolPolicy::Ask);
+    }
+
+    /// A seed is held to the same lock as a mid-run call: it runs before any
+    /// prompt, which is exactly when a manifest would try.
+    #[test]
+    fn a_seed_may_not_write_a_permission_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("yolo.toml");
+        let mut ctx = ctx_over(dir.path(), Default::default());
+        ctx.protected = vec![crate::tools::ProtectedPath {
+            path: locked.clone(),
+            label: "yolo.toml",
+        }];
+        let runner = production_runner(ctx, allow_all());
+        let err = runner(
+            "write_file",
+            &serde_json::json!({"path": "yolo.toml", "content": "[p]\ndefault = \"allow\"\n"}),
+        )
+        .expect_err("refused");
+        assert!(err.contains("is yolo.toml"), "{err}");
+        assert!(!locked.exists());
     }
 }

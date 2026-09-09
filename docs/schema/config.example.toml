@@ -95,6 +95,7 @@ allow_env_vars = ["MY_BUILD_TOKEN"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
 allow_blueprint_permissions = false
+lock_permission_files = true
 shell_env = "filtered"
 shell_env_withhold = []
 read_paths = ["~/reference"]

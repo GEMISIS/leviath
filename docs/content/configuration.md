@@ -415,6 +415,7 @@ allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
 allow_blueprint_permissions   = false
+lock_permission_files      = true    # a run may not write config.toml, yolo.toml, or the script dirs
 shell_env                  = "filtered"   # filtered | strict | custom | inherit
 shell_env_withhold         = []          # names withheld under shell_env = "custom"
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
@@ -430,12 +431,23 @@ credential_store           = "file"   # file | keychain
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
 | `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
 | `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]`, even above the built-in default. See below |
+| `lock_permission_files` | `true` | Refuses any tool call that would write the files that decide what agents may do. See below |
 | `shell_env` | `"filtered"` | Which of the daemon's environment variables a shell command inherits. See below |
 | `shell_env_withhold` | `[]` | The names `shell_env = "custom"` withholds. Ignored under every other mode |
 | `read_paths` | `[]` | Machine-wide read grants, which apply only where a blueprint declares the path too. See below |
 | `credential_store` | `"file"` | `keychain` moves secrets to the OS credential store. Run `lev auth migrate` after changing it |
 
-Five of those need more than a table cell.
+Six of those need more than a table cell.
+
+**`lock_permission_files`** keeps a run's tools out of `config.toml`, `yolo.toml`, the taint
+gate's `policy.toml` and `rules/`, and the `providers/` and `tools/` script directories. Those are
+where permissions are granted and where code every later run executes lives, so an agent that
+could write them from inside a run could widen what its next spawn is allowed to do. With the lock
+on, `write_file`, `edit_file`, and a `shell` line that names one of them are refused before any
+policy is consulted, `--yolo` or not; a seed at spawn is held to the same rule. A shell line is
+refused for reads too, because the shell does not say which a program does; `read_file` and
+`list_dir` are untouched. This closes the tool surfaces, not every way to the disk: a
+[sandbox](/docs/containers) is the boundary for an agent you do not trust.
 
 **`allowed_workdirs`** silences the confirm prompt for everything under a listed path. Left empty,
 `lev run` asks only about the alarming cases: a home directory, or a filesystem root.
