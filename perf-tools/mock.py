@@ -155,8 +155,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             message = {"role": "assistant", "content": "done"}
             finish = "stop"
-        self._json({"id": "c1", "object": "chat.completion", "model": "gpt-mock", "usage": USAGE,
-                    "choices": [{"index": 0, "finish_reason": finish, "message": message}]})
+        return self._json({"id": "c1", "object": "chat.completion", "model": "gpt-mock", "usage": USAGE,
+                           "choices": [{"index": 0, "finish_reason": finish, "message": message}]})
 
     def _anthropic(self, req):
         """The Anthropic Messages shape of the same decision, always buffered."""

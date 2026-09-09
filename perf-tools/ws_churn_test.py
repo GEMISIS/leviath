@@ -51,6 +51,8 @@ def open_ws(host: str, port: int, path: str, timeout: float = 5.0) -> socket.soc
     try:
         sock.recv(4096)
     except socket.timeout:
+        # The handshake reply is optional: the test only needs the connection
+        # open on the server side, and a slow reply changes nothing below.
         pass
     return sock
 
@@ -62,6 +64,8 @@ def abrupt_close(sock: socket.socket) -> None:
             socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
         )
     except OSError:
+        # A socket the peer already reset refuses the option; closing it
+        # below is still the right thing, just without the forced reset.
         pass
     sock.close()
 

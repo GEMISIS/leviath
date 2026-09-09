@@ -60,3 +60,6 @@ plans/
 perf-tools/*.csv
 perf-tools/*.png
 
+# Python bytecode from running the perf-tools scripts
+__pycache__/
+
