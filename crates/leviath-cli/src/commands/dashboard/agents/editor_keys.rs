@@ -45,6 +45,10 @@ impl Dashboard {
             self.editor_add_region_key(&key);
             return;
         }
+        if self.editor().add_artifact.is_some() {
+            self.editor_add_artifact_key(&key);
+            return;
+        }
         if self.editor().line.is_some() {
             self.editor_line_key(&key);
             return;
@@ -144,7 +148,7 @@ impl Dashboard {
             KeyCode::Enter => self.editor_activate(),
             KeyCode::Left | KeyCode::Char('h') => self.editor_adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => self.editor_adjust(1),
-            KeyCode::Char(c @ '1'..='3') => {
+            KeyCode::Char(c @ '1'..='4') => {
                 let tab = StageTab::ALL[(c as usize) - ('1' as usize)];
                 let editor = self.editor();
                 if let Panel::Stage { name, .. } = &editor.panel {
@@ -213,6 +217,21 @@ impl Dashboard {
                 let name = line.value().trim().to_string();
                 if !name.is_empty() {
                     self.editor_add_region(&name);
+                }
+            }
+        }
+    }
+
+    /// Keys while the name of a new artifact is being typed.
+    fn editor_add_artifact_key(&mut self, key: &KeyEvent) {
+        let mut line = self.editor().add_artifact.take().expect("callers check");
+        match line.handle_key(key) {
+            EditOutcome::Pending => self.editor().add_artifact = Some(line),
+            EditOutcome::Cancel => {}
+            EditOutcome::Commit => {
+                let name = line.value().trim().to_string();
+                if !name.is_empty() {
+                    self.editor_add_artifact(&name);
                 }
             }
         }

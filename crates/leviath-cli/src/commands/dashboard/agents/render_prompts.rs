@@ -91,6 +91,16 @@ impl Dashboard {
             );
             return true;
         }
+        if let Some(line) = &editor.add_artifact {
+            name_popup(
+                frame,
+                area,
+                line,
+                "New artifact",
+                "Letters, digits, . _ - · what the stage's submission calls the file",
+            );
+            return true;
+        }
         false
     }
 }

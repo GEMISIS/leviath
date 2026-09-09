@@ -339,7 +339,10 @@ impl Dashboard {
                 hints.push(hint("enter", "choose"));
             }
             hints
-        } else if editor.line.is_some() || editor.add_stage.is_some() || editor.add_region.is_some()
+        } else if editor.line.is_some()
+            || editor.add_stage.is_some()
+            || editor.add_region.is_some()
+            || editor.add_artifact.is_some()
         {
             vec![
                 hint("esc", "cancel"),
@@ -400,7 +403,7 @@ impl Dashboard {
                     hint("enter", "edit"),
                     hint("←→", "change"),
                     hint("x", "remove"),
-                    hint("1-3", "tab"),
+                    hint("1-4", "tab"),
                     hint("tab", "canvas"),
                     hint("^z", "undo"),
                     hint("click", "pick a row"),

@@ -535,6 +535,166 @@ fn the_agent_panel_opens_a_shared_region_and_adds_one() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// ─── media ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_media_tab_declares_what_a_stage_takes_and_hands_back() {
+    let (mut dash, root) = dashboard("media_tab");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    dash.handle_key(key(KeyCode::Char('4')));
+    assert_eq!(
+        dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Stage {
+            name: "work".into(),
+            tab: StageTab::Media
+        }
+    );
+    let screen = text(&mut dash);
+    assert!(screen.contains("4 Media"), "{screen}");
+    let stage = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .stage("work")
+            .unwrap()
+    };
+    goto(&mut dash, FieldId::StageAccepts);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "image/*, audio/wav");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).input_accepts, ["image/*", "audio/wav"]);
+    goto(&mut dash, FieldId::StageAsText);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "model/obj");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).input_as_text, ["model/obj"]);
+    // Declare a file: the button asks its name, the cursor lands on it, and
+    // its rows edit it.
+    goto(&mut dash, FieldId::AddArtifact);
+    dash.handle_key(key(KeyCode::Enter));
+    let screen = text(&mut dash);
+    assert!(screen.contains("New artifact"), "{screen}");
+    type_str(&mut dash, "final");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).artifacts.len(), 1);
+    assert_eq!(
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .current_field()
+            .unwrap()
+            .id,
+        FieldId::ArtifactName(0)
+    );
+    goto(&mut dash, FieldId::ArtifactType(0));
+    dash.handle_key(key(KeyCode::Enter));
+    for _ in 0..3 {
+        dash.handle_key(key(KeyCode::Backspace));
+    }
+    type_str(&mut dash, "video/mp4");
+    dash.handle_key(key(KeyCode::Enter));
+    goto(&mut dash, FieldId::ArtifactRequired(0));
+    dash.handle_key(key(KeyCode::Enter));
+    goto(&mut dash, FieldId::ArtifactDescription(0));
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "the cut");
+    dash.handle_key(key(KeyCode::Enter));
+    goto(&mut dash, FieldId::ArtifactName(0));
+    dash.handle_key(key(KeyCode::Enter));
+    for _ in 0..5 {
+        dash.handle_key(key(KeyCode::Backspace));
+    }
+    type_str(&mut dash, "cut");
+    dash.handle_key(key(KeyCode::Enter));
+    let a = stage(&mut dash).artifacts.remove(0);
+    assert_eq!(
+        (
+            a.name.as_str(),
+            a.media_type.as_str(),
+            a.required,
+            a.description.as_str()
+        ),
+        ("cut", "video/mp4", true, "the cut")
+    );
+    let saved = dash.agents().editor.as_ref().unwrap().doc.to_toml();
+    assert!(
+        saved.contains("[[stages.work.output.artifacts]]"),
+        "{saved}"
+    );
+    assert!(saved.contains("[stages.work.input]"), "{saved}");
+    // A name the stage already uses is refused with a message.
+    goto(&mut dash, FieldId::AddArtifact);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "cut");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).artifacts.len(), 1);
+    assert!(
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("taken"))
+    );
+    // Esc on the name prompt adds nothing; an empty name neither.
+    goto(&mut dash, FieldId::AddArtifact);
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Esc));
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).artifacts.len(), 1);
+    // The graph beside the inspector wears what the stage takes and gives.
+    let screen = text(&mut dash);
+    assert!(screen.contains("◧ image/* audio/wav"), "{screen}");
+    assert!(screen.contains("▤ video/mp4"), "{screen}");
+    // x on any of a declaration's rows drops it.
+    dash.editor_add_artifact("b");
+    dash.editor_add_artifact("c");
+    dash.editor_add_artifact("d");
+    assert_eq!(stage(&mut dash).artifacts.len(), 4);
+    goto(&mut dash, FieldId::ArtifactDescription(3));
+    dash.handle_key(key(KeyCode::Char('x')));
+    goto(&mut dash, FieldId::ArtifactType(2));
+    dash.handle_key(key(KeyCode::Char('x')));
+    goto(&mut dash, FieldId::ArtifactName(1));
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(stage(&mut dash).artifacts.len(), 1);
+    goto(&mut dash, FieldId::ArtifactRequired(0));
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert!(stage(&mut dash).artifacts.is_empty());
+    // The region panel: what it takes and how many stored parts it keeps.
+    dash.handle_key(key(KeyCode::Char('3')));
+    goto(&mut dash, FieldId::OwnLayout);
+    dash.handle_key(key(KeyCode::Enter));
+    dash.editor_add_region("shots");
+    let region = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .region(Some("work"), "shots")
+            .unwrap()
+    };
+    goto(&mut dash, FieldId::RegionAccepts);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "image/png audio/*");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(region(&mut dash).accepts, ["image/png", "audio/*"]);
+    goto(&mut dash, FieldId::RegionMaxStored);
+    dash.handle_key(key(KeyCode::Right));
+    assert_eq!(region(&mut dash).max_stored, Some(1));
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "2");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(region(&mut dash).max_stored, Some(12));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // ─── a region ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1684,6 +1844,7 @@ fn the_helpers_are_inert_off_their_panels_and_rows() {
     // The region-scoped number helper answers "mine" for a region field
     // even off a region panel, and does nothing.
     assert!(dash.editor_set_number_more(&FieldId::RegionBudget, None));
+    dash.editor_set_toggle_more(&FieldId::StageMode, true);
     dash.set_region_panel_name("x");
     // A settle for a chooser purpose that is not a pick is a no-op.
     dash.editor_settle_more(super::editor::PickerFor::Tools, "x");

@@ -347,7 +347,7 @@ fn build(
     let longest = graph
         .nodes
         .iter()
-        .map(|n| n.id.trim_start_matches("ext:").chars().count())
+        .map(super::model::StageNode::width_hint)
         .max()
         .unwrap_or(0);
     let snake = layout.wrap.is_some();
@@ -664,12 +664,15 @@ impl FlowView {
         }
     }
 
-    /// The longest node id on the canvas, which is what a box is sized for.
+    /// The widest box's sizing hint: the longest id, or the badge row that
+    /// needs more (see [`StageNode::width_hint`]).
+    ///
+    /// [`StageNode::width_hint`]: super::model::StageNode::width_hint
     fn longest_id(&self) -> usize {
         self.graph
             .nodes
             .iter()
-            .map(|n| n.id.trim_start_matches("ext:").chars().count())
+            .map(super::model::StageNode::width_hint)
             .max()
             .unwrap_or(0)
     }

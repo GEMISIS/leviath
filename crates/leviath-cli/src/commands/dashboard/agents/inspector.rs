@@ -21,12 +21,18 @@ pub(in crate::commands::dashboard) enum StageTab {
     Model,
     /// Regions and tool routing.
     Context,
+    /// What the stage takes as parts and the files it hands back.
+    Media,
 }
 
 impl StageTab {
-    /// The three tabs, in order.
-    pub(in crate::commands::dashboard) const ALL: [StageTab; 3] =
-        [StageTab::Behaviour, StageTab::Model, StageTab::Context];
+    /// The four tabs, in order.
+    pub(in crate::commands::dashboard) const ALL: [StageTab; 4] = [
+        StageTab::Behaviour,
+        StageTab::Model,
+        StageTab::Context,
+        StageTab::Media,
+    ];
 
     /// The tab's title.
     pub(in crate::commands::dashboard) fn title(self) -> &'static str {
@@ -34,6 +40,7 @@ impl StageTab {
             StageTab::Behaviour => "Behaviour",
             StageTab::Model => "Model & tools",
             StageTab::Context => "Context",
+            StageTab::Media => "Media",
         }
     }
 }
@@ -123,7 +130,26 @@ pub(in crate::commands::dashboard) enum FieldId {
     RegionMessage,
     RegionSeed,
     RegionDescription,
+    /// The media type patterns the region takes.
+    RegionAccepts,
+    /// The most stored parts the region keeps.
+    RegionMaxStored,
     DeleteRegion,
+    /// `[stages.<name>.input] accepts`.
+    StageAccepts,
+    /// `[stages.<name>.input] as_text`.
+    StageAsText,
+    /// The name of the stage's `n`th declared artifact; `x` on any of an
+    /// artifact's rows drops the declaration.
+    ArtifactName(usize),
+    /// The `n`th artifact's type or pattern.
+    ArtifactType(usize),
+    /// Whether the `n`th artifact must be present.
+    ArtifactRequired(usize),
+    /// What the `n`th artifact is for.
+    ArtifactDescription(usize),
+    /// Declare another artifact (asks its name).
+    AddArtifact,
 }
 
 /// What a field holds and how it edits.
@@ -517,7 +543,63 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
             ));
             out
         }
+        StageTab::Media => media_fields(&stage),
     }
+}
+
+/// The media tab: what the stage takes beyond what its regions say, what it
+/// reads as text, and the files it declares it hands back.
+fn media_fields(stage: &crate::blueprint_edit::StageView) -> Vec<Field> {
+    let mut out = vec![
+        Field::new(
+            FieldId::StageAccepts,
+            "Takes, beyond its regions",
+            FieldValue::Text(stage.input_accepts.join(", ")),
+            "Media type patterns the stage takes as parts when its regions do not already \
+             say: image/*, audio/wav. Empty leaves it to the regions.",
+        ),
+        Field::new(
+            FieldId::StageAsText,
+            "Reads as text",
+            FieldValue::Text(stage.input_as_text.join(", ")),
+            "Types whose parts reach the model as text whatever it takes natively: \
+             model/obj, application/json.",
+        ),
+    ];
+    for (i, artifact) in stage.artifacts.iter().enumerate() {
+        out.push(Field::new(
+            FieldId::ArtifactName(i),
+            format!("Hands back #{}", i + 1),
+            FieldValue::Text(artifact.name.clone()),
+            "What the submission calls the file. x on any of its rows drops the declaration.",
+        ));
+        out.push(Field::new(
+            FieldId::ArtifactType(i),
+            "  type",
+            FieldValue::Text(artifact.media_type.clone()),
+            "The media type the file must be, or a pattern it must match: video/mp4, image/*.",
+        ));
+        out.push(Field::new(
+            FieldId::ArtifactRequired(i),
+            "  required",
+            FieldValue::Toggle(artifact.required),
+            "A submission without this file is refused back to the model.",
+        ));
+        out.push(Field::new(
+            FieldId::ArtifactDescription(i),
+            "  description",
+            FieldValue::Text(artifact.description.clone()),
+            "What the file is for, shown to the model.",
+        ));
+    }
+    out.push(Field::new(
+        FieldId::AddArtifact,
+        "Declare a file it hands back",
+        FieldValue::Button,
+        "A named file the stage submits beside its answer (asks its name); the run checks \
+         it is there and of the type.",
+    ));
+    out
 }
 
 /// `· 5% · min 800 · max 4000`, whichever a region has.
@@ -616,6 +698,20 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
             "How many items over the limit before it evicts.",
         )
         .enabled(sliding),
+        Field::new(
+            FieldId::RegionAccepts,
+            "Takes",
+            FieldValue::Text(region.accepts.join(", ")),
+            "Media type patterns the region takes: image/*, audio/wav. Empty takes \
+             anything; a write outside the list is refused with it.",
+        ),
+        Field::new(
+            FieldId::RegionMaxStored,
+            "Stored parts: keeps at most",
+            FieldValue::Number(region.max_stored),
+            "How many stored parts the region holds across its entries; past it the \
+             oldest goes. Empty is unbounded.",
+        ),
         Field::new(
             FieldId::RegionRequired,
             "Must be filled first",

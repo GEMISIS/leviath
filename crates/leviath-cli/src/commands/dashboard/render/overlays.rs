@@ -216,10 +216,13 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "← → / h l",
                     "change the row in place: cycle a choice, step a number, flip a toggle",
                 ),
-                ("1 2 3", "a stage's tabs: behaviour, model & tools, context"),
+                (
+                    "1 2 3 4",
+                    "a stage's tabs: behaviour, model & tools, context, media",
+                ),
                 (
                     "x / backspace",
-                    "remove the row: a model from the chain, a routing rule",
+                    "remove the row: a model from the chain, a routing rule, a file declaration",
                 ),
                 ("← → on a model", "move it earlier or later in the chain"),
                 (

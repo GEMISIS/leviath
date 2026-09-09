@@ -1273,6 +1273,258 @@ fn region_fields_write_the_lairs_way() {
 }
 
 #[test]
+fn media_keys_write_the_way_the_runtime_reads_them() {
+    use ArtifactField as A;
+    let mut doc = starter();
+    let s = RegionScope::Shared;
+    doc.add_region(&s, "shots").unwrap();
+    doc.set_region_field(
+        &s,
+        "shots",
+        RegionField::Accepts,
+        RegionValue::Text("Image/*, audio/wav image/*".into()),
+    )
+    .unwrap();
+    doc.set_region_field(
+        &s,
+        "shots",
+        RegionField::MaxStored,
+        RegionValue::Number(Some(0)),
+    )
+    .unwrap();
+    let r = doc.region(None, "shots").unwrap();
+    assert_eq!(r.accepts, ["image/*", "audio/wav"]);
+    assert_eq!(r.max_stored, Some(1));
+    runtime_ok(&doc);
+    doc.set_region_field(
+        &s,
+        "shots",
+        RegionField::Accepts,
+        RegionValue::Text(" ".into()),
+    )
+    .unwrap();
+    doc.set_region_field(
+        &s,
+        "shots",
+        RegionField::MaxStored,
+        RegionValue::Number(None),
+    )
+    .unwrap();
+    let r = doc.region(None, "shots").unwrap();
+    assert!(r.accepts.is_empty() && r.max_stored.is_none());
+    assert!(!doc.to_toml().contains("accepts"), "{}", doc.to_toml());
+    // The stage's input lists come and go with their table.
+    assert_eq!(
+        doc.set_stage_input("ghost", InputList::Accepts, &[]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    doc.set_stage_input("work", InputList::Accepts, &["video/*".to_string()])
+        .unwrap();
+    doc.set_stage_input("work", InputList::AsText, &["model/obj".to_string()])
+        .unwrap();
+    let w = doc.stage("work").unwrap();
+    assert_eq!(w.input_accepts, ["video/*"]);
+    assert_eq!(w.input_as_text, ["model/obj"]);
+    assert!(
+        doc.to_toml().contains("[stages.work.input]"),
+        "{}",
+        doc.to_toml()
+    );
+    runtime_ok(&doc);
+    doc.set_stage_input("work", InputList::Accepts, &[])
+        .unwrap();
+    assert!(
+        doc.to_toml().contains("[stages.work.input]"),
+        "as_text keeps the table: {}",
+        doc.to_toml()
+    );
+    doc.set_stage_input("work", InputList::AsText, &[]).unwrap();
+    assert!(!doc.to_toml().contains("input"), "{}", doc.to_toml());
+    // Clearing what is not there is fine.
+    doc.set_stage_input("work", InputList::AsText, &[]).unwrap();
+    // Artifacts: [[tables]] under a headed stage, edited by index, refused
+    // when wrong.
+    assert!(doc.artifacts("work").is_empty());
+    assert!(doc.artifacts("ghost").is_empty());
+    doc.add_artifact("work", "final").unwrap();
+    assert_eq!(
+        doc.add_artifact("work", "final"),
+        Err(EditError::Taken("final".into()))
+    );
+    assert_eq!(
+        doc.add_artifact("work", "no way"),
+        Err(EditError::BadName("no way".into()))
+    );
+    assert_eq!(
+        doc.add_artifact("ghost", "x"),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    doc.add_artifact("work", "track").unwrap();
+    assert!(
+        doc.to_toml().contains("[[stages.work.output.artifacts]]"),
+        "{}",
+        doc.to_toml()
+    );
+    doc.set_artifact("work", 0, A::Type("video/mp4".into()))
+        .unwrap();
+    doc.set_artifact("work", 0, A::Required(true)).unwrap();
+    doc.set_artifact("work", 0, A::Description("the cut".into()))
+        .unwrap();
+    doc.set_artifact("work", 1, A::Name("audio".into()))
+        .unwrap();
+    assert_eq!(
+        doc.artifacts("work"),
+        vec![
+            ArtifactView {
+                name: "final".into(),
+                media_type: "video/mp4".into(),
+                required: true,
+                description: "the cut".into(),
+            },
+            ArtifactView {
+                name: "audio".into(),
+                media_type: "*/*".into(),
+                required: false,
+                description: String::new(),
+            },
+        ]
+    );
+    assert_eq!(doc.stage("work").unwrap().artifacts.len(), 2);
+    assert_eq!(
+        doc.set_artifact("work", 1, A::Name("final".into())),
+        Err(EditError::Taken("final".into()))
+    );
+    assert_eq!(
+        doc.set_artifact("work", 1, A::Name("a b".into())),
+        Err(EditError::BadName("a b".into()))
+    );
+    assert!(matches!(
+        doc.set_artifact("work", 0, A::Type(String::new())),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert!(matches!(
+        doc.set_artifact("work", 5, A::Required(true)),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert_eq!(
+        doc.set_artifact("ghost", 0, A::Required(true)),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    let bp = runtime_ok(&doc);
+    let work = bp.stages.iter().find(|s| s.name == "work").unwrap();
+    let declared = &work.output.as_ref().unwrap().artifacts;
+    assert_eq!(declared.len(), 2);
+    assert!(declared[0].required && declared[0].media_type == "video/mp4");
+    doc.set_artifact("work", 0, A::Required(false)).unwrap();
+    doc.set_artifact("work", 0, A::Description(String::new()))
+        .unwrap();
+    assert!(!doc.to_toml().contains("required"), "{}", doc.to_toml());
+    // Deleting: out of range refused; the last one takes the table with it.
+    assert!(matches!(
+        doc.delete_artifact("work", 2),
+        Err(EditError::OutOfRange(_))
+    ));
+    doc.delete_artifact("work", 0).unwrap();
+    assert_eq!(doc.artifacts("work")[0].name, "audio");
+    doc.delete_artifact("work", 0).unwrap();
+    assert!(!doc.to_toml().contains("output"), "{}", doc.to_toml());
+    assert!(matches!(
+        doc.delete_artifact("work", 0),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert_eq!(
+        doc.delete_artifact("ghost", 0),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    // An output table with other keys keeps them when its list empties.
+    let mut shaped = ManifestDoc::parse(
+        "[agent]\nname = \"s\"\n[stages.a]\n[stages.a.output]\nformat = \"json\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        shaped.delete_artifact("a", 0),
+        Err(EditError::OutOfRange(_))
+    ));
+    shaped.add_artifact("a", "x").unwrap();
+    shaped.delete_artifact("a", 0).unwrap();
+    let text = shaped.to_toml();
+    assert!(
+        text.contains("format = \"json\"") && !text.contains("artifacts"),
+        "{text}"
+    );
+    // An inline stage gets an inline list, edited and emptied the same way.
+    let mut inline =
+        ManifestDoc::parse("stages = { a = { mode = \"autonomous\" } }\n[agent]\nname = \"i\"\n")
+            .unwrap();
+    inline.add_artifact("a", "out").unwrap();
+    inline.add_artifact("a", "log").unwrap();
+    let text = inline.to_toml();
+    assert!(
+        text.contains(
+            "artifacts = [{ name = \"out\", type = \"*/*\" }, { name = \"log\", type = \"*/*\" }]"
+        ),
+        "{text}"
+    );
+    inline
+        .set_artifact("a", 1, A::Type("text/plain".into()))
+        .unwrap();
+    assert_eq!(inline.artifacts("a")[1].media_type, "text/plain");
+    runtime_ok(&inline);
+    assert!(matches!(
+        inline.delete_artifact("a", 5),
+        Err(EditError::OutOfRange(_))
+    ));
+    inline.delete_artifact("a", 1).unwrap();
+    inline.delete_artifact("a", 0).unwrap();
+    assert!(!inline.to_toml().contains("output"), "{}", inline.to_toml());
+    assert!(matches!(
+        inline.delete_artifact("a", 0),
+        Err(EditError::OutOfRange(_))
+    ));
+    // A list that is not a list is refused rather than clobbered, and an
+    // entry that is not a table is skipped.
+    let mut odd = ManifestDoc::parse(
+        "[agent]\nname = \"odd\"\n[stages.a]\noutput = { artifacts = 3 }\n\
+         [stages.b]\noutput = { artifacts = [1, { name = \"x\", type = \"y\" }] }\n\
+         [stages.c]\noutput = \"nope\"\ninput = \"nope\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        odd.set_stage_input("c", InputList::Accepts, &["x/y".to_string()]),
+        Err(EditError::NotATable("input".into()))
+    );
+    odd.set_stage_input("c", InputList::Accepts, &[]).unwrap();
+    assert_eq!(
+        odd.add_artifact("a", "x"),
+        Err(EditError::NotATable("artifacts".into()))
+    );
+    assert!(matches!(
+        odd.set_artifact("a", 0, A::Required(true)),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert!(matches!(
+        odd.delete_artifact("a", 0),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert_eq!(odd.artifacts("b").len(), 1);
+    odd.set_artifact("b", 0, A::Type("z".into())).unwrap();
+    assert_eq!(odd.artifacts("b")[0].media_type, "z");
+    odd.delete_artifact("b", 0).unwrap();
+    assert!(odd.artifacts("b").is_empty());
+    assert_eq!(
+        odd.add_artifact("c", "x"),
+        Err(EditError::NotATable("output".into()))
+    );
+    assert!(matches!(
+        odd.delete_artifact("c", 0),
+        Err(EditError::OutOfRange(_))
+    ));
+    // The typed-list splitter.
+    assert_eq!(split_list(" a/b,, c/D\tc/d "), ["a/b", "c/d"]);
+    assert!(split_list(", ").is_empty());
+}
+
+#[test]
 fn tool_routing_is_created_and_tidied() {
     let mut doc = starter();
     doc.set_tool_routing_default("work", "").unwrap();

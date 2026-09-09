@@ -102,6 +102,8 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) add_stage: Option<LineEdit>,
     /// The name of a region about to be added.
     pub(in crate::commands::dashboard) add_region: Option<LineEdit>,
+    /// The name of an artifact about to be declared.
+    pub(in crate::commands::dashboard) add_artifact: Option<LineEdit>,
     /// The canvas selection a pushed panel (a region, a stage's loop back
     /// to itself) was opened from: the panel stays while it holds.
     pub(in crate::commands::dashboard) panel_anchor: Option<Selection>,
@@ -462,6 +464,7 @@ impl Dashboard {
             picker: None,
             add_stage: None,
             add_region: None,
+            add_artifact: None,
             panel_anchor: None,
             overlay: None,
             menu: None,
@@ -1045,7 +1048,8 @@ impl Dashboard {
             | FieldId::RegionMaxTokens
             | FieldId::RegionMinTokens
             | FieldId::RegionMaxItems
-            | FieldId::RegionOverflow => {
+            | FieldId::RegionOverflow
+            | FieldId::RegionMaxStored => {
                 let value = match text.parse::<u64>() {
                     Ok(n) => Some(n),
                     Err(_) if text.is_empty() => None,

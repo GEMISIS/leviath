@@ -33,6 +33,7 @@ pub(crate) mod check;
 mod doc;
 mod edges;
 mod layout_store;
+mod media;
 mod order;
 mod regions;
 mod stages;
@@ -40,12 +41,16 @@ mod tables;
 pub(crate) mod templates;
 
 pub(crate) use doc::{
-    EdgeKind, EdgeView, ManifestDoc, RegionView, StageModeView, TransformKind, WorkerKind,
+    EdgeKind, EdgeView, ManifestDoc, RegionView, StageModeView, StageView, TransformKind,
+    WorkerKind,
 };
 #[cfg(test)]
 pub(crate) use doc::{FanOutView, ToolRouting};
 pub(crate) use edges::Rule;
 pub(crate) use layout_store::{LayoutStore, Positions};
+#[cfg(test)]
+pub(crate) use media::ArtifactView;
+pub(crate) use media::{ArtifactField, InputList, split_list};
 pub(crate) use regions::{RegionField, RegionScope, RegionValue};
 pub(crate) use stages::{FanOutField, StageText};
 

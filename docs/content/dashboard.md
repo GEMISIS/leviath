@@ -355,7 +355,7 @@ hidden, so the panel never reflows under the cursor:
 
 - **This agent**, when nothing is selected: description, which stage a run starts at, the model every
   stage tries first, and the shared context regions (`Enter` on one opens it).
-- **A stage**, on three tabs (`1` `2` `3`). *Behaviour*: how it works, description, tries, revisits,
+- **A stage**, on four tabs (`1` to `4`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
   has one, the prompts, its place in the file, delete. *Model & tools*: the model chain (the first is
   tried first; `Enter` swaps an entry, `x` drops it, `←` `→` or a drag on its `⠿` grip move it, the
@@ -364,14 +364,18 @@ hidden, so the panel never reflows under the cursor:
   *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
   it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
   tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
-  routing the tool).
+  routing the tool). *Media*: what the stage takes as [parts](/docs/media) beyond what its regions
+  already say, the types it reads as text whatever the model takes, and the files it declares it
+  hands back (name, type or pattern, required, description; `x` on any of a file's rows drops the
+  declaration, the last row declares another and asks its name).
 - **A path**: when it is taken, the hint the model routes on, whether it needs your approval, what
   context is carried across (everything, only pinned regions, everything summarized, or per-region
   rules: carry, summarize or drop each one, with the instructions the summary follows), delete.
 - **A context region**, opened from a region row: name, kind (each kind says what it does), share of
-  the context window and token cap, the sliding-window knobs when it is one, whether it must be filled
-  before the run goes on and what to say if it is not, what seeds it, description, delete. `Esc` goes
-  back to where the region was opened from.
+  the context window and token cap, the sliding-window knobs when it is one, the media types it takes
+  and how many stored parts it keeps, whether it must be filled before the run goes on and what to say
+  if it is not, what seeds it, description, delete. `Esc` goes back to where the region was opened
+  from.
 
 The models the chooser offers come from every provider in your config (asked when the screen
 opens, so the list fills in a moment later) on top of the built-in catalog, marked with the context
@@ -420,8 +424,8 @@ On the inspector:
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
 | `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
 | `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
-| `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing |
-| `1` `2` `3` | A stage's tabs: behaviour, model & tools, context |
+| `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration |
+| `1` `2` `3` `4` | A stage's tabs: behaviour, model & tools, context, media |
 | `Esc` | Back: a region or a loop's path returns to where it was opened from; otherwise to the graph |
 | mouse | Click a row to pick it (again to open it); click a tab to switch to it; drag a model's `⠿` grip to move it in the chain |
 
