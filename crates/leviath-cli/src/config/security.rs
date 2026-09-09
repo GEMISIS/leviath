@@ -163,10 +163,11 @@ pub struct SecurityConfig {
 
     /// Keep a run's tools away from the files that decide what agents may do.
     ///
-    /// **On by default.** `config.toml`, `yolo.toml`, the taint gate's
-    /// `policy.toml` and `rules/`, and the `providers/` and `tools/` script
-    /// directories are where permissions are granted and where code every
-    /// later run executes is kept. With this on, `write_file`, `edit_file`
+    /// **On by default.** `config.toml`, `yolo.toml`, `media_types.toml`,
+    /// the taint gate's `policy.toml` and `rules/`, and the `providers/` and
+    /// `tools/` script directories are where permissions are granted, where
+    /// the files a run is handed get their types, and where code every later
+    /// run executes is kept. With this on, `write_file`, `edit_file`
     /// and a `shell` line that names one of them are refused before any
     /// policy is consulted, `--yolo` or not, so an agent cannot widen its
     /// own permissions from inside a run and have the next spawn honour them.

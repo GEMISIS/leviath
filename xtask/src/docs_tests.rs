@@ -360,6 +360,7 @@ fn a_missing_published_artifact_is_reported_on_its_own() {
         vec![
             "docs/schema/config.example.toml: missing".to_string(),
             "docs/schema/yolo.example.toml: missing".to_string(),
+            "docs/schema/media_types.example.toml: missing".to_string(),
         ]
     );
 }

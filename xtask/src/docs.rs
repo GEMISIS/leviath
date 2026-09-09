@@ -303,7 +303,11 @@ pub const SCHEMAS: &[&str] = &[
 /// `configuration.md` links it as a live URL, so it is held to the same
 /// "must exist" rule. It is also `include_str!`'d by a `leviath-cli` test,
 /// which proves it parses.
-pub const PUBLISHED_ARTIFACTS: &[&str] = &["config.example.toml", "yolo.example.toml"];
+pub const PUBLISHED_ARTIFACTS: &[&str] = &[
+    "config.example.toml",
+    "yolo.example.toml",
+    "media_types.example.toml",
+];
 
 /// Every published schema must exist and be parseable JSON, and every other
 /// published artifact must exist.

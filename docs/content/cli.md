@@ -447,10 +447,11 @@ The media registry as this install sees it, and what a file resolves to under it
 
 | Command | Flags |
 |---|---|
-| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, and which layer the row came from (`builtin`, `config`) |
+| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, and which layer the row came from (`builtin`, `config`, `media_types.toml`) |
+| `lev media init` | `--force`. Write a commented example [`media_types.toml`](/docs/configuration#media_typestoml) beside your config |
 | `lev media check <FILE>` | `--type <MEDIA_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, and how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest |
 
-Both read `[media_types]` from the config and refuse to run on a table that does not load, the
+Both read the registry as the daemon builds it and refuse to run on a row that does not load, the
 same fault `lev doctor` reports.
 
 ### `lev agent-client`

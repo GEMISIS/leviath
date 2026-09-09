@@ -528,11 +528,12 @@ pub(crate) fn missing_script_providers(
 /// Only native providers can be listed - a Rhai script provider is resolved by
 /// name on demand and never enumerated - so the line says so rather than
 /// implying the user's `.rhai` providers are missing.
-/// The `[media_types]` rows the daemon cannot load, as one note.
+/// The media rows the daemon cannot load, in the config or in
+/// `media_types.toml`, as one note.
 fn malformed_media_types(config: &Config) -> Vec<String> {
     match config.media_registry() {
         Ok(_) => Vec::new(),
-        Err(e) => vec![format!("[media_types] is ignored until fixed: {e}")],
+        Err(e) => vec![format!("media rows are ignored until fixed: {e}")],
     }
 }
 

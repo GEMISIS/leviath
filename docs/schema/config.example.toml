@@ -229,15 +229,6 @@ max_part_bytes = 33554432        # one part, at every ingress
 inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
 max_stored_per_request = 100     # stored parts one model request carries
 
-# Rows added to the media registry. Name only what you change; the rest
-# resolves from the built-in table (type/subtype, then type/*, then */*).
-[media_types."model/obj"]
-extensions = ["obj"]
-text = true                      # UTF-8 under the hood: may reach a text model as text
-
-[media_types."application/x-acme-scene"]
-family = "model"
-extensions = ["scene"]
-magic = "41434D45"
-tokens = { per_byte = 0.1 }
-stand_in = "[{type} {size}] {name}"
+# Rows added to the media registry live in media_types.toml beside this
+# file (`lev media init` writes an example). A [media_types] table here
+# still loads, under the file's rows.

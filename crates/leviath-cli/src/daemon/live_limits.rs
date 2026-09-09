@@ -40,6 +40,9 @@ struct Applied {
     title: leviath_core::config::TitleConfig,
     media: crate::config::MediaConfig,
     media_types: toml::Table,
+    /// `media_types.toml` as it read last time, so an edit to the file is a
+    /// change to apply the way an edit to the config is.
+    media_types_file: Option<String>,
 }
 
 impl Applied {
@@ -49,6 +52,7 @@ impl Applied {
             title: config.title.clone(),
             media: config.media.clone(),
             media_types: config.media_types.clone(),
+            media_types_file: std::fs::read_to_string(crate::config::media_types_path()).ok(),
         }
     }
 }

@@ -532,7 +532,10 @@ fn config_check_notes_a_media_types_row_that_will_not_load() {
     );
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(
-        check.detail.contains("[media_types] is ignored") && check.detail.contains("model/obj"),
+        check
+            .detail
+            .contains("media rows are ignored until fixed: [media_types] in config.toml")
+            && check.detail.contains("model/obj"),
         "got: {}",
         check.detail
     );

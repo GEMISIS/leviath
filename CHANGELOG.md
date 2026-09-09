@@ -205,6 +205,14 @@ same list.
   whose file the next stage's regions cannot take carries `!` on its label,
   and the explorer's caption names the type that would cross as a stand-in
   (#400).
+- The operator's media rows live in `media_types.toml` beside `config.toml`,
+  the way yolo profiles live in `yolo.toml`: a key per type with the same
+  fields as before, layered over the compiled defaults and over a
+  `[media_types]` table in the config, which still loads. `lev media init`
+  writes a commented example, `lev media list` names the file as a row's
+  source, `lev doctor` names it when it will not load, and
+  `lock_permission_files` keeps a run's tools out of it. An edit reaches
+  the next run without a restart (#400).
 - `[stages.<name>.tool_accepts]`: what each tool may be handed at a stage,
   as `tool = ["image/*"]`. A stored part outside the list is out of that
   tool's reach there: `spawn_agent`'s `parts` refuses it by name, a script's

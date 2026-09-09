@@ -415,7 +415,7 @@ allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
 allow_blueprint_permissions   = false
-lock_permission_files      = true    # a run may not write config.toml, yolo.toml, or the script dirs
+lock_permission_files      = true    # a run may not write config.toml, yolo.toml, media_types.toml, or the script dirs
 shell_env                  = "filtered"   # filtered | strict | custom | inherit
 shell_env_withhold         = []          # names withheld under shell_env = "custom"
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
@@ -439,7 +439,7 @@ credential_store           = "file"   # file | keychain
 
 Six of those need more than a table cell.
 
-**`lock_permission_files`** keeps a run's tools out of `config.toml`, `yolo.toml`, the taint
+**`lock_permission_files`** keeps a run's tools out of `config.toml`, `yolo.toml`, `media_types.toml`, the taint
 gate's `policy.toml` and `rules/`, and the `providers/` and `tools/` script directories. Those are
 where permissions are granted and where code every later run executes lives, so an agent that
 could write them from inside a run could widen what its next spawn is allowed to do. With the lock
@@ -840,35 +840,10 @@ stored parts are left out of a request, with a warning in the run's log.
 
 ## `[media_types."type/subtype"]`
 
-Rows added to the media registry, which says what each media type is. Keys are a
-`type/subtype` or a `type/*` pattern. Name only what you change; every other field resolves
-from the built-in table (the exact type, then `type/*`, then `*/*`).
+Rows added to the media registry. They belong in [`media_types.toml`](#media_typestoml) beside
+this file, which is where `lev media init` puts them; a table here still loads, and the file's
+rows layer over it. The row keys are the same in both places.
 
-```toml
-[media_types."model/obj"]
-extensions = ["obj"]
-text = true                      # UTF-8 under the hood: may reach a text model as text
-
-[media_types."application/x-acme-scene"]
-family = "model"
-extensions = ["scene"]
-magic = "41434D45"
-tokens = { per_byte = 0.1 }
-stand_in = "[{type} {size}] {name}"
-```
-
-| Key | Meaning |
-|---|---|
-| `family` | What providers key their encoders on: `text`, `image`, `audio`, `video`, `document`, `model`, `binary`, or a name of your own |
-| `text` | The bytes are UTF-8 and may travel inline and reach any text model as text |
-| `tokens` | Exactly one of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ fixed = 1000 }` |
-| `extensions` | Extensions, without the dot, that imply this type |
-| `magic` | A hex prefix that identifies the bytes |
-| `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
-
-A misspelled key inside a row is refused, and a row that will not load is skipped by the daemon
-and reported by `lev doctor`. `lev media list` prints the effective table with each row's
-source.
 `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
 `override`, so a client can tell a figure the provider reported from one this build matched off the
 model's name. The two are not worth the same and they look identical once printed.
@@ -1156,6 +1131,7 @@ Everything persistent sits under the data root, `<home>/.leviath`, which `LEVIAT
 |---|---|
 | `config.toml` | This file, created `0600` |
 | `yolo.toml` | The named profiles behind `lev run --yolo=<name>`. See [below](#yolotoml) |
+| `media_types.toml` | Your rows in the media registry: what a type is. See [below](#media_typestoml) |
 | `mcp-auth.json` | MCP OAuth tokens, created `0600` |
 | `runs/` | One directory per run: `meta.json`, `context.json`, `stages.json`, the `run.lvr` journal, per-stage logs |
 | `agents/` | Blueprints installed by `lev add` |
@@ -1206,6 +1182,46 @@ would not fail cleanly, it would produce nonsense. An older version reads normal
 **A torn tail is tolerated.** A crash mid-append leaves a partial final frame, and readers stop
 there and keep everything before it - so an interrupted run still recovers to its last intact
 point.
+
+<a id="media_typestoml"></a>
+
+## `media_types.toml`
+
+Your rows in the media registry, which says what each [media type](/docs/media) is, live in
+`media_types.toml` beside `config.toml` (so under the data root, and wherever
+`LEVIATH_CONFIG_PATH` points when that is set). A key is a `type/subtype` or a `type/*`
+pattern; name only what you change, and every other field resolves from the built-in table (the
+exact type, then `type/*`, then `*/*`). `lev media init` writes this example to start from; the
+[live copy](/schema/media_types.example.toml) is the one the tests check, `lev media list` prints
+the table the file makes with each row's source, and an edit reaches the next run without a
+restart.
+
+```toml
+["model/obj"]
+extensions = ["obj"]
+text = true                      # UTF-8 under the hood: may reach a text model as text
+
+["application/x-acme-scene"]
+family = "model"
+extensions = ["scene"]
+magic = "41434D45"
+tokens = { per_byte = 0.1 }
+stand_in = "[{type} {size}] {name}"
+```
+
+| Key | Meaning |
+|---|---|
+| `family` | What providers key their encoders on: `text`, `image`, `audio`, `video`, `document`, `model`, `binary`, or a name of your own |
+| `text` | The bytes are UTF-8 and may travel inline and reach any text model as text |
+| `tokens` | Exactly one of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ fixed = 1000 }` |
+| `extensions` | Extensions, without the dot, that imply this type |
+| `magic` | A hex prefix that identifies the bytes |
+| `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
+
+A misspelled key inside a row is refused, and a file that will not load is skipped by the
+daemon and reported by `lev doctor`, named by path. A `[media_types]` block cut out of an
+older `config.toml` loads as it was, wrapper and all. A run's tools may not write the file
+(`lock_permission_files`), since what a file is typed as decides what a model is shown.
 
 ## `yolo.toml`
 
