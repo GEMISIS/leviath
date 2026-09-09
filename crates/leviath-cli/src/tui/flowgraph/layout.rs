@@ -308,6 +308,8 @@ mod tests {
 
     fn node(name: &str) -> StageNode {
         StageNode {
+            outputs: Vec::new(),
+            inputs: Vec::new(),
             id: name.to_string(),
             kind: NodeKind::Stage(StageKind::Autonomous),
             is_entry: false,
@@ -322,6 +324,7 @@ mod tests {
 
     fn edge(from: &str, to: &str, class: EdgeClass, back_edge: bool) -> StageEdge {
         StageEdge {
+            unseen: Vec::new(),
             from: from.to_string(),
             to: to.to_string(),
             condition: TransitionCondition::Always,

@@ -294,6 +294,10 @@ of everything it could do:
   The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
   them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the
   escapes from the current stage. A fan-out stage that is running shows its worker counts.
+  A stage that takes [files](/docs/media) beyond text wears what it takes (`◧ image/* audio/wav`,
+  from its regions' `accepts` or its `[input] accepts`), and one that declares files it hands back
+  wears their types (`▤ video/mp4`); a path whose file the next stage's regions cannot take
+  carries `!` on its label, and selecting it says which type would cross as a stand-in.
   Selecting a stage or an edge describes it on the line under the canvas. Boxes can be dragged
   into an arrangement you prefer; the explorer remembers it, and the view, for as long as the
   dashboard is open.

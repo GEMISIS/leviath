@@ -28,6 +28,23 @@ use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
 use super::snake::{LayoutMode, handles_snake, metrics, route_snake, snake_per_row};
 
+/// The word on an edge: what fires it, in the editor's or the run view's
+/// vocabulary. A file the target cannot take crosses as a stand-in, and
+/// the path says so with a `!` in front; the caption under the canvas
+/// names the type.
+fn edge_label(e: &StageEdge, edit: bool) -> String {
+    let label = if edit {
+        e.editor_label()
+    } else {
+        e.condition_label()
+    };
+    match (e.unseen.is_empty(), label.is_empty()) {
+        (true, _) => label.to_string(),
+        (false, true) => "!".to_string(),
+        (false, false) => format!("! {label}"),
+    }
+}
+
 /// What a run has done to one stage, for the overlay.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct StageLive {
@@ -389,11 +406,7 @@ fn build(
                 .with_target_side(tgt)
                 .with_deletable(false)
                 .with_hidden(e.class == EdgeClass::Escape);
-            let label = if edit {
-                e.editor_label()
-            } else {
-                e.condition_label()
-            };
+            let label = edge_label(e, edit);
             if !label.is_empty() {
                 edge = edge.with_label(format!("[{label}]"));
             }
@@ -1707,6 +1720,39 @@ merge_stage = "merge"
         // New size: fit again.
         draw(&mut v, 60, 20);
         assert_ne!(v.zoom(), zoomed);
+    }
+
+    /// A path that drops a file wears a `!` on its label, alone on a run's
+    /// canvas and before the word on an editor's.
+    #[test]
+    fn a_path_that_drops_a_file_is_marked_on_both_canvases() {
+        let g = Arc::new(StageGraph::from_blueprint(
+            &parse_manifest(
+                r#"
+[agent]
+name = "g"
+[stages.render]
+[[stages.render.output.artifacts]]
+name = "final"
+type = "video/mp4"
+[stages.render.transitions.publish]
+[stages.publish]
+[stages.publish.context.regions]
+notes = { kind = "pinned", accepts = ["text/*"] }
+[stages.publish.transitions]
+"#,
+            )
+            .unwrap(),
+        ));
+        let mut v = FlowView::new(g.clone(), false);
+        let (_, text) = draw(&mut v, 220, 50);
+        assert!(text.contains("▤ video/mp4"), "{text}");
+        let dropped = &g.edges[0];
+        assert_eq!(edge_label(dropped, false), "!");
+        assert_eq!(edge_label(dropped, true), "! always");
+        let fine = &graph().edges[0];
+        assert_eq!(edge_label(fine, false), "");
+        assert_eq!(edge_label(fine, true), "always");
     }
 
     #[test]
