@@ -574,10 +574,11 @@ fn build_agent_inner(
     // that a live run is up but blind to paths its author designed it around.
     let read_path_counts =
         read_path_grant_counts(&blueprint, deps.config, std::path::Path::new(&args.workdir));
+    let media = Arc::new(tool_media(world, &args.run_id));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy)
         .with_shell_env(shell_env_policy(deps.config))
-        .with_media(Arc::new(tool_media(world, &args.run_id)));
+        .with_media(media.clone());
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
@@ -791,12 +792,15 @@ fn build_agent_inner(
     let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
         deps.config.limits.write_limits(),
     ));
+    let offered_parts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
         crate::daemon::script_host::DaemonScriptHost::new(
             script_allow,
             std::path::PathBuf::from(&args.workdir),
         )
         .with_write_budget(writes.clone())
+        // The run's parts, by name, and somewhere to put new ones.
+        .with_media(media.clone(), offered_parts.clone())
         // Route a script `shell()` through the agent's per-stage sandbox (so a
         // script can't escape the isolation the stage declared) and cap it at the
         // configured wall-clock timeout.
@@ -1054,6 +1058,7 @@ fn build_agent_inner(
         script_tools,
         script_tool_names,
         script_host,
+        offered_parts,
         dynamic,
         unattended: unattended_tools,
         yolo: profile,

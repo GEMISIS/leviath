@@ -53,6 +53,13 @@ pub trait ToolService: Send + Sync {
     /// Default no-op for services without per-stage policy.
     fn sync_stage(&self, _entity: Entity, _stage_index: usize, _stage_name: &str) {}
 
+    /// Hand the service the stored parts `entity`'s window holds, right
+    /// before a batch is dispatched, so a tool that takes a part by name can
+    /// find it off the tick. Called with the whole current list each time;
+    /// an empty list means the window holds none. Default no-op for services
+    /// whose tools take no parts.
+    fn offer_parts(&self, _entity: Entity, _parts: Vec<leviath_core::media::Part>) {}
+
     /// Re-resolve `entity`'s advertised tool defs for the stage at `stage_index` -
     /// e.g. after new tools were discovered on disk. `None` means "no change"
     /// (the default, for services without dynamic tools); `Some(tools)` replaces
@@ -847,6 +854,16 @@ pub(crate) fn dispatch_tools(
                 });
             }
         }
+        // What a tool may read by name: every stored part the window holds
+        // right now, offered whole so a stale offer never outlives the entry
+        // it came from.
+        let offered: Vec<leviath_core::media::Part> = window
+            .regions
+            .iter()
+            .flat_map(|r| r.content.iter())
+            .flat_map(|e| e.content.stored().cloned())
+            .collect();
+        service.0.offer_parts(entity, offered);
         let exec = service.0.exec_for(entity, lane_calls, progress);
         let exec = match ack {
             Some(ack) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT),

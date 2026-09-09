@@ -44,10 +44,27 @@ fn stage_ctx(stage_name: &str, index: usize, window: &ContextWindow) -> serde_js
             (r.name.clone(), serde_json::Value::String(text))
         })
         .collect();
+    // The stored parts each region holds, by region, so a hook can see that
+    // `storyboard` carries three images without parsing stand-ins out of
+    // the text. Regions holding none are absent.
+    let parts: serde_json::Map<String, serde_json::Value> = window
+        .regions
+        .iter()
+        .filter_map(|r| {
+            let stored: Vec<serde_json::Value> = r
+                .content
+                .iter()
+                .flat_map(|e| e.content.stored())
+                .map(leviath_scripting::parts::part_summary)
+                .collect();
+            (!stored.is_empty()).then(|| (r.name.clone(), serde_json::Value::Array(stored)))
+        })
+        .collect();
     serde_json::json!({
         "stage": stage_name,
         "stage_index": index,
         "regions": regions,
+        "parts": parts,
     })
 }
 
@@ -619,5 +636,43 @@ pub(crate) fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<Re
                     .to_string(),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod ctx_tests {
+    use super::*;
+    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore, Part};
+    use leviath_core::region::EntryContent;
+    use leviath_core::{Region, RegionKind};
+
+    #[test]
+    fn the_ctx_lists_each_regions_stored_parts_and_skips_the_rest() {
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new("brief".into(), RegionKind::Pinned, 1_000));
+        window.add_region(Region::new("art".into(), RegionKind::Pinned, 5_000));
+        let reg = MediaRegistry::builtin();
+        let blob = Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+        )
+        .named("a.png");
+        let r = MemoryBlobStore::new().put("r", &blob, &reg).unwrap();
+        window
+            .add_to_region("brief", "words".to_string(), 1)
+            .unwrap();
+        window
+            .get_region_mut("art")
+            .unwrap()
+            .add_entry(
+                EntryContent::from_parts(vec![Part::text("cap"), Part::stored(r).named("a.png")]),
+                1_700,
+            )
+            .unwrap();
+        let ctx = stage_ctx("plan", 0, &window);
+        assert_eq!(ctx["regions"]["brief"], "words");
+        assert!(ctx["parts"].get("brief").is_none());
+        assert_eq!(ctx["parts"]["art"][0]["name"], "a.png");
+        assert_eq!(ctx["parts"]["art"][0]["media_type"], "image/png");
     }
 }

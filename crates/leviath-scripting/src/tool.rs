@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use leviath_core::media::Part;
+use leviath_core::region::EntryContent;
 use leviath_core::text::{split_at_boundary, substring};
 use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 use serde::Deserialize;
@@ -62,6 +64,11 @@ pub struct ScriptToolMeta {
     /// `filesystem`). The host drops the tool when the platform can't provide one -
     /// a script self-declares what it depends on. Empty = always available.
     pub required_caps: Vec<String>,
+    /// Media type patterns the tool takes as parts (`@accepts image/*`):
+    /// what it reads with `read_part`. Advisory, for `lev tools` and lint.
+    pub accepts: Vec<String>,
+    /// Media type patterns the tool hands back as parts (`@produces`).
+    pub produces: Vec<String>,
 }
 
 impl ScriptToolMeta {
@@ -103,6 +110,9 @@ impl ScriptToolMeta {
 /// - `// @param <name> <type> <required|optional> "<description>"` - repeatable.
 /// - `// @requires <cap> [<cap>...]` - platform capabilities the tool needs
 ///   (`network`, `shell`, `filesystem`); comma/space-separated, repeatable.
+/// - `// @accepts <type/pattern> [...]` and `// @produces <type/pattern> [...]`:
+///   the media types the tool reads as parts and hands back as parts;
+///   comma/space-separated, repeatable.
 ///
 /// Non-comment / unrecognized lines are ignored, so a script can mix ordinary
 /// comments with directives. A missing `@tool` name is an error.
@@ -111,6 +121,8 @@ pub(crate) fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
     let mut description = String::new();
     let mut params: Vec<ParamSpec> = Vec::new();
     let mut required_caps: Vec<String> = Vec::new();
+    let mut accepts: Vec<String> = Vec::new();
+    let mut produces: Vec<String> = Vec::new();
 
     for line in src.lines() {
         let trimmed = line.trim();
@@ -138,11 +150,9 @@ pub(crate) fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
             "description" => description = arg.to_string(),
             "param" => params.push(parse_param_directive(arg)?),
             // `@requires <cap> [<cap>...]` - whitespace/comma-separated, repeatable.
-            "requires" => required_caps.extend(
-                arg.split([' ', ',', '\t'])
-                    .filter(|c| !c.is_empty())
-                    .map(str::to_string),
-            ),
+            "requires" => required_caps.extend(list_items(arg)),
+            "accepts" => accepts.extend(list_items(arg)),
+            "produces" => produces.extend(list_items(arg)),
             _ => {} // unknown directive - ignore
         }
     }
@@ -155,7 +165,16 @@ pub(crate) fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
         description,
         params,
         required_caps,
+        accepts,
+        produces,
     })
+}
+
+/// The items of a whitespace- or comma-separated directive argument.
+fn list_items(arg: &str) -> impl Iterator<Item = String> + '_ {
+    arg.split([' ', ',', '\t'])
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse the argument of a `@param` directive:
@@ -216,6 +235,12 @@ struct ToolTomlTool {
     /// Platform capabilities the tool requires (`network`, `shell`, `filesystem`).
     #[serde(default)]
     requires: Vec<String>,
+    /// Media type patterns the tool reads as parts.
+    #[serde(default)]
+    accepts: Vec<String>,
+    /// Media type patterns the tool hands back as parts.
+    #[serde(default)]
+    produces: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +287,8 @@ pub(crate) fn parse_tool_toml(src: &str) -> Result<ScriptToolMeta> {
         description: doc.tool.description,
         params,
         required_caps: doc.tool.requires,
+        accepts: doc.tool.accepts,
+        produces: doc.tool.produces,
     })
 }
 
@@ -295,6 +322,37 @@ pub trait ScriptHost: Send + Sync {
     fn write_file(&self, path: &str, content: &str) -> std::result::Result<String, String>;
     /// Read an environment variable.
     fn env_var(&self, name: &str) -> std::result::Result<String, String>;
+
+    /// The bytes of a stored part the run holds, named by file name or a
+    /// hash prefix. A host with no store, or no such part, says so.
+    fn read_part(&self, name_or_sha: &str) -> std::result::Result<Vec<u8>, String> {
+        Err(format!("this host holds no part named '{name_or_sha}'"))
+    }
+
+    /// Store `bytes` as a part of this run, typed as `media_type` when given
+    /// (else sniffed) and named `name` when given, returning the part's
+    /// summary map. A host with no store refuses.
+    fn write_part(
+        &self,
+        bytes: Vec<u8>,
+        media_type: Option<&str>,
+        name: Option<&str>,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let _ = (bytes, media_type, name);
+        Err("this host has no blob store to write a part into".to_string())
+    }
+
+    /// Every stored part the run holds, as summary maps.
+    fn list_parts(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+
+    /// The stored part with this hash, if the host holds it: what a tool's
+    /// returned `parts` list is resolved through.
+    fn part(&self, sha256: &str) -> Option<Part> {
+        let _ = sha256;
+        None
+    }
 }
 
 // ─── Compiled tool + tool set ───────────────────────────────────────────────
@@ -472,8 +530,12 @@ pub(crate) const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 /// still escapes - a panic from Rhai's own internals - is contained one level
 /// up, where the daemon runs this on a `spawn_blocking` task and turns the
 /// resulting `JoinError` into a tool error.
-pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptHost>) -> String {
-    let engine = build_tool_engine(host);
+pub fn execute(
+    tool: &ScriptTool,
+    args: serde_json::Value,
+    host: Arc<dyn ScriptHost>,
+) -> EntryContent {
+    let engine = build_tool_engine(host.clone());
     // Converting a `serde_json::Value` to a Rhai `Dynamic` is infallible (any
     // JSON maps to a Dynamic); fall back to unit on the impossible error rather
     // than carry a dead error arm.
@@ -481,9 +543,52 @@ pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptH
     let mut scope = Scope::new();
     scope.push_dynamic("params", params);
     match engine.eval_ast_with_scope::<Dynamic>(&mut scope, &tool.ast) {
-        Ok(value) => dynamic_to_result_string(value),
-        Err(e) => format!("[error] {}: {}", tool.meta.name, e),
+        Ok(value) => result_content(value, host.as_ref()),
+        Err(e) => format!("[error] {}: {}", tool.meta.name, e).into(),
     }
+}
+
+/// A script's return value as the tool result. A map with a `parts` list is
+/// the typed form: its `content` is the text and each part map (as
+/// `write_part` returned it, or as `find_part` found it) is resolved through
+/// the host by hash. Anything else is text, as [`dynamic_to_result_string`]
+/// renders it.
+fn result_content(value: Dynamic, host: &dyn ScriptHost) -> EntryContent {
+    let has_parts = value
+        .read_lock::<Map>()
+        .is_some_and(|m| m.contains_key("parts"));
+    if !has_parts {
+        return dynamic_to_result_string(value).into();
+    }
+    let json: serde_json::Value = match rhai::serde::from_dynamic(&value) {
+        Ok(json) => json,
+        Err(e) => return format!("[error] cannot serialize result: {e}").into(),
+    };
+    let Some(listed) = json["parts"].as_array() else {
+        return "[error] `parts` in a tool result must be a list of part maps".into();
+    };
+    let text = json["content"].as_str().unwrap_or_default().to_string();
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(Part::text(text));
+    }
+    for item in listed {
+        let Some(sha) = crate::parts::sha_of(item) else {
+            return "[error] a part in the tool result has no sha256; return what write_part or \
+                    find_part gave you"
+                .into();
+        };
+        match host.part(sha) {
+            Some(part) => parts.push(part),
+            None => {
+                return format!(
+                    "[error] the tool result names a part this run does not hold: {sha}"
+                )
+                .into();
+            }
+        }
+    }
+    EntryContent::from_parts(parts)
 }
 
 /// Serialize a script's return value for the agent: strings pass through
@@ -642,6 +747,52 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
         guard_str("env_var", &mut || to_rhai(h.env_var(name)))
     });
 
+    // read_part(name_or_sha) -> Blob
+    let h = host.clone();
+    engine.register_fn("read_part", move |name: &str| -> HostRes<rhai::Blob> {
+        h.read_part(name)
+            .map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))
+    });
+    // write_part(bytes) / write_part(bytes, type) / write_part(bytes, type, name)
+    let h = host.clone();
+    engine.register_fn("write_part", move |bytes: rhai::Blob| {
+        guard_dyn("write_part", &mut || {
+            written(h.write_part(bytes.clone(), None, None))
+        })
+    });
+    let h = host.clone();
+    engine.register_fn("write_part", move |bytes: rhai::Blob, media_type: &str| {
+        guard_dyn("write_part", &mut || {
+            written(h.write_part(bytes.clone(), Some(media_type), None))
+        })
+    });
+    let h = host.clone();
+    engine.register_fn(
+        "write_part",
+        move |bytes: rhai::Blob, media_type: &str, name: &str| {
+            guard_dyn("write_part", &mut || {
+                written(h.write_part(bytes.clone(), Some(media_type), Some(name)))
+            })
+        },
+    );
+    // list_parts() -> [part maps]; find_part(name_or_sha) -> part map or ()
+    let h = host.clone();
+    engine.register_fn("list_parts", move || -> HostRes<Dynamic> {
+        let parts = serde_json::Value::Array(h.list_parts());
+        rhai::serde::to_dynamic(parts)
+    });
+    let h = host.clone();
+    engine.register_fn("find_part", move |name: &str| -> HostRes<Dynamic> {
+        let found = h
+            .list_parts()
+            .into_iter()
+            .find(|p| part_answers_to(p, name));
+        match found {
+            Some(p) => rhai::serde::to_dynamic(p),
+            None => Ok(Dynamic::UNIT),
+        }
+    });
+
     // Pure helpers. Their bodies live in named free functions (not inline
     // closures) so they get a single, cleanly-attributed monomorphization under
     // coverage instrumentation instead of being inlined into rhai's generic
@@ -672,6 +823,27 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     engine.register_fn("decode_base64", |s: &str| -> HostRes<String> {
         guard_str("decode_base64", &mut || decode_base64(s))
     });
+}
+
+/// A `write_part` answer as Rhai sees it: the summary map, or the host's
+/// refusal as a runtime error.
+fn written(r: std::result::Result<serde_json::Value, String>) -> HostRes<Dynamic> {
+    let json =
+        r.map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))?;
+    rhai::serde::to_dynamic(json)
+}
+
+/// Whether a part summary answers to `wanted`: its name exactly, or a hash
+/// prefix of at least six characters.
+fn part_answers_to(summary: &serde_json::Value, wanted: &str) -> bool {
+    if summary["name"].as_str() == Some(wanted) {
+        return true;
+    }
+    let wanted = wanted.to_ascii_lowercase();
+    wanted.len() >= 6
+        && summary["sha256"]
+            .as_str()
+            .is_some_and(|sha| sha.starts_with(&wanted))
 }
 
 /// `parse_json(str)` host function: JSON string → Rhai value.
@@ -1055,6 +1227,26 @@ mod tests {
         let src = "// @tool t\n// @requires network, shell\n// @requires filesystem\n1";
         let meta = parse_annotations(src).unwrap();
         assert_eq!(meta.required_caps, ["network", "shell", "filesystem"]);
+    }
+
+    #[test]
+    fn annotations_declare_what_a_tool_takes_and_makes() {
+        let src = "// @tool t\n// @accepts image/*, audio/wav\n// @produces video/mp4\n// @accepts model/*\n1";
+        let meta = parse_annotations(src).unwrap();
+        assert_eq!(meta.accepts, ["image/*", "audio/wav", "model/*"]);
+        assert_eq!(meta.produces, ["video/mp4"]);
+        let meta = parse_tool_toml(
+            "[tool]\nname = \"t\"\naccepts = [\"image/*\"]\nproduces = [\"image/png\"]\n",
+        )
+        .unwrap();
+        assert_eq!(meta.accepts, ["image/*"]);
+        assert_eq!(meta.produces, ["image/png"]);
+        assert!(
+            parse_annotations("// @tool t\n1")
+                .unwrap()
+                .accepts
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1500,7 +1692,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         std::panic::set_hook(Box::new(|_| {}));
         let out = execute(&tool, serde_json::json!({}), host);
         std::panic::set_hook(prev);
-        out
+        out.into_string()
     }
 
     /// Assert the tool reported a guarded panic from `host_fn` carrying `detail`.
@@ -1963,5 +2155,276 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     fn collapse_whitespace_runs_and_trims() {
         assert_eq!(collapse_whitespace("  a \n\t b  "), "a b");
         assert_eq!(collapse_whitespace(""), "");
+    }
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use super::*;
+    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore};
+    use std::sync::Mutex;
+
+    /// A host over a memory store: what the daemon's host does, minus the
+    /// permission layer.
+    struct PartsHost {
+        store: MemoryBlobStore,
+        registry: MediaRegistry,
+        parts: Mutex<Vec<Part>>,
+        allow_write: bool,
+    }
+
+    impl PartsHost {
+        fn arc(allow_write: bool) -> Arc<PartsHost> {
+            let store = MemoryBlobStore::new();
+            let registry = MediaRegistry::builtin();
+            let blob = Blob::new(
+                MediaType::parse("image/png").unwrap(),
+                b"\x89PNG\r\n\x1a\nhero".to_vec(),
+            )
+            .named("hero.png");
+            let r = store.put("run", &blob, &registry).unwrap();
+            let seeded = Part::stored(r).named("hero.png");
+            Arc::new(PartsHost {
+                store,
+                registry,
+                parts: Mutex::new(vec![seeded, Part::text("note").named("note")]),
+                allow_write,
+            })
+        }
+    }
+
+    impl ScriptHost for PartsHost {
+        fn http_get(
+            &self,
+            _: &str,
+            _: BTreeMap<String, String>,
+        ) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn http_post(
+            &self,
+            _: &str,
+            _: &str,
+            _: BTreeMap<String, String>,
+        ) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn shell(&self, _: &str) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn read_file(&self, _: &str) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn write_file(&self, _: &str, _: &str) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn env_var(&self, _: &str) -> std::result::Result<String, String> {
+            Err("no".into())
+        }
+        fn read_part(&self, wanted: &str) -> std::result::Result<Vec<u8>, String> {
+            let parts = self.parts.lock().unwrap();
+            let part = parts
+                .iter()
+                .find(|p| crate::parts::part_matches(p, wanted))
+                .ok_or_else(|| format!("no part '{wanted}'"))?;
+            let sha = part.blob().map(|b| b.sha256.clone()).unwrap_or_default();
+            self.store
+                .read("run", &sha)
+                .map(|b| b.to_vec())
+                .map_err(|e| e.to_string())
+        }
+        fn write_part(
+            &self,
+            bytes: Vec<u8>,
+            media_type: Option<&str>,
+            name: Option<&str>,
+        ) -> std::result::Result<serde_json::Value, String> {
+            if !self.allow_write {
+                return Err("[denied] write_part".to_string());
+            }
+            let declared = media_type.and_then(|t| MediaType::parse(t).ok());
+            let mt = self.registry.resolve(declared.as_ref(), name, &bytes);
+            let blob = Blob::new(mt, bytes).named(name.unwrap_or("part"));
+            let r = self.store.put("run", &blob, &self.registry).unwrap();
+            let part = Part::stored(r).named(name.unwrap_or("part"));
+            self.parts.lock().unwrap().push(part.clone());
+            Ok(crate::parts::part_summary(&part))
+        }
+        fn list_parts(&self) -> Vec<serde_json::Value> {
+            self.parts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.is_stored())
+                .map(crate::parts::part_summary)
+                .collect()
+        }
+        fn part(&self, sha256: &str) -> Option<Part> {
+            self.parts
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.blob().is_some_and(|b| b.sha256 == sha256))
+                .cloned()
+        }
+    }
+
+    fn tool_from(src: &str) -> ScriptTool {
+        let engine = Engine::new();
+        ScriptTool {
+            meta: parse_annotations(src).expect("annotations"),
+            ast: engine.compile(src).expect("compile"),
+            source_path: PathBuf::from("mem.rhai"),
+        }
+    }
+
+    /// The doubles above answer the unrelated host functions with a refusal;
+    /// call each once so the gate sees them run.
+    fn touch_stubs(host: &dyn ScriptHost) {
+        assert!(host.http_get("u", BTreeMap::new()).is_err());
+        assert!(host.http_post("u", "b", BTreeMap::new()).is_err());
+        assert!(host.shell("c").is_err());
+        assert!(host.read_file("p").is_err());
+        assert!(host.write_file("p", "c").is_err());
+        assert!(host.env_var("n").is_err());
+    }
+
+    #[test]
+    fn a_script_reads_lists_finds_and_writes_parts() {
+        let host = PartsHost::arc(true);
+        let tool = tool_from(
+            "// @tool t\n\
+             let bytes = read_part(\"hero.png\");\n\
+             let all = list_parts();\n\
+             let found = find_part(\"hero.png\");\n\
+             let by_sha = find_part(found.sha256.sub_string(0, 8));\n\
+             let missing = find_part(\"nope.png\");\n\
+             let copy = write_part(bytes, \"image/png\", \"copy.png\");\n\
+             let typed = write_part(bytes, \"image/png\");\n\
+             let sniffed = write_part(bytes);\n\
+             `${bytes.len()} ${all.len()} ${found.name} ${by_sha.name} ${missing == ()} ${copy.name} ${typed.media_type} ${sniffed.media_type}`",
+        );
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(
+            out,
+            "12 1 hero.png hero.png true copy.png image/png image/png"
+        );
+        assert_eq!(host.list_parts().len(), 4);
+    }
+
+    #[test]
+    fn a_result_map_with_parts_becomes_typed_content() {
+        let host = PartsHost::arc(true);
+        let tool = tool_from(
+            "// @tool t\n// @produces image/png\n\
+             let b = read_part(\"hero.png\"); b.push(0x21);\n\
+             let p = write_part(b, \"image/png\", \"out.png\");\n\
+             #{ content: \"made it\", parts: [p, find_part(\"hero.png\")] }",
+        );
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out.parts().len(), 3, "{out}");
+        assert_eq!(out.stored_count(), 2);
+        assert!(
+            out.as_str()
+                .starts_with("made it\n[image/png, 13 B] out.png"),
+            "{out}"
+        );
+
+        // No content: parts alone.
+        let tool = tool_from("// @tool t\n#{ parts: [find_part(\"hero.png\")] }");
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out.parts().len(), 1);
+        assert!(out.has_stored());
+
+        // The refusals a script can earn.
+        for (src, expect) in [
+            ("// @tool t\n#{ parts: 5 }", "must be a list"),
+            (
+                "// @tool t\n#{ parts: [], f: || 1 }",
+                "cannot serialize result",
+            ),
+            (
+                "// @tool t\n#{ parts: [#{ name: \"x\" }] }",
+                "has no sha256",
+            ),
+            (
+                "// @tool t\n#{ parts: [#{ sha256: \"0000000000\" }] }",
+                "does not hold: 0000000000",
+            ),
+            (
+                "// @tool t\nwrite_part(read_part(\"hero.png\"))",
+                "[denied] write_part",
+            ),
+            ("// @tool t\nread_part(\"nope.png\")", "no part 'nope.png'"),
+            ("// @tool t\nread_part(\"note\")", "[error]"),
+        ] {
+            let host = PartsHost::arc(false);
+            let out = execute(&tool_from(src), serde_json::json!({}), host);
+            assert!(out.contains(expect), "{src}: {out}");
+        }
+        // A map without `parts` is still JSON text.
+        let out = execute(
+            &tool_from("// @tool t\n#{ a: 1 }"),
+            serde_json::json!({}),
+            host,
+        );
+        assert_eq!(out, "{\"a\":1}");
+    }
+
+    #[test]
+    fn the_default_host_holds_no_parts() {
+        struct Bare;
+        impl ScriptHost for Bare {
+            fn http_get(
+                &self,
+                _: &str,
+                _: BTreeMap<String, String>,
+            ) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+            fn http_post(
+                &self,
+                _: &str,
+                _: &str,
+                _: BTreeMap<String, String>,
+            ) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+            fn shell(&self, _: &str) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+            fn read_file(&self, _: &str) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+            fn write_file(&self, _: &str, _: &str) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+            fn env_var(&self, _: &str) -> std::result::Result<String, String> {
+                Err("no".into())
+            }
+        }
+        let host: Arc<dyn ScriptHost> = Arc::new(Bare);
+        touch_stubs(host.as_ref());
+        touch_stubs(PartsHost::arc(false).as_ref());
+        assert!(host.read_part("x").unwrap_err().contains("holds no part"));
+        assert!(
+            host.write_part(vec![1], None, None)
+                .unwrap_err()
+                .contains("no blob store")
+        );
+        assert!(host.list_parts().is_empty());
+        assert!(host.part("abc").is_none());
+        let out = execute(
+            &tool_from("// @tool t\nlist_parts().len()"),
+            serde_json::json!({}),
+            host.clone(),
+        );
+        assert_eq!(out, "0");
+        let out = execute(
+            &tool_from("// @tool t\nfind_part(\"abcdef\") == ()"),
+            serde_json::json!({}),
+            host,
+        );
+        assert_eq!(out, "true");
     }
 }

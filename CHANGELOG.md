@@ -111,6 +111,16 @@ same list.
   hydrate send the stand-in. The journal and `context.json` never hold
   base64. `[media] max_stored_per_request` caps how many parts one request
   carries, oldest dropped first (#400).
+- Rhai scripts handle parts. A script tool reads a stored part's bytes with
+  `read_part(name)` (by file name or hash prefix), stores new bytes with
+  `write_part(bytes [, type [, name]])`, sees what the run holds with
+  `list_parts()` and `find_part(name)`, and returns `#{ content, parts }`
+  to hand parts back on its result; `// @accepts` and `// @produces`
+  declare the types it takes and makes, which `lev tools` shows. The parts
+  a tool can name are the ones in the agent's context when the batch was
+  dispatched plus what the batch wrote. A custom region's `entries[i]`
+  carries `parts`, and a stage hook's `ctx.parts` lists each region's
+  stored parts (#400).
 - A tool result is text plus any stored parts the tool produced, all the
   way through: the tool lane, the routed region entry, the journal's
   `ToolCallDone` record (a plain string when it is text alone, so every

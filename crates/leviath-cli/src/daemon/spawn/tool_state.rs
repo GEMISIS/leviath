@@ -57,6 +57,8 @@ pub(super) struct ToolStateParts<'a> {
     pub(super) script_tool_names: HashSet<String>,
     /// The host those scripts call back into.
     pub(super) script_host: Arc<dyn leviath_scripting::ScriptHost>,
+    /// The parts handle that host reads, which the runtime's offers fill.
+    pub(super) offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::media::Part>>>,
     /// Re-resolution context, for a blueprint that rescans mid-run.
     pub(super) dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
     /// Whether this run answers its own prompts: `--yolo` under a profile
@@ -133,6 +135,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         script_tools: Arc::new(StdMutex::new(parts.script_tools)),
         script_tool_names: Arc::new(StdMutex::new(parts.script_tool_names)),
         script_host: parts.script_host,
+        offered_parts: parts.offered_parts,
         dynamic: parts.dynamic,
         // Everything a resume needs to redo this resolution against the config
         // as it stands then, rather than the copy this spawn read.

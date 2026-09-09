@@ -52,13 +52,18 @@ flowchart TD
 
 | Hook | Fires | Sees | `modify` replaces |
 |---|---|---|---|
-| `on_stage_enter` | entering a stage, before its first inference | stage, regions | region contents |
-| `before_inference` | context assembled, before the request goes out | stage, regions | region contents |
+| `on_stage_enter` | entering a stage, before its first inference | stage, regions, parts | region contents |
+| `before_inference` | context assembled, before the request goes out | stage, regions, parts | region contents |
 | `after_inference` | response in hand, before it reaches context | response, token count, tool-call names | the response text |
 | `on_tool_call` | before the policy and taint layers see the calls | the calls and their arguments | the calls |
-| `on_stage_exit` | stage finished, before the next is chosen | stage, regions | region contents |
+| `on_stage_exit` | stage finished, before the next is chosen | stage, regions, parts | region contents |
 | `on_completion` | run finished successfully | the final output | the final output |
 | `on_error` | run finished in error | the error message | the message |
+
+The three region hooks see each region's text under `regions` and, under `parts`, the stored
+[parts](/docs/media) each region holds, as maps with `media_type`, `name`, `sha256`, `size` and
+`tokens`, keyed by region name; a region holding none is absent from `parts`. A hook can refuse to
+start a stage whose `storyboard` is empty, or note in `regions` that six frames arrived.
 
 A **cancelled** run fires neither terminal hook. It was stopped from outside, and a hook narrating
 that would report your own decision back to you.

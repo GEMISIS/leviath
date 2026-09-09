@@ -18,8 +18,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::Mutex as StdMutex;
+
 use leviath_core::floor_char_boundary;
+use leviath_core::media::Part;
 use leviath_scripting::ScriptHost;
+use leviath_scripting::parts::{part_matches, part_summary};
 use leviath_tools::ShellExecutor;
 use tokio::process::Command as TokioCommand;
 
@@ -110,6 +114,13 @@ pub(crate) struct DaemonScriptHost {
     /// `write_file` and a redirect in its `shell` are writes the run pays
     /// for like any other; without this they were the two that did not.
     writes: Option<Arc<crate::daemon::tool_service::WriteBudget>>,
+    /// The run's blob store, when this host serves a run: where `write_part`
+    /// puts bytes and `read_part` gets them.
+    media: Option<Arc<leviath_tools::ToolMedia>>,
+    /// The parts a script may name: what the runtime offered from the window
+    /// before the batch, plus what scripts in it wrote. Shared with the tool
+    /// state, which the runtime hands the offer to.
+    parts: Arc<StdMutex<Vec<Part>>>,
 }
 
 impl DaemonScriptHost {
@@ -127,7 +138,21 @@ impl DaemonScriptHost {
             allow_env_vars: Vec::new(),
             shell_env: leviath_tools::ShellEnvPolicy::default(),
             writes: None,
+            media: None,
+            parts: Arc::new(StdMutex::new(Vec::new())),
         }
+    }
+
+    /// Give scripts the run's blob store and the parts they may name.
+    /// Consuming builder used at spawn.
+    pub(crate) fn with_media(
+        mut self,
+        media: Arc<leviath_tools::ToolMedia>,
+        parts: Arc<StdMutex<Vec<Part>>>,
+    ) -> Self {
+        self.media = Some(media);
+        self.parts = parts;
+        self
     }
 
     /// Charge this run's write budget for what scripts write. Consuming
@@ -307,6 +332,75 @@ impl ScriptHost for DaemonScriptHost {
             writes.record(bytes);
         }
         out
+    }
+
+    fn read_part(&self, wanted: &str) -> Result<Vec<u8>, String> {
+        let Some(media) = &self.media else {
+            return Err("this run has no blob store, so it holds no parts".to_string());
+        };
+        let part = leviath_core::sync::lock(&self.parts)
+            .iter()
+            .rev()
+            .find(|p| part_matches(p, wanted))
+            .cloned();
+        let Some(part) = part else {
+            return Err(format!(
+                "no stored part is named '{wanted}'; list_parts() shows what this run holds"
+            ));
+        };
+        let Some(blob) = part.blob() else {
+            return Err(format!("'{wanted}' is inline text, not a stored part"));
+        };
+        media
+            .store
+            .read(&media.run_id, &blob.sha256)
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| format!("could not read the bytes of '{wanted}': {e}"))
+    }
+
+    fn write_part(
+        &self,
+        bytes: Vec<u8>,
+        media_type: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        // Storing a part is writing the run, as `write_file` is.
+        if !self.allow.write_file {
+            return Err(denied("write_part"));
+        }
+        let Some(media) = &self.media else {
+            return Err("this run has no blob store to write a part into".to_string());
+        };
+        let media_type = media.type_of(media_type, name, &bytes);
+        let name = match name {
+            Some(n) => n.to_string(),
+            None => {
+                let n = leviath_core::sync::lock(&self.parts).len() + 1;
+                media.name_for(&format!("part-{n}"), &media_type)
+            }
+        };
+        let size = bytes.len() as u64;
+        let part = media.store(leviath_core::media::Blob::new(media_type, bytes).named(name))?;
+        if let Some(writes) = &self.writes {
+            writes.record(size);
+        }
+        leviath_core::sync::lock(&self.parts).push(part.clone());
+        Ok(part_summary(&part))
+    }
+
+    fn list_parts(&self) -> Vec<serde_json::Value> {
+        leviath_core::sync::lock(&self.parts)
+            .iter()
+            .filter(|p| p.is_stored())
+            .map(part_summary)
+            .collect()
+    }
+
+    fn part(&self, sha256: &str) -> Option<Part> {
+        leviath_core::sync::lock(&self.parts)
+            .iter()
+            .find(|p| p.blob().is_some_and(|b| b.sha256 == sha256))
+            .cloned()
     }
 
     fn env_var(&self, name: &str) -> Result<String, String> {
@@ -2198,5 +2292,126 @@ mod tests {
         let capped = cap_script_io(s);
         // Valid UTF-8 (would panic on construction if a codepoint were split).
         assert!(capped.contains("[...truncated by leviath"));
+    }
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use super::*;
+    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore};
+
+    fn media_and_store() -> (Arc<leviath_tools::ToolMedia>, Arc<MemoryBlobStore>) {
+        let store = Arc::new(MemoryBlobStore::new());
+        let media = Arc::new(leviath_tools::ToolMedia {
+            store: store.clone(),
+            registry: Arc::new(MediaRegistry::builtin()),
+            run_id: "run-1".to_string(),
+            max_part_bytes: 64,
+        });
+        (media, store)
+    }
+
+    fn all_allowed() -> ScriptAllow {
+        ScriptAllow {
+            http_get: true,
+            http_post: true,
+            shell: true,
+            read_file: true,
+            write_file: true,
+            env_var: true,
+        }
+    }
+
+    #[test]
+    fn parts_are_read_written_listed_and_resolved() {
+        let (media, store) = media_and_store();
+        let parts = Arc::new(StdMutex::new(Vec::new()));
+        let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
+            leviath_core::write_limits::WriteLimits::default(),
+        ));
+        let host = DaemonScriptHost::new(all_allowed(), std::env::temp_dir())
+            .with_media(media.clone(), parts.clone())
+            .with_write_budget(writes.clone());
+        // An offered part, as the runtime hands it over.
+        let blob = Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nhero".to_vec(),
+        )
+        .named("hero.png");
+        let r = store.put("run-1", &blob, &media.registry).unwrap();
+        let sha = r.sha256.clone();
+        parts
+            .lock()
+            .unwrap()
+            .push(Part::stored(r).named("hero.png"));
+        parts.lock().unwrap().push(Part::text("note").named("note"));
+
+        assert_eq!(host.read_part("hero.png").unwrap().len(), 12);
+        let prefix: String = sha.chars().take(10).collect();
+        assert_eq!(host.read_part(&prefix).unwrap().len(), 12);
+        let err = host.read_part("note").unwrap_err();
+        assert!(err.contains("inline text"), "{err}");
+        let err = host.read_part("ghost.png").unwrap_err();
+        assert!(err.contains("list_parts()"), "{err}");
+
+        let written = host
+            .write_part(b"\x89PNG\r\n\x1a\ncopy".to_vec(), None, None)
+            .unwrap();
+        assert_eq!(written["name"], "part-3.png");
+        assert_eq!(written["media_type"], "image/png");
+        let named = host
+            .write_part(vec![1, 2, 3], Some("audio/wav"), Some("beep.wav"))
+            .unwrap();
+        assert_eq!(named["name"], "beep.wav");
+        assert_eq!(named["media_type"], "audio/wav");
+        assert_eq!(writes.written(), 15);
+        assert_eq!(host.list_parts().len(), 3, "the inline note is not listed");
+        assert!(host.part(&sha).is_some());
+        assert!(host.part("nope").is_none());
+        let err = host.write_part(vec![0; 100], None, None).unwrap_err();
+        assert!(err.contains("ceiling"), "{err}");
+
+        // Bytes the store no longer has.
+        parts.lock().unwrap().push(
+            Part::stored(leviath_core::media::BlobRef {
+                sha256: "f".repeat(64),
+                media_type: MediaType::parse("image/png").unwrap(),
+                size: 1,
+                width: None,
+                height: None,
+                duration_ms: None,
+                tokens: 1,
+                stand_in: String::new(),
+            })
+            .named("lost.png"),
+        );
+        let err = host.read_part("lost.png").unwrap_err();
+        assert!(err.contains("could not read the bytes"), "{err}");
+    }
+
+    #[test]
+    fn without_a_store_or_a_grant_parts_are_refused() {
+        let host = DaemonScriptHost::new(all_allowed(), std::env::temp_dir());
+        assert!(host.read_part("x").unwrap_err().contains("no blob store"));
+        assert!(
+            host.write_part(vec![1], None, None)
+                .unwrap_err()
+                .contains("no blob store")
+        );
+        let (media, _) = media_and_store();
+        let mut allow = all_allowed();
+        allow.write_file = false;
+        let host = DaemonScriptHost::new(allow, std::env::temp_dir())
+            .with_media(media, Arc::new(StdMutex::new(Vec::new())));
+        let err = host.write_part(vec![1], None, None).unwrap_err();
+        assert!(
+            err.contains("[denied]") && err.contains("write_part"),
+            "{err}"
+        );
+        // Without a budget the write is still stored.
+        let (media, _) = media_and_store();
+        let host = DaemonScriptHost::new(all_allowed(), std::env::temp_dir())
+            .with_media(media, Arc::new(StdMutex::new(Vec::new())));
+        assert!(host.write_part(vec![1], None, Some("a.bin")).is_ok());
     }
 }
