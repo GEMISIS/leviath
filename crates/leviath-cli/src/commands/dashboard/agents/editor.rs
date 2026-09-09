@@ -1145,19 +1145,7 @@ impl Dashboard {
                 };
                 self.editor_set_number(id, value);
             }
-            FieldId::WorkerRef => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                let kind = self
-                    .editor()
-                    .doc
-                    .stage(&stage)
-                    .and_then(|s| s.fan_out.worker.map(|(k, _)| k))
-                    .unwrap_or(WorkerKind::Stage);
-                let worker = (!text.is_empty()).then_some((kind, text));
-                self.editor_mutate(|d| {
-                    d.set_fan_out(&stage, crate::blueprint_edit::FanOutField::Worker(worker))
-                });
-            }
+            FieldId::WorkerRef => self.editor_set_worker(&text),
             FieldId::EdgeHint => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_edge_hint(&from, &to, &text));

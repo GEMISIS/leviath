@@ -11,8 +11,23 @@ use super::editor::{ModalBase, PickerFor, TYPE_ANOTHER};
 use super::inspector::{FieldId, Panel, REGION_KINDS};
 use crate::blueprint_edit::{
     ArtifactField, InputList, RegionField, RegionScope, RegionValue, Rule, TransformKind,
-    split_list,
+    WorkerKind, split_list,
 };
+
+/// The output type that asks for no shape.
+const OUTPUT_ANY: &str = "(any)";
+
+/// The plain shapes the output type chooser offers ahead of the media
+/// types, each with what it means.
+const OUTPUT_SHAPES: [(&str, &str); 4] = [
+    (OUTPUT_ANY, "no shape asked for"),
+    ("markdown", "prose the model formats; checked to parse"),
+    (
+        "json",
+        "a JSON document; checked to parse, and against a schema when the stage has one",
+    ),
+    ("text", "plain text"),
+];
 use crate::tui::widgets::confirm::Confirm;
 use crate::tui::widgets::line_edit::LineEdit;
 use crate::tui::widgets::picker::{Picker, PickerOption};
@@ -176,6 +191,12 @@ impl Dashboard {
     pub(super) fn editor_pick_more(&mut self, id: &FieldId, value: &str) {
         let value = value.to_string();
         match id {
+            // The "another…" row asks for the name; anything else is it.
+            FieldId::WorkerRef if value == TYPE_ANOTHER => {
+                self.editor().line =
+                    Some((FieldId::WorkerRef, LineEdit::new(String::new(), false)));
+            }
+            FieldId::WorkerRef => self.editor_set_worker(&value),
             FieldId::RoutingDefault => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 let region = if value == "(default)" {
@@ -406,7 +427,9 @@ impl Dashboard {
             | FieldId::StageAsText
             | FieldId::RegionAccepts
             | FieldId::ToolLimitRow(_)
-            | FieldId::ArtifactType => self.editor_open_type_chooser(id),
+            | FieldId::ArtifactType
+            | FieldId::OutputFormat => self.editor_open_type_chooser(id),
+            FieldId::WorkerRef => self.editor_open_worker_picker(),
             FieldId::ModelEntry(i) => self.editor_open_model_picker(PickerFor::ReplaceModel(*i)),
             // The empty chain reads as a model row; Enter still adds.
             FieldId::AddModel => self.editor_open_model_picker(PickerFor::AddModel),
@@ -431,11 +454,14 @@ impl Dashboard {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 self.editor_mutate(|d| d.delete_artifact(&stage, i));
             }
-            // A list of types cleared: the stage's, a tool's, a region's.
+            // A list of types cleared: the stage's, a tool's, a region's; the
+            // output type back to none.
             FieldId::StageAccepts
             | FieldId::StageAsText
             | FieldId::RegionAccepts
-            | FieldId::ToolLimitRow(_) => self.editor_write_types(&field.id, Vec::new()),
+            | FieldId::ToolLimitRow(_)
+            | FieldId::OutputFormat => self.editor_write_types(&field.id, Vec::new()),
+            FieldId::WorkerRef => self.editor_set_worker(""),
             FieldId::ModelEntry(i) => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 let chain: Vec<String> = self
@@ -632,6 +658,18 @@ impl Dashboard {
                 "The file's type".to_string(),
                 "The media type the file must be, or a pattern it must match.".to_string(),
             ),
+            FieldId::OutputFormat => (
+                vec![
+                    view.map(|s| s.output_format)
+                        .filter(|f| !f.is_empty())
+                        .unwrap_or_else(|| OUTPUT_ANY.to_string()),
+                ],
+                true,
+                "The answer's type".to_string(),
+                "A label the model is told and the result records: markdown, json, text, or a \
+                 media type. Nothing converts between shapes."
+                    .to_string(),
+            ),
             _ => (
                 self.panel_region()
                     .and_then(|(scope, name)| self.editor().doc.region(scope.stage(), &name))
@@ -651,7 +689,13 @@ impl Dashboard {
     /// one in.
     fn editor_open_type_chooser(&mut self, id: &FieldId) {
         let (current, single, title, explain) = self.type_field_state(id);
-        let mut values = self.editor().media_types.clone();
+        // The output type is a label before it is a media type: the plain
+        // shapes come first, then every type the registry knows.
+        let mut values: Vec<String> = match id {
+            FieldId::OutputFormat => OUTPUT_SHAPES.iter().map(|(v, _)| v.to_string()).collect(),
+            _ => Vec::new(),
+        };
+        values.extend(self.editor().media_types.iter().cloned());
         for held in &current {
             if !values.contains(held) {
                 values.push(held.clone());
@@ -661,7 +705,11 @@ impl Dashboard {
             .iter()
             .map(|value| PickerOption {
                 value: value.clone(),
-                detail: type_detail(value),
+                detail: OUTPUT_SHAPES
+                    .iter()
+                    .find(|(v, _)| v == value)
+                    .map(|(_, d)| d.to_string())
+                    .unwrap_or_else(|| type_detail(value)),
             })
             .collect();
         rows.push(PickerOption {
@@ -726,6 +774,15 @@ impl Dashboard {
                     return;
                 };
                 self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Type(first)));
+            }
+            FieldId::OutputFormat => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let format = types
+                    .into_iter()
+                    .next()
+                    .filter(|f| f != OUTPUT_ANY)
+                    .unwrap_or_default();
+                self.editor_mutate(|d| d.set_output_format(&stage, &format));
             }
             _ => {
                 if let Some((scope, name)) = self.panel_region() {
@@ -868,6 +925,81 @@ impl Dashboard {
             | PickerFor::ConnectFrom(_)
             | PickerFor::MediaTypes(_) => {}
         }
+    }
+
+    /// The worker chooser: the agent's other stages when the workers are a
+    /// stage of it, every agent in the catalog when they are another agent
+    /// (with an "another…" row for one that is not installed here). A query
+    /// is a text row, so Enter on it types rather than coming here.
+    fn editor_open_worker_picker(&mut self) {
+        let stage = self.editor().panel_stage().expect("a stage field");
+        let worker = self
+            .editor()
+            .doc
+            .stage(&stage)
+            .and_then(|s| s.fan_out.worker);
+        let current = worker.as_ref().map(|(_, v)| v.clone()).unwrap_or_default();
+        let kind = worker.map(|(k, _)| k);
+        let (title, explain, mut rows): (String, String, Vec<PickerOption>) = match kind {
+            Some(WorkerKind::Agent) => {
+                let own = self.editor().name.clone();
+                let rows = self
+                    .agents()
+                    .catalog
+                    .entries
+                    .iter()
+                    .filter(|e| e.name != own)
+                    .map(|e| PickerOption {
+                        value: e.name.clone(),
+                        detail: e.description.clone(),
+                    })
+                    .collect();
+                (
+                    format!("Which agent runs {stage}'s workers?"),
+                    "Every agent installed here; one that is not yet can be named.".to_string(),
+                    rows,
+                )
+            }
+            _ => (
+                format!("Which stage runs {stage}'s workers?"),
+                "A stage of this agent, run once per piece of the work.".to_string(),
+                self.editor()
+                    .doc
+                    .stage_names()
+                    .into_iter()
+                    .filter(|n| *n != stage)
+                    .map(|n| PickerOption {
+                        value: n,
+                        detail: String::new(),
+                    })
+                    .collect(),
+            ),
+        };
+        if kind == Some(WorkerKind::Agent) {
+            rows.push(PickerOption {
+                value: TYPE_ANOTHER.to_string(),
+                detail: "an agent by name, installed elsewhere".to_string(),
+            });
+        }
+        let cursor = rows.iter().position(|r| r.value == current).unwrap_or(0);
+        let picker = Picker::new(title, vec![explain], rows, cursor);
+        self.editor().picker = Some((PickerFor::Field(FieldId::WorkerRef), picker));
+    }
+
+    /// Write the worker the fan-out runs as, keeping its kind; empty clears
+    /// it.
+    pub(super) fn editor_set_worker(&mut self, value: &str) {
+        let stage = self.editor().panel_stage().expect("a stage field");
+        let kind = self
+            .editor()
+            .doc
+            .stage(&stage)
+            .and_then(|s| s.fan_out.worker.map(|(k, _)| k))
+            .unwrap_or(WorkerKind::Stage);
+        let worker = (!value.is_empty()).then(|| (kind, value.to_string()));
+        self.editor_mutate(|d| {
+            d.set_fan_out(&stage, crate::blueprint_edit::FanOutField::Worker(worker))
+        });
     }
 
     /// The tools chosen in the multi-chooser.

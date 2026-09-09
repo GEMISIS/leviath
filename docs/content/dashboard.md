@@ -357,11 +357,14 @@ hidden, so the panel never reflows under the cursor:
   stage tries first, and the shared context regions (`Enter` on one opens it).
 - **A stage**, on four tabs (`1` to `4`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
-  has one, the prompts, its place in the file, delete. *Inputs & outputs*: the regions the stage
-  reads and the [media](/docs/media) each takes (`Enter` opens one), what the stage takes beyond
-  them and what it reads as text whatever the model takes, the answer's format, and the files it
-  declares it hands back (`Enter` opens one, `x` drops it, the last row declares another and asks its
-  name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
+  has one, the prompts, its place in the file, delete. The worker a fan-out runs as is picked
+  from the agent's other stages or from every agent installed here (with an *another…* row for
+  one that is not), and typed only when it is a query. *Inputs & outputs*: the input types (what
+  the stage takes as files beyond text; left empty it is whatever its regions take, and each
+  region is listed under it with the [media](/docs/media) it takes, `Enter` opening it), what is
+  sent to the model as text whatever it takes, the output type (picked from the plain shapes,
+  `markdown`, `json`, `text`, or any media type), and the output files it declares it hands back
+  (`Enter` opens one, `x` drops it, the last row declares another and asks its name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
   drops it, `h` `l` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
   use, picked from every tool this install has (`Space` toggles, `Enter` keeps), and under them what
   each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another

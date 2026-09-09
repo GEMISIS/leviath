@@ -328,6 +328,15 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 Some((kind, value)) => (worker_kind_label(*kind).to_string(), value.clone()),
                 None => ("(none)".to_string(), String::new()),
             };
+            // A query is typed; a stage or an agent is picked from the ones
+            // there are.
+            let worker_value = match stage.fan_out.worker.map(|(k, _)| k) {
+                Some(WorkerKind::Query) => FieldValue::Text(worker_ref),
+                _ => FieldValue::Row(match worker_ref.is_empty() {
+                    true => "(none)".to_string(),
+                    false => worker_ref,
+                }),
+            };
             let names = doc.stage_names();
             let index = names.iter().position(|n| n == name).unwrap_or(0);
             let own_loop = doc.edge(name, name);
@@ -388,8 +397,9 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 Field::new(
                     FieldId::WorkerRef,
                     "Worker",
-                    FieldValue::Text(worker_ref),
-                    "The stage, agent or query the workers run as.",
+                    worker_value,
+                    "The stage or the agent the workers run as (Enter picks one), or the \
+                     query they are matched by (Enter types it). x clears it.",
                 )
                 .enabled(fan_out),
                 Field::new(
@@ -617,9 +627,9 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
     }
 }
 
-/// The inputs and outputs tab: the regions the stage reads and what each
-/// takes, what it takes beyond them, what it reads as text, the answer's
-/// format, and the files it declares it hands back.
+/// The inputs and outputs tab, top to bottom: the input types (the
+/// stage's own, or what its regions take), one row per region under it,
+/// what is sent as text, the output type, and the output files.
 fn io_fields(
     doc: &ManifestDoc,
     name: &str,
@@ -627,59 +637,81 @@ fn io_fields(
 ) -> Vec<Field> {
     let layout = doc.effective_regions(Some(name));
     let mut out = Vec::new();
-    for (i, region) in layout.regions.iter().enumerate() {
+    // What the regions take between them, for the input row to show when
+    // the stage says nothing of its own: any type when any region takes
+    // anything, else the union of what they name (text aside, which every
+    // stage takes).
+    let mut from_regions: Vec<String> = Vec::new();
+    let mut any = layout.regions.is_empty();
+    for region in &layout.regions {
+        if region.accepts.is_empty() {
+            any = true;
+        }
+        for p in &region.accepts {
+            if !p.starts_with("text/") && !from_regions.contains(p) {
+                from_regions.push(p.clone());
+            }
+        }
+    }
+    let inherited = match any || from_regions.is_empty() {
+        true => "any type".to_string(),
+        false => from_regions.join(", "),
+    };
+    out.push(Field::new(
+        FieldId::StageAccepts,
+        "Input types",
+        FieldValue::Row(match stage.input_accepts.is_empty() {
+            true => format!("({inherited}, from its regions)"),
+            false => stage.input_accepts.join(", "),
+        }),
+        "The files the stage takes, beyond text. Empty means whatever its regions take, \
+         listed below. Enter picks types, x goes back to the regions.",
+    ));
+    for region in &layout.regions {
         out.push(Field::new(
             FieldId::IoRegionRow(region.name.clone()),
-            if i == 0 { "Reads" } else { "  and" },
-            FieldValue::Row(format!(
-                "{}  {}",
-                region.name,
-                list_or(&region.accepts, "any type")
-            )),
-            "A region the stage sees, and the media it takes. Enter opens the region.",
+            format!("  from {}", region.name),
+            FieldValue::Row(list_or(&region.accepts, "any type")),
+            "A region the stage reads and the types it takes. Enter opens it in a window.",
         ));
     }
     out.push(Field::new(
-        FieldId::StageAccepts,
-        "Takes, beyond its regions",
-        FieldValue::Row(list_or(&stage.input_accepts, "(what the regions take)")),
-        "Media type patterns the stage takes as parts when its regions do not already say. \
-         Enter picks the types, x leaves it to the regions.",
-    ));
-    out.push(Field::new(
         FieldId::StageAsText,
-        "Reads as text",
+        "Sent as text",
         FieldValue::Row(list_or(&stage.input_as_text, "(none)")),
-        "Types whose parts reach the model as text whatever it takes natively: model/obj, \
-         application/json. Enter picks the types, x clears them.",
+        "Files of these types reach the model as text even when it cannot take them \
+         natively: model/obj, application/json. Enter picks types, x clears them.",
     ));
     out.push(Field::new(
         FieldId::OutputFormat,
-        "Answer format",
-        FieldValue::Text(stage.output_format.clone()),
-        "A label for the answer's shape (markdown, json, or a media type), carried to the \
-         model and recorded with the result.",
+        "Output type",
+        FieldValue::Row(match stage.output_format.is_empty() {
+            true => "(any)".to_string(),
+            false => stage.output_format.clone(),
+        }),
+        "The shape of the answer: markdown, json, text, or a media type. Told to the model \
+         and recorded with the result. Enter picks one, x asks for no shape.",
     ));
     for (i, artifact) in stage.artifacts.iter().enumerate() {
         out.push(Field::new(
             FieldId::ArtifactRow(i),
-            if i == 0 { "Hands back" } else { "  and" },
+            "Output file",
             FieldValue::Row(format!(
                 "{}  {}{}",
                 artifact.name,
                 artifact.media_type,
                 if artifact.required { "  required" } else { "" }
             )),
-            "A file the stage submits beside its answer. Enter edits it, x drops the \
-             declaration.",
+            "A file the stage hands back beside its answer. Enter opens it in a window, x \
+             drops the declaration.",
         ));
     }
     out.push(Field::new(
         FieldId::AddArtifact,
-        "Declare a file it hands back",
+        "Declare an output file",
         FieldValue::Button,
-        "A named file the stage submits beside its answer (asks its name); the run checks \
-         it is there and of the type.",
+        "A named file the stage must hand back (asks its name); the run checks it is there \
+         and of the type.",
     ));
     out
 }
