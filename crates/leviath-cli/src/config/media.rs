@@ -2,8 +2,15 @@
 //! and `media_types.toml` beside it, the operator's additions to the media
 //! registry (a `[media_types]` table in the config still loads, under the
 //! file).
+//!
+//! A row in either place may name a `check`, a Rhai script relative to the
+//! config's directory whose `check(bytes, media_type)` refuses bytes that
+//! are not what they claim. The scripts are compiled here, when the
+//! registry is built, so a broken one is a load error the daemon, `lev
+//! doctor` and `lev media` all report the same way.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leviath_core::media::MediaRegistry;
 use leviath_core::media::registry::RegistryError;
@@ -38,6 +45,48 @@ pub enum MediaTypesError {
         /// What was wrong with it.
         message: String,
     },
+    /// A row's `check` script could not be loaded.
+    #[error("media check for {key} ({script}): {message}")]
+    Check {
+        /// The row's type or pattern.
+        key: String,
+        /// The script as the row wrote it.
+        script: String,
+        /// What was wrong with it.
+        message: String,
+    },
+}
+
+/// Compile every check the operator's rows name and attach it to its row.
+///
+/// A script path is relative to the config's directory and has to resolve
+/// inside it, the fence a blueprint's scripts get against the blueprint's
+/// directory: a row is configuration, and configuration that could point
+/// the daemon at any file on the machine and run it is not.
+fn attach_checks(reg: &mut MediaRegistry, config_dir: &Path) -> Result<(), MediaTypesError> {
+    for (key, script, _) in reg.declared_checks() {
+        let fail = |message: String| MediaTypesError::Check {
+            key: key.clone(),
+            script: script.clone(),
+            message,
+        };
+        let path = config_dir.join(&script);
+        if !leviath_core::resolves_within(&path, config_dir) {
+            return Err(fail(format!(
+                "resolves outside {}; a check lives beside the config that names it",
+                config_dir.display()
+            )));
+        }
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
+        let compiled = leviath_scripting::media_check::compile(&script, &source)
+            .map_err(|e| fail(e.to_string()))?;
+        // `declared_checks` hands back the registry's own normalised keys,
+        // which are the one thing `attach_check` can refuse.
+        reg.attach_check(&key, Arc::new(compiled))
+            .expect("a key the registry itself listed");
+    }
+    Ok(())
 }
 
 /// The rows `path` holds: its top-level tables, plus any under a
@@ -122,9 +171,10 @@ impl Default for MediaConfig {
 impl super::Config {
     /// The media registry this install describes: the compiled defaults, a
     /// `[media_types]` table in the config, then `media_types.toml` beside
-    /// it, later rows winning. A malformed row is the error, named by key
-    /// and by where it lives, so `lev doctor`, `lev media` and the daemon
-    /// say the same thing about it.
+    /// it, later rows winning, with every check the rows name compiled and
+    /// attached. A malformed row or a check that will not load is the
+    /// error, named by key and by where it lives, so `lev doctor`, `lev
+    /// media` and the daemon say the same thing about it.
     pub fn media_registry(&self) -> Result<MediaRegistry, MediaTypesError> {
         let mut reg = MediaRegistry::builtin();
         reg.layer(&self.media_types, "config")
@@ -137,6 +187,8 @@ impl super::Config {
                     message: e.to_string(),
                 })?;
         }
+        let config_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        attach_checks(&mut reg, &config_dir)?;
         Ok(reg)
     }
 
@@ -248,6 +300,71 @@ mod registry_tests {
             // The file variant names the path first.
             let unreadable = config.media_registry().unwrap_err().to_string();
             assert!(unreadable.starts_with(&path.display().to_string()));
+        });
+    }
+
+    /// A row's `check` is compiled from beside the config and refuses bytes
+    /// through every store; a script that is missing, escapes the config's
+    /// directory or does not compile is named with its row.
+    #[test]
+    fn a_rows_check_is_compiled_from_beside_the_config() {
+        crate::config::with_isolated_config_path("media-types-check", |dir| {
+            use leviath_core::media::{Blob, BlobStore, MemoryBlobStore};
+            let path = dir.join(super::MEDIA_TYPES_FILE);
+            let _ = std::fs::remove_file(&path);
+            std::fs::create_dir_all(dir.join("checks")).unwrap();
+            std::fs::write(
+                dir.join("checks/scene.rhai"),
+                "fn check(bytes, media_type) { if bytes.len() < 4 { return \"too short\"; } () }",
+            )
+            .unwrap();
+            std::fs::write(
+                &path,
+                "[\"application/x-acme-scene\"]\nfamily = \"model\"\ncheck = \"checks/scene.rhai\"\n",
+            )
+            .unwrap();
+            let config = Config::default();
+            let reg = config.media_registry().unwrap();
+            let scene: leviath_core::media::MediaType = "application/x-acme-scene".parse().unwrap();
+            assert_eq!(reg.info(&scene).check.as_deref(), Some("checks/scene.rhai"));
+            let store = MemoryBlobStore::new();
+            let err = store
+                .put(
+                    "r",
+                    &Blob::new(scene.clone(), b"ab".to_vec()).named("a.scene"),
+                    &reg,
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("too short"), "{err}");
+            assert!(
+                store
+                    .put("r", &Blob::new(scene, b"ACME1".to_vec()), &reg)
+                    .is_ok()
+            );
+
+            let named = |rows: &str| {
+                std::fs::write(&path, rows).unwrap();
+                let err = config.media_registry().unwrap_err();
+                let text = err.to_string();
+                assert!(text.starts_with("media check for x/y ("), "{text}");
+                text
+            };
+            let missing = named("[\"x/y\"]\ncheck = \"checks/gone.rhai\"\n");
+            assert!(missing.contains("cannot read"), "{missing}");
+            let escaping = named("[\"x/y\"]\ncheck = \"../outside.rhai\"\n");
+            assert!(escaping.contains("resolves outside"), "{escaping}");
+            std::fs::write(dir.join("checks/broken.rhai"), "fn check(a) { () }").unwrap();
+            let broken = named("[\"x/y\"]\ncheck = \"checks/broken.rhai\"\n");
+            assert!(broken.contains("exactly two parameters"), "{broken}");
+            // The daemon keeps the defaults rather than a registry with a
+            // check it could not compile.
+            assert_eq!(
+                config
+                    .media_registry_or_defaults()
+                    .info(&"x/y".parse().unwrap())
+                    .source,
+                "builtin"
+            );
         });
     }
 

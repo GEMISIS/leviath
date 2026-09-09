@@ -2477,7 +2477,7 @@ mod tests {
 #[cfg(test)]
 mod binary_read_tests {
     use super::*;
-    use leviath_core::media::{BlobStore, MediaRegistry, MemoryBlobStore};
+    use leviath_core::media::{BlobStore, MemoryBlobStore};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -2491,7 +2491,7 @@ mod binary_read_tests {
     fn media(store: Arc<MemoryBlobStore>, max: u64) -> Arc<ToolMedia> {
         Arc::new(ToolMedia {
             store,
-            registry: Arc::new(MediaRegistry::builtin()),
+            registry: Arc::new(leviath_core::media::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         })

@@ -23,6 +23,7 @@ leviath-core = { workspace = true }
 # Custom-region Rhai hooks (render/on_write/on_overflow). The boundary is
 # JSON-in/JSON-out, so this crate needs no direct rhai dependency.
 leviath-scripting = { workspace = true }
+toml = { workspace = true }
 # Control-channel token generation (control-socket only).
 rand = { workspace = true, optional = true }
 leviath-providers = { workspace = true }

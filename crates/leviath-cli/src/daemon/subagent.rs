@@ -862,7 +862,9 @@ task = { kind = "pinned", max_tokens = 1000 }
         ];
         h.media = Some(std::sync::Arc::new(leviath_tools::ToolMedia {
             store,
-            registry: std::sync::Arc::new(registry),
+            registry: std::sync::Arc::new(leviath_core::media::RegistryCell::new(
+                std::sync::Arc::new(registry),
+            )),
             run_id: "parent".to_string(),
             max_part_bytes: 1024,
         }));

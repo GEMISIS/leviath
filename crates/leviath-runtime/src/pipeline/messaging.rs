@@ -56,7 +56,7 @@ pub(crate) fn deliver_messages(
                 );
                 continue;
             }
-            deliver_with_parts(&mut window, &state.agent_id, &region, msg, &media);
+            deliver_with_parts(&mut window, entity, &state.agent_id, &region, msg, &media);
         }
     }
 }
@@ -69,12 +69,13 @@ pub(crate) fn deliver_messages(
 /// bad attachment.
 fn deliver_with_parts(
     window: &mut ContextWindow,
+    entity: Entity,
     run_id: &str,
     region: &str,
     msg: AgentMessage,
     media: &crate::blob_store::MediaParams,
 ) {
-    let (sources, _) = media.hydration_inputs();
+    let (sources, _) = media.hydration_inputs(entity);
     let Some((store, registry)) = sources else {
         tracing::warn!(
             run_id,

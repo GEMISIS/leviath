@@ -3672,7 +3672,7 @@ mod tests {
     fn media_for_answers(max: u64) -> leviath_tools::ToolMedia {
         leviath_tools::ToolMedia {
             store: Arc::new(leviath_core::media::MemoryBlobStore::new()),
-            registry: Arc::new(leviath_core::media::MediaRegistry::builtin()),
+            registry: Arc::new(leviath_core::media::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         }
@@ -4175,7 +4175,7 @@ mod tests {
 #[cfg(test)]
 mod mcp_content_tests {
     use super::*;
-    use leviath_core::media::{Blob, MediaRegistry, MediaType, MemoryBlobStore};
+    use leviath_core::media::{Blob, MediaType, MemoryBlobStore};
 
     fn result(
         success: bool,
@@ -4203,7 +4203,7 @@ mod mcp_content_tests {
     fn media(max: u64) -> leviath_tools::ToolMedia {
         leviath_tools::ToolMedia {
             store: Arc::new(MemoryBlobStore::new()),
-            registry: Arc::new(MediaRegistry::builtin()),
+            registry: Arc::new(leviath_core::media::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         }

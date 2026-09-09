@@ -25,7 +25,9 @@ pub(crate) fn is_media_tool(name: &str) -> bool {
 /// What the media tools need besides the window.
 pub(crate) struct MediaToolContext<'a> {
     /// The world's store, registry and limits.
-    pub media: &'a MediaParams<'a>,
+    pub media: &'a MediaParams<'a, 'a>,
+    /// The run's entity, which picks its registry.
+    pub entity: bevy_ecs::entity::Entity,
     /// The run the parts belong to.
     pub run_id: &'a str,
     /// The run's working directory, when it has one. Paths resolve inside it.
@@ -42,7 +44,7 @@ pub(crate) fn handle_media_tool(
     window: &mut ContextWindow,
     ctx: &MediaToolContext<'_>,
 ) -> String {
-    let (sources, _) = ctx.media.hydration_inputs();
+    let (sources, _) = ctx.media.hydration_inputs(ctx.entity);
     let Some((store, registry)) = sources else {
         return "[error] this run has no blob store, so it cannot hold parts".to_string();
     };
@@ -291,6 +293,7 @@ fn find_part(
 mod tests {
     use super::*;
     use crate::blob_store::{BlobStoreHandle, MediaLimits, MediaRegistryHandle};
+    use bevy_ecs::entity::Entity;
     use bevy_ecs::prelude::World;
     use bevy_ecs::system::SystemState;
     use leviath_core::media::MemoryBlobStore;
@@ -316,8 +319,9 @@ mod tests {
 
     // `&mut dyn`, not generic: one instantiation, so the coverage gate sees
     // every branch of this helper run across the calls that share it.
-    fn with_world(store: bool, f: &mut dyn FnMut(&MediaParams<'_>)) {
+    fn with_world(store: bool, f: &mut dyn FnMut(&MediaParams<'_, '_>, Entity)) {
         let mut world = World::new();
+        let entity = world.spawn(()).id();
         if store {
             world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
             world.insert_resource(MediaRegistryHandle::default());
@@ -328,14 +332,15 @@ mod tests {
         }
         let mut state: SystemState<MediaParams> = SystemState::new(&mut world);
         let media = state.get(&world).expect("the media params always validate");
-        f(&media);
+        f(&media, entity);
     }
 
     fn call(
         name: &str,
         args: serde_json::Value,
         window: &mut ContextWindow,
-        media: &MediaParams<'_>,
+        media: &MediaParams<'_, '_>,
+        entity: Entity,
         workdir: Option<&Path>,
     ) -> String {
         handle_media_tool(
@@ -344,6 +349,7 @@ mod tests {
             window,
             &MediaToolContext {
                 media,
+                entity,
                 run_id: "run-1",
                 workdir,
                 tool_limit: None,
@@ -357,13 +363,14 @@ mod tests {
     fn an_export_outside_the_stages_limit_is_refused_by_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nv1").unwrap();
-        with_world(true, &mut |media| {
+        with_world(true, &mut |media, entity| {
             let mut w = window();
             let out = call(
                 "context_attach",
                 json!({"region": "sprites", "path": "hero.png"}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.starts_with("Attached"), "{out}");
@@ -374,6 +381,7 @@ mod tests {
                 &mut w,
                 &MediaToolContext {
                     media,
+                    entity,
                     run_id: "run-1",
                     workdir: Some(dir.path()),
                     tool_limit: Some(&limit),
@@ -390,6 +398,7 @@ mod tests {
                 &mut w,
                 &MediaToolContext {
                     media,
+                    entity,
                     run_id: "run-1",
                     workdir: Some(dir.path()),
                     tool_limit: Some(&limit),
@@ -410,13 +419,14 @@ mod tests {
     fn attach_then_export_round_trips_a_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nv1").unwrap();
-        with_world(true, &mut |media| {
+        with_world(true, &mut |media, entity| {
             let mut w = window();
             let out = call(
                 "context_attach",
                 json!({"region": "sprites", "path": "hero.png", "key": "hero", "caption": "v1"}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(
@@ -440,6 +450,7 @@ mod tests {
                 json!({"region": "sprites", "path": "hero.png", "key": "hero", "type": "image/png", "deliver": "native"}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.starts_with("Attached"), "{out}");
@@ -462,6 +473,7 @@ mod tests {
                 json!({"name": "hero.png", "path": "out/hero-v2.png"}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(
@@ -477,6 +489,7 @@ mod tests {
                 json!({"name": sha.chars().take(8).collect::<String>()}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.contains("to 'hero.png'"), "{out}");
@@ -491,6 +504,7 @@ mod tests {
                 json!({"name": sha.chars().take(8).collect::<String>()}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.contains(&format!("to '{}.png'", short(&sha))), "{out}");
@@ -501,6 +515,7 @@ mod tests {
                 json!({"name": sha.chars().take(8).collect::<String>()}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.contains("this run holds none"), "{out}");
@@ -514,12 +529,19 @@ mod tests {
         std::fs::write(dir.path().join("song.wav"), [1u8, 2, 3]).unwrap();
         std::fs::write(dir.path().join("big.bin"), vec![0; 100]).unwrap();
         std::fs::write(dir.path().join("ok.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        with_world(false, &mut |media| {
+        with_world(false, &mut |media, entity| {
             let mut w = window();
-            let out = call("context_attach", json!({}), &mut w, media, Some(dir.path()));
+            let out = call(
+                "context_attach",
+                json!({}),
+                &mut w,
+                media,
+                entity,
+                Some(dir.path()),
+            );
             assert!(out.contains("no blob store"), "{out}");
         });
-        with_world(true, &mut |media| {
+        with_world(true, &mut |media, entity| {
             let mut w = window();
             let wd = Some(dir.path());
             let out = call(
@@ -527,6 +549,7 @@ mod tests {
                 json!({"region": "art", "path": "ok.png"}),
                 &mut w,
                 media,
+                entity,
                 None,
             );
             assert!(out.contains("no working directory"), "{out}");
@@ -566,7 +589,7 @@ mod tests {
                 ),
             ];
             for (args, expect) in cases {
-                let out = call("context_attach", args.clone(), &mut w, media, wd);
+                let out = call("context_attach", args.clone(), &mut w, media, entity, wd);
                 assert!(out.contains(expect), "{args}: {out}");
             }
             let out = call(
@@ -574,17 +597,19 @@ mod tests {
                 json!({"region": "art", "path": "ok.png", "deliver": "stand_in"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.starts_with("Attached"), "{out}");
 
-            let out = call("context_export", json!({}), &mut w, media, wd);
+            let out = call("context_export", json!({}), &mut w, media, entity, wd);
             assert!(out.contains("missing 'name'"), "{out}");
             let out = call(
                 "context_export",
                 json!({"name": "nope.png"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.contains("The run holds:\n[image/png"), "{out}");
@@ -593,6 +618,7 @@ mod tests {
                 json!({"name": "ok.png", "path": "../x.png"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.contains("escape"), "{out}");
@@ -601,6 +627,7 @@ mod tests {
                 json!({"name": "ok.png", "path": "a/b/ok.png"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.starts_with("Wrote"), "{out}");
@@ -610,6 +637,7 @@ mod tests {
                 json!({"name": "ok.png", "path": "file/ok.png"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.contains("could not create"), "{out}");
@@ -619,6 +647,7 @@ mod tests {
                 json!({"name": "ok.png", "path": "adir"}),
                 &mut w,
                 media,
+                entity,
                 wd,
             );
             assert!(out.contains("could not write 'adir'"), "{out}");
@@ -631,7 +660,7 @@ mod tests {
             let broken = ContextWindow::new(10);
             assert!(find_part(&broken, short(&sha)).is_none());
         });
-        with_world(true, &mut |media| {
+        with_world(true, &mut |media, entity| {
             let mut w = window();
             let mut part = leviath_core::media::Part::stored(leviath_core::media::BlobRef {
                 sha256: "0".repeat(64),
@@ -653,6 +682,7 @@ mod tests {
                 json!({"name": "lost.png"}),
                 &mut w,
                 media,
+                entity,
                 Some(dir.path()),
             );
             assert!(out.contains("could not read the stored bytes"), "{out}");

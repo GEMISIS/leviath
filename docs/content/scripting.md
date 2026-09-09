@@ -31,6 +31,7 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 | [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle, from entering a stage through to the end |
 | [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, what it does, and the typed [parts](/docs/media) it reads and makes |
 | [**Output validators**](/docs/rhai-validators) | beside the agent, referenced by the stage's `[output]` block | Whether a submitted final output is accepted, and what the model is told when it is not |
+| [**Media checks**](/docs/rhai-media-checks) | beside the config or the agent, referenced by a media row's `check` | Whether bytes claiming one of your media types are that type, before they are stored |
 | [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
 
 Each page walks its point end to end with a complete, copy-pasteable example.
@@ -47,7 +48,7 @@ manifest-relative path to write into `validator = "..."` or `[stages.<name>.hook
 Every script runs in a hardened engine: no `eval`, no `import`, no ambient filesystem or
 network access, bounded operations and expression depth, a capped call depth, and `print`/`debug`
 muted. The operation budget scales with the job: 500k operations for tool scripts and providers,
-100k for hooks, regions, and validators. The host functions each extension point offers are the only way out of it, and they differ
+100k for hooks, regions, and validators, five million for a media check scanning a file. The host functions each extension point offers are the only way out of it, and they differ
 by point:
 
 - Provider scripts get HTTP, JSON, SSE parsing, and encoding helpers, because mapping an API is
@@ -73,7 +74,7 @@ On top of that, tool and provider scripts get `encode_uri`, `encode_base64`, `de
 [`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) governs. The full list
 per point is on that point's own page: [tools](/docs/rhai-tools),
 [providers](/docs/rhai-providers), [regions](/docs/rhai-regions), [hooks](/docs/rhai-hooks),
-[validators](/docs/rhai-validators).
+[validators](/docs/rhai-validators), [media checks](/docs/rhai-media-checks).
 
 Names are matched exactly, and the match is enforced. A script missing the function its surface
 needs, or defining it with the wrong arity, fails at spawn with a compile error rather than
@@ -93,6 +94,10 @@ applies to the next run rather than an in-flight one.
 
 Policy rules reload as well. The daemon stats `policy.toml` and every `rules/*.rhai` beside it, so a
 rule you add, edit, or delete gates the next run. Nothing is restarted for that either.
+
+A media check named by the operator's rows is recompiled whenever `media_types.toml` or the
+config changes, and that reaches the runs already under way as well as the next one; one named
+by a blueprint is compiled at spawn, like the agent's other scripts.
 
 Neither is scanned or executed until something actually references it, so dropping a file into a
 directory does not by itself run it.

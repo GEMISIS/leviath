@@ -537,6 +537,35 @@ fn tool_call(id: &str) -> InferenceResponse {
 ///
 /// The re-drive is set out of reach here, so the run can only finish through
 /// the wake path.
+/// The housekeeping hook rides the same timer, so the daemon's periodic
+/// work (re-reading an edited config for the runs already under way) runs
+/// with nothing else waking the host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_runs_the_housekeeper_on_every_redrive() {
+    let mut host = host_with(vec![]);
+    host.set_redrive_interval(std::time::Duration::from_millis(20));
+    let kept = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = kept.clone();
+    host.set_housekeeper(Box::new(move |world| {
+        // Handed the world itself, so the hook can install a resource.
+        world
+            .world_mut()
+            .insert_resource(crate::blob_store::MediaLimits::default());
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let shutdown = host.world_mut().shutdown_handle();
+    let (op_tx, op_rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        host.serve(op_rx).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let runs = kept.load(std::sync::atomic::Ordering::SeqCst);
+    shutdown.notify_one();
+    drop(op_tx);
+    handle.await.unwrap();
+    assert!(runs >= 2, "the hook ran on the timer: {runs}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stage_boundary_is_crossed_without_waiting_for_the_redrive() {
     let mut host = host_with(vec![tool_call("c1"), tool_call("c2")]);

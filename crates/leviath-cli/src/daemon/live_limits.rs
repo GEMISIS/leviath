@@ -132,12 +132,20 @@ impl LiveLimits {
         // The dispatcher's half of the title split; the spawner reads the same
         // document a moment later.
         ecs.insert_resource(leviath_runtime::title::TitleSettings(config.title.clone()));
-        // Typed parts: the operator's registry rows and size ceilings. Read
-        // wherever a part arrives or a request is hydrated, so a row added
-        // while the daemon runs types the next file rather than the next run.
-        ecs.insert_resource(leviath_runtime::blob_store::MediaRegistryHandle(
-            std::sync::Arc::new(config.media_registry_or_defaults()),
-        ));
+        // Typed parts: the operator's registry rows and size ceilings. The
+        // world's registry is what the next spawn layers its blueprint over,
+        // and every run already under way is rebuilt over it here, so a row
+        // added while the daemon runs types the next file rather than the
+        // next run.
+        let registry = std::sync::Arc::new(config.media_registry_or_defaults());
+        let refreshed = leviath_runtime::blob_store::refresh_run_registries(ecs, &registry);
+        if refreshed > 0 {
+            tracing::info!(
+                runs = refreshed,
+                "[media] live runs re-read the media types"
+            );
+        }
+        ecs.insert_resource(leviath_runtime::blob_store::MediaRegistryHandle(registry));
         ecs.insert_resource(leviath_runtime::blob_store::MediaLimits {
             max_part_bytes: config.media.max_part_bytes,
             inline_text_bytes: config.media.inline_text_bytes,
@@ -397,6 +405,46 @@ mod tests {
         config.limits.stream_inference = false;
         assert!(live.apply(&config, &mut world));
         assert!(!world.stream_inference());
+    }
+
+    /// An edited media row reaches a run already under way: the world's
+    /// registry is rebuilt and every live run's registry is rebuilt over it,
+    /// keeping the run's own blueprint rows on top.
+    #[test]
+    fn an_edited_media_row_reaches_a_run_already_under_way() {
+        crate::config::with_isolated_config_path("live-limits-media-rows", |_| {
+            use leviath_runtime::blob_store::{MediaRegistryHandle, RunMediaRegistry};
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut world = world(&runtime, 1);
+            let live = applier();
+            let mut config = Config::default();
+            live.apply(&config, &mut world);
+            let base = world
+                .world()
+                .get_resource::<MediaRegistryHandle>()
+                .unwrap()
+                .0
+                .clone();
+            let rows: toml::Table =
+                toml::from_str("[\"application/x-acme-scene\"]\nfamily = \"model\"\n").unwrap();
+            let run = RunMediaRegistry::new(&base, rows, Default::default()).unwrap();
+            let held = run.cell();
+            world.spawn_agent(run);
+            let obj: leviath_core::media::MediaType = "model/obj".parse().unwrap();
+            let scene: leviath_core::media::MediaType = "application/x-acme-scene".parse().unwrap();
+            assert_eq!(held.load().info(&obj).family, "model");
+
+            config.media_types = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
+            assert!(live.apply(&config, &mut world));
+            let now = held.load();
+            assert_eq!(
+                now.info(&obj).family,
+                "scene",
+                "the edit reached the live run"
+            );
+            assert_eq!(now.info(&scene).family, "model", "its own rows stay on top");
+            assert!(!live.apply(&config, &mut world), "nothing changed since");
+        });
     }
 
     #[test]

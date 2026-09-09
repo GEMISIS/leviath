@@ -18140,6 +18140,7 @@ mod spawn_parts {
             global_hints: hints(true),
             global_nudge: leviath_core::NudgeConfig::default(),
             region_scripts: HashMap::new(),
+            media_registry: None,
         }
     }
 
@@ -18180,6 +18181,73 @@ mod spawn_parts {
         assert!(err.contains("over the 2 byte ceiling"), "{err}");
         // No parts: the store is never consulted.
         assert!(spawn_agent_seeded(&mut world, seeded(Vec::new())).is_ok());
+    }
+
+    /// A spawn builds the run's registry from the world's rows and the
+    /// blueprint's own, and types the attached parts by it; a host-built one
+    /// is taken as is, and rows that will not layer refuse the spawn.
+    #[test]
+    fn a_spawn_carries_the_blueprints_media_rows_onto_the_run() {
+        use crate::blob_store::RunMediaRegistry;
+        use leviath_core::media::{MediaRegistry, MediaType};
+        let mut world = World::new();
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        let mut spawn = seeded(vec![InboundPart::from_bytes(
+            "a.scene",
+            b"ACME\x00\x00\x00\x01".to_vec(),
+        )]);
+        spawn.blueprint.media_types = toml::from_str(
+            "[\"application/x-acme-scene\"]\nfamily = \"model\"\nextensions = [\"scene\"]\n",
+        )
+        .unwrap();
+        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
+        let scene = MediaType::parse("application/x-acme-scene").unwrap();
+        let run = world
+            .get::<RunMediaRegistry>(e)
+            .expect("the run has a registry");
+        assert_eq!(run.registry().info(&scene).source, "blueprint");
+        let task = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("task")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            task.content[1].content.stored().next().unwrap().media_type,
+            scene,
+            "the attached part is typed by the blueprint's extension row"
+        );
+
+        // A host-built registry is used as handed over.
+        let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
+        let mut spawn = seeded(Vec::new());
+        spawn.media_registry = Some(
+            RunMediaRegistry::new(&MediaRegistry::builtin(), rows, Default::default()).unwrap(),
+        );
+        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
+        let obj = MediaType::parse("model/obj").unwrap();
+        assert_eq!(
+            world
+                .get::<RunMediaRegistry>(e)
+                .unwrap()
+                .registry()
+                .info(&obj)
+                .family,
+            "scene"
+        );
+
+        // Rows the registry refuses (an embedder's hand-built blueprint) are
+        // the spawn's error.
+        let mut spawn = seeded(Vec::new());
+        spawn.blueprint.media_types = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
+        let err = spawn_agent_seeded(&mut world, spawn).unwrap_err();
+        assert!(err.starts_with("[media_types]:"), "{err}");
+
+        // A world with no registry at all spawns without one.
+        let mut bare = World::new();
+        let e = spawn_agent_seeded(&mut bare, seeded(Vec::new())).expect("spawn");
+        assert!(bare.get::<RunMediaRegistry>(e).is_none());
     }
 }
 
@@ -18337,12 +18405,13 @@ mod model_parts {
             max_part_bytes: 16,
             ..MediaLimits::default()
         });
+        let entity = world.spawn(()).id();
         let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
         let media = state.get(&world).expect("the parameter validates");
         let mut unnamed = png("x");
         unnamed.name = None;
         let big = Blob::new(MediaType::parse("image/png").unwrap(), vec![0; 64]);
-        let parts = store_model_parts(vec![png("hero.png"), unnamed, big], "run-m", &media);
+        let parts = store_model_parts(vec![png("hero.png"), unnamed, big], entity, "run-m", &media);
         assert_eq!(parts.len(), 3);
         assert!(parts[0].is_stored());
         assert_eq!(parts[0].name.as_deref(), Some("hero.png"));
@@ -18356,15 +18425,16 @@ mod model_parts {
             "{:?}",
             parts[2]
         );
-        assert!(store_model_parts(Vec::new(), "run-m", &media).is_empty());
+        assert!(store_model_parts(Vec::new(), entity, "run-m", &media).is_empty());
     }
 
     #[test]
     fn a_world_without_a_store_describes_what_it_dropped() {
         let mut world = World::new();
+        let entity = world.spawn(()).id();
         let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
         let media = state.get(&world).expect("the parameter validates");
-        let parts = store_model_parts(vec![png("hero.png")], "run-m", &media);
+        let parts = store_model_parts(vec![png("hero.png")], entity, "run-m", &media);
         assert_eq!(parts.len(), 1);
         assert_eq!(
             parts[0].inline_text().unwrap(),

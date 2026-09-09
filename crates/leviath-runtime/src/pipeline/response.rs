@@ -45,13 +45,14 @@ pub(crate) fn to_inference_result(
 /// own reply still records that it made something.
 pub(crate) fn store_model_parts(
     blobs: Vec<leviath_core::media::Blob>,
+    entity: Entity,
     run_id: &str,
     media: &crate::blob_store::MediaParams,
 ) -> Vec<leviath_core::media::Part> {
     if blobs.is_empty() {
         return Vec::new();
     }
-    let (sources, _) = media.hydration_inputs();
+    let (sources, _) = media.hydration_inputs(entity);
     let Some((store, registry)) = sources else {
         return blobs
             .into_iter()
@@ -365,7 +366,12 @@ pub(crate) fn collect_inference(
                         ),
                     ));
                 }
-                let parts = store_model_parts(response.parts.clone(), &state.agent_id, &media);
+                let parts = store_model_parts(
+                    response.parts.clone(),
+                    outcome.entity,
+                    &state.agent_id,
+                    &media,
+                );
                 let result = to_inference_result(&response, parts);
                 commands
                     .entity(outcome.entity)

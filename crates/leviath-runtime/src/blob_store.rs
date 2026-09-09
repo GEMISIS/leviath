@@ -7,14 +7,17 @@
 //! directory points at them. A world with no runs directory (the embedding
 //! mode) keeps the same bytes in memory instead.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy_ecs::prelude::Resource;
+use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use leviath_core::files::BLOBS_DIR;
+use leviath_core::media::registry::RegistryError;
 use leviath_core::media::{
-    Blob, BlobRef, BlobStore, MediaRegistry, MemoryBlobStore, is_sha256_hex,
+    Blob, BlobRef, BlobStore, MediaCheck, MediaRegistry, MemoryBlobStore, RegistryCell,
+    is_sha256_hex,
 };
 
 /// The store every system reads and writes stored parts through.
@@ -32,33 +35,133 @@ impl Default for MediaRegistryHandle {
     }
 }
 
-/// The three media resources a system reads, as one parameter.
+/// The registry one run reads: the world's rows with the blueprint's own
+/// `[media_types]` layered on top, and the blueprint's compiled checks
+/// attached.
 ///
-/// Every `PipelineWorld` installs all three; a world assembled by hand in a
-/// test may install none, and then [`Self::hydration_inputs`] says so and
-/// stored parts go out as their stand-ins.
+/// Built once at spawn and held for the life of the run behind a
+/// [`RegistryCell`], which the tool lane shares (see `ToolMedia`), so the
+/// systems that type a run's bytes and the tools that store them read one
+/// registry. When the operator's rows change under a live daemon,
+/// [`refresh_run_registries`] rebuilds every run's registry over the new
+/// base and stores it into the same cell, and every holder's next read is
+/// the edited one.
+#[derive(Component, Clone, Debug)]
+pub struct RunMediaRegistry {
+    /// The blueprint's rows, as written.
+    rows: toml::Table,
+    /// The blueprint's compiled checks, keyed by row.
+    checks: BTreeMap<String, Arc<dyn MediaCheck>>,
+    /// Where the built registry lives.
+    cell: Arc<RegistryCell>,
+}
+
+impl RunMediaRegistry {
+    /// `base` (the world's registry) with `rows` layered on top and `checks`
+    /// attached. A row that will not layer, or a check on a key that is not
+    /// a type, is the error: the spawn refuses rather than typing the run's
+    /// bytes against half a table.
+    pub fn new(
+        base: &MediaRegistry,
+        rows: toml::Table,
+        checks: BTreeMap<String, Arc<dyn MediaCheck>>,
+    ) -> Result<Self, RegistryError> {
+        let built = Self::build(base, &rows, &checks)?;
+        Ok(Self {
+            rows,
+            checks,
+            cell: Arc::new(RegistryCell::new(Arc::new(built))),
+        })
+    }
+
+    fn build(
+        base: &MediaRegistry,
+        rows: &toml::Table,
+        checks: &BTreeMap<String, Arc<dyn MediaCheck>>,
+    ) -> Result<MediaRegistry, RegistryError> {
+        let mut registry = base.layered(rows, "blueprint")?;
+        for (key, check) in checks {
+            registry.attach_check(key, check.clone())?;
+        }
+        Ok(registry)
+    }
+
+    /// The cell the registry lives in, for a holder outside the world.
+    pub fn cell(&self) -> Arc<RegistryCell> {
+        self.cell.clone()
+    }
+
+    /// The registry as it stands now.
+    pub fn registry(&self) -> Arc<MediaRegistry> {
+        self.cell.load()
+    }
+
+    /// Rebuild over a new `base` and swap it in for every holder.
+    pub fn rebuild(&self, base: &MediaRegistry) -> Result<(), RegistryError> {
+        let built = Self::build(base, &self.rows, &self.checks)?;
+        self.cell.store(Arc::new(built));
+        Ok(())
+    }
+}
+
+/// Rebuild every live run's registry over `base`, the world's registry as it
+/// stands after a reload, and report how many were rebuilt. A run whose rows
+/// no longer layer keeps the registry it had, with a warning; its rows were
+/// checked at spawn, so that means the base changed under them.
+pub fn refresh_run_registries(world: &mut World, base: &MediaRegistry) -> usize {
+    let mut refreshed = 0;
+    for (entity, run) in world.query::<(Entity, &RunMediaRegistry)>().iter(world) {
+        match run.rebuild(base) {
+            Ok(()) => refreshed += 1,
+            Err(e) => tracing::warn!(
+                ?entity,
+                "[media] a run keeps its old media registry; its rows no longer layer: {e}"
+            ),
+        }
+    }
+    refreshed
+}
+
+/// The media resources a system reads, as one parameter: the world's store,
+/// registry and ceilings, and each live run's own registry.
+///
+/// Every `PipelineWorld` installs the three resources; a world assembled by
+/// hand in a test may install none, and then [`Self::hydration_inputs`] says
+/// so and stored parts go out as their stand-ins.
 #[derive(bevy_ecs::system::SystemParam)]
-pub struct MediaParams<'w> {
+pub struct MediaParams<'w, 's> {
     /// The run's blob store.
     pub store: Option<bevy_ecs::system::Res<'w, BlobStoreHandle>>,
-    /// The registry that types parts.
+    /// The registry that types parts, for a run without one of its own.
     pub registry: Option<bevy_ecs::system::Res<'w, MediaRegistryHandle>>,
     /// The operator's ceilings.
     pub limits: Option<bevy_ecs::system::Res<'w, MediaLimits>>,
+    /// Each live run's own registry, where its spawn built one.
+    pub runs: bevy_ecs::system::Query<'w, 's, &'static RunMediaRegistry>,
 }
 
 /// The store and registry a job hydrates with, when both are installed.
 pub type HydrationSources = Option<(Arc<dyn BlobStore>, Arc<MediaRegistry>)>;
 
-impl MediaParams<'_> {
-    /// The store and registry together when both are installed, and the
-    /// per-request cap either way.
-    pub fn hydration_inputs(&self) -> (HydrationSources, usize) {
+impl MediaParams<'_, '_> {
+    /// The registry `entity`'s run reads: its own when its spawn built one,
+    /// else the world's. `None` in a world with neither.
+    pub fn registry_for(&self, entity: Entity) -> Option<Arc<MediaRegistry>> {
+        self.runs
+            .get(entity)
+            .ok()
+            .map(RunMediaRegistry::registry)
+            .or_else(|| self.registry.as_deref().map(|r| r.0.clone()))
+    }
+
+    /// The store and the registry `entity`'s run reads, together when both
+    /// are there, and the per-request cap either way.
+    pub fn hydration_inputs(&self, entity: Entity) -> (HydrationSources, usize) {
         let both = self
             .store
             .as_deref()
             .map(|s| s.0.clone())
-            .zip(self.registry.as_deref().map(|r| r.0.clone()));
+            .zip(self.registry_for(entity));
         let max_stored = self
             .limits
             .as_deref()
@@ -158,6 +261,7 @@ impl FsBlobStore {
 
 impl BlobStore for FsBlobStore {
     fn put(&self, run_id: &str, blob: &Blob, reg: &MediaRegistry) -> io::Result<BlobRef> {
+        leviath_core::media::verify_blob(reg, blob)?;
         let r = blob.describe(reg);
         let dir = self.dir_for(run_id)?;
         let path = dir.join(&r.sha256);
@@ -243,6 +347,139 @@ mod tests {
         std::fs::write(store.dir_for("run-a").unwrap().join("notes.txt"), b"x").unwrap();
         assert_eq!(store.list("run-a").unwrap().len(), 1);
         assert!(format!("{store:?}").contains("FsBlobStore"));
+    }
+
+    /// A check a row names runs where the bytes are written, so an on-disk
+    /// store refuses bytes that fail it and writes nothing.
+    #[test]
+    fn a_failed_check_writes_nothing() {
+        use leviath_core::media::FnCheck;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(tmp.path().to_path_buf());
+        let mut reg = MediaRegistry::builtin();
+        let rows: toml::Table = toml::from_str("[\"image/png\"]\ncheck = \"png.rhai\"\n").unwrap();
+        reg.layer(&rows, "t").unwrap();
+        reg.attach_check(
+            "image/png",
+            Arc::new(FnCheck::new(
+                "png",
+                |_: &MediaType, bytes: &[u8]| match bytes.starts_with(b"\x89PNG") {
+                    true => Ok(()),
+                    false => Err("no PNG signature".to_string()),
+                },
+            )),
+        )
+        .unwrap();
+        let fake =
+            Blob::new(MediaType::parse("image/png").unwrap(), b"GIF89a".to_vec()).named("shot.png");
+        let err = store.put("run-a", &fake, &reg).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("no PNG signature"), "{err}");
+        assert!(store.list("run-a").unwrap().is_empty());
+        assert!(store.put("run-a", &png_blob(), &reg).is_ok());
+    }
+
+    /// A run's registry is the world's rows with the blueprint's on top and
+    /// its checks attached; a rebuild over a new base reaches the cell every
+    /// holder shares, and a base that no longer takes the rows is refused.
+    #[test]
+    fn a_run_registry_layers_the_blueprint_and_follows_a_rebuild() {
+        use leviath_core::media::FnCheck;
+        let base = MediaRegistry::builtin();
+        let rows: toml::Table = toml::from_str(
+            "[\"application/x-acme-scene\"]\nfamily = \"model\"\ncheck = \"checks/scene.rhai\"\n",
+        )
+        .unwrap();
+        let mut checks: BTreeMap<String, Arc<dyn MediaCheck>> = BTreeMap::new();
+        checks.insert(
+            "application/x-acme-scene".to_string(),
+            Arc::new(FnCheck::new(
+                "scene",
+                |_: &MediaType, bytes: &[u8]| match bytes.starts_with(b"ACME") {
+                    true => Ok(()),
+                    false => Err("missing the ACME tag".to_string()),
+                },
+            )),
+        );
+        let run = RunMediaRegistry::new(&base, rows.clone(), checks.clone()).unwrap();
+        let scene = MediaType::parse("application/x-acme-scene").unwrap();
+        let held = run.cell();
+        assert_eq!(run.registry().info(&scene).family, "model");
+        assert_eq!(run.registry().info(&scene).source, "blueprint");
+        assert_eq!(
+            held.load().verify(&scene, b"NOPE"),
+            Err("missing the ACME tag".to_string())
+        );
+        assert_eq!(held.load().verify(&scene, b"ACME\x00"), Ok(()));
+        assert!(format!("{run:?}").contains("checks/scene.rhai"));
+
+        // The operator edits the obj row: the rebuild reaches the shared cell
+        // and keeps the blueprint's row and check.
+        let edited: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
+        let next = base.layered(&edited, "media_types.toml").unwrap();
+        run.rebuild(&next).unwrap();
+        let obj = MediaType::parse("model/obj").unwrap();
+        assert_eq!(held.load().info(&obj).family, "scene");
+        assert_eq!(held.load().info(&scene).family, "model");
+        assert_eq!(
+            held.load().verify(&scene, b"NOPE"),
+            Err("missing the ACME tag".to_string())
+        );
+
+        // Bad rows are refused at construction, and a check on a key that is
+        // not a type is refused too.
+        let bad: toml::Table = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
+        assert!(RunMediaRegistry::new(&base, bad, BTreeMap::new()).is_err());
+        let mut bad_key: BTreeMap<String, Arc<dyn MediaCheck>> = BTreeMap::new();
+        bad_key.insert(
+            "png".to_string(),
+            checks["application/x-acme-scene"].clone(),
+        );
+        assert!(RunMediaRegistry::new(&base, rows, bad_key).is_err());
+
+        // Across a world: every run with a registry is rebuilt; one whose
+        // rows the new base refuses is left as it was, and counted out.
+        let mut world = World::new();
+        world.spawn(run.clone());
+        world.spawn(());
+        assert_eq!(refresh_run_registries(&mut world, &base), 1);
+        assert_eq!(held.load().info(&obj).family, "model", "back on the base");
+        let stuck = RunMediaRegistry {
+            rows: toml::from_str("[png]\nfamily = \"image\"\n").unwrap(),
+            checks: BTreeMap::new(),
+            cell: Arc::new(RegistryCell::default()),
+        };
+        world.spawn(stuck);
+        assert_eq!(refresh_run_registries(&mut world, &next), 1);
+        assert_eq!(held.load().info(&obj).family, "scene");
+    }
+
+    /// The parameter answers for a run: its own registry when it has one,
+    /// the world's otherwise, and nothing in a world with neither.
+    #[test]
+    fn media_params_resolve_a_registry_per_run() {
+        let mut world = World::new();
+        let bare = world.spawn(()).id();
+        let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
+        let own = world
+            .spawn(RunMediaRegistry::new(&MediaRegistry::builtin(), rows, BTreeMap::new()).unwrap())
+            .id();
+        let obj = MediaType::parse("model/obj").unwrap();
+        {
+            let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+            let media = state.get(&world).unwrap();
+            assert!(media.registry_for(bare).is_none());
+            assert_eq!(media.registry_for(own).unwrap().info(&obj).family, "scene");
+            assert!(media.hydration_inputs(own).0.is_none(), "no store yet");
+        }
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let media = state.get(&world).unwrap();
+        assert_eq!(media.registry_for(bare).unwrap().info(&obj).family, "model");
+        let (sources, max) = media.hydration_inputs(own);
+        assert_eq!(sources.unwrap().1.info(&obj).family, "scene");
+        assert_eq!(max, MediaLimits::default().max_stored_per_request);
     }
 
     #[test]
@@ -343,11 +580,12 @@ mod tests {
         // The bundled parameter answers from a world that installs the
         // resources, and says "nothing to hydrate with" from one that does not.
         let mut world = bevy_ecs::world::World::new();
+        let entity = world.spawn(()).id();
         let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
         let (none, cap) = state
             .get(&world)
             .expect("the parameter validates")
-            .hydration_inputs();
+            .hydration_inputs(entity);
         assert!(none.is_none());
         assert_eq!(cap, 100);
         world.insert_resource(BlobStoreHandle(mem.clone()));
@@ -360,7 +598,7 @@ mod tests {
         let (both, cap) = state
             .get(&world)
             .expect("the parameter validates")
-            .hydration_inputs();
+            .hydration_inputs(entity);
         assert!(both.is_some());
         assert_eq!(cap, 3);
         assert_eq!(limits.max_part_bytes, 32 * 1024 * 1024);
