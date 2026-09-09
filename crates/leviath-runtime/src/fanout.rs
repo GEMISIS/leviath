@@ -1121,6 +1121,7 @@ mod tests {
                         title: None,
                         title_error: None,
                         unattended: false,
+                        yolo_profile: None,
                         read_paths: None,
                         output_request: None,
                         model_override: None,

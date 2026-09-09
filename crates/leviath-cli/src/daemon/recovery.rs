@@ -322,6 +322,9 @@ fn reload_one(
         // `--allow` and `--max-depth` stay unpersisted: losing them narrows what
         // the run may do, which is the harmless direction.
         yolo: meta.yolo,
+        // And the profile with it: a scoped run that came back as bare
+        // `--yolo` would have escalated across a restart.
+        yolo_profile: meta.yolo_profile.clone(),
         // Belt and braces: seeds aren't replayed on reload at all (see above),
         // so a resumed run can never re-execute a command seed.
         no_seed_commands: true,
@@ -700,6 +703,7 @@ mod tests {
                 ..Default::default()
             },
             yolo: false,
+            yolo_profile: None,
             read_paths: None,
             // Non-default on purpose, like `flags` above: proves a reload puts
             // the run's answer back rather than dropping it (and then erasing
@@ -2371,5 +2375,50 @@ mod tests {
         assert!(!is_finished(&RunStatus::Cancelled));
         assert!(!is_finished(&RunStatus::Running));
         assert!(!is_finished(&RunStatus::WaitingInput));
+    }
+
+    /// A profiled run comes back under its profile, not under bare `--yolo`:
+    /// the name is restored and the profile's held checkpoints stay held.
+    #[tokio::test]
+    async fn reload_keeps_a_profiled_run_under_its_profile() {
+        crate::config::with_isolated_config_path_async("reload_yolo_profile", |cfg| async move {
+            std::fs::write(
+                cfg.join("yolo.toml"),
+                "[careful]\ndefault = \"ask\"\ncheckpoints = \"ask\"\n",
+            )
+            .unwrap();
+            let agent = agent_dir();
+            let manifest = agent.path().join("agent.leviath");
+            let runs = tempfile::tempdir().unwrap();
+            write_run(
+                runs.path(),
+                "run-prof",
+                manifest.to_str().unwrap(),
+                RunStatus::Running,
+                None,
+            );
+            let meta_path = runs.path().join("run-prof").join("meta.json");
+            let mut meta: RunMeta =
+                serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+            meta.yolo = true;
+            meta.yolo_profile = Some("careful".to_string());
+            std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+            let (world, entity) = reload_single(runs.path(), "run-prof").await;
+            let md = world
+                .world()
+                .get::<RunMetadata>(entity)
+                .expect("reloaded run has metadata");
+            assert!(md.unattended);
+            assert_eq!(md.yolo_profile.as_deref(), Some("careful"));
+            assert!(
+                world
+                    .world()
+                    .get::<leviath_runtime::components::InteractionAutoApprove>(entity)
+                    .is_none(),
+                "the profile's held checkpoints hold across a reload"
+            );
+        })
+        .await;
     }
 }

@@ -67,6 +67,13 @@ pub struct SpawnArgs {
     /// outside that `Waiting` is indistinguishable from a hang.
     #[serde(default)]
     pub yolo: bool,
+    /// The named yolo profile (`--yolo=<name>`) that says which parts of
+    /// `yolo` a person still wants: the profile's own tool and shell rules,
+    /// and whether questions, checkpoints and the taint gate still reach
+    /// someone. `None` with `yolo` set is the bare flag. Meaningless without
+    /// `yolo`.
+    #[serde(default)]
+    pub yolo_profile: Option<String>,
     /// Refuse this run's `seed = { command = ... }` regions (the
     /// `--no-seed-commands` launch override). Command seeds execute at spawn,
     /// before any approval prompt, so this is the per-run counterpart to the
@@ -120,6 +127,7 @@ impl std::fmt::Debug for SpawnArgs {
                 },
             )
             .field("yolo", &self.yolo)
+            .field("yolo_profile", &self.yolo_profile)
             .field("no_seed_commands", &self.no_seed_commands)
             .field("allow", &self.allow)
             .field("max_depth", &self.max_depth)
@@ -195,6 +203,10 @@ pub struct RunListEntry {
     /// be sitting on a prompt; if it is, something dropped the flag.
     #[serde(default)]
     pub unattended: bool,
+    /// The yolo profile the run was launched under, when it named one.
+    /// Omitted by a daemon older than profiles, and for the bare flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_profile: Option<String>,
     /// Whether this run finished having modified nothing, when its blueprint
     /// gave it a way to. Only ever true for a run that has stopped.
     ///

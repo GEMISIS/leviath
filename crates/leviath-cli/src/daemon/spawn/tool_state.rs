@@ -59,8 +59,15 @@ pub(super) struct ToolStateParts<'a> {
     pub(super) script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// Re-resolution context, for a blueprint that rescans mid-run.
     pub(super) dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
-    /// Whether this run answers its own prompts (`--yolo`).
+    /// Whether this run answers its own prompts: `--yolo` under a profile
+    /// whose `questions` are `auto`.
     pub(super) unattended: bool,
+    /// The yolo profile this run decides tool calls under, if it is a yolo
+    /// run at all.
+    pub(super) yolo: Option<Arc<crate::yolo::YoloProfile>>,
+    /// The profile's name when `--yolo=<name>` named one, so a resume can read
+    /// it again. `None` for an attended run and for the bare flag.
+    pub(super) yolo_profile: Option<String>,
     /// `[safe_commands]` the blueprint declares, if the user opted in.
     pub(super) blueprint_safe: Option<&'a leviath_core::blueprint::SafeCommandsConfig>,
     /// `[read_paths]` the blueprint declares, if any.
@@ -115,6 +122,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         ),
         interaction: parts.hub.backend_for(parts.run_id),
         unattended: parts.unattended,
+        yolo: crate::daemon::tool_service::Live::new(parts.yolo),
         stage_name: Arc::new(StdMutex::new(parts.entry_stage.to_string())),
         subagent: parts.subagent,
         sandbox: parts.sandbox,
@@ -129,6 +137,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
             blueprint_safe: parts.blueprint_safe.cloned(),
             blueprint_read_paths: parts.blueprint_read_paths.cloned(),
             workdir: parts.workdir,
+            yolo_profile: parts.yolo_profile,
         }),
     })
 }

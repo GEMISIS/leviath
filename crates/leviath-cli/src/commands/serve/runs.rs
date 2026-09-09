@@ -439,6 +439,7 @@ fn probe_meta() -> RunMeta {
     probe.waiting_on = Some(leviath_core::run_meta::WaitReason::ToolApproval);
     probe.output_request = Some(Default::default());
     probe.model_override = Some(String::new());
+    probe.yolo_profile = Some(String::new());
     probe
 }
 

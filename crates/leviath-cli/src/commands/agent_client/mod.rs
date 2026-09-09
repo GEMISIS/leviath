@@ -79,8 +79,16 @@ pub struct AgentClientArgs {
 
     /// Approve every tool call without prompting (recommended when the host does
     /// not implement `session/request_permission`, e.g. Gas City).
-    #[arg(long)]
-    pub yolo: bool,
+    /// `--yolo=<profile>` runs under a named profile from `yolo.toml` instead;
+    /// the equals sign is required.
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub yolo: Option<String>,
 
     /// Allow a tool outright (repeatable).
     #[arg(long)]

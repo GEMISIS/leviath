@@ -841,6 +841,7 @@ async fn spawn_and_wait(
         model: None,
         workdir: &workdir.to_string_lossy(),
         yolo: true,
+        yolo_profile: None,
         allow: Vec::new(),
         max_depth: None,
         regions: std::collections::HashMap::new(),

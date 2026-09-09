@@ -565,6 +565,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         model: None,
         workdir: &cmd.workdir,
         yolo: cmd.yolo,
+        yolo_profile: None,
         allow: Vec::new(),
         max_depth: None,
         // Region seeds are a `lev run` command line; this screen writes a task.

@@ -527,6 +527,13 @@ pub struct RunMeta {
     /// to attended, so nothing is escalated retroactively.
     #[serde(default)]
     pub yolo: bool,
+    /// The named yolo profile (`--yolo=<name>`) the run was launched under,
+    /// persisted with `yolo` for the same reason: a restart that dropped the
+    /// name would resume a carefully scoped run under bare `--yolo`, which is
+    /// the escalating direction. Absent for the bare flag and for runs written
+    /// before profiles existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_profile: Option<String>,
     /// How much of the blueprint's `[read_paths]` the config granted, as
     /// resolved at spawn. `None` for a blueprint that declared none, and for
     /// runs written before this field existed.
@@ -828,6 +835,7 @@ impl RunMeta {
             model_override: None,
             flags: RunFlags::default(),
             yolo: false,
+            yolo_profile: None,
             read_paths: None,
         }
     }

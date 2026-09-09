@@ -101,9 +101,11 @@ pub(super) async fn spawn_agent(
     // running on the host, from a request - as did `{"allow": ["*"]}`, which
     // reaches the same wildcard override by another name. `--no-remote-yolo`
     // refuses both.
+    // A named profile is a kind of yolo, so it is refused with it.
+    let yolo = body.yolo || body.yolo_profile.is_some();
     state
         .limits
-        .check_launch_overrides(body.yolo, &body.allow)
+        .check_launch_overrides(yolo, &body.allow)
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     // And a completion webhook is a request the daemon makes on the caller's
     // behalf, so it goes through the same SSRF policy as any model-supplied URL.
@@ -124,7 +126,8 @@ pub(super) async fn spawn_agent(
         metadata: body.metadata.clone(),
         callback_url: body.callback_url.clone(),
         callback_secret: body.callback_secret.clone(),
-        yolo: body.yolo,
+        yolo,
+        yolo_profile: body.yolo_profile.clone(),
         // Either side may refuse: the caller for this run, or the operator
         // for every run that comes in this way.
         no_seed_commands: body.no_seed_commands || state.limits.no_remote_seed_commands,
@@ -963,6 +966,15 @@ mod tests {
                 "a named allow",
                 SpawnAgentReq {
                     allow: vec!["shell".to_string()],
+                    ..Default::default()
+                },
+            ),
+            // A profile is a kind of yolo, however narrow, and is refused
+            // with it; the operator's flag says nothing about which one.
+            (
+                "a yolo profile",
+                SpawnAgentReq {
+                    yolo_profile: Some("careful".to_string()),
                     ..Default::default()
                 },
             ),

@@ -148,6 +148,7 @@ impl EmbedSpawner {
                 title: None,
                 title_error: None,
                 unattended: args.yolo,
+                yolo_profile: args.yolo_profile.clone(),
                 // The embedded spawner has no user config to grant against, so
                 // there is nothing to report; `[read_paths]` enforcement is the
                 // host's, through the tool context it supplies.

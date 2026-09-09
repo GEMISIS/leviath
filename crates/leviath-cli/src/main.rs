@@ -342,7 +342,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
             .unwrap_or_default();
         // `--yolo` means unattended, so it takes the warn-and-proceed path even
         // on a terminal: the flag's whole meaning is "do not stop to ask".
-        let interactive = std::io::IsTerminal::is_terminal(&io::stdin()) && !args.yolo;
+        let interactive = std::io::IsTerminal::is_terminal(&io::stdin()) && args.yolo.is_none();
         let ok = leviath_cli::workdir_guard::check(
             std::path::Path::new(&workdir),
             dirs::home_dir().as_deref(),
@@ -368,7 +368,8 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
             stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
             model: args.model,
             workdir: &workdir,
-            yolo: args.yolo,
+            yolo: args.yolo.is_some(),
+            yolo_profile: args.yolo.filter(|name| !name.is_empty()),
             allow: args.allow,
             max_depth: args.max_depth,
             regions: args.regions,

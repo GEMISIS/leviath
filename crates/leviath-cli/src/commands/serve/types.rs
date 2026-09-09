@@ -627,6 +627,10 @@ pub(super) struct SpawnAgentReq {
     /// Approve every tool call for this run.
     #[serde(default)]
     pub(super) yolo: bool,
+    /// Run under a named profile from `yolo.toml` (the `--yolo=<name>` of
+    /// the CLI). Implies `yolo`.
+    #[serde(default)]
+    pub(super) yolo_profile: Option<String>,
     /// Tools to allow outright for this run.
     #[serde(default)]
     pub(super) allow: Vec<String>,

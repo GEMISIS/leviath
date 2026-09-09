@@ -194,6 +194,11 @@ pub(crate) struct AgentToolState {
     /// ever - unless the stage kept it in `required_tools`, in which case a real
     /// prompt is exactly what the blueprint asked for.
     pub unattended: bool,
+    /// The yolo profile this run's tool calls answer to, when it is a yolo
+    /// run: the built-in default for bare `--yolo`, the named one for
+    /// `--yolo=<name>`. `None` for an attended run. Re-read from `yolo.toml`
+    /// when a named run resumes, like the config layers beside it.
+    pub yolo: Arc<Live<Option<Arc<crate::yolo::YoloProfile>>>>,
     /// The current stage name, for tagging interactions (re-synced on stage change).
     pub stage_name: Arc<StdMutex<String>>,
     /// Handle for the sub-agent tools (spawn/check/wait/send/kill), or `None`
@@ -266,6 +271,10 @@ pub(crate) struct ConfigSource {
     pub blueprint_read_paths: Option<leviath_core::blueprint::ReadPathsConfig>,
     /// The run's workdir, which read-path entries compile relative to.
     pub workdir: std::path::PathBuf,
+    /// The yolo profile the run was launched under by name, so a resume reads
+    /// the current `yolo.toml` for it. `None` for an attended run and for the
+    /// bare flag, which reads no file.
+    pub yolo_profile: Option<String>,
 }
 
 /// A minimal [`AgentToolState`] over `workdir`, for the daemon-level test of
@@ -364,6 +373,25 @@ impl AgentToolState {
             &source.workdir,
         ) {
             self.builtins.set_read_paths(policy);
+        }
+        // The named yolo profile, from the file as it stands now. A name the
+        // file has lost, or a file that no longer loads, keeps the rules the
+        // run resumed with: dropping them would not be safer, it would be
+        // whichever of "prompt for everything" and "refuse everything" the
+        // code happened to fall into, and neither is what the person asked.
+        if let Some(name) = &source.yolo_profile {
+            match crate::yolo::resolve_for_spawn(true, Some(name)) {
+                Ok(profile) => self.yolo.set(profile),
+                Err(error) => {
+                    let error = error.to_string();
+                    tracing::warn!(
+                        profile = %name,
+                        error,
+                        "yolo.toml no longer resolves this run's profile; keeping the rules it \
+                         resumed with"
+                    );
+                }
+            }
         }
     }
 
@@ -677,6 +705,28 @@ pub(crate) async fn dispatch_tools(
                 state.blueprint_may_loosen(),
             )
         });
+        // The yolo profile, when this is a yolo run. It sees the policy the
+        // config layers settled on and says what runs unprompted, what still
+        // asks, and what is refused; it never lifts a configured deny.
+        let configured = policy;
+        let decision = {
+            let profile = state.yolo.get();
+            let is_script = state
+                .script_tool_names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&tc.name);
+            crate::yolo::decide_under(
+                profile.as_ref().as_deref(),
+                &tc.name,
+                &tc.arguments,
+                configured,
+                crate::tools::launch_allows(&state.launch_overrides, &tc.name),
+                crate::yolo::ToolKind::classify(&tc.name, is_builtin, is_script),
+                state.builtins.workdir(),
+            )
+        };
+        let policy = decision.as_ref().map_or(configured, |d| d.policy);
         // A grant can only ever collapse `Ask` into `Allow`. It never reaches
         // `Deny`, and it never has to: a denied tool is not one the user was
         // ever offered a grant for.
@@ -686,6 +736,19 @@ pub(crate) async fn dispatch_tools(
         };
 
         match policy {
+            // A deny the profile added names the rule, and the file it lives
+            // in: `[tool_permissions]` is not where this one is lifted.
+            ToolPolicy::Deny if configured != ToolPolicy::Deny => {
+                let reason = decision.map(|d| d.reason).unwrap_or_default();
+                let result = format!(
+                    "[denied] Tool '{}' is refused by this run's yolo profile ({reason}). Edit \
+                     the profile in yolo.toml and resume this run (`lev resume`); the run \
+                     re-reads it and does not need restarting.",
+                    tc.name
+                );
+                progress(&tc.id, &result);
+                slots.push((tc.id.clone(), Some(result)));
+            }
             ToolPolicy::Deny => {
                 // Says what actually lifts it. The run re-reads its permissions
                 // when it resumes, so the message names an edit plus a resume
@@ -1008,6 +1071,7 @@ mod tests {
             blueprint_safe: None,
             blueprint_read_paths: None,
             workdir: std::env::temp_dir(),
+            yolo_profile: None,
         })
     }
 
@@ -1071,6 +1135,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1132,6 +1197,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1215,6 +1281,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1414,6 +1481,7 @@ mod tests {
                     allow: vec![outside.path().to_string_lossy().to_string()],
                 }),
                 workdir: workdir.path().to_path_buf(),
+                yolo_profile: None,
             }),
             ..(*state_over(workdir.path(), allow)).clone()
         });
@@ -1466,6 +1534,7 @@ mod tests {
                     allow: vec![String::new()],
                 }),
                 workdir: workdir.path().to_path_buf(),
+                yolo_profile: None,
             }),
             ..(*state_over(workdir.path(), HashMap::new())).clone()
         });
@@ -1544,6 +1613,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1828,6 +1898,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2204,6 +2275,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2273,6 +2345,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -2696,6 +2769,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -3239,6 +3313,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            yolo_profile: None,
             model_override: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
@@ -3265,6 +3340,7 @@ mod tests {
             blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
+            yolo: Live::new(None),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: Some(handle),
             sandbox: None,
@@ -3638,5 +3714,115 @@ mod tests {
         )
         .await;
         assert!(out[0].1.contains("[error] tool error"));
+    }
+
+    /// A state deciding under `name` from `toml`, otherwise like [`state_with`].
+    fn profile_state(hub: &InteractionHub, toml: &str, name: &str) -> Arc<AgentToolState> {
+        let mut state = state_with(hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let file = crate::yolo::YoloFile::from_toml(toml).expect("profile parses");
+        Arc::get_mut(&mut state)
+            .expect("sole owner before dispatch")
+            .yolo = Live::new(file.get(name));
+        state
+    }
+
+    /// A deny the profile added is refused with a message naming the rule and
+    /// the file it lives in: `[tool_permissions]` is not where it is lifted.
+    #[tokio::test]
+    async fn a_profile_deny_is_refused_and_names_the_rule() {
+        let hub = InteractionHub::new();
+        let state = profile_state(
+            &hub,
+            "[p]\ndefault = \"allow\"\n[[p.shell.deny]]\ncommand = \"curl\"\n",
+            "p",
+        );
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "curl https://x"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let result = out[0].1.clone();
+        assert!(result.contains("[denied]"), "{result}");
+        assert!(result.contains("yolo profile"), "{result}");
+        assert!(result.contains("shell deny rule \"curl\""), "{result}");
+        assert!(result.contains("yolo.toml"), "{result}");
+        assert!(hub.pending().is_empty(), "a deny asks nobody");
+    }
+
+    /// Under `default = "allow"` a call that would ask runs unprompted; under
+    /// `default = "ask"` the ordinary prompt opens and an approval runs it.
+    #[tokio::test]
+    async fn a_profile_decides_between_running_and_asking() {
+        let hub = InteractionHub::new();
+        let state = profile_state(&hub, "[p]\ndefault = \"allow\"\n", "p");
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "echo yolo-ran"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        assert!(out[0].1.contains("yolo-ran"), "{}", out[0].1);
+        assert!(hub.pending().is_empty(), "allowed means unprompted");
+
+        let hub = InteractionHub::new();
+        let state = profile_state(&hub, "[p]\ndefault = \"ask\"\n", "p");
+        let out = dispatch_answering(
+            state,
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "echo asked-first"}),
+            )],
+            |req| InteractionResponse::approval(&req.id, true, ApprovalScope::Once),
+            hub,
+        )
+        .await;
+        assert!(out[0].1.contains("asked-first"), "{}", out[0].1);
+    }
+
+    /// A resume reads the named profile from the file as it stands: an edit
+    /// applies, and a name the file has lost keeps the rules the run had.
+    #[tokio::test]
+    async fn reread_config_follows_a_named_profile_and_keeps_it_when_the_name_goes() {
+        crate::config::with_isolated_config_path_async("reread_yolo_profile", |cfg| async move {
+            std::fs::write(cfg.join("yolo.toml"), "[careful]\ndefault = \"ask\"\n").unwrap();
+            let hub = InteractionHub::new();
+            let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+            Arc::get_mut(&mut state).expect("sole owner").config_source = Arc::new(ConfigSource {
+                agent_name: "tester".to_string(),
+                blueprint_safe: None,
+                blueprint_read_paths: None,
+                workdir: std::env::temp_dir(),
+                yolo_profile: Some("careful".to_string()),
+            });
+            let default_of =
+                |state: &AgentToolState| state.yolo.get().as_ref().as_ref().map(|p| p.spec.default);
+            assert_eq!(default_of(&state), None);
+            state.reread_config(&Config::default());
+            assert_eq!(default_of(&state), Some(crate::yolo::rules::Waiver::Ask));
+
+            std::fs::write(cfg.join("yolo.toml"), "[careful]\ndefault = \"allow\"\n").unwrap();
+            state.reread_config(&Config::default());
+            assert_eq!(default_of(&state), Some(crate::yolo::rules::Waiver::Allow));
+
+            std::fs::write(cfg.join("yolo.toml"), "[other]\ndefault = \"ask\"\n").unwrap();
+            state.reread_config(&Config::default());
+            assert_eq!(default_of(&state), Some(crate::yolo::rules::Waiver::Allow));
+
+            // Bare `--yolo` and an attended run name nothing, and nothing is read.
+            let plain = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+            plain.reread_config(&Config::default());
+            assert!(plain.yolo.get().is_none());
+        })
+        .await;
     }
 }

@@ -649,6 +649,18 @@ pub(crate) fn session_approval_keys(tool_name: &str, arguments: &serde_json::Val
     crate::shell_keys::command_keys(command)
 }
 
+/// Whether `--allow` named this tool for the run, under any of its spellings.
+///
+/// The one launch override a yolo profile defers to: a person who typed
+/// `--allow web_fetch` answered that question at the terminal, so a profile's
+/// `ask` list does not put it back to them. A `deny` still wins.
+pub(crate) fn launch_allows(
+    launch_overrides: &HashMap<String, ToolPolicy>,
+    tool_name: &str,
+) -> bool {
+    by_any_spelling(launch_overrides, tool_name) == Some(&ToolPolicy::Allow)
+}
+
 /// Look a tool up in a permission map under any name that refers to it.
 ///
 /// Policy is matched against the name the *model* calls, which is always the
@@ -2624,5 +2636,19 @@ mod policy_tests {
                 );
             }
         }
+    }
+
+    /// `--allow` is recognised under any spelling of the tool, and only as an
+    /// allow: an `ask` in the launch map is not a person having said yes.
+    #[test]
+    fn launch_allows_matches_any_spelling_and_only_an_allow() {
+        let launch = HashMap::from([
+            ("bash".to_string(), ToolPolicy::Allow),
+            ("web_fetch".to_string(), ToolPolicy::Ask),
+        ]);
+        assert!(launch_allows(&launch, "shell"));
+        assert!(launch_allows(&launch, "bash"));
+        assert!(!launch_allows(&launch, "web_fetch"));
+        assert!(!launch_allows(&launch, "read_file"));
     }
 }

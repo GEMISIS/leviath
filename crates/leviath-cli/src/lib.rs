@@ -35,3 +35,4 @@ pub(crate) mod tools;
 pub(crate) mod tui;
 pub mod ui_state;
 pub mod workdir_guard;
+pub(crate) mod yolo;

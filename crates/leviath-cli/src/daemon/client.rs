@@ -124,6 +124,9 @@ pub struct LaunchRequest<'a> {
     pub workdir: &'a str,
     /// `--yolo`: run unattended.
     pub yolo: bool,
+    /// `--yolo=<name>`: the profile that says which parts of unattended a
+    /// person still wants. `None` is the bare flag.
+    pub yolo_profile: Option<String>,
     /// `--allow`: tools permitted outright.
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
@@ -158,6 +161,7 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         model,
         workdir,
         yolo,
+        yolo_profile,
         allow,
         max_depth,
         regions,
@@ -194,6 +198,7 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         callback_url: None,
         callback_secret: None,
         yolo,
+        yolo_profile,
         no_seed_commands,
         allow,
         max_depth,
@@ -291,6 +296,31 @@ fn broken_config_warning(path: &std::path::Path) -> Vec<String> {
         ),
         "  fix the file and the next run picks it up; nothing needs restarting".to_string(),
     ]
+}
+
+/// Refuse `--yolo=<name>` for a profile the file does not have before the
+/// daemon is asked, and say what the profile keeps for a person.
+///
+/// Not best-effort like the warnings beside it: the person named a specific
+/// set of rules, and the daemon would refuse the same spawn a moment later
+/// with the same words. Failing here saves the round trip and the placeholder
+/// run directory. The bare flag and an attended run say nothing.
+pub(crate) fn yolo_profile_preflight(spawn_args: &SpawnArgs) -> anyhow::Result<Vec<String>> {
+    let profile =
+        crate::yolo::resolve_for_spawn(spawn_args.yolo, spawn_args.yolo_profile.as_deref())?;
+    let Some(profile) = profile.filter(|p| !p.is_builtin_default()) else {
+        return Ok(Vec::new());
+    };
+    let holds = profile.holds();
+    if holds.is_empty() {
+        return Ok(vec![format!(
+            "--yolo={} allows everything the config does not deny; it keeps nothing for you",
+            profile.name
+        )]);
+    }
+    let mut lines = vec![format!("--yolo={} keeps these for you:", profile.name)];
+    lines.extend(holds.into_iter().map(|line| format!("  {line}")));
+    Ok(lines)
 }
 
 /// Say, before the run starts, that `--yolo` will still stop for a person.
@@ -440,6 +470,9 @@ pub(crate) async fn send_spawn(
 ) -> anyhow::Result<()> {
     warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
+    for line in yolo_profile_preflight(&spawn_args)? {
+        eprintln!("{line}");
+    }
     warn_held_checkpoints(&spawn_args);
     warn_retired_output_checks(&spawn_args);
     let spawned = spawn_once(client, spawn_args).await?;
@@ -475,6 +508,9 @@ pub async fn send_spawn_batch(
     // run: once.
     warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
+    for line in yolo_profile_preflight(&spawn_args)? {
+        eprintln!("{line}");
+    }
     warn_held_checkpoints(&spawn_args);
     warn_retired_output_checks(&spawn_args);
     let mut spawned = Vec::with_capacity(count);
@@ -542,6 +578,7 @@ mod tests {
             model: Some("m".to_string()),
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -600,6 +637,7 @@ mod tests {
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -625,6 +663,7 @@ mod tests {
                 model: None,
                 workdir: "/work",
                 yolo: false,
+                yolo_profile: None,
                 allow: Vec::new(),
                 max_depth: None,
                 regions: HashMap::new(),
@@ -653,6 +692,7 @@ mod tests {
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -679,6 +719,7 @@ mod tests {
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -733,6 +774,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -761,6 +803,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -790,6 +833,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions: HashMap::new(),
@@ -815,6 +859,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -870,6 +915,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -918,6 +964,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -943,6 +990,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -971,6 +1019,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -995,6 +1044,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -1020,6 +1070,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             model: None,
             workdir: "/work",
             yolo: false,
+            yolo_profile: None,
             allow: Vec::new(),
             max_depth: None,
             regions,
@@ -1656,5 +1707,74 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not reachable"));
+    }
+
+    /// `--yolo=<name>` reaches the daemon as the bit plus the name.
+    #[test]
+    fn resolve_spawn_args_carries_a_yolo_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manifest = write_manifest(&agent_dir);
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("do it"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: true,
+            yolo_profile: Some("careful".to_string()),
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
+        .unwrap();
+        assert!(args.yolo);
+        assert_eq!(args.yolo_profile.as_deref(), Some("careful"));
+    }
+
+    /// The profile pre-flight: nothing for an attended run or the bare flag,
+    /// what a named profile keeps for a person, and a refusal for a name the
+    /// file does not have - before the daemon is asked.
+    #[tokio::test]
+    async fn the_yolo_profile_preflight_names_holds_and_refuses_unknown_names() {
+        crate::config::with_isolated_config_path_async("spawn-yolo-profile", |cfg| async move {
+            std::fs::write(
+                cfg.join("yolo.toml"),
+                "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\n[loose]\ndefault = \"allow\"\n",
+            )
+            .unwrap();
+            let with = |yolo: bool, profile: Option<&str>| SpawnArgs {
+                yolo,
+                yolo_profile: profile.map(str::to_string),
+                ..SpawnArgs::default()
+            };
+            assert!(yolo_profile_preflight(&with(false, None)).unwrap().is_empty());
+            assert!(yolo_profile_preflight(&with(true, None)).unwrap().is_empty());
+            assert!(yolo_profile_preflight(&with(false, Some("nope"))).unwrap().is_empty());
+
+            let lines = yolo_profile_preflight(&with(true, Some("careful"))).unwrap();
+            assert_eq!(lines[0], "--yolo=careful keeps these for you:");
+            assert!(lines[1].contains("questions"), "{lines:?}");
+            assert!(lines[2].contains("lists do not allow"), "{lines:?}");
+
+            let lines = yolo_profile_preflight(&with(true, Some("loose"))).unwrap();
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].contains("keeps nothing for you"), "{lines:?}");
+
+            let err = yolo_profile_preflight(&with(true, Some("nope"))).unwrap_err();
+            assert!(err.to_string().contains("careful, loose"), "{err}");
+
+            // Through `send_spawn`: refused before any socket is dialled, so
+            // the error is the profile's, not "daemon not reachable".
+            let id = control_id(&cfg.join("nowhere"));
+            let err = send_spawn(&ControlClient::new(id), with(true, Some("nope")), false)
+                .await
+                .expect_err("an unknown profile stops the spawn");
+            assert!(err.to_string().contains("no yolo profile"), "{err}");
+        })
+        .await;
     }
 }

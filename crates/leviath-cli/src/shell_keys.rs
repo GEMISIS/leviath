@@ -891,25 +891,61 @@ fn take_substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
 /// is what made `PATH=/tmp/evil ls` read as a plain `ls` and ride the safe list
 /// into an unprompted execution of somebody else's binary.
 fn segment_key(words: &[Word]) -> SegmentKey {
+    let (mut keys, rest) = match strip_to_program(words) {
+        Stripped::NothingRuns(keys) => return SegmentKey::from_keys(keys),
+        Stripped::Unreadable => return SegmentKey::Unreadable,
+        Stripped::Program { env_keys, words } => (env_keys, words),
+    };
+    let program = &rest[0];
+    match rest.get(1) {
+        Some(arg) if folds_into_key(&program.text, arg) => {
+            keys.push(format!("{} {}", program.text, arg.text));
+        }
+        _ => keys.push(program.text.clone()),
+    }
+    SegmentKey::Keys(keys)
+}
+
+/// A segment with its leading keywords and assignments taken off, down to the
+/// program that runs.
+enum Stripped<'a> {
+    /// No program runs here: the segment is keywords, or bindings alone. The
+    /// keys are the `env:NAME` entries those bindings contribute.
+    NothingRuns(Vec<String>),
+    /// Something here decides what runs in a way no key can name.
+    Unreadable,
+    /// `words[0]` is a literal program; `env_keys` names what the segment
+    /// bound in front of it.
+    Program {
+        env_keys: Vec<String>,
+        words: &'a [Word],
+    },
+}
+
+/// Strip leading keywords and `VAR=value` assignments until a program is
+/// reached. `FOO=1 do cargo test` yields the program `cargo test` with
+/// `env:FOO` beside it.
+///
+/// Shared by [`segment_key`] and [`matchable_segments`], so the two readings
+/// of what a segment runs cannot drift apart.
+fn strip_to_program(words: &[Word]) -> Stripped<'_> {
     let mut env_keys = Vec::new();
     let mut rest = words;
-    // Strip leading keywords and `VAR=value` assignments until a program is
-    // reached. `FOO=1 do cargo test` keys `shell:cargo test` and `shell:env:FOO`.
     loop {
         let Some(first) = rest.first() else {
-            return SegmentKey::from_keys(env_keys);
+            return Stripped::NothingRuns(env_keys);
         };
         let text = first.text.as_str();
         if INERT_KEYWORDS.contains(&text) {
-            return SegmentKey::from_keys(env_keys);
+            return Stripped::NothingRuns(env_keys);
         }
         if CODE_INSTALLING.contains(&text) {
-            return SegmentKey::Unreadable;
+            return Stripped::Unreadable;
         }
         if ENV_BINDING.contains(&text) {
             return match binding_keys(&rest[1..], &mut env_keys) {
-                Ok(()) => SegmentKey::from_keys(env_keys),
-                Err(()) => SegmentKey::Unreadable,
+                Ok(()) => Stripped::NothingRuns(env_keys),
+                Err(()) => Stripped::Unreadable,
             };
         }
         if PREFIX_KEYWORDS.contains(&text) {
@@ -929,18 +965,69 @@ fn segment_key(words: &[Word]) -> SegmentKey {
     // same is true of a program whose whole job is running a command assembled
     // somewhere this cannot see.
     if !program.literal || UNREADABLE_PROGRAMS.contains(&program.text.as_str()) {
-        return SegmentKey::Unreadable;
+        return Stripped::Unreadable;
     }
     if carries_escape_flag(&program.text, rest) {
-        return SegmentKey::Unreadable;
+        return Stripped::Unreadable;
     }
-    match rest.get(1) {
-        Some(arg) if folds_into_key(&program.text, arg) => {
-            env_keys.push(format!("{} {}", program.text, arg.text));
-        }
-        _ => env_keys.push(program.text.clone()),
+    Stripped::Program {
+        env_keys,
+        words: rest,
     }
-    SegmentKey::Keys(env_keys)
+}
+
+/// One command of a line as a yolo profile's shell rules see it: the words
+/// that would be matched, and whether they can be trusted to say what runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MatchableSegment {
+    /// The program and its arguments, quotes removed, in order. Empty when the
+    /// segment runs nothing a rule could name.
+    pub words: Vec<String>,
+    /// The words do not fully decide what runs: the segment binds a variable
+    /// in front of its program (`PATH=x cargo`), one of its words is an
+    /// expansion (`rm -r $DIR`), or its program is one no key can name. An
+    /// opaque segment can still be refused; it can never be matched by a rule
+    /// that would let it through.
+    pub opaque: bool,
+    /// Whether it redirects a write somewhere that keeps it.
+    pub writes: bool,
+}
+
+/// The commands of a line, in order, for rule matching. `None` when the line
+/// cannot be read at all, the same cases [`command_keys`] treats as
+/// ungrantable. Segments that run nothing and bind nothing (`for i in ...`,
+/// `fi`) are left out; a binding on its own (`export FOO=1`) stays, as an
+/// opaque segment, because it changes what a later one resolves to.
+///
+/// The same tokenizer and the same reading of what a segment runs as the grant
+/// keys use; only the shape differs, because a rule wants the words and a key
+/// wants a name.
+pub(crate) fn matchable_segments(
+    command: &str,
+    backslash_escapes: bool,
+) -> Option<Vec<MatchableSegment>> {
+    let segments = tokenize_for(command, backslash_escapes)?;
+    let mut out = Vec::new();
+    for segment in &segments {
+        let writes = segment
+            .writes
+            .iter()
+            .any(|t| classify_write(t) != WriteTarget::Discarded);
+        let (words, opaque) = match strip_to_program(&segment.words) {
+            Stripped::NothingRuns(keys) if keys.is_empty() && !writes => continue,
+            Stripped::NothingRuns(_) | Stripped::Unreadable => (Vec::new(), true),
+            Stripped::Program { env_keys, words } => (
+                words.iter().map(|w| w.text.clone()).collect(),
+                !env_keys.is_empty() || words.iter().any(|w| !w.literal),
+            ),
+        };
+        out.push(MatchableSegment {
+            words,
+            opaque,
+            writes,
+        });
+    }
+    Some(out)
 }
 
 /// The key naming a bound variable.

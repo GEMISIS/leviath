@@ -55,8 +55,21 @@ pub struct RunArgs {
     /// `stages/<n>/taint_audit.json` as `YoloAutoApprove`. Think twice before
     /// combining `--yolo` with an agent whose `[read_paths]` reach private
     /// files.
-    #[arg(long)]
-    pub yolo: bool,
+    ///
+    /// `--yolo=<profile>` runs under a named profile from `yolo.toml` beside
+    /// your config instead: the profile says which tool calls and shell
+    /// commands run unprompted, which still ask, and whether the model's
+    /// questions and the stage checkpoints still come to you. `lev yolo list`
+    /// shows the profiles you have. The equals sign is required, so
+    /// `lev run --yolo coder` keeps meaning "run coder, plain yolo".
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub yolo: Option<String>,
 
     /// Allow a tool outright (repeatable).
     #[arg(long)]
@@ -496,5 +509,45 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let err = effective_workdir(Some(file), cwd).unwrap_err();
         assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    /// `--yolo` alone is the bare flag, `--yolo=<name>` names a profile, and
+    /// the space form keeps meaning "bare flag, then the agent": otherwise
+    /// `lev run --yolo coder` would silently read `coder` as a profile.
+    #[test]
+    fn the_yolo_flag_takes_a_profile_only_with_an_equals_sign() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            run: RunArgs,
+        }
+        let p = Probe::try_parse_from(["lev", "coder", "--yolo"]).expect("bare flag");
+        assert_eq!(p.run.yolo.as_deref(), Some(""));
+        assert_eq!(p.run.path.as_deref(), Some("coder"));
+        let p = Probe::try_parse_from(["lev", "--yolo=careful", "coder"]).expect("named");
+        assert_eq!(p.run.yolo.as_deref(), Some("careful"));
+        assert_eq!(p.run.path.as_deref(), Some("coder"));
+        let p = Probe::try_parse_from(["lev", "--yolo", "coder"]).expect("space form");
+        assert_eq!(p.run.yolo.as_deref(), Some(""));
+        assert_eq!(p.run.path.as_deref(), Some("coder"));
+        let p = Probe::try_parse_from(["lev", "coder"]).expect("no flag");
+        assert!(p.run.yolo.is_none());
+    }
+
+    /// The argv pre-scan leaves `--yolo=<name>` alone: `yolo` is a known flag
+    /// whichever way its value is attached.
+    #[test]
+    fn the_pre_scan_passes_a_profile_flag_through() {
+        let (out, regions) = extract_region_flags(argv(&[
+            "lev",
+            "run",
+            "coder",
+            "--yolo=careful",
+            "--files",
+            "@x",
+        ]));
+        assert_eq!(out, argv(&["lev", "run", "coder", "--yolo=careful"]));
+        assert_eq!(regions.get("files").map(String::as_str), Some("@x"));
     }
 }

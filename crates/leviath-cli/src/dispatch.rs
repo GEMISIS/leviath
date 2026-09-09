@@ -60,6 +60,9 @@ pub enum Commands {
     /// Manage taint tracking policy rules
     Policy(commands::policy::PolicyArgs),
 
+    /// List, inspect and try the profiles behind `--yolo=<name>`
+    Yolo(commands::yolo::YoloArgs),
+
     /// Update Leviath, then everything that shipped with it
     #[command(long_about = commands::update::UPDATE_LONG_ABOUT)]
     Update(commands::update::UpdateArgs),
@@ -171,6 +174,7 @@ Setup and configuration:
   mcp           Manage MCP tool servers and their authentication
   approvals     Show what runs without an approval prompt, and why
   policy        Manage taint tracking policy rules
+  yolo          List, inspect and try the profiles behind `--yolo=<name>`
   update        Update Leviath, then everything that shipped with it
 
 Blueprints:
@@ -353,6 +357,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Approvals(args) => commands::approvals::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
+        Commands::Yolo(args) => commands::yolo::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
         Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
@@ -919,6 +924,21 @@ mod tests {
             command: commands::policy::PolicyCommand::List(commands::policy::PolicyListArgs {}),
         };
         let result = dispatch(Commands::Policy(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_yolo_variant_is_routed() {
+        let result = crate::config::with_isolated_config_path_async("dispatch-yolo", |_| async {
+            dispatch(
+                Commands::Yolo(commands::yolo::YoloArgs {
+                    command: commands::yolo::YoloCommand::List(commands::yolo::ListArgs::default()),
+                }),
+                &MockRisky,
+            )
+            .await
+        })
+        .await;
         assert!(result.is_ok());
     }
 
