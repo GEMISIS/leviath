@@ -136,6 +136,7 @@ pub(super) async fn spawn_agent(
         max_depth: body.max_depth,
         // Serve spawns are top-level runs.
         parent_run_id: None,
+        parts: Vec::new(),
     };
     let warnings = spawn_warnings(&manifest_path, args.output.as_ref());
 

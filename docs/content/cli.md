@@ -47,6 +47,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--output-format <LABEL>` | Ask for the final output in this shape. A label that differs from what the blueprint declares retires its Rhai validator and JSON schema, with a warning on stderr. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
+| `--attach <PATH[:REGION][:TYPE][:text]>` | Put a file in a region as a typed part. Repeatable. See below |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
 
 **`--workdir`** decides more than where commands run. File tools are confined to it, and relative
@@ -90,6 +91,28 @@ A region only accepts a seed if the blueprint declares it as caller input: a str
 key implicitly. A table seed (`seed = { glob = ... }`, `{ command = ... }`, and so on) fills the
 region from somewhere else and takes no caller input. A `--<name>` naming any other region is
 dropped.
+
+A `@file` that is not text (an image, a recording, a PDF) is attached to the region as a typed
+[part](/docs/media) instead of being read as its seed text, and a required region counts as
+provided by it. `--attach` does the same for any region the blueprint declares, caller input or
+not, and says more about the file when the name alone does not:
+
+```bash
+lev run storyteller --task "a 30 second trailer" \
+  --attach voice.wav:voice_samples --attach frame1.png:storyboard
+lev run modeller --attach scene.bin:props:model/gltf-binary
+lev run reviewer --task "does @mockup.png match the brief?"
+```
+
+The segments after the path are told apart by shape: `type/subtype` declares the media type when
+the registry cannot tell from the bytes or the extension, `text`, `native` or `stand_in` chooses how
+the part reaches the model, and anything else names the region. Left off, the region is the one
+the task lands in. A `@path` inside the task text or a region's text attaches that file to the
+same entry, and the text keeps the `@path` as written so the model reads the same name the part
+carries. Paths resolve from where you ran the command. Write `\@` for a literal `@`; a token that
+names no file is left as text, and `lev run` warns when it looked like a path. A part bound for a
+region the blueprint does not declare, or whose declared type the region's `accepts` excludes, is
+refused before the daemon is dialled.
 
 > [!NOTE]
 > `--task` fills the caller-input key `task`. A blueprint receives it only if some region asks for
@@ -451,7 +474,7 @@ config grants.
 |---|---|---|
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
-| `lev msg <AGENT_ID> <CONTENT>` | | Deliver a message into a running agent's context |
+| `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it, as on `lev run` |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
 | `lev resume <RUN_ID>` | | Un-pause a run |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |

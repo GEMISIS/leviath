@@ -335,6 +335,7 @@ fn reload_one(
         // caller's requested shape would silently revert the run to the
         // blueprint's partway through, and the caller would never see why.
         output: meta.output_request.clone(),
+        parts: Vec::new(),
     };
     let entity = build_agent_for_reload(world.world_mut(), deps, &args)?;
 

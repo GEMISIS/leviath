@@ -111,6 +111,18 @@ same list.
   hydrate send the stand-in. The journal and `context.json` never hold
   base64. `[media] max_stored_per_request` caps how many parts one request
   carries, oldest dropped first (#400).
+- Files reach a run from the command line. `lev run --attach
+  path[:region][:type][:text]` puts a file in a region as a typed part, a
+  `--<region> @file` whose bytes are not text attaches instead of seeding,
+  and a `@path` inside the task or a region's text attaches that file to
+  the same entry while the text keeps the name. `lev msg --attach` and a
+  `@path` in a message do the same for a running agent, with the files
+  landing beside the words as one entry. The control socket's spawn and
+  message requests carry `parts` (base64 on the wire), the daemon stores
+  each one under the run's `blobs/` and writes the reference into the
+  region, and a region that refuses the part's type or is over `[media]
+  max_part_bytes` refuses the spawn by name, or drops the part from a
+  message and keeps the text (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

@@ -12,6 +12,9 @@ use leviath_core::{
 
 use crate::ContextWindow;
 
+pub(crate) mod parts;
+pub(crate) use parts::{PartSink, ingest_parts};
+
 /// Initialize a [`ContextWindow`] from a blueprint and seed its regions from a
 /// name→content map. Adds each layout region plus the infra
 /// `tool_results`/`conversation` regions, then fills each seed whose key matches

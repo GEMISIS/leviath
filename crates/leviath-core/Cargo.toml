@@ -26,6 +26,9 @@ glob = { workspace = true }
 regex = { workspace = true }
 # Content addressing for stored media parts (`leviath_core::media::store`).
 sha2 = { workspace = true }
+# A part's bytes on the control socket and in a JSON request
+# (`leviath_core::media::inbound`), which are text transports.
+base64 = { workspace = true }
 
 [dev-dependencies]
 # The always-on tracing subscriber, so log-macro bodies run under test.

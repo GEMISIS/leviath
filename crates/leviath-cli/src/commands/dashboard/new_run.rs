@@ -617,6 +617,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         regions: HashMap::new(),
         no_seed_commands: false,
         output_request: None,
+        parts: Vec::new(),
     }) {
         Ok(args) => args,
         Err(e) => {

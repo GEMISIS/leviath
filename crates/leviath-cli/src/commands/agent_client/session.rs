@@ -91,6 +91,7 @@ pub(super) fn spawn_args(
                 on_validator_error: None,
             }),
         },
+        parts: Vec::new(),
     }
 }
 

@@ -354,6 +354,9 @@ pub struct AgentMessage {
     pub content: String,
     /// Which region to add the message to (default: "conversation")
     pub target_region: Option<String>,
+    /// Files attached to the message; stored when it is delivered and written
+    /// beside the text in one entry.
+    pub parts: Vec<leviath_core::media::InboundPart>,
 }
 
 /// Inbox component for receiving messages sent to a running agent.
@@ -620,6 +623,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             content: "hello".to_string(),
             target_region: None,
+            parts: Vec::new(),
         });
         assert_eq!(inbox.messages.len(), 1);
 
@@ -636,6 +640,7 @@ mod tests {
                 agent_id: "a".to_string(),
                 content: content.to_string(),
                 target_region: None,
+                parts: Vec::new(),
             });
         }
 
@@ -874,6 +879,7 @@ mod tests {
             agent_id: "a".to_string(),
             content: "msg".to_string(),
             target_region: None,
+            parts: Vec::new(),
         });
         let _ = inbox.drain_all();
         assert!(inbox.messages.is_empty());
@@ -888,6 +894,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             content: "hello".to_string(),
             target_region: Some("conv".to_string()),
+            parts: Vec::new(),
         };
         let cloned = msg.clone();
         assert_eq!(cloned.agent_id, "agent-1");

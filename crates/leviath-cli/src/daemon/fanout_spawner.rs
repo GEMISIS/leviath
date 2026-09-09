@@ -148,6 +148,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             // the same output).
             no_seed_commands: true,
             output_request,
+            parts: Vec::new(),
         })
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
@@ -511,6 +512,7 @@ mod tests {
             max_depth: None,
             parent_run_id: None,
             output: None,
+            parts: Vec::new(),
         };
         let (global_defs, global_owners) = spawner.mcp_global.current();
         let parent = build_agent(

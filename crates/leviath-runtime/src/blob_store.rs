@@ -67,6 +67,13 @@ impl MediaParams<'_> {
             });
         (both, max_stored)
     }
+
+    /// The largest part any ingress accepts.
+    pub fn max_part_bytes(&self) -> u64 {
+        self.limits
+            .as_deref()
+            .map_or(MediaLimits::default().max_part_bytes, |l| l.max_part_bytes)
+    }
 }
 
 /// The operator's ceilings on typed parts, from `[media]` in the config.

@@ -16,8 +16,12 @@ use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResp
 pub struct MsgArgs {
     /// The target agent id.
     pub agent_id: String,
-    /// The message to deliver.
+    /// The message to deliver. A `@path` inside it attaches that file.
     pub content: String,
+    /// Attach a file to the message: `path[:region][:type][:text]`, as on
+    /// `lev run --attach`. Repeatable.
+    #[arg(long, value_name = "PATH[:REGION][:TYPE][:text]")]
+    pub attach: Vec<String>,
 }
 
 /// Arguments for `lev cancel`.
@@ -117,17 +121,35 @@ async fn send_bool(
 
 /// `lev msg`: deliver a message to a running agent.
 pub async fn send_message(client: &ControlClient, args: &MsgArgs) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (content, parts) = message_parts(&args.content, &args.attach, &cwd)?;
     send_bool(
         client,
         ControlRequest::Message {
             agent_id: args.agent_id.clone(),
-            content: args.content.clone(),
+            content,
             target_region: None,
+            parts,
         },
         "message delivered",
         "no agent accepted the message",
     )
     .await
+}
+
+/// The message text and the parts it carries: every `--attach` file, then
+/// every `@path` the text names. A token that names no file stays text and
+/// is reported on stderr.
+pub(crate) fn message_parts(
+    text: &str,
+    attach: &[String],
+    cwd: &std::path::Path,
+) -> anyhow::Result<(String, Vec<leviath_core::media::InboundPart>)> {
+    let mut parts = crate::commands::run::attach::attach_all(attach, cwd)?;
+    let (text, named, unresolved) = crate::commands::run::attach::inline_parts(text, None, cwd)?;
+    parts.extend(named);
+    crate::commands::run::attach::warn_unresolved(&unresolved);
+    Ok((text, parts))
 }
 
 /// `lev pause`: park a run. The daemon refuses (`ok: false`) when the run does
@@ -400,7 +422,42 @@ mod tests {
         MsgArgs {
             agent_id: "a".to_string(),
             content: "hi".to_string(),
+            attach: Vec::new(),
         }
+    }
+
+    #[test]
+    fn message_parts_take_attachments_and_named_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"notes").unwrap();
+        let (text, parts) = message_parts(
+            "see @a.png and @gone.png",
+            &["b.txt:notes".into()],
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(text, "see @a.png and @gone.png");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "b.txt");
+        assert_eq!(parts[0].region.as_deref(), Some("notes"));
+        assert_eq!(parts[1].name, "a.png");
+        assert!(message_parts("x", &["missing.bin".into()], dir.path()).is_err());
+        std::fs::write(dir.path().join("empty.png"), b"").unwrap();
+        let err = message_parts("see @empty.png", &[], dir.path()).unwrap_err();
+        assert!(err.to_string().contains("nothing to attach"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn message_with_an_unreadable_attachment_never_dials() {
+        // No daemon behind this id: the attachment fails first, so nothing
+        // is ever dialled, and a daemon that never hears from us is right.
+        let dir = tempfile::tempdir().unwrap();
+        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+        let mut args = msg_args();
+        args.attach = vec!["/no/such/file.png".to_string()];
+        let err = send_message(&client, &args).await.unwrap_err();
+        assert!(err.to_string().contains("could not read"), "{err}");
     }
 
     #[tokio::test]

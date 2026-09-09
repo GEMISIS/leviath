@@ -6,6 +6,7 @@
 //! module keeps the manifest/session/tool-source helpers still shared across the
 //! CLI, and the `RunArgs` the binary wires into that path.
 
+pub mod attach;
 pub(crate) mod manifest;
 pub(crate) mod session;
 pub(crate) mod task;
@@ -130,6 +131,14 @@ pub struct RunArgs {
     #[arg(long, value_name = "JSON|@FILE")]
     pub output_schema: Option<String>,
 
+    /// Attach a file to the run: `path[:region][:type][:text]`. The file lands
+    /// in the named region (default: the task region) as a typed part. `:type`
+    /// names its media type when the registry cannot tell; `:text` sends its
+    /// bytes to the model as text whatever the model takes. Repeatable. A
+    /// `@path` inside the task text does the same for that file.
+    #[arg(long, value_name = "PATH[:REGION][:TYPE][:text]")]
+    pub attach: Vec<String>,
+
     /// Dynamic per-region seed flags (`--<region> <text|@file>`), collected by an
     /// argv pre-scan in the binary since region names are blueprint-defined.
     /// clap skips this field; it is populated after parsing.
@@ -150,6 +159,7 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     "output-format",
     "output-instructions",
     "output-schema",
+    "attach",
     // Every flag `run` owns must be listed here. One that is missing is not a
     // parse error: the pre-scan silently reads it as a `--<region>` seed and
     // swallows the token after it.

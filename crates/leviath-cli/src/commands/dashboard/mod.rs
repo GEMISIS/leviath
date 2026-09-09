@@ -135,6 +135,7 @@ async fn daemon_background_loop(
                     agent_id,
                     content,
                     target_region: None,
+                    parts: Vec::new(),
                 },
                 "message",
             ),

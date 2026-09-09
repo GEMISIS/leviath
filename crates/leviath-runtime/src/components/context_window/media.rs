@@ -267,3 +267,114 @@ mod tests {
         );
     }
 }
+
+impl super::ContextWindow {
+    /// Write an entry that carries typed parts, on the system's behalf.
+    ///
+    /// A custom region's `on_write` hook sees the entry's text rendering, as
+    /// it does for every other write. When the hook hands the same text back
+    /// the parts are kept exactly; when it rewrites the text, the rewrite
+    /// replaces the text parts and the stored parts follow it unchanged.
+    pub(crate) fn add_content_entry(
+        &mut self,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: EntryContent,
+        tokens: usize,
+    ) -> leviath_core::Result<()> {
+        let rendered = content.as_str().to_string();
+        let (text, tokens, key_override) =
+            self.on_write_system(region_name, rendered.clone(), tokens, &kind, None);
+        let content = if text == rendered {
+            content
+        } else {
+            rewritten(content, text)
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_typed_entry(content.clone(), tokens, kind.clone())?;
+            if let Some(key) = key_override.as_deref()
+                && let Some(entry) = region.content.last_mut()
+            {
+                entry.key = Some(key.to_string());
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `content` with its text replaced by `text` and its stored parts kept.
+fn rewritten(content: EntryContent, text: String) -> EntryContent {
+    let mut parts = vec![leviath_core::media::Part::text(text)];
+    parts.extend(content.into_parts().into_iter().filter(|p| p.is_stored()));
+    EntryContent::from_parts(parts)
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::super::ContextWindow;
+    use leviath_core::EntryKind;
+    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore, Part};
+    use leviath_core::region::{EntryContent, Region, RegionKind};
+    use std::sync::Arc;
+
+    fn stored_png() -> Part {
+        let reg = MediaRegistry::builtin();
+        let blob = Blob::new(MediaType::parse("image/png").unwrap(), vec![1, 2, 3]).named("a.png");
+        let r = MemoryBlobStore::new().put("r", &blob, &reg).unwrap();
+        Part::stored(r).named("a.png")
+    }
+
+    fn custom_window(src: &str) -> ContextWindow {
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new(
+            "brain".into(),
+            RegionKind::Custom {
+                script: "t.rhai".into(),
+                persistent: true,
+            },
+            5_000,
+        ));
+        window.region_scripts.insert(
+            "t.rhai".into(),
+            Arc::new(leviath_scripting::region_hook::compile("t.rhai", src).unwrap()),
+        );
+        window
+    }
+
+    #[test]
+    fn parts_survive_a_hook_that_keeps_the_text_and_follow_one_that_rewrites_it() {
+        let content = EntryContent::from_parts(vec![Part::text("keep"), stored_png()]);
+        let mut same =
+            custom_window("fn render(ctx) { \"\" }\nfn on_write(ctx) { ctx.entry.content }");
+        same.add_content_entry("brain", EntryKind::Text, content.clone(), 10)
+            .unwrap();
+        let entry = &same.get_region("brain").unwrap().content[0];
+        assert_eq!(entry.content, content);
+        assert_eq!(entry.key, None);
+
+        let mut upper = custom_window(
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ content: ctx.entry.content.to_upper(), key: \"k\" } }",
+        );
+        upper
+            .add_content_entry("brain", EntryKind::Text, content, 10)
+            .unwrap();
+        let entry = &upper.get_region("brain").unwrap().content[0];
+        assert_eq!(entry.content.parts().len(), 2);
+        assert_eq!(
+            entry.content.parts()[0].inline_text(),
+            Some("KEEP\n[IMAGE/PNG, 3 B] A.PNG")
+        );
+        assert!(entry.content.parts()[1].is_stored());
+        assert_eq!(entry.key.as_deref(), Some("k"));
+
+        let mut plain = ContextWindow::new(100);
+        plain.add_region(Region::new("t".into(), RegionKind::Pinned, 100));
+        let err = plain
+            .add_content_entry("missing", EntryKind::Text, EntryContent::text("x"), 1)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            leviath_core::Error::RegionNotFound("missing".into()).to_string()
+        );
+    }
+}

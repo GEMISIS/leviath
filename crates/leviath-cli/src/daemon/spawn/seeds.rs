@@ -168,7 +168,13 @@ pub(super) fn resolve_seeds(
         match seed {
             RegionSeed::CallerInput { name } => {
                 let value = caller.get(name).map(|s| s.as_str()).unwrap_or("");
-                if value.trim().is_empty() {
+                // A part attached to this region provides it as surely as
+                // text does: `--mockup @./m.png` carries no text at all.
+                let has_part = args
+                    .parts
+                    .iter()
+                    .any(|p| p.region.as_deref() == Some(name.as_str()));
+                if value.trim().is_empty() && !has_part {
                     if region.required {
                         return Err(region.required_message.clone().unwrap_or_else(|| {
                             format!(
@@ -180,6 +186,11 @@ pub(super) fn resolve_seeds(
                         }));
                     }
                     // Optional and unprovided - leave the region empty.
+                    continue;
+                }
+                // Provided by a part alone: the part is written after the
+                // seeds, and an empty seed would be an empty entry before it.
+                if value.trim().is_empty() {
                     continue;
                 }
                 seeds.insert(region.name.clone(), value.to_string());

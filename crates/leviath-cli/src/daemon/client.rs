@@ -9,8 +9,9 @@ use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
+use crate::commands::run::attach::{self, RegionInput};
 use crate::commands::run::manifest::find_manifest;
-use crate::commands::run::task::{read_region_value, resolve_task};
+use crate::commands::run::task::resolve_task;
 use crate::runstate::new_run_id;
 
 /// Everything a spawn request needs from the agent's own files.
@@ -74,9 +75,13 @@ pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
 fn resolve_regions(
     blueprint: &leviath_core::Blueprint,
     regions: HashMap<String, String>,
-) -> anyhow::Result<HashMap<String, String>> {
+    cwd: &std::path::Path,
+) -> anyhow::Result<RegionSeeds> {
     let declared = blueprint.caller_inputs();
+    let registry = attach::cli_registry();
     let mut out = HashMap::new();
+    let mut parts = Vec::new();
+    let mut unresolved = Vec::new();
     for (name, raw) in regions {
         if !declared.contains(&name.as_str()) {
             bail!(
@@ -88,9 +93,89 @@ fn resolve_regions(
                 }
             );
         }
-        out.insert(name, read_region_value(&raw)?);
+        let RegionInput {
+            text,
+            parts: found,
+            unresolved: missing,
+        } = attach::read_region_input(&name, &raw, cwd, &registry)?;
+        if !text.is_empty() {
+            out.insert(name, text);
+        }
+        parts.extend(found);
+        unresolved.extend(missing);
     }
-    Ok(out)
+    Ok(RegionSeeds {
+        text: out,
+        parts,
+        unresolved,
+    })
+}
+
+/// What the `--<region>` flags resolved to.
+struct RegionSeeds {
+    /// Text seeds, keyed by region.
+    text: HashMap<String, String>,
+    /// Files, each bound for its region.
+    parts: Vec<leviath_core::media::InboundPart>,
+    /// `@path` tokens that named no file.
+    unresolved: Vec<String>,
+}
+
+/// Refuse a part bound for a region the blueprint does not declare, or one
+/// whose `accepts` excludes the type the user named for it, before anything
+/// is dialled.
+///
+/// The daemon checks the same things and its refusal comes back as the
+/// spawn error, but by then the user may have spent twenty minutes in an
+/// editor writing the task. A part with no region goes where the task text
+/// goes, so it is checked against that region. An untyped part is not
+/// checked against `accepts`: only the daemon's registry, with the user's
+/// `[media_types]` in it, can say what it is.
+fn check_parts(
+    blueprint: &leviath_core::Blueprint,
+    parts: &[leviath_core::media::InboundPart],
+) -> anyhow::Result<()> {
+    let regions = &blueprint.context_layout.regions;
+    let task_region = regions
+        .iter()
+        .find(|r| r.name == "task" && r.kind == leviath_core::RegionKind::Pinned)
+        .or_else(|| {
+            regions
+                .iter()
+                .find(|r| r.kind == leviath_core::RegionKind::Pinned)
+        })
+        .map(|r| r.name.as_str());
+    for part in parts {
+        let name = match part.region.as_deref().or(task_region) {
+            Some(n) => n,
+            None => bail!(
+                "'{}' names no region and this agent has no task region to put it in",
+                part.name
+            ),
+        };
+        let Some(region) = regions.iter().find(|r| r.name == name) else {
+            bail!(
+                "'{}' names region '{name}', which this agent does not declare; its regions are: {}",
+                part.name,
+                regions
+                    .iter()
+                    .map(|r| r.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        if let Some(t) = &part.media_type
+            && !region.accepts.is_empty()
+            && !t.matches_any(&region.accepts)
+        {
+            bail!(
+                "region '{name}' does not accept {t} ('{}'); it accepts: {}",
+                part.name,
+                region.accepts.join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The stdin probe for callers that build a spawn request from inside the
@@ -137,6 +222,9 @@ pub struct LaunchRequest<'a> {
     pub no_seed_commands: bool,
     /// The output shape the caller asked for, overriding the blueprint's.
     pub output_request: Option<leviath_core::output::OutputSpec>,
+    /// Files attached with `--attach`, already read: their paths were
+    /// relative to where the command ran, which only the caller knows.
+    pub parts: Vec<leviath_core::media::InboundPart>,
 }
 
 /// Resolve the local inputs of a spawn request: find and parse the manifest,
@@ -167,9 +255,16 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         regions,
         no_seed_commands,
         output_request,
+        parts: attached,
     } = req;
     let source = load_agent_source(path)?;
-    let resolved_regions = resolve_regions(&source.blueprint, regions)?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let RegionSeeds {
+        text: resolved_regions,
+        mut parts,
+        mut unresolved,
+    } = resolve_regions(&source.blueprint, regions, &cwd)?;
+    parts.extend(attached);
     // An agent driven by named regions takes no task, so neither demanding one
     // nor opening an editor to write one would make sense - `lev run reviewer
     // --diff @x.patch` is a complete command line. Handing it one anyway is the
@@ -186,12 +281,19 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
             _ => anyhow::bail!(source.blueprint.task_refusal()),
         },
     };
+    // A file the task names where it mentions it: `edit @hero.png`.
+    let (task, named, missing) = attach::inline_parts(&task, None, &cwd)?;
+    parts.extend(named);
+    unresolved.extend(missing);
+    check_parts(&source.blueprint, &parts)?;
+    attach::warn_unresolved(&unresolved);
 
     Ok(SpawnArgs {
         run_id: new_run_id(&source.run_stem),
         blueprint_path: source.manifest.to_string_lossy().to_string(),
         task,
         regions: resolved_regions,
+        parts,
         model,
         workdir: workdir.to_string(),
         metadata: Default::default(),
@@ -584,6 +686,7 @@ mod tests {
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
@@ -643,6 +746,7 @@ mod tests {
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap();
         assert!(
@@ -669,6 +773,7 @@ mod tests {
                 regions: HashMap::new(),
                 no_seed_commands: false,
                 output_request: None,
+                parts: Vec::new(),
             })
             .is_err()
         );
@@ -698,6 +803,7 @@ mod tests {
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap();
         assert_eq!(args.task, "summarize the README");
@@ -725,6 +831,7 @@ mod tests {
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
@@ -780,6 +887,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .expect("no task is required of an agent that takes none");
         assert_eq!(args.task, "");
@@ -809,6 +917,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -839,6 +948,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions: HashMap::new(),
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .expect("blank is the same as absent");
         assert_eq!(args.task, "");
@@ -865,6 +975,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("unknown region"), "got: {err}");
@@ -921,6 +1032,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap();
         // `@path` was read and trimmed.
@@ -970,6 +1082,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("(none)"), "got: {err}");
@@ -996,6 +1109,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("read manifest"), "got: {err}");
@@ -1025,6 +1139,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("parse manifest"), "got: {err}");
@@ -1050,6 +1165,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(
@@ -1076,6 +1192,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             regions,
             no_seed_commands: false,
             output_request: None,
+            parts: Vec::new(),
         })
         .unwrap_err();
         assert!(
@@ -1834,5 +1951,166 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
             assert!(err.to_string().contains("no yolo profile"), "{err}");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+    use leviath_core::media::{InboundPart, MediaType};
+
+    fn write_typed_manifest(dir: &std::path::Path, regions: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("agent.leviath"),
+            format!(
+                "[agent]\nname = \"artist\"\n\n[stages.main]\nmode = \"autonomous\"\n\n\
+                 [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
+                 [context.regions]\n{regions}\n"
+            ),
+        )
+        .unwrap();
+        dir.join("agent.leviath")
+    }
+
+    const TASK_AND_ART: &str = "task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
+        art = { kind = \"pinned\", max_tokens = 4000, seed = \"input\", accepts = [\"image/*\"] }\n\
+        conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }";
+
+    fn request<'a>(
+        manifest: &'a str,
+        task: Option<&'a str>,
+        regions: HashMap<String, String>,
+        parts: Vec<InboundPart>,
+    ) -> LaunchRequest<'a> {
+        LaunchRequest {
+            path: manifest,
+            task,
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions,
+            no_seed_commands: false,
+            output_request: None,
+            parts,
+        }
+    }
+
+    #[test]
+    fn attached_named_and_region_files_all_become_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_typed_manifest(&dir.path().join("artist"), TASK_AND_ART);
+        let png = dir.path().join("hero.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nbody").unwrap();
+        let task = format!(
+            "edit @{} so the arm is longer, not @nothing.png",
+            png.display()
+        );
+        let regions = HashMap::from([("art".to_string(), format!("@{}", png.display()))]);
+        let attached = InboundPart::from_bytes("extra.wav", vec![1, 2, 3]);
+        let args = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            Some(&task),
+            regions,
+            vec![attached],
+        ))
+        .unwrap();
+        assert_eq!(args.task, task);
+        assert!(
+            args.regions.is_empty(),
+            "a binary region file is a part, not text"
+        );
+        let names: Vec<&str> = args.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["hero.png", "extra.wav", "hero.png"]);
+        assert_eq!(args.parts[0].region.as_deref(), Some("art"));
+        assert_eq!(args.parts[1].region, None);
+        assert_eq!(args.parts[2].region, None);
+    }
+
+    #[test]
+    fn parts_are_checked_against_the_blueprint_before_dialling() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_typed_manifest(&dir.path().join("artist"), TASK_AND_ART);
+        let path = manifest.to_str().unwrap();
+        let wav = InboundPart::from_bytes("song.wav", vec![1])
+            .in_region("art")
+            .typed(MediaType::parse("audio/wav").unwrap());
+        let err = resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![wav]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not accept audio/wav"), "{err}");
+        assert!(err.contains("it accepts: image/*"), "{err}");
+
+        let ghost = InboundPart::from_bytes("x.bin", vec![1]).in_region("ghost");
+        let err = resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![ghost]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("region 'ghost', which this agent does not declare"),
+            "{err}"
+        );
+        assert!(err.contains("task, art, conversation"), "{err}");
+
+        // An untyped part into a typed region is the daemon's to judge.
+        let untyped = InboundPart::from_bytes("maybe.png", vec![1]).in_region("art");
+        assert!(
+            resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![untyped])).is_ok()
+        );
+
+        // A `task` region that is not pinned does not count as the task
+        // region; the first pinned one does.
+        let manifest = write_typed_manifest(
+            &dir.path().join("rolling"),
+            "task = { kind = \"sliding_window\", max_items = 5, max_tokens = 1000 }\n\
+             art = { kind = \"pinned\", max_tokens = 4000, accepts = [\"image/*\"] }",
+        );
+        let wav = InboundPart::from_bytes("song.wav", vec![1])
+            .typed(MediaType::parse("audio/wav").unwrap());
+        let err = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            Some("t"),
+            HashMap::new(),
+            vec![wav],
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("region 'art' does not accept audio/wav"),
+            "{err}"
+        );
+
+        // A task naming an empty file is refused before anything is dialled.
+        let manifest = write_typed_manifest(&dir.path().join("artist2"), TASK_AND_ART);
+        let empty = dir.path().join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        let task = format!("edit @{}", empty.display());
+        let err = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            Some(&task),
+            HashMap::new(),
+            Vec::new(),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nothing to attach"), "{err}");
+
+        // No pinned region at all: a part with no region has nowhere to go.
+        let manifest = write_typed_manifest(
+            &dir.path().join("chatty"),
+            "conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }",
+        );
+        let loose = InboundPart::from_bytes("x.bin", vec![1]);
+        let err = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            None,
+            HashMap::new(),
+            vec![loose],
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("names no region"), "{err}");
     }
 }
