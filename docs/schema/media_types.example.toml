@@ -1,0 +1,19 @@
+# Rows added to the media registry: what a media type is, for the types the
+# built-in table does not know or gets wrong for you. Name only what you
+# change; every other field resolves from the built-in table (the exact type,
+# then type/*, then */*). A key is a type/subtype or a type/* pattern.
+#
+# `lev media list` prints the effective table with each row's source, and
+# `lev media check <file>` says what a file resolves to under it. Edits reach
+# the next run; nothing needs restarting.
+
+["model/obj"]
+extensions = ["obj"]
+text = true                      # UTF-8 under the hood: may reach a text model as text
+
+["application/x-acme-scene"]
+family = "model"                 # text | image | audio | video | document | model | binary | a name of your own
+extensions = ["scene"]
+magic = "41434D45"               # a hex prefix that identifies the bytes
+tokens = { per_byte = 0.1 }      # or { per_pixel = 750, max = 1600 }, { per_second = 32 }, { fixed = 1000 }
+stand_in = "[{type} {size}] {name}"   # what a model that cannot take the type sees

@@ -855,7 +855,7 @@
     },
     "media_types": {
       "type": "object",
-      "description": "Rows added to the media registry, keyed by type/subtype or type/*. A row names only the fields it changes; the rest resolve from the built-in table.",
+      "description": "Rows added to the media registry, keyed by type/subtype or type/*. A row names only the fields it changes; the rest resolve from the built-in table. Such rows belong in media_types.toml beside this file, whose rows layer over these; a table here still loads.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,

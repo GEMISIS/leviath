@@ -328,10 +328,12 @@ pub struct Config {
     pub media: MediaConfig,
 
     /// `[media_types]`: rows added to the media registry, keyed by
-    /// `type/subtype` or `type/*`, layered over the compiled defaults. A row
-    /// names only the fields it changes. Kept as the table it was written as
-    /// and handed to `leviath_core::media::MediaRegistry::layer`, which is
-    /// the one reader and reports a malformed row by key.
+    /// `type/subtype` or `type/*`, layered over the compiled defaults and
+    /// under `media_types.toml`, which is where such rows belong; the table
+    /// here still loads so an older config keeps working. A row names only
+    /// the fields it changes. Kept as the table it was written as and handed
+    /// to `leviath_core::media::MediaRegistry::layer`, which is the one
+    /// reader and reports a malformed row by key.
     #[serde(default)]
     pub media_types: toml::Table,
 

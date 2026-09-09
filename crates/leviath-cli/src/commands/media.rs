@@ -4,8 +4,9 @@
 //! The registry decides what every attached file *is*: its family, whether
 //! its bytes are text, how many tokens it is budgeted at, and what a model
 //! that cannot take it sees instead. Those answers come from two layers
-//! (the compiled defaults, then `[media_types]` in the config), and this is
-//! the place to see the result of the layering before a run depends on it.
+//! (the compiled defaults, a `[media_types]` table in the config, then
+//! `media_types.toml` beside it), and this is the place to see the result of
+//! the layering before a run depends on it.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,16 @@ pub enum MediaCommand {
     /// Say what a file resolves to: its type, family, token estimate, and
     /// what a model sees
     Check(CheckArgs),
+    /// Write a commented example media_types.toml beside your config
+    Init(InitArgs),
+}
+
+/// Arguments for `lev media init`.
+#[derive(Args, Debug, Default)]
+pub struct InitArgs {
+    /// Overwrite a file that is already there.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `lev media list`.
@@ -54,20 +65,41 @@ pub struct CheckArgs {
 
 /// Execute `lev media`.
 pub(crate) async fn execute(args: MediaArgs) -> anyhow::Result<()> {
-    let registry = crate::config::Config::load()?
-        .media_registry()
-        .map_err(|e| anyhow::anyhow!("[media_types] in the config does not load: {e}"))?;
+    // The registry as the daemon builds it, read only by the commands that
+    // look at it: `init` writes the file the others would read.
+    let registry = || -> anyhow::Result<MediaRegistry> {
+        crate::config::Config::load()?
+            .media_registry()
+            .map_err(|e| anyhow::anyhow!("the media registry does not load: {e}"))
+    };
     let out = match args.command {
-        MediaCommand::List(list) => render_list(&registry, list.json),
+        MediaCommand::List(list) => render_list(&registry()?, list.json),
         MediaCommand::Check(check) => render_check(
-            &registry,
+            &registry()?,
             &check.file,
             check.media_type.as_deref(),
             check.json,
         )?,
+        MediaCommand::Init(init_args) => init(&crate::config::media_types_path(), init_args.force)?,
     };
     print!("{out}");
     Ok(())
+}
+
+/// Write the example, refusing to replace a file that is there unless told.
+fn init(path: &Path, force: bool) -> anyhow::Result<String> {
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; edit it, or pass --force to replace it with the example",
+            path.display()
+        );
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+    std::fs::write(path, crate::config::MEDIA_TYPES_EXAMPLE)?;
+    Ok(format!(
+        "wrote {}\n  `lev media list` shows the table it makes; edit the rows and they reach the next run\n",
+        path.display()
+    ))
 }
 
 /// Every row of the registry, resolved: what each type is once the layers
@@ -120,7 +152,8 @@ fn render_list(registry: &MediaRegistry, json: bool) -> String {
         ));
     }
     out.push_str(&format!(
-        "\n{} type{}. Rows layer: compiled defaults, then [media_types] in the config.\n",
+        "\n{} type{}. Rows layer: compiled defaults, [media_types] in the config, then \
+         media_types.toml beside it.\n",
         rows.len(),
         match rows.len() {
             1 => "",
@@ -318,6 +351,58 @@ mod tests {
         .await;
     }
 
+    /// `lev media init` writes the example once, replaces it only when
+    /// forced, and says where it went.
+    #[tokio::test]
+    async fn init_writes_the_example_beside_the_config() {
+        crate::config::with_isolated_config_path_async("media-init", |dir| async move {
+            let path = dir.join("media_types.toml");
+            assert!(
+                execute(MediaArgs {
+                    command: MediaCommand::Init(InitArgs::default()),
+                })
+                .await
+                .is_ok()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                crate::config::MEDIA_TYPES_EXAMPLE
+            );
+            let err = init(&path, false).unwrap_err();
+            assert!(err.to_string().contains("--force"), "{err}");
+            assert!(
+                execute(MediaArgs {
+                    command: MediaCommand::Init(InitArgs::default()),
+                })
+                .await
+                .is_err()
+            );
+            std::fs::write(&path, "[\"x/y\"]\nfamily = \"custom\"\n").unwrap();
+            init(&path, true).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                crate::config::MEDIA_TYPES_EXAMPLE
+            );
+            // The rows the file adds show up in the listing, with their source.
+            std::fs::write(&path, "[\"x/y\"]\nfamily = \"custom\"\n").unwrap();
+            let registry = crate::config::Config::load()
+                .unwrap()
+                .media_registry()
+                .unwrap();
+            let out = render_list(&registry, false);
+            assert!(out.contains("media_types.toml"), "{out}");
+            // A parent that is a file cannot be created; a path that is a
+            // directory cannot be written.
+            let blocker = dir.join("blocker");
+            std::fs::write(&blocker, "").unwrap();
+            assert!(init(&blocker.join("media_types.toml"), false).is_err());
+            let taken = dir.join("taken");
+            std::fs::create_dir_all(&taken).unwrap();
+            assert!(init(&taken, true).is_err());
+        })
+        .await;
+    }
+
     /// A `[media_types]` table that does not layer, and a config that does
     /// not parse at all, are each refused with a reason rather than run on
     /// the defaults.
@@ -336,6 +421,17 @@ mod tests {
             .await
             .unwrap_err();
             assert!(err.to_string().contains("[media_types]"), "{err}");
+            assert!(
+                execute(MediaArgs {
+                    command: MediaCommand::Check(CheckArgs {
+                        file: dir.join("config.toml"),
+                        media_type: None,
+                        json: false,
+                    }),
+                })
+                .await
+                .is_err()
+            );
             std::fs::write(&config, "this is not toml = = =\n").unwrap();
             assert!(
                 execute(MediaArgs {
