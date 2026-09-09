@@ -90,15 +90,33 @@ pub(super) async fn submit_interaction(
 pub(super) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    Json(body): Json<SendMessageReq>,
+    request: axum::extract::Request,
 ) -> Result<StatusCode, ApiError> {
+    let max_upload = state.limits.request_limits.max_upload_bytes;
+    let (mut body, mut parts): (SendMessageReq, _) =
+        super::upload::json_or_multipart(&state, request, max_upload).await?;
+    // Files named inside the run's workdir, by `parts` or by `@path` in the
+    // text. Only a run this API can see has a workdir to resolve against;
+    // a message to one it cannot still goes through, with its uploads.
+    if let Ok(meta) = crate::runstate::read_meta(&id) {
+        let workdir = std::path::Path::new(&meta.workdir);
+        parts.extend(super::upload::json_parts(&body.parts, workdir, max_upload)?);
+        let (kept, named) = super::upload::inline_parts(&body.message, None, workdir, max_upload)?;
+        body.message = kept;
+        parts.extend(named);
+    } else if !body.parts.is_empty() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("Agent run '{id}' has no working directory this server can read parts from"),
+        ));
+    }
     let reply = state
         .control
         .request(&ControlRequest::Message {
             agent_id: id.clone(),
             content: body.message,
             target_region: body.target_region,
-            parts: Vec::new(),
+            parts,
         })
         .await;
     daemon_ok(
@@ -434,6 +452,106 @@ mod tests {
             .await,
             StatusCode::ACCEPTED
         );
+    }
+
+    /// A message with files: what the daemon receives on the wire.
+    async fn message_seen(
+        run_id: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Option<serde_json::Value>) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&captured);
+        let (control, _dir, _srv) = fake_daemon(move |req| {
+            *sink.lock().unwrap() = Some(serde_json::to_value(&req).unwrap());
+            ControlResponse::Ok { ok: true }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{run_id}/message"))
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let status = app_with(control).oneshot(req).await.unwrap().status();
+        let seen = captured.lock().unwrap().take();
+        (status, seen)
+    }
+
+    #[tokio::test]
+    async fn a_message_carries_files_named_in_the_workdir_or_uploaded() {
+        crate::runstate::with_isolated_runs_dir_async("message_carries_files", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("mark.png"), b"\x89PNG\r\n\x1a\nmark").unwrap();
+            let run_id = "msg-run";
+            let meta = leviath_core::run_meta::RunMeta::new(
+                run_id.to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                workdir.path().to_string_lossy().to_string(),
+                1,
+            );
+            crate::runstate::create_run(&meta).unwrap();
+
+            let body = b"{\"message\":\"see @mark.png\",\"parts\":[{\"path\":\"mark.png\",\"region\":\"art\"}]}";
+            let (status, seen) = message_seen(run_id, "application/json", body.to_vec()).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let seen = seen.expect("delivered");
+            assert_eq!(seen["content"], "see @mark.png");
+            let parts = seen["parts"].as_array().unwrap();
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0]["region"], "art");
+            assert!(parts[1].get("region").is_none());
+
+            let boundary = "levboundary";
+            let body = format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n\
+                 {{\"message\":\"look\"}}\r\n--{boundary}\r\nContent-Disposition: form-data; \
+                 name=\"part\"; filename=\"up.png\"\r\nContent-Type: image/png\r\n\r\nbytes\r\n\
+                 --{boundary}--\r\n"
+            );
+            let (status, seen) = message_seen(
+                run_id,
+                &format!("multipart/form-data; boundary={boundary}"),
+                body.into_bytes(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let parts = seen.unwrap()["parts"].as_array().unwrap().clone();
+            assert_eq!(parts[0]["name"], "up.png");
+
+            // A workdir part that cannot be read, a mention of one, and a
+            // body that is no form at all each fail before the daemon hears.
+            std::fs::write(workdir.path().join("empty.png"), b"").unwrap();
+            for (content_type, body) in [
+                (
+                    "application/json",
+                    b"{\"message\":\"hi\",\"parts\":[{\"path\":\"missing.png\"}]}".to_vec(),
+                ),
+                ("application/json", b"{\"message\":\"see @empty.png\"}".to_vec()),
+                ("multipart/form-data; boundary=b", b"garbage".to_vec()),
+            ] {
+                let (status, seen) = message_seen(run_id, content_type, body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(seen.is_none());
+            }
+
+            // A run this server cannot see: uploads still go, workdir parts do
+            // not.
+            let (status, seen) =
+                message_seen("ghost", "application/json", b"{\"message\":\"hi\"}".to_vec()).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert!(seen.is_some());
+            let (status, _) = message_seen(
+                "ghost",
+                "application/json",
+                b"{\"message\":\"hi\",\"parts\":[{\"path\":\"x\"}]}".to_vec(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 
     #[tokio::test]

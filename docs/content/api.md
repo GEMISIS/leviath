@@ -72,6 +72,7 @@ off. A flag wins over the config file, and the config file over the default.
 |---|---|---|---|---|
 | Requests in flight | 64 | `--max-concurrent-requests <N>` | `[serve] max_concurrent_requests` | 503 at once, not queued |
 | Seconds per request | 30 | `--request-timeout-secs <SECS>` | `[serve] request_timeout_secs` | 408, and the handler is dropped |
+| Bytes per request body | 32 MiB | none | `[serve] max_upload_bytes` | 413; this is what bounds a multipart upload |
 
 Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws` and
 `/ws/agents/{id}`) are outside both: a subscription is meant to stay open, and it is the only
@@ -212,9 +213,11 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
 | `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage spent in tokens and dollars, per visit as well as in total, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
+| `GET /api/agents/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
+| `GET /api/agents/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
-| `POST /api/agents/{id}/message` | Steer a running agent |
+| `POST /api/agents/{id}/message` | Steer a running agent. Takes files too; see [attaching files](#attaching-files) |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
@@ -222,6 +225,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
+| `GET /api/media` | The effective [media registry](/docs/media#the-registry): every type row and where it came from |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
@@ -634,6 +638,47 @@ stage into its stays, and `--json` is this shape read straight off disk.
 > it, because the field is not in those files at all. Read it together with
 > `status`: a stage recorded `complete` with tokens against its name ran,
 > whatever `entered` says on an old run.
+
+## Attaching files
+
+A run takes files three ways, and all three end as typed [parts](/docs/media) on the region they
+were aimed at, exactly as `lev run --attach` sends them.
+
+`multipart/form-data` on `POST /api/agents` and `POST /api/agents/{id}/message` carries the bytes
+themselves. A `request` field holds the JSON the route takes as a plain body, then any number of
+file fields named `part` (bound for the task region, or the message's region) or `part:<region>`,
+each with a `filename` and a `Content-Type`:
+
+```bash
+curl -X POST http://localhost:3000/api/agents -H "Authorization: Bearer $TOKEN" \
+  -F 'request={"blueprint":"storyteller","task":"a 30 second trailer"}' \
+  -F 'part:voice_samples=@voice.wav;type=audio/wav' \
+  -F 'part:storyboard=@frame1.png'
+```
+
+A JSON body instead names files already inside the run's working directory under `parts`, each
+`{ path, region?, name?, media_type?, deliver?, caption? }`. And a `@path` token inside `task`, a
+region's text, or a message names a workdir file the same way; the text keeps the token, so the
+model reads the same name the part carries. A path that escapes the working directory is refused
+with 403, a missing or empty file with 400, and a file over `[serve] max_upload_bytes` with 413.
+The daemon types every part with its registry, so `Content-Type` and `media_type` only need to be
+right when the bytes and the name do not say. A part aimed at a region whose `accepts` excludes it
+refuses the spawn with the region's list, and drops from a message with the text still delivered.
+
+## A run's parts
+
+`GET /api/agents/{id}/blobs` lists every stored part the run's context holds: a user's attachment,
+a file `read_file` stored, an image an MCP tool returned, an artifact the run submitted. Each item
+carries `sha256`, `media_type`, `name`, `size`, `width`, `height`, `duration_ms`, `tokens`, the
+`regions` carrying it, and `stored`, which is false for a part the context names but the run
+directory no longer holds. `GET /api/agents/{id}/blobs/{sha256}` serves one part's bytes under its
+own `Content-Type`, so an `<img src=...>` pointed at it renders, and `?download=1` adds a
+`Content-Disposition: attachment` carrying the part's name.
+
+`GET /api/agents/{id}/files/raw?path=` does the same for any file inside the working directory,
+typed by the registry from its bytes and name, where the JSON `files` route wraps text. The answer's
+`artifacts` carry each file's `path` and, when the run could store it, its `sha256`, so a client can
+fetch an artifact either way.
 
 ## A run's files
 
@@ -1395,6 +1440,12 @@ than that feature, not broken.
 | `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
 | `models.media_types` | `input_types` and `output_types` on every `GET /api/models` entry: the media type patterns a model takes and hands back |
+| `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`, and `@path` tokens in `task` and region text resolved inside the working directory. See [attaching files](#attaching-files) |
+| `messages.parts` | The same on `POST /api/agents/{id}/message` |
+| `runs.blobs` | `GET /api/agents/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
+| `runs.files.raw` | `GET /api/agents/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
+| `runs.result.artifacts` | `artifacts` on a run's answer as `{ name, path, media_type, size, sha256 }` objects rather than paths |
+| `media.registry` | `GET /api/media`, the effective media registry with each row's source |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
 | `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them. Without it a stage record carries tokens and no price, and the missing field is not a zero |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |

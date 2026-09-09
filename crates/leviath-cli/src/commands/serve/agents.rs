@@ -72,8 +72,11 @@ fn spawn_warnings(
 
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
-    Json(body): Json<SpawnAgentReq>,
+    request: axum::extract::Request,
 ) -> Result<Json<SpawnAgentResp>, ApiError> {
+    let max_upload = state.limits.request_limits.max_upload_bytes;
+    let (mut body, mut parts): (SpawnAgentReq, _) =
+        super::upload::json_or_multipart(&state, request, max_upload).await?;
     let blueprints = discover_blueprints(&state.current_config());
     let bp_info = blueprints
         .iter()
@@ -116,6 +119,24 @@ pub(super) async fn spawn_agent(
             .check_callback_url(callback)
             .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     }
+    // Files the request names inside the workdir, then the ones the task and
+    // each region's text mention with `@path`. The text keeps the token so
+    // the model reads the same name the part carries.
+    let workdir_path = std::path::Path::new(&workdir);
+    parts.extend(super::upload::json_parts(
+        &body.parts,
+        workdir_path,
+        max_upload,
+    )?);
+    let (task, named) = super::upload::inline_parts(&body.task, None, workdir_path, max_upload)?;
+    body.task = task;
+    parts.extend(named);
+    for (region, text) in body.regions.iter_mut() {
+        let (kept, named) =
+            super::upload::inline_parts(text, Some(region), workdir_path, max_upload)?;
+        *text = kept;
+        parts.extend(named);
+    }
     let run_id = runstate::new_run_id(&body.blueprint);
     let args = SpawnArgs {
         run_id,
@@ -137,7 +158,7 @@ pub(super) async fn spawn_agent(
         max_depth: body.max_depth,
         // Serve spawns are top-level runs.
         parent_run_id: None,
-        parts: Vec::new(),
+        parts,
     };
     let warnings = spawn_warnings(&manifest_path, args.output.as_ref());
 
@@ -858,6 +879,17 @@ mod tests {
         ))
     }
 
+    /// A JSON `POST /api/agents` request carrying `req`, for calling the
+    /// handler directly.
+    fn spawn_request(req: &SpawnAgentReq) -> axum::extract::Request {
+        Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(req).unwrap()))
+            .unwrap()
+    }
+
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
@@ -912,7 +944,7 @@ mod tests {
         // Outside `--workdir-root`.
         let err = spawn_agent(
             State(state.clone()),
-            Json(SpawnAgentReq {
+            spawn_request(&SpawnAgentReq {
                 blueprint: "probe".to_string(),
                 task: "t".to_string(),
                 workdir: Some("/".to_string()),
@@ -933,7 +965,7 @@ mod tests {
         // behalf, from inside the trust boundary.
         let err = spawn_agent(
             State(state.clone()),
-            Json(SpawnAgentReq {
+            spawn_request(&SpawnAgentReq {
                 blueprint: "probe".to_string(),
                 task: "t".to_string(),
                 workdir: Some(root.path().to_string_lossy().to_string()),
@@ -983,7 +1015,7 @@ mod tests {
         ] {
             let err = spawn_agent(
                 State(state.clone()),
-                Json(SpawnAgentReq {
+                spawn_request(&SpawnAgentReq {
                     blueprint: "probe".to_string(),
                     task: "t".to_string(),
                     workdir: Some(root.path().to_string_lossy().to_string()),
@@ -1224,6 +1256,136 @@ system_prompt = "Plan the work"
             .body(Body::from(body.to_string()))
             .unwrap();
         app.oneshot(req).await.unwrap().status()
+    }
+
+    /// A spawn with files: what the daemon receives on the wire.
+    async fn spawn_parts_seen(
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Option<serde_json::Value>) {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&captured);
+        let (control, _dir, _srv) = fake_daemon(move |req| {
+            let wire = serde_json::to_value(&req).unwrap();
+            *sink.lock().unwrap() = Some(wire["args"].clone());
+            ControlResponse::Spawned {
+                run_id: "run-1".to_string(),
+            }
+        });
+        let (app, _agents) = spawn_app(control);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let status = app.oneshot(req).await.unwrap().status();
+        let args = captured.lock().unwrap().take();
+        (status, args)
+    }
+
+    #[tokio::test]
+    async fn a_multipart_spawn_carries_its_files_to_the_daemon() {
+        let workdir = tempfile::tempdir().unwrap();
+        let boundary = "levboundary";
+        let mut body = Vec::new();
+        let request = format!(
+            "{{\"blueprint\":\"spawnable\",\"task\":\"cut it\",\"workdir\":\"{}\"}}",
+            workdir.path().to_string_lossy()
+        );
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{request}\r\n").as_bytes());
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"part:storyboard\"; filename=\"frame1.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes());
+        body.extend(b"\x89PNG\r\n\x1a\nframe");
+        body.extend(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"part\"; filename=\"notes.txt\"\r\n\r\nsome notes\r\n--{boundary}--\r\n").as_bytes());
+        let (status, args) =
+            spawn_parts_seen(&format!("multipart/form-data; boundary={boundary}"), body).await;
+        assert_eq!(status, StatusCode::OK);
+        let args = args.expect("the daemon saw a spawn");
+        assert_eq!(args["task"], "cut it");
+        let parts = args["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["name"], "frame1.png");
+        assert_eq!(parts[0]["region"], "storyboard");
+        assert_eq!(parts[0]["media_type"], "image/png");
+        assert_eq!(parts[1]["name"], "notes.txt");
+        assert!(parts[1].get("region").is_none());
+        assert!(parts[1].get("media_type").is_none());
+
+        // A body with no `request` field, an unexpected field, and an empty
+        // file are each refused.
+        for tail in [
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a.png\"\r\n\r\nxx\r\n--{boundary}--\r\n"
+            ),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{request}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--{boundary}--\r\n"
+            ),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{request}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a.png\"\r\n\r\n\r\n--{boundary}--\r\n"
+            ),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\nnot json\r\n--{boundary}--\r\n"
+            ),
+        ] {
+            let (status, _) = spawn_parts_seen(
+                &format!("multipart/form-data; boundary={boundary}"),
+                tail.clone().into_bytes(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{tail}");
+        }
+        // A body that says multipart and is nothing of the kind.
+        let (status, _) = spawn_parts_seen("multipart/form-data", b"garbage".to_vec()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_json_spawn_reads_named_and_mentioned_files_from_the_workdir() {
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::write(workdir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nhero").unwrap();
+        std::fs::write(workdir.path().join("brief.md"), "# brief").unwrap();
+        let wd = workdir.path().to_string_lossy();
+        let body = format!(
+            "{{\"blueprint\":\"spawnable\",\"task\":\"edit @hero.png please\",\"workdir\":\"{wd}\",\
+             \"regions\":{{\"brief\":\"read @brief.md and @nothing.md\"}},\
+             \"parts\":[{{\"path\":\"brief.md\",\"region\":\"notes\",\"caption\":\"c\"}}]}}"
+        );
+        let (status, args) = spawn_parts_seen("application/json", body.into_bytes()).await;
+        assert_eq!(status, StatusCode::OK);
+        let args = args.expect("the daemon saw a spawn");
+        assert_eq!(args["task"], "edit @hero.png please");
+        assert_eq!(args["regions"]["brief"], "read @brief.md and @nothing.md");
+        let parts = args["parts"].as_array().unwrap();
+        let names: Vec<&str> = parts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["brief.md", "hero.png", "brief.md"]);
+        assert_eq!(parts[0]["region"], "notes");
+        assert_eq!(parts[0]["caption"], "c");
+        assert!(parts[1].get("region").is_none());
+        assert_eq!(parts[2]["region"], "brief");
+
+        let body = format!(
+            "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":\"{wd}\",\
+             \"parts\":[{{\"path\":\"../outside.png\"}}]}}"
+        );
+        let (status, _) = spawn_parts_seen("application/json", body.into_bytes()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // A mentioned file the workdir holds but the API cannot take (empty,
+        // here) fails the spawn, whether the task or a region named it.
+        std::fs::write(workdir.path().join("empty.png"), b"").unwrap();
+        for body in [
+            format!(
+                "{{\"blueprint\":\"spawnable\",\"task\":\"see @empty.png\",\"workdir\":\"{wd}\"}}"
+            ),
+            format!(
+                "{{\"blueprint\":\"spawnable\",\"task\":\"t\",\"workdir\":\"{wd}\",\
+                 \"regions\":{{\"brief\":\"see @empty.png\"}}}}"
+            ),
+        ] {
+            let (status, _) = spawn_parts_seen("application/json", body.into_bytes()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _) = spawn_parts_seen("application/json", b"{\"blueprint\":5}".to_vec()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

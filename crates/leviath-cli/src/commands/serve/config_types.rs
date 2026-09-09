@@ -188,6 +188,25 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // console can offer "models that can see this image" without inferring
     // it from names, and can tell a text-only answer from a missing field.
     "models.media_types",
+    // `parts` and `multipart/form-data` on `POST /api/agents` and
+    // `POST /api/agents/{id}/message`, and `@path` tokens in a task or
+    // message resolved inside the run's working directory: a caller can send
+    // files with a run. An older daemon reads `parts` as nothing at all.
+    "spawn.parts",
+    "messages.parts",
+    // `GET /api/agents/{id}/blobs` and `.../blobs/{sha256}`: the stored parts
+    // a run holds and their bytes, so a console can show an image the run
+    // produced without reaching into the workdir.
+    "runs.blobs",
+    // `GET /api/agents/{id}/files/raw?path=`: a workdir file's bytes under
+    // their own content type, where the JSON files route wraps text.
+    "runs.files.raw",
+    // `artifacts` on a run's answer as `{ name, path, media_type, size,
+    // sha256 }` objects rather than paths.
+    "runs.result.artifacts",
+    // `GET /api/media`: the effective media registry and where each row
+    // came from.
+    "media.registry",
     "runs.stages",
     // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
     // the `visits` split beneath them. Without the price a console drawing a
@@ -383,6 +402,9 @@ pub(super) struct ApiLimits {
     /// Seconds a request may take before this server answers 408. `0` means
     /// there is no deadline. `--request-timeout-secs` over `[serve]`.
     pub(super) request_timeout_secs: u64,
+    /// Bytes one request body may carry: the ceiling on a multipart upload.
+    /// `[serve] max_upload_bytes`.
+    pub(super) max_upload_bytes: u64,
 }
 
 impl ApiLimits {
@@ -401,6 +423,7 @@ impl ApiLimits {
             max_tracked_modified_files: leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
             max_concurrent_requests: requests.max_concurrent_requests,
             request_timeout_secs: requests.request_timeout_secs,
+            max_upload_bytes: requests.max_upload_bytes,
         }
     }
 }

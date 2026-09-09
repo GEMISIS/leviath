@@ -482,6 +482,7 @@ switches a limit off. See [Limits](/docs/api#limits) for what a client sees.
 [serve]
 max_concurrent_requests = 64   # in flight at once; the next is answered 503
 request_timeout_secs    = 30   # per request; over it the client gets 408
+max_upload_bytes        = 33554432   # one request body; bounds a multipart upload
 ```
 
 The websocket routes are outside both limits. Neither is a ceiling on the runs behind the API:

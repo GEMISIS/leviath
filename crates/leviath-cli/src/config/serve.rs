@@ -9,6 +9,10 @@ pub(crate) const DEFAULT_MAX_CONCURRENT_REQUESTS: u64 = 64;
 /// Seconds a request may take before `lev serve` answers 408.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// The default ceiling on one request body: 32 MiB, enough for an image or a
+/// short recording, and the same figure as `[media] max_part_bytes`.
+pub(crate) const DEFAULT_MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
+
 /// `[serve]` in `~/.leviath/config.toml`.
 ///
 /// Both keys are ceilings on the HTTP API, not on the runs behind it: a spawn
@@ -25,6 +29,15 @@ pub struct ServeConfig {
     /// Seconds one request may take before it is answered 408.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+
+    /// Bytes one request body may carry: the ceiling on a multipart upload
+    /// to `POST /api/agents` or `POST /api/agents/{id}/message`.
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+}
+
+fn default_max_upload_bytes() -> u64 {
+    DEFAULT_MAX_UPLOAD_BYTES
 }
 
 fn default_max_concurrent_requests() -> u64 {
@@ -40,6 +53,7 @@ impl Default for ServeConfig {
         Self {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
 }
@@ -54,6 +68,9 @@ mod tests {
         assert_eq!(empty, ServeConfig::default());
         assert_eq!(empty.max_concurrent_requests, 64);
         assert_eq!(empty.request_timeout_secs, 30);
+        assert_eq!(empty.max_upload_bytes, 32 * 1024 * 1024);
+        let upload: ServeConfig = toml::from_str("max_upload_bytes = 10").unwrap();
+        assert_eq!(upload.max_upload_bytes, 10);
     }
 
     #[test]

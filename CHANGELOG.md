@@ -151,6 +151,19 @@ same list.
   region as a part, with a caption and a key so a newer version replaces
   the older, and `context_export` writes a stored part back into the
   workdir by file name or hash prefix (#400).
+- Files reach a run over HTTP. `POST /api/agents` and `POST
+  /api/agents/{id}/message` take `multipart/form-data` (a `request` field
+  of JSON plus file fields named `part` or `part:<region>`), a JSON `parts`
+  list naming files inside the run's working directory, and `@path` tokens
+  in the task, a region's text or a message, resolved inside the working
+  directory. `GET /api/agents/{id}/blobs` lists the stored parts a run
+  holds and `/blobs/{sha256}` serves one under its own content type, `GET
+  /api/agents/{id}/files/raw?path=` serves a workdir file the same way, and
+  `GET /api/media` lists the effective media registry. `[serve]
+  max_upload_bytes` (32 MiB by default) bounds a request body and is
+  reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
+  `runs.blobs`, `runs.files.raw`, `runs.result.artifacts` and
+  `media.registry` (#400).
 - Files reach a run from the command line. `lev run --attach
   path[:region][:type][:text]` puts a file in a region as a typed part, a
   `--<region> @file` whose bytes are not text attaches instead of seeding,

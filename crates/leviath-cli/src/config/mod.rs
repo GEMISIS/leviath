@@ -4153,6 +4153,7 @@ enabled = false
             serve: ServeConfig {
                 max_concurrent_requests: 16,
                 request_timeout_secs: 5,
+                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
             },
             agent_read_paths: HashMap::from([(
                 "cto".to_string(),

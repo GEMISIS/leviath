@@ -46,6 +46,14 @@ pub(super) struct RequestLimits {
     pub(super) max_concurrent_requests: u64,
     /// Seconds a request may take before it is answered 408.
     pub(super) request_timeout_secs: u64,
+    /// Bytes one request body may carry, which is what bounds a multipart
+    /// upload. `[serve] max_upload_bytes`; no flag.
+    #[serde(default = "default_upload")]
+    pub(super) max_upload_bytes: u64,
+}
+
+fn default_upload() -> u64 {
+    crate::config::DEFAULT_MAX_UPLOAD_BYTES
 }
 
 impl Default for RequestLimits {
@@ -53,6 +61,7 @@ impl Default for RequestLimits {
         Self {
             max_concurrent_requests: crate::config::DEFAULT_MAX_CONCURRENT_REQUESTS,
             request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
 }
@@ -69,6 +78,7 @@ impl RequestLimits {
         Self {
             max_concurrent_requests: flag_max_concurrent.unwrap_or(config.max_concurrent_requests),
             request_timeout_secs: flag_timeout_secs.unwrap_or(config.request_timeout_secs),
+            max_upload_bytes: config.max_upload_bytes,
         }
     }
 
@@ -259,6 +269,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
         let response = app.oneshot(request("/slow")).await.unwrap();
@@ -271,6 +282,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 0,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
         let response = app.oneshot(request("/slow")).await.unwrap();
@@ -282,6 +294,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 5,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
         let response = app.oneshot(request("/slow")).await.unwrap();
@@ -295,6 +308,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let router = Router::new()
             .route("/ws", get(slow))
@@ -321,6 +335,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let router = Router::new()
             .route("/api/mcp/servers/{name}/login", post(slow))
@@ -356,6 +371,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 1,
             request_timeout_secs: 1,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
         let app = app(
@@ -437,6 +453,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 0,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
         let app = app(
@@ -489,6 +506,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 0,
             request_timeout_secs: 0,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
         let app = app(
@@ -518,6 +536,7 @@ mod tests {
         let config = ServeConfig {
             max_concurrent_requests: 8,
             request_timeout_secs: 120,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         // Neither flag: the config stands.
         assert_eq!(
@@ -525,6 +544,7 @@ mod tests {
             RequestLimits {
                 max_concurrent_requests: 8,
                 request_timeout_secs: 120,
+                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
             }
         );
         // Each flag on its own, including `0` to switch a limit off.
@@ -533,6 +553,7 @@ mod tests {
             RequestLimits {
                 max_concurrent_requests: 0,
                 request_timeout_secs: 120,
+                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
             }
         );
         assert_eq!(
@@ -540,6 +561,7 @@ mod tests {
             RequestLimits {
                 max_concurrent_requests: 8,
                 request_timeout_secs: 3,
+                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
             }
         );
         // No config table and no flags: the defaults.
@@ -556,12 +578,29 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: u64::MAX,
             request_timeout_secs: 0,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         assert_eq!(limits.cap(), Some(usize::MAX));
         let gate = Gate::new(limits);
         assert_eq!(
             gate.in_flight.as_ref().map(|s| s.available_permits()),
             Some(Semaphore::MAX_PERMITS)
+        );
+    }
+
+    /// A limits record written before the upload ceiling existed still reads,
+    /// with the default in that slot.
+    #[test]
+    fn an_older_limits_record_reads_the_default_upload_ceiling() {
+        let limits: RequestLimits = serde_json::from_value(serde_json::json!({
+            "max_concurrent_requests": 4,
+            "request_timeout_secs": 9
+        }))
+        .unwrap();
+        assert_eq!(limits.max_concurrent_requests, 4);
+        assert_eq!(
+            limits.max_upload_bytes,
+            crate::config::DEFAULT_MAX_UPLOAD_BYTES
         );
     }
 }

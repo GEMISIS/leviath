@@ -617,6 +617,25 @@
               "schema": {
                 "$ref": "#/components/schemas/SpawnAgentReq"
               }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file for the task region. Repeatable. Name the field `part:<region>` for another region; the file's `filename` names the part and its `Content-Type` declares the type."
+                  }
+                }
+              }
             }
           }
         },
@@ -645,6 +664,9 @@
           },
           "408": {
             "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
           },
           "503": {
             "$ref": "#/components/responses/Overloaded"
@@ -935,6 +957,173 @@
         }
       }
     },
+    "/api/agents/{id}/files/raw": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "A workdir file's bytes, under its own content type",
+        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the media registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. `download=1` adds a `Content-Disposition: attachment` naming the file.",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workdir-relative path, or an absolute path inside the workdir."
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Ask the browser to save the file rather than show it."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes, under its media type.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/blobs": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The stored parts a run holds",
+        "description": "Every stored part the run's context carries, by sha256: its type, name, size, dimensions, the regions carrying it, and whether the bytes are on disk under the run's `blobs/`. A part a user attached, a file `read_file` stored, an image an MCP tool returned, and an artifact the run submitted all appear here.",
+        "responses": {
+          "200": {
+            "description": "The listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobListing"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/blobs/{sha256}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "name": "sha256",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The part's sha256, 64 lowercase hex characters, as the listing and the run's context give it."
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The bytes of one stored part",
+        "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404.",
+        "parameters": [
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Ask the browser to save the file rather than show it."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bytes, under the part's media type.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/logs": {
       "parameters": [
         {
@@ -1141,11 +1330,42 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "content"
+                  "message"
                 ],
                 "properties": {
-                  "content": {
-                    "type": "string"
+                  "message": {
+                    "type": "string",
+                    "description": "The text. A `@path` token attaches that workdir file to the same entry."
+                  },
+                  "target_region": {
+                    "type": "string",
+                    "description": "The region to land in; the conversation when absent."
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PartRef"
+                    },
+                    "description": "Files already inside the run's working directory to send with the message."
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to send beside the message. Repeatable; `part:<region>` aims one at another region."
                   }
                 }
               }
@@ -1156,11 +1376,23 @@
           "202": {
             "description": "Accepted: the daemon holds it, and the work happens after the response."
           },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
           "408": {
             "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
           },
           "503": {
             "$ref": "#/components/responses/Overloaded"
@@ -1577,6 +1809,36 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/media": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "The effective media registry",
+        "description": "Every row of the media registry this server resolves types with, keys sorted, each with where it came from: `builtin`, `config` (`[media_types]` in config.toml), or the blueprint or provider that added it. A row names only what it sets, so a `family`, `text` or `extensions` that is absent is inherited from the pattern rows above it.",
+        "responses": {
+          "200": {
+            "description": "The listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaListing"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3046,6 +3308,13 @@
           "callback_secret": {
             "type": "string",
             "description": "Shared secret for the HMAC-SHA256 signature on that callback."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartRef"
+            },
+            "description": "Files already inside the working directory to attach as typed parts. A `multipart/form-data` body carries files instead: a `request` field holding this JSON, then any number of file fields named `part` (bound for the task region) or `part:<region>`, each with a `filename` and a `Content-Type`. A `@path` token inside `task` or a region's text attaches that file too, resolved inside the working directory, and the text keeps the token."
           }
         }
       },
@@ -3530,7 +3799,8 @@
           "max_history_limit",
           "max_tracked_modified_files",
           "max_concurrent_requests",
-          "request_timeout_secs"
+          "request_timeout_secs",
+          "max_upload_bytes"
         ],
         "properties": {
           "max_limit": {
@@ -3572,6 +3842,10 @@
           "request_timeout_secs": {
             "type": "integer",
             "description": "Seconds before a request is dropped with a 408; 0 is no deadline."
+          },
+          "max_upload_bytes": {
+            "type": "integer",
+            "description": "Bytes one request body may carry, which bounds a multipart upload. `[serve] max_upload_bytes`."
           }
         }
       },
@@ -3712,6 +3986,162 @@
           },
           "limits": {
             "$ref": "#/components/schemas/ApiLimits"
+          }
+        }
+      },
+      "PartRef": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "description": "A file inside the run's working directory, to attach as a typed part.",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file, relative to the working directory."
+          },
+          "region": {
+            "type": "string",
+            "description": "The region to put it in; the task region when absent."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name the part carries; the file name when absent."
+          },
+          "media_type": {
+            "type": "string",
+            "description": "Its media type, when the bytes and name do not say."
+          },
+          "deliver": {
+            "type": "string",
+            "enum": [
+              "native",
+              "text",
+              "stand_in"
+            ],
+            "description": "How it reaches the model: as its own type, as text, or as a one-line stand-in."
+          },
+          "caption": {
+            "type": "string",
+            "description": "Text stored beside it."
+          }
+        }
+      },
+      "BlobEntry": {
+        "type": "object",
+        "required": [
+          "sha256",
+          "media_type",
+          "size",
+          "tokens",
+          "regions",
+          "stored"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "description": "The store's key: the bytes' sha256."
+          },
+          "media_type": {
+            "type": "string",
+            "description": "The type the bytes were stored as."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name the part carries, when the context gave it one."
+          },
+          "size": {
+            "type": "integer",
+            "description": "Size in bytes."
+          },
+          "width": {
+            "type": "integer",
+            "description": "Pixel width, when known."
+          },
+          "height": {
+            "type": "integer",
+            "description": "Pixel height, when known."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "Duration in milliseconds, when known."
+          },
+          "tokens": {
+            "type": "integer",
+            "description": "The token estimate the region was charged."
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The regions whose entries carry this part, in layout order."
+          },
+          "stored": {
+            "type": "boolean",
+            "description": "Whether the bytes are on disk under the run's blobs directory."
+          }
+        }
+      },
+      "BlobListing": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlobEntry"
+            },
+            "description": "Every stored part, first appearance first."
+          }
+        }
+      },
+      "MediaTypeEntry": {
+        "type": "object",
+        "required": [
+          "media_type",
+          "source"
+        ],
+        "properties": {
+          "media_type": {
+            "type": "string",
+            "description": "The row's key: a type, or a pattern such as image/*."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the row came from: builtin, config, or a blueprint or provider name."
+          },
+          "family": {
+            "type": "string",
+            "description": "The family the row sets, when it sets one."
+          },
+          "text": {
+            "type": "boolean",
+            "description": "Whether the row calls the bytes text, when it says."
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The extensions the row names, when it names any."
+          }
+        }
+      },
+      "MediaListing": {
+        "type": "object",
+        "required": [
+          "types"
+        ],
+        "properties": {
+          "types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaTypeEntry"
+            },
+            "description": "Every row, keys sorted."
           }
         }
       }
