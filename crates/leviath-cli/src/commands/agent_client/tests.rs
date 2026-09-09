@@ -1763,6 +1763,69 @@ async fn prompt_files_reach_the_daemon_as_parts() {
     h.close_input().await;
 }
 
+/// A `resource_link` into the session's working directory is read and rides
+/// the prompt as a part, and the text says so; one pointing elsewhere stays
+/// a name, marked as not fetched.
+#[tokio::test]
+async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
+        ControlRequest::Spawn { args } => {
+            cap.lock()
+                .unwrap()
+                .push((args.task.clone(), args.parts.clone()));
+            ControlResponse::Spawned {
+                run_id: RUN_ID.to_string(),
+            }
+        }
+        _ => ControlResponse::Ok { ok: true },
+    });
+    let (_bp, args) = blueprint_args();
+    let work = tempfile::tempdir().unwrap();
+    let inside = work.path().join("notes.md");
+    std::fs::write(&inside, b"# notes").unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("secret.txt");
+    std::fs::write(&outside, b"no").unwrap();
+    let mut h = Harness::start(daemon, args);
+    h.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
+        .await;
+    let _ = h.recv().await;
+    let cwd = serde_json::to_string(&work.path().to_string_lossy()).unwrap();
+    h.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":{cwd}}}}}"#
+    ))
+    .await;
+    let _ = h.recv().await;
+    let inside_url = crate::commands::result::export::file_url(&inside);
+    let outside_url = crate::commands::result::export::file_url(&outside);
+    h.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{{"prompt":[{{"type":"text","text":"read these"}},{{"type":"resource_link","uri":"{inside_url}","name":"notes.md","mimeType":"text/markdown"}},{{"type":"resource_link","uri":"{outside_url}","name":"secret.txt"}}]}}}}"#
+    ))
+    .await;
+    let _ = h.recv_until(is_result).await;
+    let seen = captured.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let (task, parts) = &seen[0];
+    assert!(
+        task.contains(&format!(
+            "--- {inside_url} ---\n[a linked resource (text/markdown); attached]"
+        )),
+        "{task}"
+    );
+    assert!(
+        task.contains(&format!(
+            "--- {outside_url} ---\n[a linked resource; not fetched]"
+        )),
+        "{task}"
+    );
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert_eq!(parts[0].name, "notes.md");
+    assert_eq!(parts[0].data, b"# notes");
+    h.close_input().await;
+}
+
 /// A run that submitted nothing emits nothing extra, leaving the turn exactly
 /// as it was before this existed.
 #[tokio::test]
