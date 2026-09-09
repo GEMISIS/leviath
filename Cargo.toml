@@ -238,7 +238,7 @@ ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 # hidden edges too, overlaps disconnected components and asserts acyclicity.
 # `crossterm` = `ratatui/crossterm`, so its event conversions accept our events.
 rataflow = { version = "0.1", default-features = false, features = ["crossterm"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 # HTTPS for `lev serve` (issue #300). Its `tls-rustls` feature resolves to
 # `rustls/aws-lc-rs` - the same provider the outbound reqwest stack already
 # uses - so this adds a server-side TLS *listener* without adding a second TLS

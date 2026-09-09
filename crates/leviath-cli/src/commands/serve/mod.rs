@@ -6,6 +6,7 @@
 mod agents;
 mod artifact_types;
 mod auth;
+mod blobs;
 mod blueprints;
 mod config;
 mod config_health;
@@ -31,6 +32,7 @@ mod types;
 mod update;
 mod update_cache;
 mod update_job;
+mod upload;
 mod websocket;
 mod yolo;
 
@@ -132,6 +134,9 @@ fn api_router() -> Router<AppState> {
             get(agents::agent_context_history),
         )
         .route("/api/agents/{id}/files", get(agents::agent_file))
+        .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
+        .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
+        .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
         .route("/api/agents/{id}/stages", get(agents::agent_stages))
@@ -159,6 +164,9 @@ fn api_router() -> Router<AppState> {
         .route("/api/yolo", get(yolo::list_profiles))
         .route("/api/yolo/test", post(yolo::test_profile))
         .route("/api/yolo/{name}", get(yolo::get_profile))
+        // The effective media registry, so a console can name a type's
+        // family and extensions the way the daemon will.
+        .route("/api/media", get(blobs::list_media))
         // Update - how this copy was installed, and what upgrades it. The
         // console has no other way to know, and printed a macOS-only command
         // to everyone because of it.
@@ -519,7 +527,15 @@ async fn execute_with_shutdown(
         false => app,
     };
 
+    // How large a body any route takes: the multipart spawn and message
+    // routes carry files, and the default 2 MiB would refuse a modest image.
+    // One ceiling for every route, since a limit that varied per route would
+    // be one more thing `GET /api/config` had to explain.
+    let body_limit = axum::extract::DefaultBodyLimit::max(
+        usize::try_from(request_limits.max_upload_bytes).unwrap_or(usize::MAX),
+    );
     let app = app
+        .layer(body_limit)
         // Require a valid token on every route; CORS stays outermost so browser
         // preflight (OPTIONS) is answered before the auth check.
         .layer(axum::middleware::from_fn_with_state(
@@ -827,6 +843,7 @@ mod tests {
     /// The production half of every module that owns a handler, by name.
     const HANDLER_SOURCES: &[(&str, &str)] = &[
         ("agents", include_str!("agents.rs")),
+        ("blobs", include_str!("blobs.rs")),
         ("blueprints", include_str!("blueprints.rs")),
         ("config", include_str!("config.rs")),
         ("doctor", include_str!("doctor.rs")),

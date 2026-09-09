@@ -618,7 +618,7 @@ impl ValidateResponse {
 
 // ─── Agent types ────────────────────────────────────────────────────────────
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub(super) struct SpawnAgentReq {
     pub(super) blueprint: String,
     pub(super) task: String,
@@ -667,6 +667,11 @@ pub(super) struct SpawnAgentReq {
     /// names what was retired. Supply this field when the new shape should
     /// still be checked.
     pub(super) output_schema: Option<serde_json::Value>,
+    /// Files already inside the working directory to attach as typed parts.
+    /// A `multipart/form-data` body carries files instead; a `@path` token
+    /// inside `task` or a region's text attaches that file too.
+    #[serde(default)]
+    pub(super) parts: Vec<super::upload::PartRef>,
 }
 
 /// A run's final output as the API serves it.
@@ -1137,6 +1142,9 @@ pub(super) struct SendMessageReq {
     pub(super) message: String,
     #[serde(default)]
     pub(super) target_region: Option<String>,
+    /// Files already inside the working directory to send with the message.
+    #[serde(default)]
+    pub(super) parts: Vec<super::upload::PartRef>,
 }
 
 // ─── Config types ───────────────────────────────────────────────────────────

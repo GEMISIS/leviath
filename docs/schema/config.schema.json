@@ -385,6 +385,12 @@
           "minimum": 0,
           "default": 30,
           "description": "Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed."
+        },
+        "max_upload_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 33554432,
+          "description": "Bytes one request body may carry: the ceiling on a multipart upload to POST /api/agents or POST /api/agents/{id}/message. 32 MiB by default."
         }
       }
     },
