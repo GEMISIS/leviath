@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.4"
+version = "0.2.5"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -65,7 +65,9 @@ system_prompt = """
 Do a fast first pass over the code in the `diff` region (and read_file for
 surrounding context). Honor any focus in `review_criteria`, and use `discovery`
 (this project's layout and conventions, mapped by the discover stage) plus
-`project_context` to judge what "correct" means here.
+`project_context` to judge what "correct" means here. If `screenshots` holds
+images, they show what the change is meant to look like or what it broke:
+check the diff against them, and say when the code cannot produce what they show.
 
 Flag the obvious red flags - don't go deep yet:
 - Security: injection, unsafe deserialization, secrets in code, missing authz.
@@ -213,7 +215,9 @@ would block a merge yourself. A worker reported as FAILED covered nothing - its
 area is still unreviewed, so review it here.
 
 Then scrutinize what no single area could show: the interactions between them,
-and anything the workers left. Work the review through a fixed framework so
+and anything the workers left. If `screenshots` holds images, they are the
+caller's evidence of intent or breakage; a finding that contradicts one should
+say so. Work the review through a fixed framework so
 nothing is skipped:
   1. Correctness - does it do what the task/diff intends? Trace the logic.
   2. Security - injection, authz, secret handling, unsafe input.
@@ -343,6 +347,11 @@ If nothing blocking turned up, say so plainly - a clean review is a result.
 diff            = { kind = "pinned", budget = "20%", required = true, seed = "diff", required_message = "Provide the code or diff to review via --diff <text|@file>.", volatility = "stable" }
 # Optional caller focus, e.g. --criteria "focus on security / backwards-compat".
 review_criteria = { kind = "pinned", budget = "2%", seed = "criteria", volatility = "stable" }
+# Optional screenshots of the change (a mockup, a before and an after):
+# `--attach before.png:screenshots --attach after.png:screenshots`, or a
+# `@path` in `--criteria`. Typed `image/*`, so a model that can see them does, and
+# one that cannot gets a stand-in naming each. Six at most; older ones go.
+screenshots     = { kind = "pinned", budget = "6%", seed = "screenshots", accepts = ["image/*"], max_stored = 6, volatility = "stable" }
 # Pre-loaded on startup: architecture / conventions (missing files skipped).
 project_context = { kind = "pinned", budget = "4%", seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] }, volatility = "stable" }
 # Deterministic repo scan, run once at spawn (issue #108) - the discover stage

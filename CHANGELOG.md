@@ -223,6 +223,10 @@ same list.
   compaction that replaces entries carrying stored parts with a text summary
   names the parts it dropped in the run log; the bytes stay in the store
   (#400).
+- The bundled `reviewer` (0.2.5) takes screenshots: a `screenshots` region
+  accepting `image/*`, filled with `--attach shot.png:screenshots` or a
+  `@path` in `--criteria`, that the scan and deep-review stages read as the
+  caller's evidence of intent or breakage (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;
