@@ -18227,6 +18227,36 @@ mod typed_tool_results {
             "{}",
             answer.content
         );
+        // With a blueprint on the agent, the stage's limit for the tool is
+        // looked up before the tool answers; the answer is the same here,
+        // since there is still no store to read from.
+        let mut stage = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage
+            .tool_accepts
+            .insert("context_export".to_string(), vec!["text/*".to_string()]);
+        let mut call = tc("c2", "context_export");
+        call.arguments = serde_json::json!({"name": "shot.png"});
+        let limited = ready_for_tools(&mut world, vec![call]);
+        world
+            .entity_mut(limited)
+            .insert(AgentBlueprint(blueprint(vec![stage])));
+        s.run(&mut world);
+        assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
+        let conv = world
+            .get::<ContextWindow>(limited)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .clone();
+        let answer = conv
+            .content
+            .iter()
+            .find(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+            .expect("the answer landed as a tool result");
+        assert!(answer.content.contains("no blob store"));
     }
 
     #[test]
