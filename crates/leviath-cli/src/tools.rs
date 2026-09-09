@@ -590,12 +590,18 @@ fn shell_protected_refusal(
 /// The ways a shell line spells `path`: as written, and through the home
 /// directory as `~/...`, `$HOME/...` and `${HOME}/...`.
 fn location_spellings(path: &std::path::Path, home: Option<&std::path::Path>) -> Vec<String> {
+    // Both separators, always: a shell line writes `/` on every OS, and on
+    // Windows the native form has `\`. Emitting both unconditionally rather
+    // than by platform keeps this one function with one set of regions; a
+    // duplicate spelling costs a `contains` and nothing else.
     let absolute = path.to_string_lossy().into_owned();
-    let mut spellings = vec![absolute.clone()];
+    let mut spellings = vec![absolute.replace('\\', "/"), absolute];
     if let Some(rest) = home.and_then(|h| path.strip_prefix(h).ok()) {
-        let rest = rest.to_string_lossy();
+        let native = rest.to_string_lossy().into_owned();
+        let slashed = native.replace('\\', "/");
         for prefix in ["~", "$HOME", "${HOME}"] {
-            spellings.push(format!("{prefix}/{rest}"));
+            spellings.push(format!("{prefix}/{slashed}"));
+            spellings.push(format!("{prefix}/{native}"));
         }
     }
     spellings
