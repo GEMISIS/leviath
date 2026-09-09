@@ -174,6 +174,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         std::collections::HashMap::new(),
         no_seed_commands: h.no_seed_commands,
         output_request: child_output,
+        parts: Vec::new(),
     }) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),

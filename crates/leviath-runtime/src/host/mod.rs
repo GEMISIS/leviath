@@ -541,6 +541,7 @@ impl WorldHost {
                 agent_id,
                 content,
                 target_region,
+                parts,
                 reply,
             } => {
                 // Page the target in if it was unloaded, so delivery finds it.
@@ -551,6 +552,7 @@ impl WorldHost {
                         agent_id,
                         content,
                         target_region,
+                        parts,
                     })
                     .is_ok();
                 let _ = reply.send(ok);

@@ -259,7 +259,14 @@ conversation region between inference calls, as if the user had spoken mid-turn:
 
 ```bash
 lev msg <agent-id> "Focus on the auth module first, skip the migrations for now."
+lev msg <agent-id> "the arm is still wrong, see @marked_up.png" --attach notes.md:brief
 ```
+
+A message can carry files. A `@path` in the text and every `--attach` become typed
+[parts](/docs/media) on the same entry as the words, in the region the message lands in; an
+attachment naming another region (`--attach notes.md:brief`) lands there on its own. A part the
+run cannot take (over the size ceiling, or a region that refuses its type) is logged and dropped,
+and the text is still delivered.
 
 Whether a message lands right away is per-stage. `accepts_messages` defaults to `true`; set it to
 `false` on a stage that shouldn't be interrupted (e.g. a final report), and messages stay queued in

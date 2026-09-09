@@ -361,6 +361,8 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
             return Ok(());
         }
     }
+    // Read here, where the paths the user typed still mean what they meant.
+    let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
     let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
         leviath_cli::daemon::client::LaunchRequest {
             path,
@@ -379,6 +381,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
                 args.output_instructions,
                 args.output_schema,
             )?,
+            parts,
         },
     )?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,

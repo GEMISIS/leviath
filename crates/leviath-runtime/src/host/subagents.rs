@@ -53,6 +53,8 @@ impl WorldHost {
                         agent_id: run_id,
                         content,
                         target_region,
+                        // A sub-agent's `send_message` carries text only.
+                        parts: Vec::new(),
                     })
                     .is_ok();
                 let _ = reply.send(ok);

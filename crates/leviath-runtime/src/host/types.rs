@@ -41,6 +41,11 @@ pub struct SpawnArgs {
     /// keeps older requests (which never sent this) deserializing to an empty map.
     #[serde(default)]
     pub regions: HashMap<String, String>,
+    /// Files the caller attached: each lands in its region (or the task
+    /// region) as a stored part, beside the text it came with. Bytes ride
+    /// base64 here; the run's blob store holds them from spawn on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<leviath_core::media::InboundPart>,
     /// Optional model override (`provider/model` or `model`).
     #[serde(default)]
     pub model: Option<String>,
@@ -501,6 +506,8 @@ pub enum ControlOp {
         content: String,
         /// Optional target region (defaults to the conversation region).
         target_region: Option<String>,
+        /// Files sent with the message, written beside it as stored parts.
+        parts: Vec<leviath_core::media::InboundPart>,
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },

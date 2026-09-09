@@ -144,7 +144,12 @@ lev respond <id> --attach marked_up.png "the arm is still wrong, see the circle"
 `--attach path[:region][:type][:text]` puts a file in a region. An `@path` inside any text does
 the same for the region the text lands in, and keeps the text exactly as written so the model
 and the stand-in agree on the name. Write `\@` for a literal `@`. A token that names no file is
-left alone, so an email address is never mistaken for one.
+left alone, so an email address is never mistaken for one. On the command line, paths resolve
+from where you ran the command; over the API they resolve inside the run's working directory.
+A `--<region> @file` whose bytes are not text is attached to that region as a part rather than
+read as its seed. The daemon types every part with its own registry, so a file the CLI could
+not name still gets the type your `[media_types]` rows give it; `:type` overrides that, and
+`:text`, `:native` or `:stand_in` override how the part reaches the model.
 
 Over HTTP, `POST /api/agents` and `POST /api/agents/{id}/message` take `multipart/form-data`
 with any number of file parts, or a JSON `parts` list naming files already inside the workdir.

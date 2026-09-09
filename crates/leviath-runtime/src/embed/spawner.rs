@@ -118,6 +118,7 @@ impl EmbedSpawner {
             agent_id: args.run_id.clone(),
             blueprint,
             seeds,
+            parts: args.parts.clone(),
             stages,
             global_hints: self.hints,
             global_nudge: // The default nudge policy; blueprints override per stage/agent.

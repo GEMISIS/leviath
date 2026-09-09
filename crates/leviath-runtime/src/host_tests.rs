@@ -2435,6 +2435,7 @@ async fn message_op_is_delivered() {
         agent_id: "agent-a".to_string(),
         content: "hi".to_string(),
         target_region: Some("conversation".to_string()),
+        parts: Vec::new(),
         reply,
     })
     .await;

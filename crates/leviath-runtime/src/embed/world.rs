@@ -461,6 +461,7 @@ impl AgentWorld {
             agent_id: id.0.clone(),
             content: content.to_string(),
             target_region: None,
+            parts: Vec::new(),
             reply,
         })
         .await

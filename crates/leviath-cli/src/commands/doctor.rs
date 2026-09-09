@@ -882,6 +882,7 @@ async fn spawn_and_wait(
         regions: std::collections::HashMap::new(),
         no_seed_commands: false,
         output_request: None,
+        parts: Vec::new(),
     });
     let args = match args {
         Ok(args) => args,

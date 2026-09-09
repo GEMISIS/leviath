@@ -7040,6 +7040,7 @@ fn msg(agent_id: &str, content: &str, region: Option<&str>) -> AgentMessage {
         agent_id: agent_id.to_string(),
         content: content.to_string(),
         target_region: region.map(String::from),
+        parts: Vec::new(),
     }
 }
 
@@ -17836,4 +17837,221 @@ fn spawning_refuses_a_blueprint_with_no_stages_or_a_stage_count_mismatch() {
     )
     .unwrap_err();
     assert!(err.contains("0 resolved stages"), "{err}");
+}
+
+// ── message delivery with parts ──
+
+mod message_parts {
+    use super::*;
+    use crate::blob_store::{BlobStoreHandle, MediaLimits, MediaRegistryHandle};
+    use leviath_core::media::{InboundPart, MemoryBlobStore};
+
+    fn png() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nbody".to_vec()
+    }
+
+    fn world_with_store() -> (World, mpsc::UnboundedSender<AgentMessage>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        (world, tx)
+    }
+
+    fn with_parts(content: &str, parts: Vec<InboundPart>) -> AgentMessage {
+        AgentMessage {
+            agent_id: "a1".to_string(),
+            content: content.to_string(),
+            target_region: None,
+            parts,
+        }
+    }
+
+    #[test]
+    fn text_and_files_land_as_one_entry_and_a_named_region_gets_its_own() {
+        let (mut world, tx) = world_with_store();
+        let e = spawn_msg_agent(
+            &mut world,
+            true,
+            &[("conversation", 10_000), ("art", 10_000)],
+        );
+        tx.send(with_parts(
+            "see this",
+            vec![
+                InboundPart::from_bytes("hero.png", png()),
+                InboundPart::from_bytes("song.wav", vec![1, 2, 3]).in_region("art"),
+            ],
+        ))
+        .unwrap();
+        run_deliver(&mut world);
+        let window = world.get::<ContextWindow>(e).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert_eq!(conv.content.len(), 1);
+        assert_eq!(conv.content[0].content.parts().len(), 2);
+        assert_eq!(
+            conv.content[0].content.as_str(),
+            "see this\n[image/png, 12 B] hero.png"
+        );
+        assert_eq!(conv.content[0].kind, leviath_core::EntryKind::UserMessage);
+        let art = window.get_region("art").unwrap();
+        assert_eq!(art.stored_count(), 1);
+        assert_eq!(
+            art.content[0].content.parts()[0].name.as_deref(),
+            Some("song.wav")
+        );
+    }
+
+    #[test]
+    fn a_world_without_a_store_delivers_the_text_alone() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        let e = spawn_msg_agent(&mut world, true, &[("conversation", 10_000)]);
+        tx.send(with_parts(
+            "just words",
+            vec![InboundPart::from_bytes("hero.png", png())],
+        ))
+        .unwrap();
+        run_deliver(&mut world);
+        let conv = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .clone();
+        assert_eq!(conv.content.len(), 1);
+        assert_eq!(conv.content[0].content, "just words");
+        assert_eq!(conv.stored_count(), 0);
+    }
+
+    #[test]
+    fn a_part_the_run_cannot_take_is_dropped_and_the_text_still_lands() {
+        let (mut world, tx) = world_with_store();
+        world.insert_resource(MediaLimits {
+            max_part_bytes: 4,
+            ..MediaLimits::default()
+        });
+        let e = spawn_msg_agent(&mut world, true, &[("conversation", 10_000), ("tiny", 1)]);
+        // Over the ceiling in the message's own region; over the ceiling in
+        // a named one; a region nobody declared; a region with no room.
+        tx.send(with_parts(
+            "",
+            vec![
+                InboundPart::from_bytes("big.png", png()),
+                InboundPart::from_bytes("big2.png", png()).in_region("conversation"),
+                InboundPart::from_bytes("x.bin", vec![1]).in_region("ghost"),
+                InboundPart::from_bytes("y.png", vec![1])
+                    .typed(leviath_core::media::MediaType::parse("image/png").unwrap())
+                    .in_region("tiny"),
+            ],
+        ))
+        .unwrap();
+        run_deliver(&mut world);
+        let window = world.get::<ContextWindow>(e).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert_eq!(conv.content.len(), 1);
+        assert_eq!(conv.content[0].content, "");
+        assert_eq!(conv.stored_count(), 0);
+        assert!(window.get_region("tiny").unwrap().content.is_empty());
+    }
+
+    #[test]
+    fn the_message_entry_itself_can_be_refused() {
+        let (mut world, tx) = world_with_store();
+        let e = spawn_msg_agent(&mut world, true, &[("conversation", 1)]);
+        tx.send(with_parts(
+            "too much for a one-token region",
+            vec![InboundPart::from_bytes("hero.png", png())],
+        ))
+        .unwrap();
+        run_deliver(&mut world);
+        let window = world.get::<ContextWindow>(e).unwrap();
+        assert!(
+            window
+                .get_region("conversation")
+                .unwrap()
+                .content
+                .is_empty()
+        );
+    }
+}
+
+// ── spawn with attached parts ──
+
+mod spawn_parts {
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::blob_store::{BlobStoreHandle, MediaRegistryHandle};
+    use crate::pipeline::spawn::{SeededSpawn, spawn_agent_seeded};
+    use leviath_core::media::{InboundPart, MemoryBlobStore};
+
+    fn task_blueprint() -> leviath_core::Blueprint {
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                4000,
+            )],
+            8000,
+        );
+        let s = leviath_core::Stage::new(
+            "start".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+    }
+
+    fn seeded(parts: Vec<InboundPart>) -> SeededSpawn {
+        SeededSpawn {
+            agent_id: "run-parts".to_string(),
+            blueprint: task_blueprint(),
+            seeds: HashMap::from([("task".to_string(), "edit @hero.png".to_string())]),
+            parts,
+            stages: vec![resolved("m")],
+            global_hints: hints(true),
+            global_nudge: leviath_core::NudgeConfig::default(),
+            region_scripts: HashMap::new(),
+        }
+    }
+
+    fn png() -> InboundPart {
+        InboundPart::from_bytes("hero.png", b"\x89PNG\r\n\x1a\nbody".to_vec())
+    }
+
+    #[test]
+    fn attached_parts_land_after_the_seeds_in_the_task_region() {
+        let mut world = World::new();
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        let e = spawn_agent_seeded(&mut world, seeded(vec![png()])).expect("spawn");
+        let task = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("task")
+            .unwrap()
+            .clone();
+        assert_eq!(task.content.len(), 2);
+        assert_eq!(task.content[0].content, "edit @hero.png");
+        assert_eq!(task.content[1].content, "[image/png, 12 B] hero.png");
+        assert_eq!(task.stored_count(), 1);
+    }
+
+    #[test]
+    fn a_world_without_a_store_refuses_a_part_and_a_bad_part_refuses_the_spawn() {
+        let mut world = World::new();
+        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
+        assert!(err.contains("no blob store"), "{err}");
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(crate::blob_store::MediaLimits {
+            max_part_bytes: 2,
+            ..Default::default()
+        });
+        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
+        assert!(err.contains("over the 2 byte ceiling"), "{err}");
+        // No parts: the store is never consulted.
+        assert!(spawn_agent_seeded(&mut world, seeded(Vec::new())).is_ok());
+    }
 }

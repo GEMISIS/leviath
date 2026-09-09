@@ -1033,6 +1033,7 @@ mod tests {
                 max_depth: None,
                 parent_run_id: None,
                 output: None,
+                parts: Vec::new(),
             }),
             reply,
         });
@@ -1752,6 +1753,7 @@ system_prompt = "x"
                     max_depth: None,
                     parent_run_id: None,
                     output: None,
+                    parts: Vec::new(),
                 }),
                 reply,
             })
@@ -1839,6 +1841,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                 max_depth: None,
                 parent_run_id: None,
                 output: None,
+                parts: Vec::new(),
             }),
             reply,
         };
@@ -1982,6 +1985,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                 max_depth: None,
                 parent_run_id: None,
                 output: None,
+                parts: Vec::new(),
             }),
             reply,
         });

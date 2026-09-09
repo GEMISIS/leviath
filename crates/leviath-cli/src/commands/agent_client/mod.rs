@@ -577,6 +577,7 @@ impl Server {
                             agent_id: run_id.clone(),
                             content: task,
                             target_region: None,
+                            parts: Vec::new(),
                         })
                         .await,
                     Ok(ControlResponse::Ok { ok: true })

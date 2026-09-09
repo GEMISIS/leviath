@@ -98,6 +98,7 @@ pub(super) async fn send_message(
             agent_id: id.clone(),
             content: body.message,
             target_region: body.target_region,
+            parts: Vec::new(),
         })
         .await;
     daemon_ok(

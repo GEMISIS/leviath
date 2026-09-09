@@ -19,12 +19,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod inbound;
 pub mod inline_refs;
 pub mod part;
 pub mod probe;
 pub mod registry;
 pub mod store;
 
+pub use inbound::InboundPart;
 pub use part::{Blob, BlobRef, Delivery, Part, PartBody};
 pub use registry::{MediaInfo, MediaRegistry, TokenRule};
 pub use store::{BlobStore, MemoryBlobStore, is_sha256_hex, sha256_hex};

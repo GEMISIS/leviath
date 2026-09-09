@@ -198,6 +198,7 @@ pub(crate) fn spawn_agent(
             agent_id,
             blueprint,
             seeds,
+            parts: Vec::new(),
             stages,
             global_hints,
             global_nudge: leviath_core::NudgeConfig::default(),
@@ -218,6 +219,9 @@ pub struct SeededSpawn {
     pub blueprint: leviath_core::Blueprint,
     /// Content for named caller-input regions, keyed by region name.
     pub seeds: std::collections::HashMap<String, String>,
+    /// Files the caller attached, written into their regions as stored parts
+    /// once the seeds are in.
+    pub parts: Vec<leviath_core::media::InboundPart>,
     /// The blueprint's stages, already resolved against the provider registry.
     pub stages: Vec<ResolvedStage>,
     /// Config-level prompt hints, applied where the blueprint says nothing.
@@ -245,12 +249,30 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         agent_id,
         mut blueprint,
         seeds,
+        parts,
         stages,
         global_hints,
         global_nudge,
         region_scripts,
     } = spawn;
     let seeds = &seeds;
+    // Where attached bytes go, read before the world is borrowed for the
+    // spawn. A world without a store (one assembled by hand in a test)
+    // refuses a part rather than dropping it on the floor.
+    let media_store = world
+        .get_resource::<crate::blob_store::BlobStoreHandle>()
+        .map(|s| s.0.clone())
+        .zip(
+            world
+                .get_resource::<crate::blob_store::MediaRegistryHandle>()
+                .map(|r| r.0.clone()),
+        );
+    let max_part_bytes = world
+        .get_resource::<crate::blob_store::MediaLimits>()
+        .map_or(
+            crate::blob_store::MediaLimits::default().max_part_bytes,
+            |l| l.max_part_bytes,
+        );
     // Everything below indexes `blueprint.stages`, `stages` and the per-stage
     // vectors built from them by position. `parse_manifest` guarantees at
     // least one stage, but this is `pub` and an embedder can hand-build a
@@ -335,6 +357,22 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     // pass through each region's on_write hook like any other entry.
     window.region_scripts = region_scripts;
     crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
+    if !parts.is_empty() {
+        let Some((store, registry)) = media_store else {
+            return Err("this world has no blob store, so it cannot take an attached part".into());
+        };
+        crate::context_setup::ingest_parts(
+            &mut window,
+            &blueprint,
+            parts,
+            &crate::context_setup::PartSink {
+                store: store.as_ref(),
+                registry: &registry,
+                run_id: &agent_id,
+                max_part_bytes,
+            },
+        )?;
+    }
     // Before stage 0's prompt is injected, so it has somewhere of its own to go
     // rather than being charged to whichever pinned region came first.
     let prompts: Vec<Option<String>> = setups.iter().map(|s| s.system_prompt.clone()).collect();

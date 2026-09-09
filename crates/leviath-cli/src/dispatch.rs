@@ -538,6 +538,7 @@ mod tests {
         let args = commands::ctl::MsgArgs {
             agent_id: "a".to_string(),
             content: "c".to_string(),
+            attach: Vec::new(),
         };
         assert!(dispatch(Commands::Msg(args), &MockRisky).await.is_ok());
     }

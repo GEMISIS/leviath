@@ -911,6 +911,7 @@ fn build_agent_inner(
             agent_id: args.run_id.clone(),
             blueprint,
             seeds,
+            parts: args.parts.clone(),
             stages,
             global_hints: leviath_core::config::PromptHints {
                 batch_tool: deps.config.batch_tool_hint,
@@ -1364,6 +1365,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             max_depth: None,
             parent_run_id: None,
             output: None,
+            parts: Vec::new(),
         }
     }
 
@@ -3754,6 +3756,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             max_depth: None,
             parent_run_id: None,
             output: None,
+            parts: Vec::new(),
         }
     }
 
@@ -3842,6 +3845,38 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
         )
         .unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_required_caller_input_is_satisfied_by_a_part() {
+        let bp =
+            bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
+        let mut args = args_with("t", HashMap::new(), "/tmp");
+        args.parts =
+            vec![leviath_core::media::InboundPart::from_bytes("m.png", vec![1]).in_region("spec")];
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert!(!seeds.contains_key("spec"));
+        // A part bound elsewhere does not satisfy it.
+        args.parts[0].region = Some("other".to_string());
+        assert!(
+            resolve_seeds(
+                &bp,
+                &args,
+                "/tmp",
+                &seed_policy(),
+                &no_seed_tools(),
+                &no_read_paths(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
