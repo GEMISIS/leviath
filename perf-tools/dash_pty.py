@@ -26,7 +26,6 @@ import json
 import os
 import pty
 import re
-import resource
 import select
 import signal
 import struct
@@ -93,6 +92,8 @@ def main():
                 try:
                     out.extend(os.read(fd, 1 << 16))
                 except OSError:
+                    # The pty's slave side is gone once the child exits; the
+                    # next wait4 collects it, so there is nothing to do here.
                     pass
         return None
     done = None
@@ -101,6 +102,8 @@ def main():
         try:
             step()
         except (OSError, ProcessLookupError):
+            # The child already left (closed pty, or no such pid): the reap
+            # below collects it, and a failed step is not an error.
             pass
         done = reap(2.0)
         if done:

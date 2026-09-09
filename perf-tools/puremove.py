@@ -12,6 +12,11 @@ import subprocess, sys, collections, re
 ref, orig, news = sys.argv[1], sys.argv[2], sys.argv[3:]
 root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
 
+def read(path):
+    """The file's text, with the handle closed before returning."""
+    with open(f"{root}/{path}", encoding="utf-8") as f:
+        return f.read()
+
 def norm(line):
     l = line.strip()
     if not l or l.startswith("//") or l.startswith("use ") or l.startswith("mod ") or l.startswith("pub use") or l.startswith("pub(crate) use"):
@@ -22,19 +27,19 @@ def norm(line):
     return l
 
 before = subprocess.run(["git", "-C", root, "show", f"{ref}:{orig}"], capture_output=True, text=True).stdout.split("\n")
-after = open(f"{root}/{orig}").read().split("\n")
+after = read(orig).split("\n")
 removed = collections.Counter(filter(None, map(norm, before)))
 removed.subtract(collections.Counter(filter(None, map(norm, after))))
 removed = +removed  # lines the original lost
 added = collections.Counter()
-for n in news:
-    added.update(filter(None, map(norm, open(f"{root}/{n}").read().split("\n"))))
+new_texts = {n: read(n) for n in news}
+for txt in new_texts.values():
+    added.update(filter(None, map(norm, txt.split("\n"))))
 # The new files carry their own `impl X {` / `}` wrappers; drop one of each per file.
-for n in news:
+for txt in new_texts.values():
     for w in ("}", ):
         if added[w] > 0:
             added[w] -= 1
-    txt = open(f"{root}/{n}").read()
     for m in re.finditer(r"^impl \w+ \{$", txt, re.M):
         added[m.group(0)] -= 1
 added = +added

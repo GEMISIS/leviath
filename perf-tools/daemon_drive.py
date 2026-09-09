@@ -54,7 +54,8 @@ def daemon_cpu_seconds():
     so `getrusage(RUSAGE_CHILDREN)` never sees it."""
     pid_file = os.path.join(os.environ["LEVIATH_HOME"], ".leviath", "daemon.pid")
     try:
-        pid = open(pid_file).read().strip().split()[0]
+        with open(pid_file, encoding="utf-8") as f:
+            pid = f.read().strip().split()[0]
         txt = subprocess.run(["ps", "-o", "cputime=", "-p", pid], capture_output=True, text=True).stdout.strip()
     except (OSError, IndexError):
         return None
