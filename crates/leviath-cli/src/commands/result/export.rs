@@ -14,8 +14,8 @@ use leviath_core::media::human_size;
 use leviath_core::output::{Artifact, FinalOutput};
 
 /// What hands a URL to the operating system: `leviath_sys::open_url` in the
-/// binary, a recording stub in tests.
-pub(crate) type Opener = fn(&str) -> bool;
+/// binary, the dashboard's injected opener, a recording stub in tests.
+pub(crate) type Opener<'a> = &'a dyn Fn(&str) -> bool;
 
 /// What `lev result` was asked to do with the run's files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +162,7 @@ pub(crate) fn export_and_open(
     run_id: &str,
     file_name: &str,
     bytes: &[u8],
-    opener: Opener,
+    opener: Opener<'_>,
 ) -> anyhow::Result<PathBuf> {
     let path = write_into(&export_dir(run_id), file_name, bytes)?;
     open_file(&path, opener)?;
@@ -171,7 +171,7 @@ pub(crate) fn export_and_open(
 
 /// Hand `path` to the operating system to open with whatever it associates
 /// with that kind of file.
-pub(crate) fn open_file(path: &Path, opener: Opener) -> anyhow::Result<()> {
+pub(crate) fn open_file(path: &Path, opener: Opener<'_>) -> anyhow::Result<()> {
     match opener(&file_url(path)) {
         true => Ok(()),
         false => anyhow::bail!(
@@ -188,7 +188,7 @@ pub(crate) fn deliver(
     workdir: &str,
     output: &FinalOutput,
     request: FileRequest<'_>,
-    opener: Opener,
+    opener: Opener<'_>,
     stdout: &mut dyn Write,
 ) -> anyhow::Result<Vec<String>> {
     if output.artifacts.is_empty() {
@@ -340,9 +340,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.png");
         std::fs::write(&path, b"x").unwrap();
-        assert!(open_file(&path, record_open).is_ok());
+        assert!(open_file(&path, &record_open).is_ok());
         assert!(OPENED.lock().unwrap().iter().any(|u| u.ends_with("/a.png")));
-        let err = open_file(&path, refuse_open).unwrap_err();
+        let err = open_file(&path, &refuse_open).unwrap_err();
         assert!(err.to_string().contains("could not open"), "{err}");
     }
 
@@ -414,7 +414,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Stdout("final"),
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap();
@@ -431,7 +431,7 @@ mod tests {
                     dir: dest.path(),
                     only: None,
                 },
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap();
@@ -450,7 +450,7 @@ mod tests {
                     dir: &dest.path().join("one"),
                     only: Some("notes"),
                 },
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap();
@@ -462,7 +462,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Open("final"),
-                record_open,
+                &record_open,
                 &mut sink,
             )
             .unwrap();
@@ -477,7 +477,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Open("final"),
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -490,7 +490,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Open("nope"),
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -501,7 +501,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Open("final"),
-                record_open,
+                &record_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -512,7 +512,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Stdout("final"),
-                refuse_open,
+                &refuse_open,
                 &mut Broken,
             )
             .unwrap_err();
@@ -528,7 +528,7 @@ mod tests {
                     dir: &blocked,
                     only: Some("final"),
                 },
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -542,7 +542,7 @@ mod tests {
                     dir: dest.path(),
                     only: None,
                 },
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -554,7 +554,7 @@ mod tests {
                 &wd,
                 &output,
                 FileRequest::Stdout("nope"),
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -565,7 +565,7 @@ mod tests {
                 &wd,
                 &none,
                 FileRequest::Stdout("final"),
-                refuse_open,
+                &refuse_open,
                 &mut sink,
             )
             .unwrap_err();

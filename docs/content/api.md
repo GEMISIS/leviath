@@ -656,6 +656,9 @@ curl -X POST http://localhost:3000/api/agents -H "Authorization: Bearer $TOKEN" 
   -F 'part:storyboard=@frame1.png'
 ```
 
+`POST /api/agents/{id}/interaction` takes both forms too, for a text answer: the files land beside
+the words in the tool result, and a choice or an approval with files is refused with 400.
+
 A JSON body instead names files already inside the run's working directory under `parts`, each
 `{ path, region?, name?, media_type?, deliver?, caption? }`. And a `@path` token inside `task`, a
 region's text, or a message names a workdir file the same way; the text keeps the token, so the

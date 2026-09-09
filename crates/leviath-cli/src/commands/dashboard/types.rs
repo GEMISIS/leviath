@@ -424,8 +424,13 @@ pub(super) enum DaemonCommand {
     Answer {
         response: interaction::InteractionResponse,
     },
-    /// Deliver a mid-run message to a running agent.
-    Message { agent_id: String, content: String },
+    /// Deliver a mid-run message to a running agent, with the files a
+    /// `@path` in it named.
+    Message {
+        agent_id: String,
+        content: String,
+        parts: Vec<leviath_core::media::InboundPart>,
+    },
 }
 
 /// The result of a [`DaemonCommand`], drained each tick.
@@ -597,6 +602,8 @@ pub(super) struct SpawnCommand {
     pub(super) yolo: bool,
     /// The yolo profile it does that under, when one was picked.
     pub(super) yolo_profile: Option<String>,
+    /// The files the task named with `@path`, read from the workdir.
+    pub(super) parts: Vec<leviath_core::media::InboundPart>,
 }
 
 /// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
@@ -717,7 +724,8 @@ mod tests {
             cmd,
             DaemonCommand::Message {
                 agent_id: "a".to_string(),
-                content: "b".to_string()
+                content: "b".to_string(),
+                parts: Vec::new(),
             }
         );
     }

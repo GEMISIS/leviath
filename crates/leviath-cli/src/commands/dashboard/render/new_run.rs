@@ -161,6 +161,7 @@ impl Dashboard {
                     ),
                     false => Span::styled("", Style::default()),
                 },
+                Self::attached_chip(&self.new_run_attached_names()),
             ]),
             focus_colour(focused),
             focused,
@@ -223,6 +224,17 @@ impl Dashboard {
             ),
             popup,
         );
+    }
+
+    /// The title chip naming the files the task attaches, or nothing.
+    fn attached_chip(names: &[String]) -> Span<'static> {
+        match names.is_empty() {
+            true => Span::styled("", Style::default()),
+            false => Span::styled(
+                format!("[{} attached: {}] ", names.len(), names.join(", ")),
+                Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+        }
     }
 
     /// The help bar's text for the current focus. Names the unattended
@@ -329,6 +341,20 @@ mod tests {
             "src/main.rs".to_string(),
         ];
         dash
+    }
+
+    /// A `@path` the workdir holds shows on the task box's title as you type.
+    #[test]
+    fn the_title_names_the_files_the_task_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hero.png"), b"png").unwrap();
+        let mut dash = screen();
+        dash.new_run_ctx.workdir = dir.path().to_path_buf();
+        dash.new_run_task
+            .area_mut()
+            .insert_str("edit @hero.png and @nothing.png");
+        let out = rendered(&mut dash);
+        assert!(out.contains("[1 attached: hero.png]"), "{out}");
     }
 
     #[test]

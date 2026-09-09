@@ -567,6 +567,7 @@ Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the ope
 | `--feedback <TEXT>` | With `--deny`, what the model should do instead. It reads the text inside the refused call's tool result. An error with anything but `--deny` |
 | `--stage` | With `--approve`, allow what this call runs until the run leaves the current stage |
 | `--session` | With `--approve`, allow what this call runs for the rest of the run (alias `--run`) |
+| `--attach <PATH[:REGION][:TYPE][:text]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. A `@path` inside the answer attaches that file too. Refused on a choice or an approval |
 
 See [Human-in-the-loop](/docs/interaction) for what raises these.
 

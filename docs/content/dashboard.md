@@ -159,7 +159,7 @@ rather than back into the form.
 | `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` also starts it, but only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and `Ctrl+S` or the Start button is the way to submit |
 | `Enter` / `Alt+Enter` | Newline |
 | `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |
-| `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed |
+| `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed. A path that names a file is attached to the task as a typed part when the run starts, and the task box's title counts them as you type; one that names nothing stays text, with a warning |
 | `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
 | `F1` | Help. `?` types a question mark here |
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
@@ -202,6 +202,7 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `R` | Re-snake the path, undoing boxes you moved by hand |
 | `Enter` / Space | Fold or unfold the row under the Context tree's cursor |
 | `[` / `]` | Jump to the previous / next region in the Context view |
+| `v` / `w` | On a stored part's row in the Context view: open the file with whatever the OS opens it with, or write it into the run's working directory under its own name |
 | `,` / `.` | Step back and forward through context history |
 | `/` , then `n` / `N` | Search, then next / previous match |
 | `y` | Copy the pane to the clipboard |
@@ -211,6 +212,10 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `Esc` | Clear the search, or go back to the list |
 | `?` / `F1` | Help |
 | `Ctrl-C` | Quit. `q` is unbound here, so a stray keystroke cannot close the dashboard mid-run |
+
+A `@path` in a typed response or message attaches that file from the run's working directory,
+the way it does on `lev respond --attach` and `lev msg`: the words keep the token, the file lands
+beside them as a typed part, and a token that names no file stays text with a warning toast.
 
 While you are typing a response, `Enter` inserts a newline, the way it does in the new-run task
 box, and `Ctrl+S` sends. `Ctrl+Enter` sends too on a terminal with the kitty keyboard protocol,
@@ -233,7 +238,13 @@ activates it, and a stray keypress does nothing. The safe answer holds focus to 
 
 The Context view is a tree, not one long scroll. Each region is a header row with its token bar;
 its entries are one-line stubs with a preview. Move with `↑`/`↓`, fold or unfold with `Enter` or
-Space (or by clicking the row), and jump between regions with `[` and `]`. While a search (`/`) is active everything is
+Space (or by clicking the row), and jump between regions with `[` and `]`. An unfolded entry that
+carries files (an attached image, a stored `read_file`, a submitted artifact) shows each as its own
+row above the text: the stand-in the model sees, the hash, the token estimate. With the cursor on
+one, `v` hands a copy to the program the operating system opens that kind of file with, and `w`
+writes it into the run's working directory. Nothing in the dashboard plays or draws a file. The
+Final view lists the files a run produced under its answer; their parts sit in the `final_output`
+region, where the same two keys reach them. While a search (`/`) is active everything is
 temporarily unfolded so matches inside entries stay reachable. Browsing history with `,`/`.` keeps
 your scroll position and fold state, and the context card's title shows which archived point you
 are on, in which stage, recorded when.

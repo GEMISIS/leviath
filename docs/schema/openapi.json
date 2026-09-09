@@ -1444,17 +1444,93 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`."
+        "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request_id"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "description": "The interaction to answer, from GET."
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "A free-text or edited answer. A `@path` token attaches that workdir file."
+                  },
+                  "choice_index": {
+                    "type": "integer",
+                    "description": "The chosen option, zero-based, for a multiple-choice or tool-approval prompt."
+                  },
+                  "approved": {
+                    "type": "boolean",
+                    "description": "Whether a tool approval or a confirmation is granted."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "once",
+                      "stage",
+                      "session"
+                    ],
+                    "description": "How long a grant holds: this call, this stage, or the whole run (`session`)."
+                  },
+                  "feedback": {
+                    "type": "string",
+                    "description": "On a deny, what the model should do instead."
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PartRef"
+                    },
+                    "description": "Files already inside the run's working directory to send with a text answer."
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to send beside a text answer. Repeatable; `part:<region>` aims one at another region."
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/providers": {

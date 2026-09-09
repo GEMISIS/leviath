@@ -296,7 +296,16 @@ lev respond <request-id> --approve --stage     # and every later call this cover
 lev respond <request-id> --approve --session   # and every later call this covers, this run
 lev respond <request-id> --deny          # reject
 lev respond <request-id> --deny --feedback "use git log, not git show"   # reject and redirect
+lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a text answer with a file
+lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
+
+A text answer carries files the way a message does: every `--attach` and every `@path` in the
+words become typed [parts](/docs/media) stored by the run and written beside the answer in the
+tool result, so the model reads the file where the words mention it. A choice or an approval has
+no text for a file to sit beside, and `--attach` on one is refused. The dashboard and the API take
+the same: a `@path` in a typed reply, and `parts` or a multipart upload on
+`POST /api/agents/{id}/interaction`.
 
 You don't have to use the CLI. The same open questions can be answered interactively from the
 [dashboard](/docs/dashboard) (press `i`), from [The Lair](https://leviath.dev/lair), or over the

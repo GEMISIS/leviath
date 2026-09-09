@@ -187,6 +187,18 @@ same list.
   effective media registry with each row's source and `lev media check
   <file>` says what a file resolves to and how a model would see it. `lev
   context --full` shows each stored part as its own row (#400).
+- A text answer to a question carries files. `lev respond --attach` and a
+  `@path` in the answer, a `@path` in a reply typed on the dashboard, and
+  `parts` or a multipart upload on `POST /api/agents/{id}/interaction` all
+  put typed parts on the answer; the run stores them and writes them beside
+  the words in the tool result, so the model reads the file where the
+  answer mentions it. A choice or an approval refuses files. The dashboard
+  shows an unfolded entry's stored parts as rows of their own in the
+  Context view, opens one with the operating system on `v` and writes it
+  into the run's working directory on `w`, lists the files a run produced
+  under its answer in the Final view, and attaches the files a task names
+  with `@path` when a run starts from the new-run screen, counting them on
+  the task box as you type (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

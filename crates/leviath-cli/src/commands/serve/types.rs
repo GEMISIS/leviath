@@ -1135,6 +1135,10 @@ pub(super) struct SubmitInteractionReq {
     /// the plain deny every existing caller sends.
     #[serde(default)]
     pub(super) feedback: Option<String>,
+    /// Files already inside the working directory to send with a text
+    /// answer.
+    #[serde(default)]
+    pub(super) parts: Vec<super::upload::PartRef>,
 }
 
 #[derive(Deserialize)]

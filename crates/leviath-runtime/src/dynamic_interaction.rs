@@ -14,6 +14,7 @@ use async_trait::async_trait;
 
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 use leviath_core::interaction::{response_approved, response_as_choice, response_as_text};
+use leviath_core::media::InboundPart;
 
 // ─── Shared taint-gate prompt helpers ──────────────────────────────────────
 // Used by both the worker (IPC) and foreground (stdin) GatePrompt impls so the
@@ -184,6 +185,9 @@ pub const BLOCKING_INTERACTION_TOOLS: &[&str] = &[
 /// `present_for_review` / `ask_user_text` / `ask_user_choice` /
 /// `ask_user_confirm` (and was therefore handled here); returns `None` for
 /// any other tool name so the caller can fall through to normal tool dispatch.
+///
+/// The text alone; a caller with somewhere to store the files a person
+/// attached to the answer uses [`dispatch_dynamic_interaction_with_parts`].
 pub async fn dispatch_dynamic_interaction(
     backend: &dyn InteractionBackend,
     tool_name: &str,
@@ -191,6 +195,21 @@ pub async fn dispatch_dynamic_interaction(
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> Option<String> {
+    dispatch_dynamic_interaction_with_parts(backend, tool_name, tool_call_id, arguments, stage_name)
+        .await
+        .map(|(text, _)| text)
+}
+
+/// [`dispatch_dynamic_interaction`], with the files the person attached to
+/// the answer beside the text. They are the answer's, not yet the run's:
+/// the caller stores them and writes the references into the tool result.
+pub async fn dispatch_dynamic_interaction_with_parts(
+    backend: &dyn InteractionBackend,
+    tool_name: &str,
+    tool_call_id: &str,
+    arguments: &serde_json::Value,
+    stage_name: &str,
+) -> Option<(String, Vec<InboundPart>)> {
     match tool_name {
         "present_for_review" => {
             Some(handle_present_for_review(backend, tool_call_id, arguments, stage_name).await)
@@ -224,7 +243,7 @@ async fn handle_present_for_review(
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
-) -> String {
+) -> (String, Vec<InboundPart>) {
     let title = arg_str(arguments, "title", "Review");
     let markdown = arg_str(arguments, "markdown", "");
 
@@ -245,11 +264,12 @@ async fn handle_present_for_review(
 
     backend.log("[tool] present_for_review \u{2192} done");
 
-    if user_feedback.trim().is_empty() {
+    let text = if user_feedback.trim().is_empty() {
         "User reviewed the document and acknowledged.".to_string()
     } else {
         format!("User feedback: {}", user_feedback)
-    }
+    };
+    (text, resp.parts)
 }
 
 async fn handle_ask_user_text(
@@ -257,7 +277,7 @@ async fn handle_ask_user_text(
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
-) -> String {
+) -> (String, Vec<InboundPart>) {
     let prompt = arg_str(arguments, "prompt", "");
 
     backend.log(&format!(
@@ -272,11 +292,12 @@ async fn handle_ask_user_text(
 
     backend.log("[tool] ask_user_text \u{2192} done");
 
-    if answer.trim().is_empty() {
+    let text = if answer.trim().is_empty() {
         "User provided no answer.".to_string()
     } else {
         answer
-    }
+    };
+    (text, resp.parts)
 }
 
 async fn handle_ask_user_choice(
@@ -284,7 +305,7 @@ async fn handle_ask_user_choice(
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
-) -> String {
+) -> (String, Vec<InboundPart>) {
     let prompt = arg_str(arguments, "prompt", "");
     let options: Vec<String> = arguments
         .get("options")
@@ -297,7 +318,10 @@ async fn handle_ask_user_choice(
         .unwrap_or_default();
 
     if options.len() < 2 {
-        return "[error] ask_user_choice requires at least 2 options".to_string();
+        return (
+            "[error] ask_user_choice requires at least 2 options".to_string(),
+            Vec::new(),
+        );
     }
 
     backend.log(&format!(
@@ -318,7 +342,7 @@ async fn handle_ask_user_choice(
 
     backend.log("[tool] ask_user_choice \u{2192} done");
 
-    format!("User chose: {}", choice)
+    (format!("User chose: {}", choice), resp.parts)
 }
 
 async fn handle_ask_user_confirm(
@@ -326,7 +350,7 @@ async fn handle_ask_user_confirm(
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
-) -> String {
+) -> (String, Vec<InboundPart>) {
     let prompt = arg_str(arguments, "prompt", "");
 
     backend.log(&format!(
@@ -340,7 +364,10 @@ async fn handle_ask_user_confirm(
 
     backend.log("[tool] ask_user_confirm \u{2192} done");
 
-    format!("User answered: {}", if approved { "Yes" } else { "No" })
+    (
+        format!("User answered: {}", if approved { "Yes" } else { "No" }),
+        resp.parts,
+    )
 }
 
 async fn handle_edit_document(
@@ -348,7 +375,7 @@ async fn handle_edit_document(
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
-) -> String {
+) -> (String, Vec<InboundPart>) {
     let content = arg_str(arguments, "content", "");
     let prompt = arg_str(
         arguments,
@@ -369,11 +396,12 @@ async fn handle_edit_document(
 
     backend.log("[tool] edit_document \u{2192} done");
 
-    if edited.trim().is_empty() {
+    let text = if edited.trim().is_empty() {
         format!("User made no changes. Current document:\n{}", content)
     } else {
         format!("User-edited document:\n{}", edited)
-    }
+    };
+    (text, resp.parts)
 }
 
 #[cfg(test)]
@@ -456,6 +484,38 @@ mod tests {
             .await;
             assert!(result.is_some());
         }
+    }
+
+    /// The files a person attached to an answer come back beside the text,
+    /// and the text-only entry point drops them.
+    #[tokio::test]
+    async fn an_answers_files_come_back_beside_its_text() {
+        let answer = InteractionResponse::text("", "see the sketch")
+            .with_parts(vec![InboundPart::from_bytes("sketch.png", vec![1, 2, 3])]);
+        let backend = MockBackend::with_responses(vec![answer.clone()]);
+        let (text, parts) = dispatch_dynamic_interaction_with_parts(
+            &backend,
+            "ask_user_text",
+            "id1",
+            &serde_json::json!({"prompt": "p"}),
+            "main",
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "see the sketch");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].name, "sketch.png");
+        let backend = MockBackend::with_responses(vec![answer]);
+        let text = dispatch_dynamic_interaction(
+            &backend,
+            "ask_user_text",
+            "id1",
+            &serde_json::json!({"prompt": "p"}),
+            "main",
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "see the sketch");
     }
 
     // ─── present_for_review ─────────────────────────────────────────────────

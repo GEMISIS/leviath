@@ -717,6 +717,7 @@ impl Server {
             // The protocol's permission outcome is an option id and nothing
             // else, so a host cannot say why it refused.
             feedback: None,
+            parts: Vec::new(),
         };
         let _ = self
             .control

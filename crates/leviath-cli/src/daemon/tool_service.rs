@@ -24,7 +24,7 @@ use leviath_core::interaction::{ApprovalScope, InteractionRequest};
 use leviath_core::region::EntryContent;
 use leviath_providers::ToolCall;
 use leviath_runtime::dynamic_interaction::{
-    InteractionBackend, UnattendedInteraction, dispatch_dynamic_interaction,
+    InteractionBackend, UnattendedInteraction, dispatch_dynamic_interaction_with_parts,
 };
 use leviath_runtime::interaction_hub::HubInteractionBackend;
 use leviath_runtime::pipeline::{ToolProgress, ToolService};
@@ -536,30 +536,89 @@ fn mcp_content(
         _ => Vec::new(),
     };
     let text = super::seed_tool::mcp_text(result);
-    if blobs.is_empty() {
+    let attached = blobs
+        .into_iter()
+        .map(|blob| Attached {
+            declared: Some(blob.media_type.to_string()),
+            name: blob.name,
+            data: blob.bytes,
+            deliver: None,
+        })
+        .collect();
+    with_attached(tool, text, attached, media)
+}
+
+/// A person's answer as the region will hold it: the text, then every file
+/// attached to it as a stored part, typed by the registry (the sender's
+/// declaration first) and named as the sender named it.
+fn answer_content(
+    tool: &str,
+    text: String,
+    attached: Vec<leviath_core::media::InboundPart>,
+    media: Option<&leviath_tools::ToolMedia>,
+) -> EntryContent {
+    let attached = attached
+        .into_iter()
+        .map(|part| Attached {
+            declared: part.media_type.map(|t| t.to_string()),
+            name: Some(part.name),
+            data: part.data,
+            deliver: part.deliver,
+        })
+        .collect();
+    with_attached(tool, text, attached, media)
+}
+
+/// Bytes on their way into a region beside some text: an MCP block, or a
+/// file a person attached to an answer.
+struct Attached {
+    /// The type the sender declared, when it did; the registry sniffs one
+    /// otherwise, and corrects a declaration it cannot parse.
+    declared: Option<String>,
+    /// The name the sender gave the bytes, when it did.
+    name: Option<String>,
+    /// The bytes.
+    data: Vec<u8>,
+    /// How the part should reach a model, when the sender had a preference.
+    deliver: Option<leviath_core::media::Delivery>,
+}
+
+/// `text`, then each of `attached` as a stored part. Nothing to attach is
+/// text alone; a file that cannot be stored (no store, over the ceiling)
+/// is described in the text instead of dropped.
+fn with_attached(
+    tool: &str,
+    text: String,
+    attached: Vec<Attached>,
+    media: Option<&leviath_tools::ToolMedia>,
+) -> EntryContent {
+    if attached.is_empty() {
         return text.into();
     }
     let mut parts = vec![leviath_core::media::Part::text(text)];
-    for (i, mut blob) in blobs.into_iter().enumerate() {
+    for (i, item) in attached.into_iter().enumerate() {
+        let size = leviath_core::media::human_size(item.data.len() as u64);
         let Some(media) = media else {
+            let what = match (&item.declared, &item.name) {
+                (Some(declared), _) => format!("{declared} block of {size}"),
+                (None, Some(name)) => format!("'{name}' ({size})"),
+                (None, None) => format!("a file of {size}"),
+            };
             parts.push(leviath_core::media::Part::text(format!(
-                "[{} block of {} dropped: this run has no blob store]",
-                blob.media_type,
-                leviath_core::media::human_size(blob.bytes.len() as u64)
+                "[{what} dropped: this run has no blob store]"
             )));
             continue;
         };
-        blob.media_type = media.type_of(
-            Some(blob.media_type.as_str()),
-            blob.name.as_deref(),
-            &blob.bytes,
-        );
-        if blob.name.is_none() {
-            let name = media.name_for(&format!("{tool}-{}", i + 1), &blob.media_type);
-            blob = blob.named(name);
-        }
+        let media_type = media.type_of(item.declared.as_deref(), item.name.as_deref(), &item.data);
+        let name = item
+            .name
+            .unwrap_or_else(|| media.name_for(&format!("{tool}-{}", i + 1), &media_type));
+        let blob = leviath_core::media::Blob::new(media_type, item.data).named(name);
         match media.store(blob) {
-            Ok(part) => parts.push(part),
+            Ok(part) => parts.push(match item.deliver {
+                Some(deliver) => part.delivered(deliver),
+                None => part,
+            }),
             Err(e) => parts.push(leviath_core::media::Part::text(format!(
                 "[block dropped: {e}]"
             ))),
@@ -685,13 +744,18 @@ pub(crate) async fn dispatch_tools(
             true => &UnattendedInteraction,
             false => &state.interaction,
         };
-        if let Some(result) =
-            dispatch_dynamic_interaction(interaction, &tc.name, &tc.id, &tc.arguments, &stage_name)
-                .await
+        if let Some((text, attached)) = dispatch_dynamic_interaction_with_parts(
+            interaction,
+            &tc.name,
+            &tc.id,
+            &tc.arguments,
+            &stage_name,
+        )
+        .await
         {
             // Journal the user's answer now: pass 2 hasn't run yet, and losing
             // an answered prompt to a crash means re-asking it on resume.
-            let result: EntryContent = result.into();
+            let result = answer_content(&tc.name, text, attached, state.builtins.media());
             progress(&tc.id, &result);
             slots.push((tc.id, Some(result)));
             continue;
@@ -1260,9 +1324,23 @@ mod tests {
         mcp: leviath_mcp::ToolExecutor,
         global: HashMap<String, ToolPolicy>,
     ) -> Arc<AgentToolState> {
-        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+        state_with_ctx(
+            hub,
+            mcp,
+            global,
             leviath_tools::ToolContext::new(std::env::temp_dir()),
-        ));
+        )
+    }
+
+    /// [`state_with`] over a tool context the caller built, for the tests
+    /// that give the tools a blob store.
+    fn state_with_ctx(
+        hub: &InteractionHub,
+        mcp: leviath_mcp::ToolExecutor,
+        global: HashMap<String, ToolPolicy>,
+        ctx: leviath_tools::ToolContext,
+    ) -> Arc<AgentToolState> {
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(ctx));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
@@ -3496,6 +3574,69 @@ mod tests {
         assert!(out[0].1.contains("Ada"));
     }
 
+    /// A file attached to an answer lands beside the text as a stored part
+    /// when the run has a store, typed by the registry and delivered as the
+    /// sender asked; without one the text says what was dropped.
+    #[tokio::test]
+    async fn an_answers_files_are_stored_beside_its_text() {
+        use leviath_core::media::{InboundPart, MediaType};
+        fn ask(req: &InteractionRequest) -> InteractionResponse {
+            InteractionResponse::text(&req.id, "see the sketch").with_parts(vec![
+                InboundPart::from_bytes("sketch.png", b"\x89PNG\r\n\x1a\nsketch".to_vec())
+                    .delivered(leviath_core::media::Delivery::Text),
+                InboundPart::from_bytes("notes", b"plain words".to_vec())
+                    .typed(MediaType::parse("text/plain").unwrap()),
+            ])
+        }
+        let call_it = || {
+            vec![call(
+                "c1",
+                "ask_user_text",
+                serde_json::json!({"prompt": "sketch?"}),
+            )]
+        };
+
+        let hub = InteractionHub::new();
+        let ctx = leviath_tools::ToolContext::new(std::env::temp_dir())
+            .with_media(Arc::new(media_for_answers(1024)));
+        let state = state_with_ctx(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new(), ctx);
+        let out = dispatch_answering(state, call_it(), ask, hub).await;
+        let content = &out[0].1;
+        assert!(content.as_str().starts_with("see the sketch"), "{content}");
+        assert_eq!(content.stored_count(), 2);
+        let png = &content.parts()[1];
+        assert_eq!(png.media_type.as_str(), "image/png");
+        assert_eq!(png.name.as_deref(), Some("sketch.png"));
+        assert_eq!(png.deliver, Some(leviath_core::media::Delivery::Text));
+        assert_eq!(content.parts()[2].media_type.as_str(), "text/plain");
+
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let out = dispatch_answering(state, call_it(), ask, hub).await;
+        let content = &out[0].1;
+        assert!(content.as_str().contains("['sketch.png'"), "{content}");
+        assert!(
+            content
+                .as_str()
+                .contains("dropped: this run has no blob store")
+        );
+        assert!(
+            content.as_str().contains("text/plain block of"),
+            "{content}"
+        );
+        assert!(!content.has_stored());
+    }
+
+    /// The store the answer tests give their tools.
+    fn media_for_answers(max: u64) -> leviath_tools::ToolMedia {
+        leviath_tools::ToolMedia {
+            store: Arc::new(leviath_core::media::MemoryBlobStore::new()),
+            registry: Arc::new(leviath_core::media::MediaRegistry::builtin()),
+            run_id: "run-1".to_string(),
+            max_part_bytes: max,
+        }
+    }
+
     #[tokio::test]
     async fn ask_approved_once_executes() {
         let hub = InteractionHub::new();
@@ -4053,6 +4194,22 @@ mod mcp_content_tests {
             "the answer\n[image/png block of 11 B dropped: this run has no blob store]"
         );
         assert!(!out.has_stored());
+        // Bytes with neither a type nor a name are still accounted for.
+        let nameless = with_attached(
+            "t",
+            "the answer".to_string(),
+            vec![Attached {
+                declared: None,
+                name: None,
+                data: vec![1, 2, 3],
+                deliver: None,
+            }],
+            None,
+        );
+        assert!(
+            nameless.as_str().contains("[a file of 3 B dropped"),
+            "{nameless}"
+        );
         let small = media(4);
         let out = mcp_content("t", result(true, vec![png(None)]), Some(&small));
         assert!(
