@@ -722,6 +722,11 @@ impl BuiltinTools {
                             "type": "string",
                             "description": "Optional initial context to inject into the sub-agent's first Pinned region"
                         },
+                        "parts": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional stored parts of this run to hand the sub-agent, each by name or by a prefix of its sha256 (as listed in your context). Each lands in the child's task region as a typed part."
+                        },
                         "max_child_depth": {
                             "type": "integer",
                             "description": "Optional max depth for the sub-agent's own children"

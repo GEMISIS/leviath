@@ -254,6 +254,30 @@ pub(crate) fn collect_compaction(
                     );
                     continue;
                 }
+                // The summary is text: whatever stored parts the region held
+                // are gone with the entries it replaces. Said once, by name,
+                // so a run that lost an image to compaction can tell why the
+                // model stopped seeing it; the stand-ins the summary was
+                // written from are what it keeps.
+                let dropped: Vec<String> = window
+                    .get_region(&region_name)
+                    .map(|r| {
+                        r.content
+                            .iter()
+                            .flat_map(|e| e.content.stored())
+                            .map(|p| p.name.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !dropped.is_empty() {
+                    let names = dropped.join(", ");
+                    tracing::warn!(
+                        region = %region_name,
+                        parts = %names,
+                        "[media] compaction replaced entries carrying stored parts with a text summary; \
+                         the parts stay in the run's store but leave the window"
+                    );
+                }
                 let summary_tokens = leviath_core::estimate_tokens(&summary);
                 let history = window
                     .regions

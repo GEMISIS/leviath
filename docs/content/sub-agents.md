@@ -57,9 +57,24 @@ With `wait: false` you get the child's id straight back and check on it yourself
 Waiting does not hold a slot on the tool lane, so a parent waiting on a child cannot starve the
 child of the capacity it needs to finish.
 
-`seed_context` injects starting material into the child's first pinned region, and
+`seed_context` injects starting material into the child's first pinned region, `parts` hands
+it files this run holds as stored [parts](/docs/media), and
 `output_format` / `output_instructions` ask it for a particular shape of answer, overriding its
-blueprint's. Override with care: an `output_format` that differs from what the child's blueprint
+blueprint's.
+
+```jsonc
+spawn_agent({
+  "blueprint": "sprite-editor",
+  "task": "make the arm longer on @hero.png",
+  "parts": ["hero.png"]        // by name, or by six or more characters of the sha256
+})
+```
+
+Each named part is read from this run's store and lands in the child's task region as a typed
+part, delivered the way it was here, so a worker sees the image its parent was asked about rather
+than a stand-in. A name that matches nothing, or bytes the store no longer holds, refuses the spawn
+by name: a child started without the file its parent meant to hand it would work from a stand-in
+and never know. Override with care: an `output_format` that differs from what the child's blueprint
 declares retires any Rhai validator and JSON schema it declared, since a check written for one
 shape cannot judge another, and the only warning goes to the daemon log.
 

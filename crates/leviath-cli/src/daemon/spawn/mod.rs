@@ -1020,6 +1020,8 @@ fn build_agent_inner(
         unattended: args.yolo,
         yolo_profile: yolo_profile_name.clone(),
         model_override: args.model.clone(),
+        offered_parts: offered_parts.clone(),
+        media: Some(media.clone()),
     };
     // Build the dynamic-tools re-resolution context and tag the entity
     // `DynamicTools` so the runtime polls it for mid-run re-scans.

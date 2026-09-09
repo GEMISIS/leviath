@@ -554,6 +554,12 @@ flowchart TD
   T -->|clearable / temporary| CL["Trimmed or cleared under budget pressure"]
 ```
 
+A summary is text. When a compacting region's entries carried stored [parts](/docs/media) (an
+attached image, a file a tool stored), the summary is written from their stand-ins and the parts
+leave the window with the entries they sat on. The bytes stay in the run's store, `lev blobs`
+still lists them, and the run log names which ones a compaction dropped. Pin a region whose files
+a later stage needs, or have the stage put them somewhere pinned with `context_attach`.
+
 ## Letting the agent decide what to forget
 
 Everything above is reactive: a region crosses a threshold and the runtime makes room. That is the

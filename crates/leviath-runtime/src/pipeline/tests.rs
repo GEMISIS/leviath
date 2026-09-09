@@ -11718,6 +11718,54 @@ fn collect_compaction_stores_summary_and_clears_source() {
     assert!(world.get::<AwaitingCompaction>(e).is_none());
 }
 
+/// A summary is text: the stored parts the region's entries carried leave the
+/// window with them, named in the log, while the bytes stay in the store.
+#[test]
+fn collect_compaction_names_the_stored_parts_a_summary_replaced() {
+    use leviath_core::media::{BlobRef, MediaType, Part};
+    let (mut world, tx) = world_with_compaction_results();
+    let mut window = compacting_window();
+    let blob = BlobRef {
+        sha256: "ab".repeat(32),
+        media_type: MediaType::parse("image/png").unwrap(),
+        size: 3,
+        width: None,
+        height: None,
+        duration_ms: None,
+        tokens: 1,
+        stand_in: "[image/png, 3 B] hero.png".to_string(),
+    };
+    window
+        .get_region_mut("conv")
+        .unwrap()
+        .add_typed_entry(
+            leviath_core::region::EntryContent::from_parts(vec![
+                Part::text("see"),
+                Part::stored(blob.clone()).named("hero.png"),
+                Part::stored(blob),
+            ]),
+            2,
+            leviath_core::EntryKind::Text,
+        )
+        .unwrap();
+    let e = world.spawn((window, AwaitingCompaction)).id();
+    tx.send(CompactionOutcome {
+        entity: e,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect_compaction(&mut world);
+
+    let w = world.get::<ContextWindow>(e).unwrap();
+    assert_eq!(w.get_region("conv").unwrap().stored_count(), 0);
+    assert!(w.get_region("history").unwrap().current_tokens > 0);
+}
+
 /// A summary with nothing in it is a compaction that failed, not one that found
 /// nothing worth keeping. Storing it trades the region's real contents for a
 /// blank, and the blank later reaches a provider as a zero-length turn - which
