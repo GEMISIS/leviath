@@ -216,6 +216,13 @@ same list.
   the next request, `lev blobs`, the dashboard and the API all see it. What
   the run cannot keep is described in the reply instead. `perf-tools/mock.py`
   draws a PNG with `LV_MOCK_IMAGE=1` (#400).
+- `spawn_agent` takes `parts`: stored parts of the parent run, by name or
+  sha256 prefix, read from the parent's store and put on the child's task
+  region as typed parts, delivered as the parent's were. A name that matches
+  nothing, or bytes the store has lost, refuses the spawn by name. A
+  compaction that replaces entries carrying stored parts with a text summary
+  names the parts it dropped in the run log; the bytes stay in the store
+  (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

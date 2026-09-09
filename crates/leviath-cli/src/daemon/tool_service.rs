@@ -3504,6 +3504,8 @@ mod tests {
             unattended: false,
             yolo_profile: None,
             model_override: None,
+            offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            media: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),

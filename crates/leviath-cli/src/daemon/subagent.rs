@@ -4,6 +4,7 @@
 //! tool lane runs off the world, so it blocks on the host applying each op via a
 //! oneshot - the same shape as an interaction.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use leviath_providers::ToolCall;
@@ -49,6 +50,68 @@ pub(crate) struct SubAgentHandle {
     /// blueprint's model list instead. `None` when the run named no model,
     /// which leaves every child resolving from its blueprint.
     pub model_override: Option<String>,
+    /// The parent's stored parts, as the runtime last offered them to the
+    /// tool lane: what `spawn_agent`'s `parts` names.
+    pub offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::media::Part>>>,
+    /// The parent's blob store, to read a named part's bytes from. `None`
+    /// in a world with no store, where `parts` is refused.
+    pub media: Option<Arc<leviath_tools::ToolMedia>>,
+}
+
+/// The parts `spawn_agent`'s `parts` argument names, read from the parent's
+/// store as inbound parts for the child, which stores them again under its
+/// own run. A name that matches nothing, or bytes the store no longer holds,
+/// refuses the spawn: a child started without the file its parent meant to
+/// hand it would work from a stand-in and never know.
+fn parts_for_child(
+    h: &SubAgentHandle,
+    args: &serde_json::Value,
+) -> Result<Vec<leviath_core::media::InboundPart>, String> {
+    let wanted: Vec<&str> = args
+        .get("parts")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(media) = h.media.as_deref() else {
+        return Err(
+            "this run has no blob store, so it has no parts to hand a sub-agent".to_string(),
+        );
+    };
+    let offered = h
+        .offered_parts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    wanted
+        .into_iter()
+        .map(|name| {
+            let (part, blob) = offered
+                .iter()
+                .filter_map(|p| p.blob().map(|b| (p, b)))
+                .find(|(p, _)| leviath_scripting::parts::part_matches(p, name))
+                .ok_or_else(|| {
+                    format!(
+                        "'{name}' names no stored part of this run (a part's name or sha256 prefix)"
+                    )
+                })?;
+            let bytes = media
+                .store
+                .read(&media.run_id, &blob.sha256)
+                .map_err(|e| format!("'{name}' could not be read from the store: {e}"))?;
+            let mut inbound = leviath_core::media::InboundPart::from_bytes(
+                part.name
+                    .clone()
+                    .unwrap_or_else(|| blob.short_sha().to_string()),
+                bytes.to_vec(),
+            )
+            .typed(blob.media_type.clone());
+            inbound.deliver = part.deliver;
+            Ok(inbound)
+        })
+        .collect()
 }
 
 // The sub-agent tool-name list lives in `leviath-tools` (next to the tool
@@ -133,6 +196,10 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         .get("max_child_depth")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
+    let parts = match parts_for_child(h, args) {
+        Ok(parts) => parts,
+        Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
+    };
     let wait_flag = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
     // A parent may ask its child for a particular shape. Passed through as a
     // label, never interpreted: the child's own `submit_output` description is
@@ -175,7 +242,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         std::collections::HashMap::new(),
         no_seed_commands: h.no_seed_commands,
         output_request: child_output,
-        parts: Vec::new(),
+        parts,
     }) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
@@ -406,6 +473,8 @@ mod tests {
             unattended: false,
             yolo_profile: None,
             model_override: None,
+            offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            media: None,
         };
 
         for bad in [
@@ -447,6 +516,8 @@ mod tests {
             unattended: false,
             yolo_profile: None,
             model_override: None,
+            offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            media: None,
         };
         let out = spawn(
             &h,
@@ -466,6 +537,8 @@ mod tests {
 
     fn handle_with(sender: UnboundedSender<SubAgentOp>) -> SubAgentHandle {
         SubAgentHandle {
+            offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            media: None,
             sender,
             parent_run_id: "parent".to_string(),
             // This crate's own directory, deliberately *not* the system temp
@@ -727,6 +800,107 @@ task = { kind = "pinned", max_tokens = 1000 }
                 "a child inherits the parent's unattended setting"
             );
         }
+    }
+
+    /// `parts` hands the child files the parent holds: read from the parent's
+    /// store by name or hash prefix, typed and delivered as the parent's part
+    /// was, and refused by name when the parent has no such part or no store.
+    #[tokio::test]
+    async fn spawn_hands_named_parts_to_the_child() {
+        use leviath_core::media::{Blob, BlobStore, Delivery, MediaRegistry, MediaType, Part};
+        let bp = temp_blueprint();
+        let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        let store = std::sync::Arc::new(leviath_core::media::MemoryBlobStore::new());
+        let registry = MediaRegistry::builtin();
+        let png = Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nhero".to_vec(),
+        );
+        let stored = store.put("parent", &png, &registry).unwrap();
+        let other = Blob::new(MediaType::parse("image/png").unwrap(), b"other".to_vec());
+        let unnamed = store.put("parent", &other, &registry).unwrap();
+        let sha = unnamed.sha256.clone();
+        let lost = leviath_core::media::BlobRef {
+            sha256: "e".repeat(64),
+            ..stored.clone()
+        };
+        *h.offered_parts.lock().unwrap() = vec![
+            Part::text("words"),
+            Part::stored(stored)
+                .named("hero.png")
+                .delivered(Delivery::Text),
+            Part::stored(unnamed),
+            Part::stored(lost).named("lost.png"),
+        ];
+        h.media = Some(std::sync::Arc::new(leviath_tools::ToolMedia {
+            store,
+            registry: std::sync::Arc::new(registry),
+            run_id: "parent".to_string(),
+            max_part_bytes: 1024,
+        }));
+        let prefix: String = sha.chars().take(8).collect();
+        let out = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({
+                    "blueprint": bp.path().to_str().unwrap(),
+                    "task": "edit @hero.png",
+                    "parts": ["hero.png", prefix]
+                }),
+            ),
+        )
+        .await;
+        assert!(out.contains("Spawned sub-agent"), "{out}");
+        {
+            let seen = seen.lock().unwrap();
+            let parts = &seen[0].parts;
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0].name, "hero.png");
+            assert_eq!(parts[0].media_type.as_ref().unwrap().as_str(), "image/png");
+            assert_eq!(parts[0].deliver, Some(Delivery::Text));
+            assert_eq!(parts[0].data, b"\x89PNG\r\n\x1a\nhero");
+            // The unnamed part is named by its hash.
+            assert_eq!(parts[1].name, sha.chars().take(12).collect::<String>());
+            assert_eq!(parts[1].data, b"other");
+            assert!(parts[1].deliver.is_none());
+        }
+
+        // A name the parent holds no part under, and a part whose bytes the
+        // store has lost, each refuse the spawn by name.
+        for (wanted, says) in [
+            ("nope.png", "names no stored part"),
+            ("lost.png", "could not be read from the store"),
+        ] {
+            let out = handle(
+                &h,
+                &tc(
+                    "spawn_agent",
+                    json!({"blueprint": bp.path().to_str().unwrap(), "task": "go", "parts": [wanted]}),
+                ),
+            )
+            .await;
+            assert!(out.starts_with("[error] cannot spawn"), "{out}");
+            assert!(out.contains(says), "{out}");
+        }
+        // No store at all: the argument is refused outright. Nothing named:
+        // nothing handed on.
+        h.media = None;
+        let out = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go", "parts": ["hero.png"]}),
+            ),
+        )
+        .await;
+        assert!(out.contains("no blob store"), "{out}");
+        assert!(
+            parts_for_child(&h, &json!({"parts": []}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parts_for_child(&h, &json!({})).unwrap().is_empty());
     }
 
     /// A run's `--model` covers the children it spawns as well. The child is
