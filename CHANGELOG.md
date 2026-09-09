@@ -78,9 +78,8 @@ same list.
   referenced by hash everywhere else, so the journal and `context.json` never
   grow by a file's size. What a type *is* comes from a media registry rather
   than from code: the compiled defaults, then `[media_types]` in the config,
-  then a blueprint's own rows, then rows a provider declares, each naming a
-  family, whether the bytes are text, a token rule, extensions, a magic prefix
-  and a stand-in template. `[media]` sets the size ceilings. `lev doctor`
+  each row naming a family, whether the bytes are text, a token rule,
+  extensions, a magic prefix and a stand-in template. `[media]` sets the size ceilings. `lev doctor`
   reports a row that will not load. A region says what it takes with
   `accepts = ["text/*", "image/png"]` and how many stored parts it holds with
   `max_stored`; a region with a `schema` takes text only. A snapshot or

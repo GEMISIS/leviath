@@ -3,10 +3,9 @@
 //!
 //! The registry decides what every attached file *is*: its family, whether
 //! its bytes are text, how many tokens it is budgeted at, and what a model
-//! that cannot take it sees instead. Those answers come from four layers
-//! (the compiled defaults, `[media_types]` in the config, a blueprint's own
-//! rows, a provider's), and this is the place to see the result of the
-//! layering before a run depends on it.
+//! that cannot take it sees instead. Those answers come from two layers
+//! (the compiled defaults, then `[media_types]` in the config), and this is
+//! the place to see the result of the layering before a run depends on it.
 
 use std::path::{Path, PathBuf};
 
@@ -121,8 +120,7 @@ fn render_list(registry: &MediaRegistry, json: bool) -> String {
         ));
     }
     out.push_str(&format!(
-        "\n{} type{}. Rows layer: compiled defaults, then [media_types] in the config, then a \
-         blueprint's own rows, then a provider's.\n",
+        "\n{} type{}. Rows layer: compiled defaults, then [media_types] in the config.\n",
         rows.len(),
         match rows.len() {
             1 => "",

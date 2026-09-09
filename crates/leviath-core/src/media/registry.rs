@@ -4,9 +4,9 @@
 //! type's [`MediaInfo`]: which family it belongs to (so a provider can pick an
 //! encoder), whether its bytes are text (so they can travel inline), how to
 //! estimate its tokens, which extensions imply it, and what to show a consumer
-//! that cannot take it. Rows come from four places and later ones win field by
-//! field: the defaults compiled into this crate, `[media_types]` in the user's
-//! config, `[media_types]` in a blueprint, and rows a provider declares.
+//! that cannot take it. Rows come from two places and later ones win field by
+//! field: the defaults compiled into this crate, then `[media_types]` in the
+//! user's config.
 //!
 //! Resolution is layered too. `image/png` inherits every field it does not
 //! set from `image/*`, which inherits from `*/*`, so a user row can add one

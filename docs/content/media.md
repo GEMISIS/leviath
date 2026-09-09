@@ -45,7 +45,7 @@ and optionally a magic prefix and a stand-in template. A row for `image/*` suppl
 for every image subtype; `*/*` is the last resort.
 
 ```toml
-# ~/.leviath/config.toml, or [media_types] in an agent's blueprint
+# ~/.leviath/config.toml
 [media_types."model/obj"]
 extensions = ["obj"]
 text = true                      # UTF-8 under the hood: may reach a text model as text
@@ -67,8 +67,8 @@ stand_in = "[{type} {size}] {name}"
 | `magic` | A hex prefix that identifies the bytes |
 | `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
 
-Rows layer. The compiled defaults come first, then your config, then the blueprint's own
-`[media_types]`, then rows a Rhai provider declares. A row names only what it changes: adding
+Rows layer. The compiled defaults come first, then your config's `[media_types]`. A row names
+only what it changes: adding
 an extension to `image/png` keeps its family and token rule. `lev media list` prints the
 effective table with the source of every row, and `lev media check <file>` says what type a
 file resolves to, what its stand-in looks like, and how it reaches a model; `lev models list
