@@ -414,6 +414,7 @@ fn request_to_dynamic(request: &InferenceRequest) -> Dynamic {
 /// emits from a full [`InferenceResponse`].
 fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
     StreamChunk {
+        parts: Vec::new(),
         delta: response.content,
         tool_calls: response
             .tool_calls

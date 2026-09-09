@@ -173,9 +173,16 @@ and must return:
   "tokens_used": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                    "cached_tokens": 0, "cache_write_tokens": 0,
                    "cost_usd": 0.0 },
-  "finish_reason": "Complete"   // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
+  "finish_reason": "Complete",  // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
+  "parts": [ { "bytes": <blob>, "media_type": "image/png", "name": "hero.png" } ]
 }
 ```
+
+`parts` is what a model that draws or speaks handed back, and is usually absent. Each entry
+carries its bytes as a Rhai blob under `bytes` or as base64 under `data`, a `media_type`
+(`application/octet-stream` when missing or unparsable, which the run's registry sniffs past),
+and an optional `name`. An entry with no bytes is skipped. A stream chunk takes the same key.
+See [Media](/docs/media#what-a-model-hands-back) for where the parts go.
 
 `finish_reason` also accepts the common wire spellings (`tool_calls`, `tool_use`, `length`,
 `max_tokens`, `stop_sequence`), and anything unrecognized reads as `Complete`, so most APIs'

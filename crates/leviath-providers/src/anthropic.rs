@@ -814,6 +814,7 @@ impl AnthropicProvider {
             ),
             finish_reason: Self::parse_stop_reason(stop_reason),
             reasoning: None,
+            parts: Vec::new(),
         })
     }
 }

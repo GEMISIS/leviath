@@ -652,6 +652,7 @@ impl OllamaProvider {
             },
             finish_reason,
             reasoning: None,
+            parts: Vec::new(),
         })
     }
 }
@@ -910,6 +911,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
         .to_string();
     if !done {
         return StreamChunk {
+            parts: Vec::new(),
             delta: content,
             tool_calls: Vec::new(),
             tokens: None,
@@ -959,6 +961,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
     };
 
     StreamChunk {
+        parts: Vec::new(),
         delta: content,
         tool_calls,
         tokens: Some(TokenUsage {
@@ -999,6 +1002,7 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
         tokens: None,
         finish_reason: Some(FinishReason::Complete),
         reasoning: None,
+        parts: Vec::new(),
     })
 }
 

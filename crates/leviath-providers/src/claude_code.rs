@@ -342,6 +342,7 @@ impl ClaudeCodeProvider {
             ),
             finish_reason,
             reasoning: None,
+            parts: Vec::new(),
         })
     }
 }

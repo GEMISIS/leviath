@@ -133,7 +133,43 @@ pub(crate) fn apply_tool_results(
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
-    let response_tokens = leviath_core::estimate_tokens(response_content);
+    apply_tool_results_with_parts(
+        window,
+        Reply {
+            text: response_content,
+            parts: &[],
+        },
+        tool_calls,
+        tool_results,
+        routing,
+        sensitivities,
+        reasoning,
+    );
+}
+
+/// A reply as the assistant turn records it: its text and any media the
+/// model produced beside its tool calls.
+pub(crate) struct Reply<'a> {
+    /// The reply's text.
+    pub(crate) text: &'a str,
+    /// The media it produced, already stored.
+    pub(crate) parts: &'a [leviath_core::media::Part],
+}
+
+/// [`apply_tool_results`] for a reply that produced media beside its tool
+/// calls: the parts ride the assistant turn ahead of the tool results.
+pub(crate) fn apply_tool_results_with_parts(
+    window: &mut ContextWindow,
+    reply: Reply<'_>,
+    tool_calls: &[crate::components::ToolCall],
+    tool_results: &[crate::tool_bridge::ToolResult],
+    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
+    reasoning: Option<String>,
+) {
+    let content = super::response::reply_content(reply.text, reply.parts)
+        .unwrap_or_else(|| leviath_core::region::EntryContent::text(reply.text));
+    let response_tokens = content.tokens_hint();
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
         .iter()
         .map(|tc| leviath_core::SerializedToolCall {
@@ -143,12 +179,12 @@ pub(crate) fn apply_tool_results(
             thought_signature: tc.thought_signature.clone(),
         })
         .collect();
-    let _ = window.add_assistant_turn(
+    let _ = window.add_assistant_turn_content(
         "conversation",
         leviath_core::EntryKind::AssistantTurn {
             tool_calls: serialized,
         },
-        response_content.to_string(),
+        content,
         response_tokens,
         reasoning,
     );

@@ -208,6 +208,14 @@ same list.
   session's working directory. Embedders get the same: `SpawnSpec::attach`,
   `AgentWorld::send_message_with`, `InteractionResponse::with_parts`, and
   `artifacts` on the answer (#400).
+- Media a model produces comes back as parts. An OpenAI-shaped provider
+  reads data URIs off the reply (OpenRouter's `images` list, `image_url`
+  items in a content array, streamed or not) and a Rhai provider returns
+  them under `parts`; the runtime stores each one and writes it beside the
+  reply's text on the assistant turn, named as the provider named it, so
+  the next request, `lev blobs`, the dashboard and the API all see it. What
+  the run cannot keep is described in the reply instead. `perf-tools/mock.py`
+  draws a PNG with `LV_MOCK_IMAGE=1` (#400).
 - A renamed-key table (`config/renamed.rs`) that every surface reads: the
   loader respells an old key in the file text before parsing, so a type
   error still points at its line; the unread-key warning does not report it;

@@ -13,12 +13,15 @@ pub(crate) struct ProcessResponse;
 pub(crate) struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Convert a provider response into the stored `InferenceResult` component.
-/// (Ported from `AgentEngine::apply_inference_response`.)
+/// (Ported from `AgentEngine::apply_inference_response`.) `parts` are the
+/// response's media once stored, from [`store_model_parts`].
 pub(crate) fn to_inference_result(
     response: &leviath_providers::InferenceResponse,
+    parts: Vec<leviath_core::media::Part>,
 ) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
         response: response.content.clone(),
+        parts,
         tool_calls: response
             .tool_calls
             .iter()
@@ -34,6 +37,54 @@ pub(crate) fn to_inference_result(
             .then_some(response.tokens_used.completion_tokens),
         reasoning: response.reasoning.clone(),
     }
+}
+
+/// Put the media a model produced into the run's store, each as a stored
+/// part named as the provider named it. A blob the run cannot keep (no
+/// store, over the ceiling) becomes a text part saying so, so the model's
+/// own reply still records that it made something.
+pub(crate) fn store_model_parts(
+    blobs: Vec<leviath_core::media::Blob>,
+    run_id: &str,
+    media: &crate::blob_store::MediaParams,
+) -> Vec<leviath_core::media::Part> {
+    if blobs.is_empty() {
+        return Vec::new();
+    }
+    let (sources, _) = media.hydration_inputs();
+    let Some((store, registry)) = sources else {
+        return blobs
+            .into_iter()
+            .map(|blob| {
+                leviath_core::media::Part::text(format!(
+                    "[{} of {} from the model dropped: this run has no blob store]",
+                    blob.media_type,
+                    leviath_core::media::human_size(blob.bytes.len() as u64)
+                ))
+            })
+            .collect();
+    };
+    let sink = crate::context_setup::PartSink {
+        store: store.as_ref(),
+        registry: &registry,
+        run_id,
+        max_part_bytes: media.max_part_bytes(),
+    };
+    blobs
+        .into_iter()
+        .enumerate()
+        .map(|(i, blob)| {
+            let name = blob
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("model-{}", i + 1));
+            let mut inbound = leviath_core::media::InboundPart::from_bytes(name, blob.bytes);
+            inbound.media_type = Some(blob.media_type);
+            sink.store_part(&inbound).unwrap_or_else(|e| {
+                leviath_core::media::Part::text(format!("[model output dropped: {e}]"))
+            })
+        })
+        .collect()
 }
 
 /// What a person has to do about a provider that could not be reached.
@@ -123,6 +174,7 @@ pub(crate) fn collect_inference(
     mut circuits: Option<ResMut<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,
     persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
+    media: crate::blob_store::MediaParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -313,7 +365,8 @@ pub(crate) fn collect_inference(
                         ),
                     ));
                 }
-                let result = to_inference_result(&response);
+                let parts = store_model_parts(response.parts.clone(), &state.agent_id, &media);
+                let result = to_inference_result(&response, parts);
                 commands
                     .entity(outcome.entity)
                     .insert(result)
@@ -785,7 +838,7 @@ pub(crate) fn handle_empty_response(
             && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
         {
             progress.cut_off_nudges += 1;
-            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone());
             inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
             commands
                 .entity(entity)
@@ -802,14 +855,14 @@ pub(crate) fn handle_empty_response(
             // told "you have not written the file yet" with its own unwritten
             // draft in front of it can split it; one with nothing in front of
             // it drafts the whole thing again.
-            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone());
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            store_text_reply(&mut window, &infer.response, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone());
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
                 .and_then(|s| s.context_layout.as_ref())
@@ -855,22 +908,41 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
     )
 }
 
-/// Record a text-only reply in the conversation as the model's turn. A reply
-/// with nothing in it (a cut-off tool call, an empty answer) leaves no entry:
-/// an empty assistant message is noise to the next request and some
-/// providers refuse it outright.
-fn store_text_reply(window: &mut ContextWindow, text: &str, reasoning: Option<String>) {
-    if text.trim().is_empty() {
+/// Record a reply with no tool calls in the conversation as the model's
+/// turn: its text and whatever media it produced. A reply with nothing in it
+/// (a cut-off tool call, an empty answer) leaves no entry: an empty
+/// assistant message is noise to the next request and some providers refuse
+/// it outright.
+fn store_reply(
+    window: &mut ContextWindow,
+    infer: &crate::components::InferenceResult,
+    reasoning: Option<String>,
+) {
+    let Some(content) = reply_content(&infer.response, &infer.parts) else {
         return;
-    }
-    let tokens = leviath_core::estimate_tokens(text);
-    let _ = window.add_assistant_turn(
+    };
+    let tokens = content.tokens_hint();
+    let _ = window.add_assistant_turn_content(
         "conversation",
         leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-        text.to_string(),
+        content,
         tokens,
         reasoning,
     );
+}
+
+/// A reply's text and produced parts as one entry's content, or `None` when
+/// there is nothing to record.
+pub(crate) fn reply_content(
+    text: &str,
+    parts: &[leviath_core::media::Part],
+) -> Option<leviath_core::region::EntryContent> {
+    let mut all = Vec::with_capacity(parts.len() + 1);
+    if !text.trim().is_empty() {
+        all.push(leviath_core::media::Part::text(text));
+    }
+    all.extend(parts.iter().cloned());
+    (!all.is_empty()).then(|| leviath_core::region::EntryContent::from_parts(all))
 }
 
 /// Append a `[System]` nudge to the conversation region: the one injection path

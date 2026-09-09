@@ -33,6 +33,7 @@ impl Provider for Cfg {
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
+            parts: Vec::new(),
         })
     }
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -854,6 +855,7 @@ fn agent_state() -> AgentState {
 
 fn resp(text: &str) -> leviath_providers::InferenceResponse {
     leviath_providers::InferenceResponse {
+        parts: Vec::new(),
         content: text.to_string(),
         tool_calls: vec![],
         tokens_used: leviath_providers::TokenUsage {
@@ -3592,6 +3594,7 @@ fn infer_result(with_tools: bool) -> (StageInference, crate::components::Inferen
 
 fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
+        parts: Vec::new(),
         response: "r".to_string(),
         tool_calls: if with_tools {
             vec![crate::components::ToolCall {
@@ -3683,6 +3686,7 @@ fn process_response_counts_edits_by_path() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             StageProgress::default(),
             ProcessResponse,
@@ -4740,6 +4744,7 @@ fn infer_with(
             tokens_used: 0,
             cut_off_at: None,
             reasoning: None,
+            parts: Vec::new(),
         },
     )
 }
@@ -5502,6 +5507,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             output_window(),
             ReadyForTools,
@@ -5816,6 +5822,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         tokens_used: 0,
         cut_off_at: None,
         reasoning: None,
+        parts: Vec::new(),
     };
     let e = world
         .spawn((
@@ -5861,6 +5868,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         tokens_used: 0,
         cut_off_at: None,
         reasoning: None,
+        parts: Vec::new(),
     };
     let e = world
         .spawn((
@@ -5907,6 +5915,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         tokens_used: 0,
         cut_off_at: None,
         reasoning: None,
+        parts: Vec::new(),
     };
     let e = world
         .spawn((
@@ -5960,6 +5969,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         tokens_used: 0,
         cut_off_at: None,
         reasoning: None,
+        parts: Vec::new(),
     };
     let e = world
         .spawn((
@@ -7006,6 +7016,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             AwaitingTools,
         ))
@@ -13446,6 +13457,7 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             AwaitingTools,
             crate::telemetry::StageActivity::default(),
@@ -14850,6 +14862,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
                 tokens_used: 7,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(src, &["after_inference"]),
         ))
@@ -15128,6 +15141,7 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.tool_calls[0] } }"#,
@@ -15164,6 +15178,7 @@ fn after_inference_skips_an_out_of_range_stage() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -15194,6 +15209,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -15253,6 +15269,7 @@ fn spawn_tool_hooked(
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(src, &["on_tool_call"]),
         ))
@@ -15339,6 +15356,7 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
             hook_scripts(
@@ -15540,6 +15558,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -15563,6 +15582,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tokens_used: 0,
                 cut_off_at: None,
                 reasoning: None,
+                parts: Vec::new(),
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -17392,8 +17412,14 @@ fn to_inference_result_records_where_a_cut_off_reply_stopped() {
     let mut response = resp("half a report");
     response.tokens_used.completion_tokens = 23_050;
     response.finish_reason = leviath_providers::FinishReason::TokenLimit;
-    assert_eq!(to_inference_result(&response).cut_off_at, Some(23_050));
-    assert_eq!(to_inference_result(&resp("done")).cut_off_at, None);
+    assert_eq!(
+        to_inference_result(&response, Vec::new()).cut_off_at,
+        Some(23_050)
+    );
+    assert_eq!(
+        to_inference_result(&resp("done"), Vec::new()).cut_off_at,
+        None
+    );
 }
 
 /// A cut-off reply arms the raised cap whether or not it carried tool calls:
@@ -17552,6 +17578,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
+        parts: Vec::new(),
         response: String::new(),
         tool_calls: vec![fcall(
             "c1",
@@ -18203,5 +18230,110 @@ mod typed_tool_results {
         let shots = w.get_region("shots").unwrap();
         assert_eq!(shots.stored_count(), 1);
         assert!(shots.content[0].content.as_str().contains("[...truncated]"));
+    }
+}
+
+/// Media a model produced: stored on the run and written beside the reply,
+/// or described in the text when the run cannot keep it.
+mod model_parts {
+    use super::*;
+    use crate::blob_store::{BlobStoreHandle, MediaLimits, MediaParams, MediaRegistryHandle};
+    use crate::pipeline::response::{reply_content, store_model_parts};
+    use crate::pipeline::tool_results::{Reply, apply_tool_results_with_parts};
+    use leviath_core::media::{Blob, MediaType, MemoryBlobStore, Part};
+
+    fn png(name: &str) -> Blob {
+        Blob::new(
+            MediaType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nbody".to_vec(),
+        )
+        .named(name)
+    }
+
+    #[test]
+    fn produced_media_is_stored_named_and_capped() {
+        let mut world = World::new();
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(MediaLimits {
+            max_part_bytes: 16,
+            ..MediaLimits::default()
+        });
+        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let media = state.get(&world).expect("the parameter validates");
+        let mut unnamed = png("x");
+        unnamed.name = None;
+        let big = Blob::new(MediaType::parse("image/png").unwrap(), vec![0; 64]);
+        let parts = store_model_parts(vec![png("hero.png"), unnamed, big], "run-m", &media);
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].is_stored());
+        assert_eq!(parts[0].name.as_deref(), Some("hero.png"));
+        assert_eq!(parts[0].media_type.as_str(), "image/png");
+        assert_eq!(parts[1].name.as_deref(), Some("model-2"));
+        assert!(
+            parts[2]
+                .inline_text()
+                .unwrap()
+                .starts_with("[model output dropped:"),
+            "{:?}",
+            parts[2]
+        );
+        assert!(store_model_parts(Vec::new(), "run-m", &media).is_empty());
+    }
+
+    #[test]
+    fn a_world_without_a_store_describes_what_it_dropped() {
+        let mut world = World::new();
+        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let media = state.get(&world).expect("the parameter validates");
+        let parts = store_model_parts(vec![png("hero.png")], "run-m", &media);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].inline_text().unwrap(),
+            "[image/png of 12 B from the model dropped: this run has no blob store]"
+        );
+    }
+
+    #[test]
+    fn a_reply_is_its_text_and_its_parts_or_nothing() {
+        let stored =
+            Part::stored(png("a.png").describe(&leviath_core::media::MediaRegistry::builtin()))
+                .named("a.png");
+        assert!(reply_content("  ", &[]).is_none());
+        let text = reply_content("hi", &[]).unwrap();
+        assert_eq!(text.parts().len(), 1);
+        let both = reply_content("hi", std::slice::from_ref(&stored)).unwrap();
+        assert_eq!(both.parts().len(), 2);
+        assert_eq!(both.stored_count(), 1);
+        let alone = reply_content("", std::slice::from_ref(&stored)).unwrap();
+        assert_eq!(alone.parts().len(), 1);
+    }
+
+    #[test]
+    fn the_assistant_turn_carries_the_media_ahead_of_its_tool_results() {
+        let stored =
+            Part::stored(png("a.png").describe(&leviath_core::media::MediaRegistry::builtin()))
+                .named("a.png");
+        let mut w = ctx(&[("conversation", 100_000)]);
+        apply_tool_results_with_parts(
+            &mut w,
+            Reply {
+                text: "drawn",
+                parts: std::slice::from_ref(&stored),
+            },
+            &[tc("c1", "render")],
+            &[("c1".to_string(), "ok".to_string().into())],
+            None,
+            None,
+            None,
+        );
+        let conv = w.get_region("conversation").unwrap();
+        assert_eq!(conv.content.len(), 2);
+        assert_eq!(conv.content[0].content.stored_count(), 1);
+        assert!(conv.content[0].content.as_str().starts_with("drawn"));
+        assert!(matches!(
+            conv.content[0].kind,
+            leviath_core::EntryKind::AssistantTurn { .. }
+        ));
     }
 }

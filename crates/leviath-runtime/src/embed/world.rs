@@ -590,6 +590,7 @@ mod tests {
 
     fn text(content: &str) -> InferenceResponse {
         InferenceResponse {
+            parts: Vec::new(),
             content: content.to_string(),
             tool_calls: vec![],
             tokens_used: TokenUsage {

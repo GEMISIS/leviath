@@ -748,9 +748,12 @@ pub(crate) fn dispatch_tools(
                     .into_iter()
                     .filter(|(id, _)| id != &call_id)
                     .collect();
-            apply_tool_results(
+            super::tool_results::apply_tool_results_with_parts(
                 &mut window,
-                &result.response,
+                super::tool_results::Reply {
+                    text: &result.response,
+                    parts: &result.parts,
+                },
                 &result.tool_calls,
                 &merged,
                 routing.map(|c| &c.routing),
@@ -785,9 +788,12 @@ pub(crate) fn dispatch_tools(
                     ));
                 }
             }
-            apply_tool_results(
+            super::tool_results::apply_tool_results_with_parts(
                 &mut window,
-                &result.response,
+                super::tool_results::Reply {
+                    text: &result.response,
+                    parts: &result.parts,
+                },
                 &result.tool_calls,
                 &merged,
                 routing.map(|c| &c.routing),
