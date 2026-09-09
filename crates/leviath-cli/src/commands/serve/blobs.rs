@@ -8,7 +8,6 @@
 //! workdir file the same way, typed by the registry. `GET /api/media` is
 //! the effective registry: every row and where it came from.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use axum::extract::{Path as AxumPath, Query, State};
@@ -18,103 +17,24 @@ use leviath_core::media::{MediaRegistry, MediaType, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
+use crate::blobs::{BlobEntry, blob_path};
 use crate::runstate;
 
-/// One stored part, as the listing reports it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct BlobEntry {
-    /// The store's key: the bytes' sha256.
-    pub(super) sha256: String,
-    /// The type the bytes were stored as.
-    pub(super) media_type: String,
-    /// The name the part carries, when the context gave it one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) name: Option<String>,
-    /// Size in bytes.
-    pub(super) size: u64,
-    /// Pixel width, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) width: Option<u32>,
-    /// Pixel height, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) height: Option<u32>,
-    /// Duration in milliseconds, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) duration_ms: Option<u64>,
-    /// The token estimate the region was charged.
-    pub(super) tokens: usize,
-    /// The regions whose entries carry this part, in layout order.
-    pub(super) regions: Vec<String>,
-    /// Whether the bytes are on disk under the run's `blobs/`.
-    pub(super) stored: bool,
-}
-
-/// The listing envelope.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct BlobListing {
-    /// Every stored part, first appearance first.
-    pub(super) items: Vec<BlobEntry>,
-}
-
-/// Where a run's bytes live on disk.
-fn blob_path(run_id: &str, sha256: &str) -> PathBuf {
-    runstate::run_dir(run_id)
-        .join(leviath_core::files::BLOBS_DIR)
-        .join(sha256)
-}
-
-/// The stored parts a run's context holds, by hash, first appearance first.
+/// The stored parts a run's context holds, or 404 when it has no context.
 fn stored_parts(run_id: &str) -> Result<Vec<BlobEntry>, ApiError> {
-    let snapshot = runstate::read_context_snapshot(run_id).ok_or_else(|| {
+    crate::blobs::list(run_id).ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,
             format!("No context snapshot for run '{run_id}'"),
         )
-    })?;
-    let mut order: Vec<String> = Vec::new();
-    let mut found: BTreeMap<String, BlobEntry> = BTreeMap::new();
-    for region in &snapshot.regions {
-        for entry in &region.entries {
-            for (part, blob) in entry
-                .content
-                .stored()
-                .filter_map(|p| p.blob().map(|b| (p, b)))
-            {
-                match found.get_mut(&blob.sha256) {
-                    Some(existing) => {
-                        if !existing.regions.contains(&region.name) {
-                            existing.regions.push(region.name.clone());
-                        }
-                        if existing.name.is_none() {
-                            existing.name = part.name.clone();
-                        }
-                    }
-                    None => {
-                        order.push(blob.sha256.clone());
-                        found.insert(
-                            blob.sha256.clone(),
-                            BlobEntry {
-                                sha256: blob.sha256.clone(),
-                                media_type: blob.media_type.to_string(),
-                                name: part.name.clone(),
-                                size: blob.size,
-                                width: blob.width,
-                                height: blob.height,
-                                duration_ms: blob.duration_ms,
-                                tokens: blob.tokens,
-                                regions: vec![region.name.clone()],
-                                stored: blob_path(run_id, &blob.sha256).is_file(),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(order
-        .into_iter()
-        .filter_map(|sha| found.remove(&sha))
-        .collect())
+    })
+}
+
+/// Every stored part a run holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct BlobListing {
+    /// The parts, first appearance first.
+    pub(super) items: Vec<BlobEntry>,
 }
 
 /// `GET /api/agents/{id}/blobs`: every stored part the run holds.

@@ -62,8 +62,18 @@ fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String 
             point.context.max_tokens,
         ));
         for region in &point.context.regions {
+            let stored: usize = region
+                .entries
+                .iter()
+                .map(|e| e.content.stored_count())
+                .sum();
+            let stored_note = match stored {
+                0 => String::new(),
+                1 => ", 1 stored part".to_string(),
+                n => format!(", {n} stored parts"),
+            };
             out.push_str(&format!(
-                "      region {} ({}) - {} tok, {} entr{}\n",
+                "      region {} ({}) - {} tok, {} entr{}{stored_note}\n",
                 region.name,
                 region.kind,
                 region.current_tokens,
@@ -76,8 +86,8 @@ fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String 
             ));
             if full {
                 for entry in &region.entries {
-                    for line in entry.content.lines() {
-                        out.push_str(&format!("          {line}\n"));
+                    for part in entry.content.parts() {
+                        out.push_str(&part_lines(part));
                     }
                 }
             }
@@ -85,6 +95,53 @@ fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String 
         out.push('\n');
     }
     out
+}
+
+/// One part of an entry, indented under its region: a text part line by
+/// line (with its type first when it is not plain text), a stored part as
+/// one row naming what it is, its hash, and how it is delivered.
+fn part_lines(part: &leviath_core::media::Part) -> String {
+    let mut out = String::new();
+    match part.blob() {
+        Some(blob) => {
+            let deliver = part
+                .deliver
+                .map(|d| format!("  deliver: {}", delivery_word(d)))
+                .unwrap_or_default();
+            let stand_in = match blob.stand_in.is_empty() {
+                true => format!(
+                    "[{}, {}] {}",
+                    blob.media_type,
+                    leviath_core::media::human_size(blob.size),
+                    part.name.as_deref().unwrap_or("")
+                ),
+                false => blob.stand_in.clone(),
+            };
+            out.push_str(&format!(
+                "          \u{25b8} {stand_in}  sha256:{}  {} tok{deliver}\n",
+                blob.short_sha(),
+                blob.tokens
+            ));
+        }
+        None => {
+            if part.media_type.as_str() != "text/plain" {
+                out.push_str(&format!("          [{}]\n", part.media_type));
+            }
+            for line in part.inline_text().unwrap_or_default().lines() {
+                out.push_str(&format!("          {line}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// A delivery as the blueprint spells it.
+fn delivery_word(d: leviath_core::media::Delivery) -> &'static str {
+    match d {
+        leviath_core::media::Delivery::Native => "native",
+        leviath_core::media::Delivery::Text => "text",
+        leviath_core::media::Delivery::StandIn => "stand_in",
+    }
 }
 
 /// Format a unix timestamp as a local `YYYY-MM-DD HH:MM:SS`, or the raw seconds
@@ -167,6 +224,71 @@ mod tests {
         // Singular "point" / "entry" wording.
         assert!(out.contains("(1 point)"));
         assert!(out.contains("1 entry"));
+    }
+
+    /// `--full` shows every part: a stored one as a single row with its
+    /// stand-in, hash, tokens and delivery, a typed text one under its type.
+    #[test]
+    fn render_full_shows_stored_parts_as_rows() {
+        use leviath_core::media::{BlobRef, Delivery, MediaType, Part};
+        let mut history = vec![point("plan", 1, vec!["hi"])];
+        let blob = BlobRef {
+            sha256: "abcdef0123456789".repeat(4),
+            media_type: MediaType::parse("image/png").unwrap(),
+            size: 240 * 1024,
+            width: Some(1024),
+            height: Some(768),
+            duration_ms: None,
+            tokens: 1092,
+            stand_in: "[image/png 1024x768, 240 KB] hero.png".to_string(),
+        };
+        let region = &mut history[0].context.regions[0];
+        region.entries[0].content = leviath_core::region::EntryContent::from_parts(vec![
+            Part::text("see"),
+            Part::stored(blob.clone())
+                .named("hero.png")
+                .delivered(Delivery::Text),
+            Part::inline(MediaType::parse("text/markdown").unwrap(), "# notes"),
+        ]);
+        region.entries.push(RegionEntrySnapshot {
+            content: leviath_core::region::EntryContent::from_parts(vec![
+                Part::stored(BlobRef {
+                    stand_in: String::new(),
+                    ..blob
+                })
+                .named("again.png"),
+            ]),
+            tokens: 1,
+            kind: leviath_core::region::EntryKind::Text,
+            metadata: None,
+            key: None,
+            taint: Default::default(),
+            reasoning: None,
+        });
+        let out = render("run-x", &history, false, true);
+        assert!(out.contains("2 entries, 2 stored parts"), "{out}");
+        assert!(out.contains("          see\n"), "{out}");
+        assert!(
+            out.contains(
+                "\u{25b8} [image/png 1024x768, 240 KB] hero.png  sha256:abcdef012345  1092 tok  deliver: text\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("          [text/markdown]\n          # notes\n"),
+            "{out}"
+        );
+        // No stand-in recorded: one is built from the type and size.
+        assert!(
+            out.contains("\u{25b8} [image/png, 240 KB] again.png  sha256:"),
+            "{out}"
+        );
+        assert_eq!(delivery_word(Delivery::Native), "native");
+        assert_eq!(delivery_word(Delivery::StandIn), "stand_in");
+        // The summary counts a single stored part in the singular.
+        history[0].context.regions[0].entries.pop();
+        let out = render("run-x", &history, false, false);
+        assert!(out.contains("1 entry, 1 stored part\n"), "{out}");
     }
 
     #[test]

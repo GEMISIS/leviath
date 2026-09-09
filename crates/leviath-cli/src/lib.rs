@@ -12,6 +12,7 @@
 //! struct around it says which command it belongs to.
 
 pub(crate) mod approvals;
+pub(crate) mod blobs;
 pub(crate) mod blueprint_edit;
 pub(crate) mod bundled;
 pub mod commands;
