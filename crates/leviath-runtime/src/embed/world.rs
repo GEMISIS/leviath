@@ -1063,12 +1063,9 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             _progress: crate::pipeline::ToolProgress,
         ) -> crate::tool_bridge::BoxedToolExec {
             Box::new(move || {
-                Box::pin(async move {
-                    calls
-                        .into_iter()
-                        .map(|c| (c.id, "canned".to_string()))
-                        .collect()
-                })
+                Box::pin(
+                    async move { calls.into_iter().map(|c| (c.id, "canned".into())).collect() },
+                )
             })
         }
     }

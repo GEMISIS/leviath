@@ -234,6 +234,7 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         // to keep notes paid a prompt per note: 25 of them on the run that
         // prompted this work, none of which a person could act on.
         "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
+        | "context_attach" | "context_export"
         // The same reasoning for the checklist tools: they write to the agent's
         // own context and touch nothing outside it, and prompting per item
         // would make tracking work cost more than not tracking it.
@@ -2486,6 +2487,8 @@ mod policy_tests {
             "context_read",
             "context_delete",
             "context_list",
+            "context_attach",
+            "context_export",
             "read_files",
         ] {
             assert_eq!(
@@ -2704,6 +2707,8 @@ mod policy_tests {
         "context_read",
         "context_delete",
         "context_list",
+        "context_attach",
+        "context_export",
         // Reviewed: these write item state into the agent's own checklist
         // region and reach nothing outside the context window - the same
         // standard the `context_*` tools above are held to. Prompting per item

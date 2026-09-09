@@ -206,6 +206,31 @@ fn load_blueprint(
     Ok((content, blueprint))
 }
 
+/// The run's blob store as the tools see it: the world's store and
+/// registry, keyed by this run, under the operator's size ceiling.
+fn tool_media(world: &World, run_id: &str) -> leviath_tools::ToolMedia {
+    let store = world
+        .get_resource::<leviath_runtime::blob_store::BlobStoreHandle>()
+        .map(|s| s.0.clone())
+        .unwrap_or_else(|| Arc::new(leviath_core::media::MemoryBlobStore::new()));
+    let registry = world
+        .get_resource::<leviath_runtime::blob_store::MediaRegistryHandle>()
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
+    let max_part_bytes = world
+        .get_resource::<leviath_runtime::blob_store::MediaLimits>()
+        .map_or(
+            leviath_runtime::blob_store::MediaLimits::default().max_part_bytes,
+            |l| l.max_part_bytes,
+        );
+    leviath_tools::ToolMedia {
+        store,
+        registry,
+        run_id: run_id.to_string(),
+        max_part_bytes,
+    }
+}
+
 /// Everything phase 7 attaches that is not already on the entity.
 ///
 /// A struct because these are one thing - the durable record of a run - rather
@@ -551,7 +576,8 @@ fn build_agent_inner(
         read_path_grant_counts(&blueprint, deps.config, std::path::Path::new(&args.workdir));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy)
-        .with_shell_env(shell_env_policy(deps.config));
+        .with_shell_env(shell_env_policy(deps.config))
+        .with_media(Arc::new(tool_media(world, &args.run_id)));
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
@@ -1712,6 +1738,27 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// The blueprint path here points at nothing, which is the point: the error
     /// must be about the run id, proving the guard runs before anything is read
     /// off disk.
+    #[test]
+    fn tool_media_reads_the_worlds_store_or_falls_back_to_memory() {
+        let bare = World::new();
+        let m = tool_media(&bare, "run-x");
+        assert_eq!(m.run_id, "run-x");
+        assert_eq!(
+            m.max_part_bytes,
+            leviath_runtime::blob_store::MediaLimits::default().max_part_bytes
+        );
+        let mut world = World::new();
+        world.insert_resource(leviath_runtime::blob_store::BlobStoreHandle(Arc::new(
+            leviath_core::media::MemoryBlobStore::new(),
+        )));
+        world.insert_resource(leviath_runtime::blob_store::MediaRegistryHandle::default());
+        world.insert_resource(leviath_runtime::blob_store::MediaLimits {
+            max_part_bytes: 7,
+            ..Default::default()
+        });
+        assert_eq!(tool_media(&world, "r").max_part_bytes, 7);
+    }
+
     #[tokio::test]
     async fn build_agent_rejects_a_run_id_that_is_not_a_directory_name() {
         for bad in ["../escape", "a/b", "..", ".", ""] {

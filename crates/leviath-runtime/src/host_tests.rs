@@ -69,7 +69,7 @@ impl ToolService for NoTools {
         _progress: crate::pipeline::ToolProgress,
     ) -> BoxedToolExec {
         Box::new(move || {
-            Box::pin(async move { calls.into_iter().map(|c| (c.id, String::new())).collect() })
+            Box::pin(async move { calls.into_iter().map(|c| (c.id, "".into())).collect() })
         })
     }
 }
@@ -3709,7 +3709,7 @@ async fn mock_helpers_are_exercised() {
         }],
         crate::pipeline::noop_progress(),
     );
-    assert_eq!(exec().await, vec![("c".to_string(), String::new())]);
+    assert_eq!(exec().await, vec![("c".to_string(), "".into())]);
 }
 
 #[tokio::test]

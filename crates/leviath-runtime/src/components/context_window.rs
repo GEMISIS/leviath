@@ -545,25 +545,8 @@ impl ContextWindow {
         tokens: usize,
         taint: Option<leviath_core::TaintLevel>,
     ) -> leviath_core::Result<()> {
-        let (content, tokens, key_override) = match origin {
-            WriteOrigin::Agent => self.on_write_agent(region_name, content, tokens, &kind, None)?,
-            WriteOrigin::System => self.on_write_system(region_name, content, tokens, &kind, None),
-        };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            match taint {
-                Some(level) => {
-                    region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), level)?;
-                }
-                None => region.add_typed_entry(content.clone(), tokens, kind.clone())?,
-            }
-            // A key override from the hook names the entry just pushed.
-            if let Some(key) = key_override.as_deref()
-                && let Some(entry) = region.content.last_mut()
-            {
-                entry.key = Some(key.to_string());
-            }
-            Ok(())
-        })
+        let content = leviath_core::region::EntryContent::text(content);
+        self.typed_write_content(origin, region_name, kind, content, tokens, taint)
     }
 
     /// Shared tail of every region write: run the insert, give a custom

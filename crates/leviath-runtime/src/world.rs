@@ -1281,12 +1281,7 @@ mod tests {
             _progress: crate::pipeline::ToolProgress,
         ) -> BoxedToolExec {
             Box::new(move || {
-                Box::pin(async move {
-                    calls
-                        .into_iter()
-                        .map(|c| (c.id, "ok".to_string()))
-                        .collect()
-                })
+                Box::pin(async move { calls.into_iter().map(|c| (c.id, "ok".into())).collect() })
             })
         }
     }

@@ -98,9 +98,10 @@ impl ToolService for BasicToolService {
                     // spawner): answer every call rather than dropping the
                     // batch, which would strand the agent.
                     for call in calls {
-                        let answer = "[error] no tool state registered for this agent";
-                        progress(&call.id, answer);
-                        results.push((call.id, answer.to_string()));
+                        let answer: leviath_core::region::EntryContent =
+                            "[error] no tool state registered for this agent".into();
+                        progress(&call.id, &answer);
+                        results.push((call.id, answer));
                     }
                     return results;
                 };
@@ -117,7 +118,7 @@ impl ToolService for BasicToolService {
                     )
                     .await
                     {
-                        Some(result) => result,
+                        Some(result) => result.into(),
                         None => state.tools.execute(&call.name, call.arguments).await,
                     };
                     progress(&call.id, &result);

@@ -858,7 +858,7 @@ task = { kind = "pinned", max_tokens = 1000 }
                 Box::pin(async move {
                     let out =
                         handle(&h, &tc("wait_for_agent", json!({"agent_id": "child-1"}))).await;
-                    vec![("wait".to_string(), out)]
+                    vec![("wait".to_string(), out.into())]
                 })
             }),
         );
@@ -868,16 +868,13 @@ task = { kind = "pinned", max_tokens = 1000 }
         // Which is what lets anything else run - a child's tool batch, here.
         submit(
             2,
-            Box::new(|| Box::pin(async { vec![("child".to_string(), "ran".to_string())] })),
+            Box::new(|| Box::pin(async { vec![("child".to_string(), "ran".into())] })),
         );
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), results.recv())
             .await
             .expect("the batch behind the waiter ran")
             .expect("an outcome arrived");
-        assert_eq!(
-            outcome.results,
-            vec![("child".to_string(), "ran".to_string())]
-        );
+        assert_eq!(outcome.results, vec![("child".to_string(), "ran".into())]);
 
         // And the waiter takes a permit again and reports, once its child is done.
         let waited = tokio::time::timeout(std::time::Duration::from_secs(30), results.recv())

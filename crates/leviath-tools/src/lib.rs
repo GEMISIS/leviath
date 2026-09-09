@@ -2,6 +2,7 @@
 //!
 //! Provides file system and shell tools sandboxed to a working directory.
 
+use leviath_core::region::EntryContent;
 use leviath_core::resolves_within;
 use leviath_providers::Tool;
 use serde_json::{Value, json};
@@ -20,6 +21,8 @@ mod exec;
 pub use exec::is_null_device;
 pub use exec::resolve_within;
 mod install;
+pub mod media;
+pub use media::ToolMedia;
 mod platform;
 pub mod validate;
 pub use context::*;
@@ -219,7 +222,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 28);
+        assert_eq!(defs.len(), 30);
     }
 
     #[test]
@@ -517,7 +520,7 @@ mod tests {
     fn names_returns_every_tool_and_alias() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 29);
+        assert_eq!(tools.names().len(), 31);
     }
 
     /// The taint gate's fallback arm is the third-party default: outbound,
@@ -2284,7 +2287,7 @@ mod tests {
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
         // The rest remain, `install_tool` included: mobile has a filesystem.
-        assert_eq!(tools.tool_defs().len(), 27);
+        assert_eq!(tools.tool_defs().len(), 29);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"install_tool".to_string()));
         assert!(names.contains(&"context_write".to_string()));
@@ -2468,5 +2471,73 @@ mod tests {
             result.contains("inside the workspace"),
             "says what to do instead: {result}"
         );
+    }
+}
+
+#[cfg(test)]
+mod binary_read_tests {
+    use super::*;
+    use leviath_core::media::{BlobStore, MediaRegistry, MemoryBlobStore};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn png_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hero.png"), b"\x89PNG\r\n\x1a\n\xff\xfe").unwrap();
+        std::fs::write(dir.path().join("big.bin"), vec![0xff; 40]).unwrap();
+        dir
+    }
+
+    fn media(store: Arc<MemoryBlobStore>, max: u64) -> Arc<ToolMedia> {
+        Arc::new(ToolMedia {
+            store,
+            registry: Arc::new(MediaRegistry::builtin()),
+            run_id: "run-1".to_string(),
+            max_part_bytes: max,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_binary_file_becomes_a_stored_part() {
+        let dir = png_dir();
+        let store = Arc::new(MemoryBlobStore::new());
+        let tools = BuiltinTools::new(
+            ToolContext::new(dir.path().to_path_buf()).with_media(media(store.clone(), 16)),
+        );
+        assert!(tools.media().is_some());
+        let out = tools
+            .execute("read_file", json!({"path": "hero.png"}))
+            .await;
+        assert!(out.has_stored(), "{out}");
+        assert!(out.as_str().starts_with("'hero.png' is not text."), "{out}");
+        assert!(out.as_str().contains("[image/png, 10 B] hero.png"), "{out}");
+        let sha = &out.stored().next().unwrap().blob().unwrap().sha256;
+        assert!(store.has("run-1", sha));
+
+        // Over the ceiling: refused by name.
+        let out = tools.execute("read_file", json!({"path": "big.bin"})).await;
+        assert!(
+            out.as_str()
+                .starts_with("[error] 'big.bin' is 40 bytes, over the 16 byte ceiling"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_store_the_model_is_told() {
+        let dir = png_dir();
+        let tools = BuiltinTools::new(ToolContext::new(dir.path().to_path_buf()));
+        assert!(tools.media().is_none());
+        let out = tools
+            .execute("read_file", json!({"path": "hero.png"}))
+            .await;
+        assert_eq!(
+            out.as_str(),
+            "[error] 'hero.png' is not a text file (10 B), and this run has no blob store to hold it as a part"
+        );
+        // Text files read as they always did.
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let out = tools.execute("read_file", json!({"path": "a.txt"})).await;
+        assert_eq!(out, "hello");
     }
 }

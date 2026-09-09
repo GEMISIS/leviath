@@ -1315,7 +1315,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: "{}".to_string(),
-            result: result.map(str::to_string),
+            result: result.map(Into::into),
             thought_signature: None,
         }
     }
@@ -1370,7 +1370,7 @@ mod tests {
                 RunRecord::ToolCallDone {
                     iteration: 9,
                     call_id: "c_done".to_string(),
-                    result: "Wrote 42 bytes to x.txt".to_string(),
+                    result: "Wrote 42 bytes to x.txt".to_string().into(),
                     at: 4,
                 },
             ],

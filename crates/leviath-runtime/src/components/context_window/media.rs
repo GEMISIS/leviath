@@ -270,11 +270,6 @@ mod tests {
 
 impl super::ContextWindow {
     /// Write an entry that carries typed parts, on the system's behalf.
-    ///
-    /// A custom region's `on_write` hook sees the entry's text rendering, as
-    /// it does for every other write. When the hook hands the same text back
-    /// the parts are kept exactly; when it rewrites the text, the rewrite
-    /// replaces the text parts and the stored parts follow it unchanged.
     pub(crate) fn add_content_entry(
         &mut self,
         region_name: &str,
@@ -282,16 +277,55 @@ impl super::ContextWindow {
         content: EntryContent,
         tokens: usize,
     ) -> leviath_core::Result<()> {
+        self.typed_write_content(
+            super::WriteOrigin::System,
+            region_name,
+            kind,
+            content,
+            tokens,
+            None,
+        )
+    }
+
+    /// Shared core of every typed write: run the `on_write` seam with the
+    /// caller's origin, then insert the entry with its kind and its taint
+    /// level when given, honouring a key override from the hook.
+    ///
+    /// A custom region's `on_write` hook sees the entry's text rendering, as
+    /// it always has. When the hook hands the same text back the parts are
+    /// kept exactly; when it rewrites the text, the rewrite replaces the text
+    /// parts and the stored parts follow it unchanged.
+    pub(crate) fn typed_write_content(
+        &mut self,
+        origin: super::WriteOrigin,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: EntryContent,
+        tokens: usize,
+        taint: Option<leviath_core::TaintLevel>,
+    ) -> leviath_core::Result<()> {
         let rendered = content.as_str().to_string();
-        let (text, tokens, key_override) =
-            self.on_write_system(region_name, rendered.clone(), tokens, &kind, None);
+        let (text, tokens, key_override) = match origin {
+            super::WriteOrigin::Agent => {
+                self.on_write_agent(region_name, rendered.clone(), tokens, &kind, None)?
+            }
+            super::WriteOrigin::System => {
+                self.on_write_system(region_name, rendered.clone(), tokens, &kind, None)
+            }
+        };
         let content = if text == rendered {
             content
         } else {
             rewritten(content, text)
         };
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_entry(content.clone(), tokens, kind.clone())?;
+            match taint {
+                Some(level) => {
+                    region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), level)?;
+                }
+                None => region.add_typed_entry(content.clone(), tokens, kind.clone())?,
+            }
+            // A key override from the hook names the entry just pushed.
             if let Some(key) = key_override.as_deref()
                 && let Some(entry) = region.content.last_mut()
             {

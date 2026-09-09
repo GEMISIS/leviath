@@ -312,14 +312,14 @@ pub fn restore_pending_batch(
             thought_signature: c.thought_signature.clone(),
         })
         .collect();
-    let merged: Vec<(String, String)> = batch
+    let merged: Vec<crate::tool_bridge::ToolResult> = batch
         .calls
         .iter()
         .map(|c| {
             let result = c
                 .result
                 .clone()
-                .unwrap_or_else(|| interrupted_result(&c.name, children));
+                .unwrap_or_else(|| interrupted_result(&c.name, children).into());
             (c.id.clone(), result)
         })
         .collect();
@@ -677,7 +677,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: r#"{"path":"x.txt"}"#.to_string(),
-            result: result.map(str::to_string),
+            result: result.map(Into::into),
             thought_signature: None,
         }
     }

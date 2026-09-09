@@ -212,7 +212,9 @@ pub(crate) fn production_runner(
         }
         match is_builtin {
             true => {
-                let out = block_on_daemon(ctx.builtins.execute(name, args.clone()));
+                let out = block_on_daemon(async {
+                    ctx.builtins.execute(name, args.clone()).await.into_string()
+                });
                 // A redirect is only measurable after the fact, as in the lane.
                 ctx.writes
                     .record(crate::tools::measured_write_bytes(name, args, workdir));
@@ -376,6 +378,7 @@ mod tests {
             success: true,
             data: serde_json::Value::Null,
             text: "the answer".to_string(),
+            blobs: Vec::new(),
         };
         assert_eq!(mcp_text(Ok(ok)), "the answer");
 
@@ -383,6 +386,7 @@ mod tests {
             success: false,
             data: serde_json::Value::Null,
             text: "no such record".to_string(),
+            blobs: Vec::new(),
         };
         assert_eq!(mcp_text(Ok(failed)), "[error] no such record");
 

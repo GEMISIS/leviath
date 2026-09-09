@@ -81,8 +81,11 @@ pub struct ToolCallRecord {
     pub name: String,
     /// The JSON arguments, stringified.
     pub arguments: String,
-    /// The result text, once the tool has run (`None` while pending).
-    pub result: Option<String>,
+    /// The result, once the tool has run (`None` while pending). Text and
+    /// any stored parts the tool produced; a plain string on the wire when
+    /// it is text alone, which is what every journal written before parts
+    /// existed holds.
+    pub result: Option<crate::region::EntryContent>,
     /// Opaque provider token that must be replayed with this call (Gemini's
     /// `thought_signature`). Carried so a restored batch can rebuild the exact
     /// assistant turn.
@@ -322,8 +325,8 @@ pub enum RunRecord {
         iteration: usize,
         /// The tool-call id.
         call_id: String,
-        /// The result text.
-        result: String,
+        /// The result: text and any stored parts.
+        result: crate::region::EntryContent,
         /// Unix seconds.
         at: i64,
     },
@@ -1599,7 +1602,7 @@ mod tests {
                     id: "c1".to_string(),
                     name: "read_file".to_string(),
                     arguments: "{}".to_string(),
-                    result: Some("body".to_string()),
+                    result: Some("body".to_string().into()),
                     thought_signature: Some("sig".to_string()),
                 }],
                 at: 103,
@@ -1610,7 +1613,7 @@ mod tests {
             RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
-                result: "body".to_string(),
+                result: "body".to_string().into(),
                 at: 103,
             },
             RunRecord::ContextCheckpoint {
@@ -2069,7 +2072,7 @@ mod tests {
             id: id.to_string(),
             name: "shell".to_string(),
             arguments: "{}".to_string(),
-            result: result.map(str::to_string),
+            result: result.map(Into::into),
             thought_signature: None,
         }
     }
@@ -2120,7 +2123,7 @@ mod tests {
             RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
-                result: "ran".to_string(),
+                result: "ran".to_string().into(),
                 at: 11,
             },
         ];
@@ -2157,13 +2160,13 @@ mod tests {
             RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
-                result: "stale".to_string(),
+                result: "stale".to_string().into(),
                 at: 12,
             },
             RunRecord::ToolCallDone {
                 iteration: 1,
                 call_id: "unknown".to_string(),
-                result: "nowhere to land".to_string(),
+                result: "nowhere to land".to_string().into(),
                 at: 13,
             },
         ];
@@ -2446,7 +2449,7 @@ mod tests {
             RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
-                result: "ran".to_string(),
+                result: "ran".to_string().into(),
                 at: 1,
             },
             RunRecord::ContextCheckpoint {

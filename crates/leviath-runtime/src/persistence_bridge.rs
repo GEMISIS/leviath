@@ -1552,7 +1552,7 @@ mod tests {
             record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
-                result: "ran".to_string(),
+                result: "ran".to_string().into(),
                 at: 2,
             }),
             ack: None, // the fire-and-forget per-call path

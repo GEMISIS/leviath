@@ -111,6 +111,18 @@ same list.
   hydrate send the stand-in. The journal and `context.json` never hold
   base64. `[media] max_stored_per_request` caps how many parts one request
   carries, oldest dropped first (#400).
+- A tool result is text plus any stored parts the tool produced, all the
+  way through: the tool lane, the routed region entry, the journal's
+  `ToolCallDone` record (a plain string when it is text alone, so every
+  journal written before this reads back unchanged) and the crash-resume
+  replay. `read_file` on a file that is not text stores it as a typed part
+  rather than failing, an MCP server's `image`, `audio` and blob-carrying
+  `resource` blocks are decoded and stored beside its text, and a
+  `resource_link` is described with its URI and type. Two context tools
+  move bytes the other way: `context_attach` puts a workdir file into a
+  region as a part, with a caption and a key so a newer version replaces
+  the older, and `context_export` writes a stored part back into the
+  workdir by file name or hash prefix (#400).
 - Files reach a run from the command line. `lev run --attach
   path[:region][:type][:text]` puts a file in a region as a typed part, a
   `--<region> @file` whose bytes are not text attaches instead of seeding,

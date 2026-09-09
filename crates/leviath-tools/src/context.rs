@@ -39,6 +39,10 @@ pub struct ToolContext {
     /// under any of these is dropped at discovery, so installing one would
     /// report a tool that never runs.
     pub reserved_names: Vec<String>,
+    /// The run's blob store, for a tool that has bytes the model cannot take
+    /// as text. `None` in a context built without one, where such a tool
+    /// says so instead of storing.
+    pub media: Option<Arc<ToolMedia>>,
 }
 
 /// The resolved `[security] shell_env` decision for one run.
@@ -102,7 +106,14 @@ impl ToolContext {
             shell_env: ShellEnvPolicy::default(),
             tools_dir: leviath_core::tools_dir(),
             reserved_names: Vec::new(),
+            media: None,
         }
+    }
+
+    /// Give the tools somewhere to store bytes. Builder-style.
+    pub fn with_media(mut self, media: Arc<ToolMedia>) -> Self {
+        self.media = Some(media);
+        self
     }
 
     /// Point `install_tool` at a directory other than the data root's

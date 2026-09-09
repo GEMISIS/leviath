@@ -245,15 +245,18 @@ pub(super) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
             RunRecord::ToolBatch {
                 calls, stage_index, ..
             } => calls.iter().find_map(|call| {
-                [&call.arguments, call.result.as_ref().unwrap_or(&call.name)]
-                    .into_iter()
-                    .find_map(|text| {
-                        search::find_ignore_ascii_case(text, q).map(|at| Highlight {
-                            field: format!("journal.tool.{}", call.name),
-                            snippet: search::snippet(text, at),
-                            stage: Some(*stage_index),
-                        })
+                [
+                    call.arguments.as_str(),
+                    call.result.as_deref().unwrap_or(&call.name),
+                ]
+                .into_iter()
+                .find_map(|text| {
+                    search::find_ignore_ascii_case(text, q).map(|at| Highlight {
+                        field: format!("journal.tool.{}", call.name),
+                        snippet: search::snippet(text, at),
+                        stage: Some(*stage_index),
                     })
+                })
             }),
             RunRecord::ContextCheckpoint { snapshot, .. } => snapshot
                 .regions

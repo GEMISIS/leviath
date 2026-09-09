@@ -46,10 +46,14 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::inference_pool::expect_permit;
 
+/// One tool call's answer: its id, and its result as text plus any stored
+/// parts the tool produced.
+pub type ToolResult = (String, leviath_core::region::EntryContent);
+
 /// The future produced by a boxed tool-execution closure: resolves to
 /// `(tool_call_id, result)` pairs - the same shape the engine's tool executors
 /// already return.
-pub(crate) type ToolExecFuture = Pin<Box<dyn Future<Output = Vec<(String, String)>> + Send>>;
+pub(crate) type ToolExecFuture = Pin<Box<dyn Future<Output = Vec<ToolResult>> + Send>>;
 
 /// A boxed, per-agent tool-execution closure. Built by the dispatch system so it
 /// captures that agent's own tool registry, workdir, and policy; run once by the
@@ -73,7 +77,7 @@ pub struct ToolOutcome {
     /// The agent the results belong to.
     pub entity: Entity,
     /// `(tool_call_id, result)` pairs.
-    pub results: Vec<(String, String)>,
+    pub results: Vec<ToolResult>,
     /// Wall-clock time the whole batch took. Per-call timing would require
     /// every executor to report it through `BoxedToolExec`'s return shape, so
     /// each call in the batch shares this one figure.
@@ -615,7 +619,7 @@ mod tests {
                 Box::pin(async move {
                     pairs
                         .into_iter()
-                        .map(|(a, b)| (a.to_string(), b.to_string()))
+                        .map(|(a, b)| (a.to_string(), b.into()))
                         .collect()
                 })
             }),
@@ -641,7 +645,7 @@ mod tests {
                 Box::pin(async move {
                     started.notify_one();
                     release.notified().await;
-                    vec![("held".to_string(), "done".to_string())]
+                    vec![("held".to_string(), "done".into())]
                 })
             }),
             cancel,
@@ -669,7 +673,7 @@ mod tests {
                         release.notified().await;
                     })
                     .await;
-                    vec![("parked".to_string(), "done".to_string())]
+                    vec![("parked".to_string(), "done".into())]
                 })
             }),
             cancel,
@@ -685,7 +689,7 @@ mod tests {
         let first = h.next_outcome().await;
         assert_eq!(
             first.results,
-            vec![("c".to_string(), "r".to_string())],
+            vec![("c".to_string(), "r".into())],
             "the batch reported its call"
         );
         let mut seen = vec![first.entity.to_bits()];
@@ -734,7 +738,7 @@ mod tests {
             exec: Box::new(move || {
                 Box::pin(async move {
                     releaser.notify_one();
-                    vec![("c2".to_string(), "r2".to_string())]
+                    vec![("c2".to_string(), "r2".into())]
                 })
             }),
             cancel: crate::cancel::CancelToken::new(),
@@ -892,7 +896,7 @@ mod tests {
                 exec: Box::new(move || {
                     Box::pin(async move {
                         barrier.wait().await;
-                        vec![("c".to_string(), "r".to_string())]
+                        vec![("c".to_string(), "r".into())]
                     })
                 }),
                 cancel: crate::cancel::CancelToken::new(),

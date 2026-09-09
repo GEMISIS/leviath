@@ -1,5 +1,6 @@
 //! Applying completed tool batches: results, file tracking, modification accounting.
 
+use super::tools::typed_results;
 use super::*;
 
 /// The receiving end of the tool-outcomes channel, as a world resource.
@@ -54,7 +55,7 @@ const PATH_TOOLS: [&str; 5] = [
 pub(crate) fn annotate_path_errors(
     window: &ContextWindow,
     tool_calls: &[crate::components::ToolCall],
-    merged: &mut [(String, String)],
+    merged: &mut [crate::tool_bridge::ToolResult],
 ) {
     for (call, (_id, result)) in tool_calls.iter().zip(merged.iter_mut()) {
         if !result.starts_with("[error]") || !PATH_TOOLS.contains(&call.name.as_str()) {
@@ -89,8 +90,7 @@ pub(crate) fn annotate_path_errors(
             })
         });
         if let Some(hint) = hint {
-            result.push(' ');
-            result.push_str(&hint);
+            *result = format!("{result} {hint}").into();
         }
     }
 }
@@ -128,7 +128,7 @@ pub(crate) fn apply_tool_results(
     window: &mut ContextWindow,
     response_content: &str,
     tool_calls: &[crate::components::ToolCall],
-    tool_results: &[(String, String)],
+    tool_results: &[crate::tool_bridge::ToolResult],
     routing: Option<&leviath_core::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
@@ -182,11 +182,18 @@ pub(crate) fn apply_one_tool_result(
     window: &mut ContextWindow,
     tool_name: &str,
     tool_call_id: &str,
-    result: String,
+    result: leviath_core::region::EntryContent,
     routing: Option<&leviath_core::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
 ) {
-    let mut result_text = result;
+    // The cap below is about text. A stored part is priced by its own
+    // estimate and kept whole: cutting an image in half is not a smaller
+    // image.
+    let stored: Vec<leviath_core::media::Part> = result.stored().cloned().collect();
+    let mut result_text = match stored.is_empty() {
+        true => result.into_string(),
+        false => result.inline_text(),
+    };
     let tool_name = tool_name.to_string();
     let tool_call_id = tool_call_id.to_string();
 
@@ -209,7 +216,15 @@ pub(crate) fn apply_one_tool_result(
             result_text.push_str("\n[...truncated]");
         }
     }
-    let result_tokens = leviath_core::estimate_tokens(&result_text);
+    let result_content = match stored.is_empty() {
+        true => leviath_core::region::EntryContent::text(result_text),
+        false => {
+            let mut parts = vec![leviath_core::media::Part::text(result_text)];
+            parts.extend(stored);
+            leviath_core::region::EntryContent::from_parts(parts)
+        }
+    };
+    let result_tokens = result_content.tokens_hint();
 
     let base_region = match routing {
         Some(r) => {
@@ -250,12 +265,12 @@ pub(crate) fn apply_one_tool_result(
     let add_kind = |window: &mut ContextWindow,
                     region: &str,
                     kind: leviath_core::EntryKind,
-                    content: String,
+                    content: leviath_core::region::EntryContent,
                     tokens: usize,
                     origin: crate::components::WriteOrigin|
      -> Stored {
-        let put = |w: &mut ContextWindow, c: String, t: usize| {
-            w.typed_write(origin, region, kind.clone(), c, t, taint_level)
+        let put = |w: &mut ContextWindow, c: leviath_core::region::EntryContent, t: usize| {
+            w.typed_write_content(origin, region, kind.clone(), c, t, taint_level)
         };
         match put(window, content.clone(), tokens) {
             Ok(()) => return Stored::Whole,
@@ -283,7 +298,7 @@ pub(crate) fn apply_one_tool_result(
             )
         };
         let trunc_tokens = leviath_core::estimate_tokens(&truncated);
-        match put(window, truncated, trunc_tokens) {
+        match put(window, truncated.into(), trunc_tokens) {
             Ok(()) => return Stored::Truncated { omitted },
             // The hook re-ran over the truncated text and refused that shape:
             // still a rejection, not a budget problem.
@@ -292,7 +307,7 @@ pub(crate) fn apply_one_tool_result(
             }
             Err(_) => {}
         }
-        let _ = put(window, "[result omitted]".to_string(), 5);
+        let _ = put(window, "[result omitted]".into(), 5);
         Stored::Dropped
     };
     let result_kind = || leviath_core::EntryKind::ToolResult {
@@ -309,7 +324,7 @@ pub(crate) fn apply_one_tool_result(
             window,
             "conversation",
             result_kind(),
-            result_text,
+            result_content,
             result_tokens,
             crate::components::WriteOrigin::System,
         );
@@ -322,8 +337,8 @@ pub(crate) fn apply_one_tool_result(
         // second sliding_window would desync from its tool_use (→ API 400), and
         // dropping the conversation tool_result would orphan the tool_use (the
         // assembler strips it, so the model can't see its own call landed → loops).
-        let preview: String = result_text.chars().take(160).collect();
-        let ellipsis = if result_text.len() > preview.len() {
+        let preview: String = result_content.chars().take(160).collect();
+        let ellipsis = if result_content.len() > preview.len() {
             "…"
         } else {
             ""
@@ -337,7 +352,7 @@ pub(crate) fn apply_one_tool_result(
             window,
             target_region,
             leviath_core::EntryKind::Text,
-            result_text,
+            result_content,
             result_tokens,
             crate::components::WriteOrigin::Agent,
         );
@@ -381,7 +396,7 @@ pub(crate) fn apply_one_tool_result(
             window,
             "conversation",
             result_kind(),
-            pointer,
+            pointer.into(),
             pointer_tokens,
             crate::components::WriteOrigin::System,
         );
@@ -416,7 +431,7 @@ pub(crate) fn apply_file_tracking(
     window: &mut ContextWindow,
     ft: &leviath_core::blueprint::FileTrackingConfig,
     tool_calls: &[crate::components::ToolCall],
-    merged: &mut [(String, String)],
+    merged: &mut [crate::tool_bridge::ToolResult],
 ) {
     let is_hashmap = window
         .get_region(&ft.region)
@@ -432,7 +447,7 @@ pub(crate) fn apply_file_tracking(
             continue;
         };
         let (body, verb) = match call.name.as_str() {
-            "read_file" if ft.track_reads => (result.clone(), "stored"),
+            "read_file" if ft.track_reads => (result.as_str().to_string(), "stored"),
             "write_file" if ft.track_writes => {
                 match call.arguments.get("content").and_then(|v| v.as_str()) {
                     Some(c) => (c.to_string(), "written"),
@@ -451,7 +466,8 @@ pub(crate) fn apply_file_tracking(
         *result = format!(
             "File {verb} in [{}] → ### [{}] ({} tokens). Reference it there; do not re-read this path.",
             ft.region, path, tokens
-        );
+        )
+        .into();
     }
 }
 
@@ -504,7 +520,7 @@ pub(crate) fn stage_modifying_tools(
 /// searches. `searches_empty == searches_run` is the only trace that survives.
 pub(crate) fn record_searches(
     tool_calls: &[crate::components::ToolCall],
-    merged: &[(String, String)],
+    merged: &[crate::tool_bridge::ToolResult],
     flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
 ) {
     let Some(mut flags) = flags else { return };
@@ -540,7 +556,7 @@ fn search_found_nothing(result: &str) -> bool {
 /// itself failed) count as neither.
 pub(crate) fn record_modifications(
     tool_calls: &[crate::components::ToolCall],
-    merged: &[(String, String)],
+    merged: &[crate::tool_bridge::ToolResult],
     modifying: &[String],
     progress: Option<bevy_ecs::prelude::Mut<'_, StageProgress>>,
     flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
@@ -679,7 +695,7 @@ pub(crate) fn collect_tools(
         // ordered by the original tool calls.
         let mut parts = outcome.results;
         if let Some(ctx) = context_results {
-            parts.extend(ctx.0.iter().cloned());
+            parts.extend(typed_results(&ctx.0));
         }
         let mut merged = merge_in_call_order(&infer.tool_calls, &parts);
         // Modification accounting: count the file-writing calls this

@@ -1128,7 +1128,7 @@ fn plant_rich_journal(run_id: &str) {
                 id: "c1".to_string(),
                 name: "write_file".to_string(),
                 arguments: r#"{"path":"toolneedle.rs"}"#.to_string(),
-                result: Some("wrote resultneedle".to_string()),
+                result: Some("wrote resultneedle".to_string().into()),
                 thought_signature: None,
             }],
             at: 2,

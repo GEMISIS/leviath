@@ -870,7 +870,7 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
             &mut window,
             leviath_core::blueprint::FAN_OUT_TOOL,
             call_id,
-            report,
+            report.into(),
             routing.as_ref(),
             sensitivities.as_ref(),
         );
