@@ -139,6 +139,10 @@ pub(crate) struct StageNodeContent {
     pub(crate) is_entry: bool,
     pub(crate) is_terminal: bool,
     pub(crate) self_loop: bool,
+    /// Media the stage takes beyond text, as patterns (`image/*`).
+    pub(crate) inputs: Vec<String>,
+    /// The types of the files it declares it hands back.
+    pub(crate) outputs: Vec<String>,
     // ── editor ──
     /// The editor's problems list names this stage.
     pub(crate) problem: bool,
@@ -166,6 +170,8 @@ impl StageNodeContent {
             is_entry: node.is_entry,
             is_terminal: node.is_terminal || node.allow_complete,
             self_loop: node.self_loop,
+            inputs: node.inputs.clone(),
+            outputs: node.outputs.clone(),
             problem: false,
             own_layout: false,
             status: NodeStatus::Pending,
@@ -236,7 +242,8 @@ impl StageNodeContent {
         parts.join(" · ")
     }
 
-    /// The second detail row: badges.
+    /// The second detail row: badges. Media the stage takes and hands back
+    /// sit here too, so a glance at the graph shows where the files go.
     fn badge_row(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.self_loop {
@@ -247,6 +254,12 @@ impl StageNodeContent {
         }
         if self.own_layout {
             parts.push("▣ own context".to_string());
+        }
+        if !self.inputs.is_empty() {
+            parts.push(format!("◧ {}", self.inputs.join(" ")));
+        }
+        if !self.outputs.is_empty() {
+            parts.push(format!("▤ {}", self.outputs.join(" ")));
         }
         if let Some(seen) = &self.last_seen {
             parts.push(seen.clone());
@@ -366,6 +379,8 @@ mod tests {
 
     fn node(id: &str, kind: NodeKind) -> StageNode {
         StageNode {
+            outputs: Vec::new(),
+            inputs: Vec::new(),
             id: id.to_string(),
             kind,
             is_entry: false,
@@ -504,6 +519,15 @@ mod tests {
         assert!(text.contains("▶"), "entry marker: {text}");
         assert!(text.contains("⑂ 3 run · 2 done · 1 fail"), "{text}");
         assert!(text.contains("↺ loops · ⏹ can end · 14:22:01"), "{text}");
+        // What the stage takes and hands back, between the layout badge and
+        // the clock.
+        c.inputs = vec!["image/*".to_string(), "audio/wav".to_string()];
+        c.outputs = vec!["video/mp4".to_string()];
+        let (_, text) = draw(&c, Rect::new(0, 0, 80, 4), false);
+        assert!(
+            text.contains("⏹ can end · ◧ image/* audio/wav · ▤ video/mp4 · 14:22:01"),
+            "{text}"
+        );
         c.clear_live();
         assert_eq!(c.status, NodeStatus::Pending);
         assert!(c.workers.is_none() && c.last_seen.is_none() && c.iteration.is_none());

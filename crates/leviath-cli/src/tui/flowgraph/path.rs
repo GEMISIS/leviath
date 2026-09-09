@@ -110,6 +110,8 @@ pub(crate) fn run_path(blueprint: Option<&StageGraph>, visits: &[Visit]) -> Stag
         .map(|(index, id)| {
             let stage = blueprint.and_then(|g| g.node(&visits[index].stage));
             StageNode {
+                outputs: Vec::new(),
+                inputs: Vec::new(),
                 id: id.clone(),
                 kind: stage
                     .map(|s| s.kind.clone())
@@ -135,6 +137,7 @@ pub(crate) fn run_path(blueprint: Option<&StageGraph>, visits: &[Visit]) -> Stag
     let edges: Vec<StageEdge> = ids
         .windows(2)
         .map(|pair| StageEdge {
+            unseen: Vec::new(),
             from: pair[0].clone(),
             to: pair[1].clone(),
             condition: TransitionCondition::Always,

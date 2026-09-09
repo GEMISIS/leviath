@@ -199,6 +199,13 @@ same list.
   under its answer in the Final view, and attaches the files a task names
   with `@path` when a run starts from the new-run screen, counting them on
   the task box as you type (#400).
+- The stage graph shows the media a stage takes beyond text (`◧ image/*
+  audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
+  files it declares it hands back (`▤ video/mp4`), in the explorer, the
+  new-run preview, the agent editor and `lev validate --graph` alike. A path
+  whose file the next stage's regions cannot take carries `!` on its label,
+  and the explorer's caption names the type that would cross as a stand-in
+  (#400).
 - `lev agent-client` advertises `image` and `audio` prompt capabilities. An
   image or audio block's bytes, and a `resource` block's `blob`, become
   parts on the task region (or on the message, on a later prompt), a prompt
