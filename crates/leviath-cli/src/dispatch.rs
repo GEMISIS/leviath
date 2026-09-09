@@ -565,6 +565,7 @@ mod tests {
             session: false,
             stage: false,
             json: false,
+            attach: Vec::new(),
         };
         assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());
     }

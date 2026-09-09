@@ -2384,6 +2384,7 @@ mod tests {
                     approved: None,
                     scope: None,
                     feedback: None,
+                    parts: Vec::new(),
                 },
             },
             ControlRequest::CancelInteraction { request_id: run() },

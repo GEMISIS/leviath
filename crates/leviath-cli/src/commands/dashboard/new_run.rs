@@ -177,12 +177,36 @@ impl Dashboard {
             self.toast("Write a task first", ToastLevel::Error);
             return;
         }
+        // The files the task names with `@path`, read from the workdir now,
+        // so a file that cannot be read is a toast here rather than a
+        // stand-in in the run. A token that names nothing stays text.
+        let read =
+            crate::commands::run::attach::inline_parts(&task, None, &self.new_run_ctx.workdir);
+        let (task, parts, unresolved) = match read {
+            Ok(read) => read,
+            Err(e) => {
+                self.toast(format!("Could not attach a file: {e}"), ToastLevel::Error);
+                return;
+            }
+        };
+        for token in &unresolved {
+            self.toast(
+                format!("'@{token}' names no file in the working directory; sent as text"),
+                ToastLevel::Warning,
+            );
+        }
+        let with_files = match parts.len() {
+            0 => String::new(),
+            1 => " with 1 file".to_string(),
+            n => format!(" with {n} files"),
+        };
         let _ = self.spawn_cmd_tx.send(SpawnCommand {
             agent_path: agent.path.clone(),
             task,
             workdir: self.new_run_ctx.workdir.display().to_string(),
             yolo: self.new_run_yolo,
             yolo_profile: self.new_run_yolo_profile.clone(),
+            parts,
         });
         // An unattended start is the warning the toggle gave, restated at the
         // moment it takes effect; an attended one is work in flight, not done.
@@ -194,7 +218,10 @@ impl Dashboard {
             (true, None) => (" unattended".to_string(), ToastLevel::Warning),
             (false, _) => (String::new(), ToastLevel::Progress),
         };
-        self.toast(format!("Starting '{}'{how}…", agent.name), level);
+        self.toast(
+            format!("Starting '{}'{how}{with_files}…", agent.name),
+            level,
+        );
         self.add_log(format!("run requested: {}", agent.name));
         // Recorded on the launch rather than on the selection: moving the
         // cursor down the list to read a blueprint's preview is not a choice
@@ -256,6 +283,20 @@ impl Dashboard {
     }
 
     // ── `@` file references ──────────────────────────────────────────────────
+
+    /// The files the task names with `@path` that the workdir holds, for the
+    /// task box's title. Checked as you type, so a typo shows as a missing
+    /// name before the run starts.
+    pub(super) fn new_run_attached_names(&self) -> Vec<String> {
+        let workdir = &self.new_run_ctx.workdir;
+        leviath_core::media::inline_refs::extract(&self.new_run_task.text(), &mut |path| {
+            workdir.join(path).is_file()
+        })
+        .refs
+        .into_iter()
+        .map(|r| r.path)
+        .collect()
+    }
 
     /// The workdir paths matching what has been typed after the `@`, capped to
     /// what the popup shows.
@@ -617,7 +658,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         regions: HashMap::new(),
         no_seed_commands: false,
         output_request: None,
-        parts: Vec::new(),
+        parts: cmd.parts,
     }) {
         Ok(args) => args,
         Err(e) => {
@@ -1359,6 +1400,81 @@ mod tests {
         assert_eq!(cmd.task, "ship it", "the task is trimmed");
         assert!(cmd.agent_path.ends_with("alpha"), "got: {}", cmd.agent_path);
         assert_eq!(cmd.workdir, dir.path().join("work").display().to_string());
+        assert!(cmd.parts.is_empty());
+    }
+
+    /// A `@path` in the task attaches that workdir file; one that names
+    /// nothing is a warning and stays text; one that cannot be read stops
+    /// the start.
+    #[test]
+    fn a_task_attaches_the_files_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        std::fs::write(dir.path().join("work/hero.png"), b"\x89PNG\r\n\x1a\nhero").unwrap();
+        std::fs::write(dir.path().join("work/notes.md"), b"# n").unwrap();
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+        dash.new_run_task
+            .area_mut()
+            .insert_str("edit @hero.png with @notes.md and @missing.png");
+        assert_eq!(dash.new_run_attached_names(), ["hero.png", "notes.md"]);
+
+        dash.handle_new_run_key(ctrl(KeyCode::Char('s')));
+        let cmd = dash
+            .spawn_cmd_rx_for_test()
+            .try_recv()
+            .expect("a spawn was dispatched");
+        assert_eq!(cmd.task, "edit @hero.png with @notes.md and @missing.png");
+        assert_eq!(cmd.parts.len(), 2);
+        assert_eq!(cmd.parts[0].name, "hero.png");
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.contains("'@missing.png' names no file")),
+            "{toasts:?}"
+        );
+        assert!(
+            toasts.iter().any(|t| t.contains("with 2 files")),
+            "{toasts:?}"
+        );
+
+        // One file is counted in the singular.
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+        dash.new_run_task.area_mut().insert_str("read @notes.md");
+        dash.handle_new_run_key(ctrl(KeyCode::Char('s')));
+        assert_eq!(
+            dash.spawn_cmd_rx_for_test()
+                .try_recv()
+                .expect("a spawn was dispatched")
+                .parts
+                .len(),
+            1
+        );
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts.iter().any(|t| t.contains("with 1 file…")),
+            "{toasts:?}"
+        );
+
+        // An empty file is a file the run cannot take.
+        std::fs::write(dir.path().join("work/empty.png"), b"").unwrap();
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+        dash.new_run_task.area_mut().insert_str("see @empty.png");
+        dash.handle_new_run_key(ctrl(KeyCode::Char('s')));
+        assert!(dash.new_run_screen, "the screen stays open");
+        assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts.iter().any(|t| t.contains("Could not attach")),
+            "{toasts:?}"
+        );
     }
 
     /// Ctrl+S is the submit chord that works on every terminal: Ctrl+Enter
@@ -1505,6 +1621,7 @@ mod tests {
                 workdir: dir.path().display().to_string(),
                 yolo: false,
                 yolo_profile: None,
+                parts: Vec::new(),
             })
             .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
@@ -1556,6 +1673,7 @@ mod tests {
                 workdir: dir.path().display().to_string(),
                 yolo: false,
                 yolo_profile: None,
+                parts: Vec::new(),
             },
         )
         .await;
@@ -1582,6 +1700,7 @@ mod tests {
                 workdir: dir.path().display().to_string(),
                 yolo: false,
                 yolo_profile: None,
+                parts: Vec::new(),
             })
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)

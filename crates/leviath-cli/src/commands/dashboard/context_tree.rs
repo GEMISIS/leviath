@@ -20,8 +20,19 @@ use crate::runstate::ContextSnapshot;
 /// One interactive (cursor-addressable) row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TreeRow {
-    RegionHeader { region: String },
-    EntryStub { region: String, index: usize },
+    RegionHeader {
+        region: String,
+    },
+    EntryStub {
+        region: String,
+        index: usize,
+    },
+    /// A stored part of an expanded entry: `part` indexes the entry's parts.
+    Part {
+        region: String,
+        index: usize,
+        part: usize,
+    },
 }
 
 /// The cursor-row sequence for `snap` under `tree`'s fold state: every region
@@ -38,15 +49,55 @@ pub(super) fn rows(
             region: region.name.clone(),
         });
         if searching || !tree.collapsed_regions.contains(&region.name) {
-            for index in 0..region.entries.len() {
+            for (index, entry) in region.entries.iter().enumerate() {
                 rows.push(TreeRow::EntryStub {
                     region: region.name.clone(),
                     index,
                 });
+                if entry_expanded(tree, searching, &region.name, index) {
+                    for part in stored_indices(entry) {
+                        rows.push(TreeRow::Part {
+                            region: region.name.clone(),
+                            index,
+                            part,
+                        });
+                    }
+                }
             }
         }
     }
     rows
+}
+
+/// The positions of an entry's stored parts among all its parts.
+fn stored_indices(entry: &leviath_core::run_meta::RegionEntrySnapshot) -> Vec<usize> {
+    entry
+        .content
+        .parts()
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.is_stored())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// What a stored part's row says it is: the stand-in the model sees, or,
+/// for a part recorded before stand-ins were, its type, size and name.
+pub(super) fn part_label(part: &leviath_core::media::Part) -> String {
+    let Some(blob) = part.blob() else {
+        return part.inline_text().unwrap_or_default().to_string();
+    };
+    match blob.stand_in.is_empty() {
+        false => blob.stand_in.clone(),
+        true => format!(
+            "[{}, {}] {}",
+            blob.media_type,
+            leviath_core::media::human_size(blob.size),
+            part.name.as_deref().unwrap_or("")
+        )
+        .trim_end()
+        .to_string(),
+    }
 }
 
 /// Whether an entry's full content should render: explicitly expanded, or a
@@ -265,6 +316,35 @@ pub(super) fn flatten(
             lines.push(Line::from(spans));
 
             if expanded {
+                // A row per stored part, before the text: each is a place
+                // the cursor can land, with the keys that act on it.
+                for part in stored_indices(entry)
+                    .into_iter()
+                    .filter_map(|i| entry.content.parts().get(i))
+                {
+                    let on_cursor = cursor == row_idx;
+                    cursor_lines.push(lines.len());
+                    row_idx += 1;
+                    let label_style = if on_cursor {
+                        Style::default()
+                            .fg(C_WHITE)
+                            .add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(C_SUCCESS)
+                    };
+                    let detail = part
+                        .blob()
+                        .map(|b| format!("  sha256:{}  {} tok", b.short_sha(), b.tokens))
+                        .unwrap_or_default();
+                    lines.push(Line::from(vec![
+                        Span::styled("      ▪ ", Style::default().fg(C_ACCENT)),
+                        Span::styled(part_label(part), label_style),
+                        Span::styled(
+                            format!("{detail}  v open · w write"),
+                            Style::default().fg(C_DIM),
+                        ),
+                    ]));
+                }
                 let rendered =
                     crate::render::markdown_to_text(&entry.content, render_width.saturating_sub(4));
                 for mut l in rendered.lines {
@@ -526,6 +606,78 @@ mod tests {
         tree.collapsed_regions.insert("conversation".to_string());
         let text = text_of(&flatten(&s, &tree, 0, false, 80));
         assert!(!text.contains("(empty)"), "folded empty region: {text}");
+    }
+
+    /// A stored part is a row of its own under its expanded entry, in both
+    /// the cursor sequence and the drawn lines, and folds away with it.
+    #[test]
+    fn stored_parts_get_rows_under_an_expanded_entry() {
+        use leviath_core::media::{BlobRef, MediaType, Part};
+        let blob = BlobRef {
+            sha256: "abcdef0123456789".repeat(4),
+            media_type: MediaType::parse("image/png").unwrap(),
+            size: 240 * 1024,
+            width: Some(1024),
+            height: Some(768),
+            duration_ms: None,
+            tokens: 1092,
+            stand_in: "[image/png 1024x768, 240 KB] hero.png".to_string(),
+        };
+        let mut s = snap();
+        s.regions[0].entries[0].content = leviath_core::region::EntryContent::from_parts(vec![
+            Part::text("see"),
+            Part::stored(blob.clone()).named("hero.png"),
+            Part::stored(BlobRef {
+                stand_in: String::new(),
+                ..blob
+            }),
+        ]);
+        let mut tree = ContextTreeState::default();
+        assert_eq!(rows(&s, &tree, false).len(), 4, "collapsed: no part rows");
+        tree.expanded_entries.insert(("system".to_string(), 0));
+        let all = rows(&s, &tree, false);
+        assert_eq!(all.len(), 6);
+        assert_eq!(
+            all[2],
+            TreeRow::Part {
+                region: "system".to_string(),
+                index: 0,
+                part: 1
+            }
+        );
+        assert_eq!(
+            all[3],
+            TreeRow::Part {
+                region: "system".to_string(),
+                index: 0,
+                part: 2
+            }
+        );
+        let flat = flatten(&s, &tree, 2, false, 80);
+        assert_eq!(flat.cursor_lines.len(), 6);
+        let text: Vec<String> = flat
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect())
+            .collect();
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("▪ [image/png 1024x768, 240 KB] hero.png  sha256:abcdef012345  1092 tok  v open · w write"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("▪ [image/png, 240 KB]  sha256:"),
+            "{joined}"
+        );
+        // The cursor row is the first part's line.
+        let cursor_line = &flat.lines[flat.cursor_lines[2]];
+        assert!(
+            cursor_line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(part_label(&Part::text("plain")), "plain");
     }
 
     #[test]

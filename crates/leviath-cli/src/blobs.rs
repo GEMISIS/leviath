@@ -47,17 +47,12 @@ impl BlobEntry {
     /// A file name to export the part under: its own name, or its short hash
     /// with the extension the registry gives its type.
     pub(crate) fn file_name(&self, registry: &MediaRegistry) -> String {
-        if let Some(name) = &self.name {
-            return name.clone();
-        }
-        let stem: String = self.sha256.chars().take(12).collect();
-        let extension = MediaType::parse(&self.media_type)
-            .ok()
-            .and_then(|t| registry.info(&t).extensions.first().cloned());
-        match extension {
-            Some(ext) => format!("{stem}.{ext}"),
-            None => stem,
-        }
+        export_name(
+            self.name.as_deref(),
+            &self.sha256,
+            &self.media_type,
+            registry,
+        )
     }
 
     /// The dimensions or duration, as a short label for a listing column.
@@ -67,6 +62,27 @@ impl BlobEntry {
             (_, _, Some(ms)) => format!("{:.1}s", ms as f64 / 1000.0),
             _ => String::new(),
         }
+    }
+}
+
+/// A file name to export a stored part under: the name it carries, or its
+/// short hash with the extension the registry gives its type.
+pub(crate) fn export_name(
+    name: Option<&str>,
+    sha256: &str,
+    media_type: &str,
+    registry: &MediaRegistry,
+) -> String {
+    if let Some(name) = name {
+        return name.to_string();
+    }
+    let stem: String = sha256.chars().take(12).collect();
+    let extension = MediaType::parse(media_type)
+        .ok()
+        .and_then(|t| registry.info(&t).extensions.first().cloned());
+    match extension {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
     }
 }
 

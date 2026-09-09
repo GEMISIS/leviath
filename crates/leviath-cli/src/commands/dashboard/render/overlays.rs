@@ -388,6 +388,8 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("enter / space", "fold or unfold a row"),
                 ("click", "the same, on the row under the pointer"),
                 ("[ / ]", "previous / next region"),
+                ("v", "open the stored part under the cursor with the OS"),
+                ("w", "write it into the run's working directory"),
             ],
         },
         HelpSection {
@@ -952,6 +954,8 @@ mod tests {
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("the whole blueprint"), "t: {buf}");
         assert!(buf.contains("snake the path again"), "R: {buf}");
+        assert!(buf.contains("open the stored part"), "v: {buf}");
+        assert!(buf.contains("run's working directory"), "w: {buf}");
     }
 
     /// Work in flight wears its own glyph, not the check of work that is done.

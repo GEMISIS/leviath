@@ -14,6 +14,7 @@ mod input;
 mod mcp;
 mod new_run;
 mod new_run_preview;
+mod parts;
 mod render;
 mod run_actions;
 mod selection;
@@ -129,13 +130,17 @@ async fn daemon_background_loop(
                 ControlRequest::AnswerInteraction { response },
                 "answer",
             ),
-            DaemonCommand::Message { agent_id, content } => (
+            DaemonCommand::Message {
+                agent_id,
+                content,
+                parts,
+            } => (
                 agent_id.clone(),
                 ControlRequest::Message {
                     agent_id,
                     content,
                     target_region: None,
-                    parts: Vec::new(),
+                    parts,
                 },
                 "message",
             ),
@@ -747,6 +752,7 @@ mod tests {
             .send(DaemonCommand::Message {
                 agent_id: "a1".to_string(),
                 content: "hi there".to_string(),
+                parts: Vec::new(),
             })
             .unwrap();
         let req = server.await.unwrap();

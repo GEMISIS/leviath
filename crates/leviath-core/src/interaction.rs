@@ -401,9 +401,22 @@ pub struct InteractionResponse {
     /// redirect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
+    /// Files attached to a text answer: what `lev respond --attach` and a
+    /// `@path` in a dashboard reply send. The run stores each one and
+    /// writes it beside the answer's text in the tool result. Absent on
+    /// every answer written before parts existed, and on every answer that
+    /// is not text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<crate::media::InboundPart>,
 }
 
 impl InteractionResponse {
+    /// The same answer, with files attached.
+    pub fn with_parts(mut self, parts: Vec<crate::media::InboundPart>) -> Self {
+        self.parts = parts;
+        self
+    }
+
     /// Build a simple text response.
     pub fn text(request_id: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -413,6 +426,7 @@ impl InteractionResponse {
             approved: None,
             scope: None,
             feedback: None,
+            parts: Vec::new(),
         }
     }
 
@@ -425,6 +439,7 @@ impl InteractionResponse {
             approved: None,
             scope: None,
             feedback: None,
+            parts: Vec::new(),
         }
     }
 
@@ -437,6 +452,7 @@ impl InteractionResponse {
             approved: Some(approved),
             scope: Some(scope),
             feedback: None,
+            parts: Vec::new(),
         }
     }
 
@@ -454,6 +470,7 @@ impl InteractionResponse {
             approved: Some(false),
             scope: Some(ApprovalScope::Once),
             feedback: (!feedback.is_empty()).then(|| feedback.to_string()),
+            parts: Vec::new(),
         }
     }
 
@@ -760,6 +777,26 @@ mod tests {
         assert_eq!(r.scope, Some(ApprovalScope::Run));
     }
 
+    /// An answer's files ride the wire only when there are some, so every
+    /// client that never heard of parts reads and writes the same JSON.
+    #[test]
+    fn parts_ride_the_answer_only_when_attached() {
+        let bare = InteractionResponse::text("q1", "hi");
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("parts"), "{json}");
+        let parsed: InteractionResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.parts.is_empty());
+        let with = bare.with_parts(vec![crate::media::InboundPart::from_bytes(
+            "a.png",
+            vec![1, 2, 3],
+        )]);
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("\"parts\""), "{json}");
+        let parsed: InteractionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.parts.len(), 1);
+        assert_eq!(parsed.parts[0].name, "a.png");
+    }
+
     #[test]
     fn test_response_as_text() {
         let r = InteractionResponse::text("id", "answer");
@@ -771,6 +808,7 @@ mod tests {
             approved: None,
             scope: None,
             feedback: None,
+            parts: Vec::new(),
         };
         assert_eq!(response_as_text(&empty), "");
     }

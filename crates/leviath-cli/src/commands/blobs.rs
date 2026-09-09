@@ -59,7 +59,7 @@ pub(crate) async fn execute(args: BlobsArgs) -> anyhow::Result<()> {
                 needle,
                 args.out.as_deref(),
                 args.open,
-                leviath_sys::open_url,
+                &leviath_sys::open_url,
                 &mut stdout,
             )?;
             for line in lines {
@@ -121,7 +121,7 @@ fn fetch(
     needle: &str,
     out: Option<&Path>,
     open: bool,
-    opener: Opener,
+    opener: Opener<'_>,
     stdout: &mut dyn Write,
 ) -> anyhow::Result<Vec<String>> {
     let entry = crate::blobs::find(entries, needle).ok_or_else(|| {
@@ -291,13 +291,13 @@ mod tests {
             // To stdout, by name and by hash prefix.
             let mut sink = Vec::new();
             let lines = fetch(
-                run_id, &entries, "hero.png", None, false, no_open, &mut sink,
+                run_id, &entries, "hero.png", None, false, &no_open, &mut sink,
             )
             .unwrap();
             assert!(lines.is_empty());
             assert_eq!(sink, b"\x89PNG\r\n\x1a\nhero");
             let prefix: String = sha.chars().take(8).collect();
-            assert!(fetch(run_id, &entries, &prefix, None, false, no_open, &mut sink).is_ok());
+            assert!(fetch(run_id, &entries, &prefix, None, false, &no_open, &mut sink).is_ok());
 
             // Into a directory, then to an explicit file path.
             let dest = tempfile::tempdir().unwrap();
@@ -307,7 +307,7 @@ mod tests {
                 "hero.png",
                 Some(dest.path()),
                 false,
-                no_open,
+                &no_open,
                 &mut sink,
             )
             .unwrap();
@@ -324,7 +324,7 @@ mod tests {
                 "hero.png",
                 Some(&explicit),
                 false,
-                no_open,
+                &no_open,
                 &mut sink,
             )
             .unwrap();
@@ -340,7 +340,7 @@ mod tests {
                 "hero.png",
                 Some(&under_file),
                 false,
-                no_open,
+                &no_open,
                 &mut sink,
             )
             .unwrap_err();
@@ -351,7 +351,7 @@ mod tests {
                 "hero.png",
                 None,
                 false,
-                no_open,
+                &no_open,
                 &mut Broken,
             )
             .unwrap_err();
@@ -360,20 +360,22 @@ mod tests {
 
             // Opened: exported under the temp dir first.
             let lines = fetch(
-                run_id, &entries, "hero.png", None, true, yes_open, &mut sink,
+                run_id, &entries, "hero.png", None, true, &yes_open, &mut sink,
             )
             .unwrap();
             let first = &lines[0];
             assert!(first.starts_with("opened "), "{first}");
             assert!(export::export_dir(run_id).join("hero.png").is_file());
             let _ = std::fs::remove_dir_all(export::export_dir(run_id));
-            let err =
-                fetch(run_id, &entries, "hero.png", None, true, no_open, &mut sink).unwrap_err();
+            let err = fetch(
+                run_id, &entries, "hero.png", None, true, &no_open, &mut sink,
+            )
+            .unwrap_err();
             assert!(err.to_string().contains("could not open"), "{err}");
 
             // A part the run does not hold, and one whose bytes are gone.
             let err = fetch(
-                run_id, &entries, "nope.png", None, false, no_open, &mut sink,
+                run_id, &entries, "nope.png", None, false, &no_open, &mut sink,
             )
             .unwrap_err();
             assert!(
@@ -382,7 +384,7 @@ mod tests {
             );
             std::fs::remove_file(crate::blobs::blob_path(run_id, &sha)).unwrap();
             let err = fetch(
-                run_id, &entries, "hero.png", None, false, no_open, &mut sink,
+                run_id, &entries, "hero.png", None, false, &no_open, &mut sink,
             )
             .unwrap_err();
             assert!(err.to_string().contains("not in the run's store"), "{err}");

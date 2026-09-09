@@ -53,18 +53,50 @@ fn approval_scope_from_wire(s: &str) -> ApprovalScope {
 }
 
 /// `POST /api/agents/{id}/interaction`: answer an open interaction. The request
-/// id in the body selects the interaction (globally unique in the daemon).
+/// id in the body selects the interaction (globally unique in the daemon);
+/// the run in the path is where a `parts` list or a `@path` in the answer
+/// finds its files.
 pub(super) async fn submit_interaction(
     State(state): State<AppState>,
-    AxumPath(_id): AxumPath<String>,
-    Json(body): Json<SubmitInteractionReq>,
+    AxumPath(id): AxumPath<String>,
+    request: axum::extract::Request,
 ) -> Result<StatusCode, ApiError> {
+    let max_upload = state.limits.request_limits.max_upload_bytes;
+    let (mut body, mut parts): (SubmitInteractionReq, _) =
+        super::upload::json_or_multipart(&state, request, max_upload).await?;
     if body.approved == Some(true) && body.feedback.is_some() {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "feedback goes with a deny: send it with \"approved\": false, or drop it to approve"
                 .to_string(),
         ));
+    }
+    // Files go with a text answer; a choice or an approval has no text for
+    // them to sit beside. Named workdir files need a run this server can
+    // see; an upload goes through either way.
+    if body.value.is_none() && (!parts.is_empty() || !body.parts.is_empty()) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "files go with a text answer: send them with a \"value\"".to_string(),
+        ));
+    }
+    match (body.value.as_deref(), crate::runstate::read_meta(&id)) {
+        (Some(value), Ok(meta)) => {
+            let workdir = std::path::Path::new(&meta.workdir);
+            parts.extend(super::upload::json_parts(&body.parts, workdir, max_upload)?);
+            let (kept, named) = super::upload::inline_parts(value, None, workdir, max_upload)?;
+            body.value = Some(kept);
+            parts.extend(named);
+        }
+        (Some(_), Err(_)) if !body.parts.is_empty() => {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "Agent run '{id}' has no working directory this server can read parts from"
+                ),
+            ));
+        }
+        _ => {}
     }
     let scope = body.scope.as_deref().map(approval_scope_from_wire);
     let response = InteractionResponse {
@@ -74,6 +106,7 @@ pub(super) async fn submit_interaction(
         approved: body.approved,
         scope,
         feedback: body.feedback,
+        parts,
     };
     let reply = state
         .control
@@ -550,6 +583,119 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    /// What the daemon sees for an answer posted to `run_id`.
+    async fn answer_seen(
+        run_id: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Option<serde_json::Value>) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&captured);
+        let (control, _dir, _srv) = fake_daemon(move |req| {
+            *sink.lock().unwrap() = Some(serde_json::to_value(&req).unwrap());
+            ControlResponse::Ok { ok: true }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{run_id}/interaction"))
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let status = app_with(control).oneshot(req).await.unwrap().status();
+        let seen = captured.lock().unwrap().take();
+        (status, seen)
+    }
+
+    /// A text answer carries files the way a message does: named in the
+    /// workdir, mentioned with `@path`, or uploaded. A choice cannot.
+    #[tokio::test]
+    async fn an_answer_carries_files_like_a_message() {
+        crate::runstate::with_isolated_runs_dir_async("answer_carries_files", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("mark.png"), b"\x89PNG\r\n\x1a\nmark").unwrap();
+            let run_id = "ans-run";
+            let meta = leviath_core::run_meta::RunMeta::new(
+                run_id.to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                workdir.path().to_string_lossy().to_string(),
+                1,
+            );
+            crate::runstate::create_run(&meta).unwrap();
+
+            let body = b"{\"request_id\":\"q1\",\"value\":\"see @mark.png\",\"parts\":[{\"path\":\"mark.png\",\"region\":\"art\"}]}";
+            let (status, seen) = answer_seen(run_id, "application/json", body.to_vec()).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let response = seen.expect("answered")["response"].clone();
+            assert_eq!(response["value"], "see @mark.png");
+            let parts = response["parts"].as_array().unwrap();
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0]["region"], "art");
+            assert!(parts[1].get("region").is_none());
+
+            let boundary = "levboundary";
+            let body = format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n\
+                 {{\"request_id\":\"q1\",\"value\":\"look\"}}\r\n--{boundary}\r\nContent-Disposition: form-data; \
+                 name=\"part\"; filename=\"up.png\"\r\nContent-Type: image/png\r\n\r\nbytes\r\n\
+                 --{boundary}--\r\n"
+            );
+            let (status, seen) = answer_seen(
+                run_id,
+                &format!("multipart/form-data; boundary={boundary}"),
+                body.into_bytes(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let parts = seen.unwrap()["response"]["parts"].as_array().unwrap().clone();
+            assert_eq!(parts[0]["name"], "up.png");
+
+            // A body that is no form at all, a file the workdir lacks, and a
+            // mention of one the API cannot take, each fail before the
+            // daemon hears.
+            let (status, seen) =
+                answer_seen(run_id, "multipart/form-data; boundary=b", b"garbage".to_vec()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(seen.is_none());
+            std::fs::write(workdir.path().join("empty.png"), b"").unwrap();
+            for body in [
+                b"{\"request_id\":\"q1\",\"value\":\"hi\",\"parts\":[{\"path\":\"missing.png\"}]}".to_vec(),
+                b"{\"request_id\":\"q1\",\"value\":\"see @empty.png\"}".to_vec(),
+            ] {
+                let (status, seen) = answer_seen(run_id, "application/json", body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(seen.is_none());
+            }
+            // Files on a choice, and workdir files for a run this server
+            // cannot see; a bare answer to such a run still goes.
+            let (status, _) = answer_seen(
+                run_id,
+                "application/json",
+                b"{\"request_id\":\"q1\",\"choice_index\":1,\"parts\":[{\"path\":\"mark.png\"}]}".to_vec(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, _) = answer_seen(
+                "ghost",
+                "application/json",
+                b"{\"request_id\":\"q1\",\"value\":\"hi\",\"parts\":[{\"path\":\"x\"}]}".to_vec(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (status, seen) = answer_seen(
+                "ghost",
+                "application/json",
+                b"{\"request_id\":\"q1\",\"value\":\"hi\"}".to_vec(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert!(seen.is_some());
         })
         .await;
     }

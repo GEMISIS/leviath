@@ -429,7 +429,8 @@ impl Dashboard {
                     self.context_tree.expanded_entries.insert(key);
                 }
             }
-            None => {}
+            // A part folds nothing; `v` and `w` are its keys.
+            Some(TreeRow::Part { .. }) | None => {}
         }
         self.context_tree.follow_cursor = true;
         // Kept per run, so reopening this one finds it the way it was left.
@@ -591,6 +592,10 @@ impl Dashboard {
             // Jump between region headers.
             KeyCode::Char('[') if in_context => self.jump_context_region(false),
             KeyCode::Char(']') if in_context => self.jump_context_region(true),
+            // The stored part under the cursor: open it with the OS, or
+            // write it into the run's working directory.
+            KeyCode::Char('v') if in_context => self.open_context_part(),
+            KeyCode::Char('w') if in_context => self.write_context_part(),
             // The full-screen stage explorer.
             KeyCode::Char('g') => {
                 self.open_stage_explorer();
@@ -1018,8 +1023,8 @@ impl Dashboard {
     pub(super) fn submit_input(&mut self) {
         use interaction::{ApprovalScope, InteractionKind, InteractionResponse};
 
-        let (agent_id, req) = match self.selected_agent() {
-            Some(a) => (a.id.clone(), a.pending_request.clone()),
+        let (agent_id, req, workdir) = match self.selected_agent() {
+            Some(a) => (a.id.clone(), a.pending_request.clone(), a.workdir.clone()),
             None => return,
         };
 
@@ -1032,12 +1037,16 @@ impl Dashboard {
                     } else {
                         raw
                     };
+                    let (input, parts) = self.answer_parts(&input, &workdir);
                     let d = if input.is_empty() {
                         "(end)".to_string()
                     } else {
                         truncate(&input, 40)
                     };
-                    (InteractionResponse::text(&r.id, &input), d)
+                    (
+                        InteractionResponse::text(&r.id, &input).with_parts(parts),
+                        d,
+                    )
                 }
                 InteractionKind::EditText => {
                     // Preserve indentation / internal newlines - only trim the
@@ -1087,6 +1096,7 @@ impl Dashboard {
                 } else {
                     raw
                 };
+                let (input, parts) = self.answer_parts(&input, &workdir);
                 let d = if input.is_empty() {
                     "(end)".to_string()
                 } else {
@@ -1100,6 +1110,7 @@ impl Dashboard {
                         approved: None,
                         scope: None,
                         feedback: None,
+                        parts,
                     },
                     d,
                 )
@@ -1137,10 +1148,11 @@ impl Dashboard {
             let _ = self.cmd_tx.send(DaemonCommand::Answer { response: resp });
             self.add_log(format!("Sent: {}", display));
         } else {
-            let content = resp.value.clone().unwrap_or_default();
+            let content = resp.value.unwrap_or_default();
             let _ = self.cmd_tx.send(DaemonCommand::Message {
                 agent_id: agent_id.clone(),
                 content,
+                parts: resp.parts,
             });
             self.add_log(format!("💬 User: \"{}\"", display));
         }
@@ -2968,6 +2980,88 @@ mod tests {
         assert!(dash.agents[0].pending_request.is_none());
         assert!(dash.agents[0].waiting_prompt.is_none());
         assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+    }
+
+    /// A `@path` in a typed answer attaches that file from the run's
+    /// workdir, and the same in a message with no question open.
+    #[test]
+    fn an_answer_and_a_message_attach_the_files_they_name() {
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::write(workdir.path().join("mark.png"), b"\x89PNG\r\n\x1a\nmark").unwrap();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.workdir = workdir.path().to_string_lossy().to_string();
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
+            "ft1", "What?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.input_textarea
+            .area_mut()
+            .insert_str("the arm is wrong, see @mark.png and @gone.png");
+        dash.submit_input();
+        let mark = || {
+            leviath_core::media::InboundPart::from_bytes(
+                "mark.png",
+                b"\x89PNG\r\n\x1a\nmark".to_vec(),
+            )
+        };
+        assert_eq!(
+            cmd_rx.try_recv().expect("an answer was sent"),
+            DaemonCommand::Answer {
+                response: interaction::InteractionResponse::text(
+                    "ft1",
+                    "the arm is wrong, see @mark.png and @gone.png"
+                )
+                .with_parts(vec![mark()]),
+            }
+        );
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.contains("'@gone.png' names no file")),
+            "{toasts:?}"
+        );
+
+        // No question open: a message, with its files.
+        dash.agents[0].status = AgentDisplayStatus::Active;
+        dash.input_mode = true;
+        dash.input_textarea.area_mut().insert_str("also @mark.png");
+        dash.submit_input();
+        assert_eq!(
+            cmd_rx.try_recv().expect("a message was sent"),
+            DaemonCommand::Message {
+                agent_id: "run-1".to_string(),
+                content: "also @mark.png".to_string(),
+                parts: vec![mark()],
+            }
+        );
+
+        // A file that cannot be attached (empty, here) keeps the words and
+        // says why.
+        std::fs::write(workdir.path().join("empty.png"), b"").unwrap();
+        dash.input_mode = true;
+        dash.input_textarea.area_mut().insert_str("see @empty.png");
+        dash.submit_input();
+        assert_eq!(
+            cmd_rx.try_recv().expect("a message was sent"),
+            DaemonCommand::Message {
+                agent_id: "run-1".to_string(),
+                content: "see @empty.png".to_string(),
+                parts: Vec::new(),
+            }
+        );
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.starts_with("Could not attach a file")),
+            "{toasts:?}"
+        );
     }
 
     // ─── submit_input for FreeText with /quit ─────────────────────────────

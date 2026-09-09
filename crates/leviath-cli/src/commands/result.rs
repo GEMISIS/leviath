@@ -77,7 +77,7 @@ pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
             &meta.workdir,
             output,
             request,
-            leviath_sys::open_url,
+            &leviath_sys::open_url,
             &mut stdout,
         )?;
         for line in lines {
