@@ -613,14 +613,14 @@ fn tab_strip(width: u16) -> Vec<(usize, StageTab, String)> {
     if fits { full } else { strip(true) }
 }
 
-/// The label column's width for these rows: as wide as the widest label,
+/// The label column's width for these rows: the widest label plus a gap,
 /// within bounds, so a long label is cut rather than pushing its value into
 /// the next line.
 fn label_width(fields: &[Field]) -> usize {
     fields
         .iter()
         .filter(|f| !matches!(f.value, FieldValue::Button))
-        .map(|f| f.label.chars().count())
+        .map(|f| f.label.chars().count() + 2)
         .max()
         .unwrap_or(12)
         .clamp(12, 26)

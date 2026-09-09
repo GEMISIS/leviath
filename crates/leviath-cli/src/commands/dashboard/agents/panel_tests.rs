@@ -652,12 +652,37 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     goto(&mut dash, FieldId::StageAccepts);
     dash.handle_key(key(KeyCode::Char('x')));
     assert!(stage(&mut dash).input_accepts.is_empty());
-    // The answer format is typed.
+    // The output type is one pick from the plain shapes and the registry;
+    // "(any)" and x both ask for no shape, and "another…" types one.
     goto(&mut dash, FieldId::OutputFormat);
+    let screen = text(&mut dash);
+    assert!(screen.contains("Output type"), "{screen}");
+    assert!(screen.contains("(any)"), "{screen}");
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "markdown");
+    assert!(picker_open(&mut dash));
+    let values = picker_values(&mut dash);
+    assert_eq!(&values[..4], ["(any)", "markdown", "json", "text"]);
+    assert!(values.contains(&"image/png".to_string()));
+    picker_goto(&mut dash, "markdown");
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(stage(&mut dash).output_format, "markdown");
+    dash.handle_key(key(KeyCode::Enter));
+    {
+        let editor = dash.agents().editor.as_ref().unwrap();
+        let picker = &editor.picker.as_ref().unwrap().1;
+        assert_eq!(picker.options[picker.cursor].value, "markdown");
+    }
+    picker_goto(&mut dash, "(any)");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).output_format, "");
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "another…");
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "a2ui");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(stage(&mut dash).output_format, "a2ui");
+    dash.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(stage(&mut dash).output_format, "");
     // Declaring a file asks its name and opens its window.
     goto(&mut dash, FieldId::AddArtifact);
     dash.handle_key(key(KeyCode::Enter));
@@ -783,10 +808,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
             .is_some_and(|m| m.contains("taken"))
     );
     let screen = text(&mut dash);
-    assert!(
-        screen.contains("Hands back") && screen.contains("  and"),
-        "{screen}"
-    );
+    assert_eq!(screen.matches("Output file").count(), 2, "{screen}");
     goto(&mut dash, FieldId::ArtifactRow(1));
     dash.handle_key(key(KeyCode::Char('x')));
     goto(&mut dash, FieldId::ArtifactRow(0));
@@ -803,7 +825,9 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     dash.handle_key(key(KeyCode::Char('2')));
     let screen = text(&mut dash);
     assert!(
-        screen.contains("Reads") && screen.contains("notes  any type"),
+        screen.contains("Input types")
+            && screen.contains("from notes")
+            && screen.contains("any type"),
         "{screen}"
     );
     goto(&mut dash, FieldId::IoRegionRow("shots".into()));
@@ -848,6 +872,50 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     dash.handle_key(key(KeyCode::Enter));
     let screen = text(&mut dash);
     assert!(screen.contains("◧ audio/*"), "{screen}");
+    // With nothing of its own, the input row shows what the regions take
+    // between them: the union of their lists (text aside), or any type
+    // when one of them takes anything.
+    goto(&mut dash, FieldId::StageAccepts);
+    dash.handle_key(key(KeyCode::Char('x')));
+    let set_accepts = |dash: &mut Dashboard, name: &str, list: &str| {
+        dash.agents()
+            .editor
+            .as_mut()
+            .unwrap()
+            .doc
+            .set_region_field(
+                &RegionScope::Stage("work".into()),
+                name,
+                crate::blueprint_edit::RegionField::Accepts,
+                crate::blueprint_edit::RegionValue::Text(list.to_string()),
+            )
+            .unwrap();
+        dash.agents().editor.as_mut().unwrap().refresh();
+    };
+    let input_row = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .fields()
+            .into_iter()
+            .find(|f| f.id == FieldId::StageAccepts)
+            .map(|f| match f.value {
+                FieldValue::Row(r) => r,
+                other => panic!("{other:?}"),
+            })
+            .unwrap()
+    };
+    set_accepts(&mut dash, "shots", "image/png");
+    set_accepts(&mut dash, "notes", "text/plain, audio/*");
+    assert_eq!(
+        input_row(&mut dash),
+        "(image/png, audio/*, from its regions)"
+    );
+    let screen = text(&mut dash);
+    assert!(screen.contains("from shots  image/png"), "{screen}");
+    set_accepts(&mut dash, "notes", "");
+    assert_eq!(input_row(&mut dash), "(any type, from its regions)");
     let _ = std::fs::remove_dir_all(root);
 }
 

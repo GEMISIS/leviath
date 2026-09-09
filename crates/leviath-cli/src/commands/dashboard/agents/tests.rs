@@ -907,8 +907,14 @@ fn the_inspector_edits_every_kind_of_field() {
     dash.handle_key(key(KeyCode::Char('l')));
     dash.handle_key(key(KeyCode::Enter));
     dash.handle_key(key(KeyCode::Enter));
+    // The workers are another agent: the worker is picked from the catalog,
+    // and "another…" names one that is not installed here.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
     dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
+    type_str(&mut dash, "another");
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().line.is_some());
     type_str(&mut dash, "finish");
     dash.handle_key(key(KeyCode::Enter));
     let fan = dash
@@ -1019,11 +1025,7 @@ fn the_inspector_edits_every_kind_of_field() {
     dash.handle_key(key(KeyCode::Enter));
     // Clearing the worker.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
-    dash.handle_key(key(KeyCode::Enter));
-    for _ in 0..8 {
-        dash.handle_key(key(KeyCode::Backspace));
-    }
-    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Char('x')));
     assert_eq!(
         dash.agents()
             .editor
@@ -1049,6 +1051,65 @@ fn the_inspector_edits_every_kind_of_field() {
             .fan_out
             .worker
             .is_some()
+    );
+    // The worker is picked from a list: the agent's other stages when the
+    // workers are a stage of it, the catalog when they are another agent;
+    // a query is typed.
+    let worker = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .stage("work2")
+            .unwrap()
+            .fan_out
+            .worker
+    };
+    let set_kind = |dash: &mut Dashboard, kind: &str| {
+        dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerKind);
+        dash.handle_key(key(KeyCode::Enter));
+        type_str(dash, kind);
+        dash.handle_key(key(KeyCode::Enter));
+    };
+    set_kind(&mut dash, "worker_stage");
+    dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
+    type_str(&mut dash, "finish");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        worker(&mut dash),
+        Some((
+            crate::blueprint_edit::WorkerKind::Stage,
+            "finish".to_string()
+        ))
+    );
+    set_kind(&mut dash, "worker_agent");
+    dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "coder");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        worker(&mut dash),
+        Some((
+            crate::blueprint_edit::WorkerKind::Agent,
+            "coder".to_string()
+        ))
+    );
+    set_kind(&mut dash, "worker_query");
+    dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().picker.is_none());
+    assert!(dash.agents().editor.as_ref().unwrap().line.is_some());
+    type_str(&mut dash, "s");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        worker(&mut dash),
+        Some((
+            crate::blueprint_edit::WorkerKind::Query,
+            "coders".to_string()
+        ))
     );
     // Back to autonomous: the fan-out rows are disabled and inert.
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::StageMode);

@@ -305,6 +305,14 @@ same list.
   entry in that table. `Migration::apply` now receives the raw document too,
   so a migration can quote a key that serde no longer reads.
 
+- The agent editor's *Inputs & outputs* tab reads as inputs and outputs:
+  an *Input types* row (the stage's own, or what its regions take, with the
+  regions listed under it), *Sent as text*, an *Output type* picked from
+  the plain shapes and the media registry rather than typed, and one
+  *Output file* row per declared file. A fan-out's worker is picked from
+  the agent's other stages or the installed agents instead of typed, with
+  an *another…* row for an agent that is not installed here (#400).
+
 ### Removed
 
 - The opt-in Azure Artifact Signing step on the alpha build, along with the
@@ -315,6 +323,13 @@ same list.
 
 ### Fixed
 
+- The agent editor's inspector wrapped its tab strip at its usual width,
+  which cut the last tab in two and drew every row one line below where
+  the mouse map had it, so a click landed on the row under the pointer.
+  The strip shortens its titles when the full ones do not fit, labels are
+  cut to their column, and the body is never wrapped. `←`/`→` walk a
+  stage's tabs (`h`/`l` change a row in place), and a live row's label is
+  no longer drawn in the dim colour that meant "cannot be edited" (#400).
 - The crates.io publish on a stable release stopped at `leviath-alloc`. An
   August hygiene commit marked the crate `publish = false` while the prod
   workflow's publish loop still named it and `leviath-cli`'s default allocator
