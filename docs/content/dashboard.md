@@ -362,7 +362,7 @@ hidden, so the panel never reflows under the cursor:
   them and what it reads as text whatever the model takes, the answer's format, and the files it
   declares it hands back (`Enter` opens one, `x` drops it, the last row declares another and asks its
   name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
-  drops it, `←` `→` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
+  drops it, `h` `l` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
   use, picked from every tool this install has (`Space` toggles, `Enter` keeps), and under them what
   each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another
   agent with images only, or hand a tool that takes text and images only text here.
@@ -435,7 +435,8 @@ On the inspector:
 |---|---|
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
 | `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
-| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
+| `←` / `→` | On a stage, the previous / next tab. On any other panel, change the row in place |
+| `h` / `l` | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
 | `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration, a list of types |
 | `1` `2` `3` `4` | A stage's tabs: behaviour, inputs & outputs, models & tools, context |
 | `Esc` | Close the window a region, a file or a loop is open in; otherwise back to the graph |

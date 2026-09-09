@@ -67,7 +67,7 @@ fn the_model_tab_builds_a_chain_and_picks_tools() {
     let screen = text(&mut dash);
     assert!(screen.contains("not set"), "{screen}");
     // ←/→ on that row do nothing (it is not a chain entry).
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert!(models_of(&mut dash, "work").is_empty());
     dash.handle_key(key(KeyCode::Enter));
     assert!(picker_open(&mut dash));
@@ -97,18 +97,18 @@ fn the_model_tab_builds_a_chain_and_picks_tools() {
     assert!(chain[0].contains("opus-5"), "{chain:?}");
     // Move the second one first with ←, and back with →; the cursor follows.
     goto(&mut dash, FieldId::ModelEntry(1));
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     let chain = models_of(&mut dash, "work");
     assert!(chain[0].contains("sonnet-5"), "{chain:?}");
     assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, 0);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     let chain = models_of(&mut dash, "work");
     assert!(chain[1].contains("sonnet-5"), "{chain:?}");
     // Off the ends nothing moves.
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     assert_eq!(models_of(&mut dash, "work"), chain);
     goto(&mut dash, FieldId::ModelEntry(0));
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     assert_eq!(models_of(&mut dash, "work"), chain);
     // Esc in the chooser leaves the chain alone; a replace on a stale index
     // appends instead of panicking.
@@ -367,7 +367,7 @@ fn the_context_tab_owns_a_layout_adds_regions_and_routes_tools() {
     // The default region cycles with ←/→ through the stage's regions and
     // the ones every stage has.
     goto(&mut dash, FieldId::RoutingDefault);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     let routing = dash
         .agents()
         .editor
@@ -376,7 +376,7 @@ fn the_context_tab_owns_a_layout_adds_regions_and_routes_tools() {
         .doc
         .tool_routing("work");
     assert_eq!(routing.default_region.as_deref(), Some("notes"));
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     let routing = dash
         .agents()
         .editor
@@ -586,7 +586,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
         }
     );
     let screen = text(&mut dash);
-    assert!(screen.contains("2 Inputs & outputs"), "{screen}");
+    assert!(screen.contains("2 In & out"), "{screen}");
     let stage = |dash: &mut Dashboard| {
         dash.agents()
             .editor
@@ -892,7 +892,7 @@ fn the_models_tab_limits_what_each_tool_may_be_handed() {
             .tool_accepts
     };
     let screen = text(&mut dash);
-    assert!(screen.contains("spawn_agent may be handed"), "{screen}");
+    assert!(screen.contains("spawn_agent accepts"), "{screen}");
     assert!(screen.contains("any type"), "{screen}");
     goto(&mut dash, FieldId::ToolLimitRow("spawn_agent".into()));
     dash.handle_key(key(KeyCode::Enter));
@@ -1794,6 +1794,34 @@ fn a_click_on_the_inspector_picks_rows_and_tabs() {
     let hit = dash.agents().editor.as_ref().unwrap().hit.clone();
     assert!(!hit.rows.is_empty());
     let (tab_row, tabs) = hit.tabs.clone().expect("a stage panel has tabs");
+    // The strip fits the inspector on one line, and the rows are drawn
+    // where the map says: a wrapped strip once pushed every row down a line,
+    // so a click landed on the row below the one under the pointer.
+    let screen = text(&mut dash);
+    // The buffer is one string of cells, 160 to a row.
+    let row_text =
+        |row: u16| -> String { screen.chars().skip(row as usize * 160).take(160).collect() };
+    assert!(
+        row_text(tab_row).contains("4 Context"),
+        "{}",
+        row_text(tab_row)
+    );
+    assert!(
+        tabs.last()
+            .is_some_and(|(_, x1)| *x1 <= hit.area.x + hit.area.width),
+        "{tabs:?} within {:?}",
+        hit.area
+    );
+    assert!(
+        row_text(hit.rows[0]).contains("Name"),
+        "{}",
+        row_text(hit.rows[0])
+    );
+    assert!(
+        row_text(hit.rows[1]).contains("How it works"),
+        "{}",
+        row_text(hit.rows[1])
+    );
     // A click on the last tab switches to it.
     let press = |col: u16, row: u16| mouse(MouseEventKind::Down(MouseButton::Left), col, row);
     assert!(dash.handle_agents_mouse(press(tabs[3].0 + 1, tab_row)));
@@ -2125,15 +2153,76 @@ fn a_bundled_agent_opened_for_editing_brings_its_scripts_and_takes_them_back() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The arrows walk a stage's tabs both ways and round the ends, on a
+/// stage panel only; the strip spells the tabs out when the inspector is
+/// wide enough and shortens them when it is not.
+#[test]
+fn the_arrows_walk_a_stages_tabs_and_the_strip_fits() {
+    let (mut dash, root) = dashboard("tab_arrows");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    let tab = |dash: &mut Dashboard| match &dash.agents().editor.as_ref().unwrap().panel {
+        Panel::Stage { tab, .. } => *tab,
+        other => panic!("not a stage: {other:?}"),
+    };
+    dash.handle_key(key(KeyCode::Right));
+    assert_eq!(tab(&mut dash), StageTab::Io);
+    dash.handle_key(key(KeyCode::Left));
+    assert_eq!(tab(&mut dash), StageTab::Behaviour);
+    dash.handle_key(key(KeyCode::Left));
+    assert_eq!(tab(&mut dash), StageTab::Context, "round the end");
+    dash.handle_key(key(KeyCode::Right));
+    assert_eq!(tab(&mut dash), StageTab::Behaviour);
+    assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, 0);
+    // Wide inspector (a narrow terminal gives it the whole width): full
+    // titles. Side by side: the short ones, on one line.
+    let wide = rendered_buffer(&draw(&mut dash, 100, 40));
+    assert!(wide.contains("2 Inputs & outputs"), "{wide}");
+    assert!(wide.contains("3 Models & tools"), "{wide}");
+    let narrow = text(&mut dash);
+    assert!(narrow.contains("2 In & out"), "{narrow}");
+    assert!(narrow.contains("3 Models "), "{narrow}");
+    assert!(narrow.contains("←→ 1-4 tab"), "{narrow}");
+    // Off a stage the hint says what the arrows do there.
+    dash.agents()
+        .editor
+        .as_mut()
+        .unwrap()
+        .view
+        .clear_selection();
+    dash.agents().editor.as_mut().unwrap().sync_panel();
+    dash.agents().editor.as_mut().unwrap().focus = Focus::Inspector;
+    let agent = text(&mut dash);
+    assert!(agent.contains("←→ change"), "{agent}");
+    {
+        let editor = dash.agents().editor.as_mut().unwrap();
+        editor.view.select_stage("work");
+        editor.sync_panel();
+        editor.focus = Focus::Inspector;
+    }
+    // A window has no tabs: the arrows change the row in it.
+    dash.editor_add_region("notes");
+    dash.handle_key(key(KeyCode::Esc));
+    dash.handle_key(key(KeyCode::Char('2')));
+    goto(&mut dash, FieldId::IoRegionRow("notes".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().modal.is_some());
+    assert!(dash.agents().editor.as_ref().unwrap().panel_tab().is_none());
+    dash.handle_key(key(KeyCode::Right));
+    assert!(dash.agents().editor.as_ref().unwrap().modal.is_some());
+    dash.handle_key(key(KeyCode::Esc));
+    assert_eq!(tab(&mut dash), StageTab::Io);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn the_helpers_are_inert_off_their_panels_and_rows() {
     let (mut dash, root) = dashboard("panel_corners");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
-    // ←/→ on a text row or a button change nothing.
+    // h/l on a text row or a button change nothing.
     goto(&mut dash, FieldId::StageDescription);
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Char('l')));
     goto(&mut dash, FieldId::EditPrompts);
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::Char('h')));
     assert!(dash.agents().editor.as_ref().unwrap().overlay.is_none());
     // Enter on a plain status row opens nothing.
     dash.handle_key(key(KeyCode::Char('4')));
