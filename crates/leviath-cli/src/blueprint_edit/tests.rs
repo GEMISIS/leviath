@@ -746,6 +746,12 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
     assert_eq!(doc.stage("work").unwrap().tools, ["read_file", "bash"]);
     doc.set_tools("work", &[]).unwrap();
     assert!(!doc.to_toml().contains("available_tools"));
+    doc.set_connectors("work", &["github".into()]).unwrap();
+    assert_eq!(doc.stage("work").unwrap().connectors, ["github"]);
+    assert!(doc.to_toml().contains("available_connectors"));
+    doc.set_connectors("work", &[]).unwrap();
+    assert!(!doc.to_toml().contains("available_connectors"));
+    assert!(doc.set_connectors("ghost", &[]).is_err());
 
     // Models: a slash pins the route and writes the table form; a slashless
     // entry is a model with the route left open, and writes the bare form that

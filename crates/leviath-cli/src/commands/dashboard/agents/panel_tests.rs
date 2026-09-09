@@ -169,6 +169,159 @@ fn the_model_tab_builds_a_chain_and_picks_tools() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The MCP servers answer off the loop: the config's from the moment the
+/// screen opens, an agent's own from the moment its editor does, and the
+/// chooser grows as each lands. A server picked in the chooser is a
+/// connector; one of its tools is a tool.
+#[test]
+fn the_tools_chooser_offers_mcp_servers_and_their_tools_as_they_answer() {
+    let (mut dash, root) = dashboard("mcp_tools");
+    // The config names one server; the agent's manifest another.
+    std::fs::write(
+        &dash.new_run_ctx.config_path,
+        "[[mcp_servers]]\nname = \"github\"\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    let manifest = root.join("agents").join("own").join("agent.leviath");
+    let mut manifest_text = std::fs::read_to_string(&manifest).unwrap();
+    manifest_text.push_str("\n[[mcp_servers]]\nname = \"mine\"\ncommand = \"true\"\n");
+    std::fs::write(&manifest, manifest_text).unwrap();
+    open_stage(&mut dash, "own", "work", StageTab::Model);
+    // Without a runtime both are pending, and both are offered already.
+    assert_eq!(
+        dash.agents().mcp.get("github"),
+        Some(&super::McpServerTools::Pending)
+    );
+    assert_eq!(
+        dash.agents().mcp.get("mine"),
+        Some(&super::McpServerTools::Pending)
+    );
+    goto(&mut dash, FieldId::ToolSet);
+    dash.handle_key(key(KeyCode::Enter));
+    let values = picker_values(&mut dash);
+    assert!(values.contains(&"github".to_string()), "{values:?}");
+    assert!(values.contains(&"mine".to_string()), "{values:?}");
+    dash.handle_key(key(KeyCode::Esc));
+    // The answers land: one server lists, one fails.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    dash.agents().mcp_rx = Some(rx);
+    tx.send(("github".to_string(), Ok(vec!["search".to_string()])))
+        .unwrap();
+    tx.send(("mine".to_string(), Err("no such command".to_string())))
+        .unwrap();
+    dash.drain_agents_models();
+    let tools = dash.agents().editor.as_ref().unwrap().tools.clone();
+    assert!(
+        tools.iter().any(|t| t.name == "github__search"),
+        "{tools:?}"
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|t| t.name == "mine" && t.detail.contains("no such command")),
+        "{tools:?}"
+    );
+    // Picking the server grants it whole; picking its tool grants the tool.
+    dash.handle_key(key(KeyCode::Enter));
+    picker_goto(&mut dash, "github");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    picker_goto(&mut dash, "github__search");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    let stage = dash
+        .agents()
+        .editor
+        .as_ref()
+        .unwrap()
+        .doc
+        .stage("work")
+        .unwrap();
+    assert_eq!(stage.connectors, ["github"]);
+    assert_eq!(stage.tools, ["github__search"]);
+    let row = dash
+        .agents()
+        .editor
+        .as_ref()
+        .unwrap()
+        .fields()
+        .into_iter()
+        .find(|f| f.id == FieldId::ToolSet)
+        .map(|f| f.value)
+        .unwrap();
+    assert!(
+        matches!(&row, FieldValue::Row(r) if r == "github__search, github (MCP, every tool)"),
+        "{row:?}"
+    );
+    // Reopened, both are picked; dropping the server keeps the tool.
+    dash.handle_key(key(KeyCode::Enter));
+    {
+        let editor = dash.agents().editor.as_ref().unwrap();
+        let picker = &editor.picker.as_ref().unwrap().1;
+        let at = |v: &str| picker.options.iter().position(|o| o.value == v).unwrap();
+        assert!(picker.is_chosen(at("github")));
+        assert!(picker.is_chosen(at("github__search")));
+    }
+    picker_goto(&mut dash, "github");
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.handle_key(key(KeyCode::Enter));
+    let stage = dash
+        .agents()
+        .editor
+        .as_ref()
+        .unwrap()
+        .doc
+        .stage("work")
+        .unwrap();
+    assert!(stage.connectors.is_empty());
+    assert_eq!(stage.tools, ["github__search"]);
+    // A feed that closes is let go of; asking again about a known server
+    // asks nothing.
+    drop(tx);
+    dash.drain_agents_models();
+    assert!(dash.agents().mcp_rx.is_none());
+    dash.drain_agents_models();
+    dash.ask_mcp_servers(&[leviath_mcp::MCPServerConfig {
+        name: "github".to_string(),
+        ..Default::default()
+    }]);
+    assert!(matches!(
+        dash.agents().mcp.get("github"),
+        Some(super::McpServerTools::Listed(_))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// With a runtime under it, opening the screen asks each configured
+/// server for its tools off the loop, and the answer lands in the catalog.
+#[tokio::test]
+async fn the_mcp_servers_are_asked_off_the_loop() {
+    let (mut dash, root) = dashboard("mcp_asked");
+    std::fs::write(
+        &dash.new_run_ctx.config_path,
+        "[[mcp_servers]]\nname = \"dead\"\ncommand = \"/nonexistent/mcp-server-binary\"\n",
+    )
+    .unwrap();
+    dash.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        dash.agents().mcp.get("dead"),
+        Some(&super::McpServerTools::Pending)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while dash.agents().mcp.get("dead") == Some(&super::McpServerTools::Pending) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server never answered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        dash.drain_agents_models();
+    }
+    assert!(matches!(
+        dash.agents().mcp.get("dead"),
+        Some(super::McpServerTools::Failed(_))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn the_model_chooser_grows_when_the_providers_answer() {
     let (mut dash, root) = dashboard("models_arrive");
@@ -2582,8 +2735,23 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
         .doc
         .set_tools("work", &["@builtin".into(), "ghost_tool".into()])
         .unwrap();
+    // Three MCP servers, in each state a server can be in.
+    let mut mcp = super::McpCatalog::new();
+    mcp.insert(
+        "github".to_string(),
+        super::McpServerTools::Listed(vec!["create_issue".to_string(), "search".to_string()]),
+    );
+    mcp.insert(
+        "flaky".to_string(),
+        super::McpServerTools::Failed("boom".to_string()),
+    );
+    mcp.insert("slow".to_string(), super::McpServerTools::Pending);
+    mcp.insert(
+        "one".to_string(),
+        super::McpServerTools::Listed(vec!["only.tool".to_string()]),
+    );
     let editor = dash.agents().editor.as_ref().unwrap();
-    let choices = super::editor::tool_choices(&editor.dir, "own", &editor.doc);
+    let choices = super::choices::tool_choices(&editor.dir, "own", &editor.doc, &mcp);
 
     let names: Vec<&str> = choices.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
@@ -2591,6 +2759,20 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
         &["@all", "@builtin", "@subagent", "@scripts", "@mcp"],
         "{names:?}"
     );
+    // The servers follow the groups, as connectors, each saying where its
+    // tool list stands; their tools sort in with the rest by their
+    // advertised name.
+    assert_eq!(
+        &names[5..9],
+        &["flaky", "github", "one", "slow"],
+        "{names:?}"
+    );
+    assert!(choices[5..9].iter().all(|c| c.connector));
+    assert!(choices[..5].iter().all(|c| !c.connector));
+    assert!(names.contains(&"github__create_issue"), "{names:?}");
+    assert!(names.contains(&"github__search"), "{names:?}");
+    assert!(names.contains(&"one__only_tool"), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("slow__")), "{names:?}");
     assert_eq!(names.iter().filter(|n| **n == "@builtin").count(), 1);
     let detail = |name: &str| {
         choices
@@ -2610,8 +2792,17 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
         detail("ghost_tool"),
         "named by this agent, not found on this install"
     );
-    // Past the groups the list is alphabetical.
-    let rest: Vec<&str> = names[5..].to_vec();
+    assert!(
+        detail("github").contains("2 tools now"),
+        "{}",
+        detail("github")
+    );
+    assert!(detail("one").contains("1 tool now"), "{}", detail("one"));
+    assert!(detail("slow").contains("asking it"), "{}", detail("slow"));
+    assert!(detail("flaky").contains("boom"), "{}", detail("flaky"));
+    assert_eq!(detail("github__search"), "github's tool, over MCP");
+    // Past the groups and the servers the list is alphabetical.
+    let rest: Vec<&str> = names[9..].to_vec();
     let mut sorted = rest.clone();
     sorted.sort_unstable();
     assert_eq!(rest, sorted);

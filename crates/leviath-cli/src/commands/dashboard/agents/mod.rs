@@ -10,6 +10,7 @@
 //! shape as The Lair's editor.
 
 mod catalog;
+mod choices;
 mod chooser;
 mod context_menu;
 mod editor;
@@ -57,7 +58,39 @@ pub(in crate::commands::dashboard) struct AgentsScreen {
     /// The listing's channel, drained each tick.
     pub(in crate::commands::dashboard) models_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
+    /// Every MCP server the tools chooser knows, with the tools it
+    /// advertises once it has answered: the config's servers from the
+    /// moment the screen opens, an agent's own from the moment its editor
+    /// does.
+    pub(in crate::commands::dashboard) mcp: McpCatalog,
+    /// The channel the servers' answers arrive on, drained each tick.
+    pub(in crate::commands::dashboard) mcp_rx: Option<McpFeed>,
+    /// The sender the listings answer on, kept so an editor opened later
+    /// can ask about the servers its blueprint declares.
+    pub(in crate::commands::dashboard) mcp_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<McpAnswer>>,
 }
+
+/// What the tools chooser knows about one MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands::dashboard) enum McpServerTools {
+    /// Asked, not yet answered.
+    Pending,
+    /// The tools it advertised.
+    Listed(Vec<String>),
+    /// Why it could not be asked.
+    Failed(String),
+}
+
+/// Every MCP server the chooser offers, by name.
+pub(in crate::commands::dashboard) type McpCatalog =
+    std::collections::BTreeMap<String, McpServerTools>;
+
+/// One server's answer: its name and its tools, or why not.
+pub(in crate::commands::dashboard) type McpAnswer = (String, Result<Vec<String>, String>);
+
+/// The channel the answers arrive on.
+pub(in crate::commands::dashboard) type McpFeed = tokio::sync::mpsc::UnboundedReceiver<McpAnswer>;
 
 impl Dashboard {
     /// Open the Agents screen on the catalog.
@@ -66,6 +99,7 @@ impl Dashboard {
         let config = self.agents_config();
         catalog.refresh(&self.new_run_ctx, &config);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mcp_tx, mcp_rx) = tokio::sync::mpsc::unbounded_channel();
         self.agent_builder = Some(Box::new(AgentsScreen {
             catalog,
             chooser: None,
@@ -74,7 +108,12 @@ impl Dashboard {
             list_area: Rect::default(),
             model_catalog: Vec::new(),
             models_rx: Some(rx),
+            mcp: McpCatalog::new(),
+            mcp_rx: Some(mcp_rx),
+            mcp_tx: Some(mcp_tx),
         }));
+        // And every MCP server the config names for its tools, the same way.
+        self.ask_mcp_servers(&config.mcp_servers);
         // Ask every configured provider for its models, off the UI loop; the
         // chooser offers the closed catalog until they land.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -90,31 +129,93 @@ impl Dashboard {
         }
     }
 
-    /// Take the models the providers reported, when they have.
+    /// Ask each of `servers` for its tools, off the UI loop, unless the
+    /// chooser already knows it. The chooser offers the server itself (as a
+    /// connector) at once and its tools when the answer lands.
+    pub(in crate::commands::dashboard) fn ask_mcp_servers(
+        &mut self,
+        servers: &[leviath_mcp::MCPServerConfig],
+    ) {
+        let config = self.agents_config();
+        let screen = self.agents();
+        for server in servers {
+            if screen.mcp.contains_key(&server.name) {
+                continue;
+            }
+            screen
+                .mcp
+                .insert(server.name.clone(), McpServerTools::Pending);
+            // Without a runtime (a test's dashboard) the server stays
+            // pending, which the chooser shows as such.
+            if let (Some(tx), Ok(handle)) =
+                (screen.mcp_tx.clone(), tokio::runtime::Handle::try_current())
+            {
+                let config = config.clone();
+                let server = server.clone();
+                handle.spawn(async move {
+                    let name = server.name.clone();
+                    let tools = crate::commands::serve::list_mcp_tools(config, server).await;
+                    let _ = tx.send((name, tools));
+                });
+            }
+        }
+        if let Some(editor) = screen.editor.as_mut() {
+            editor.rebuild_tools(&screen.mcp);
+        }
+    }
+
+    /// Take the models the providers reported and the tools the MCP servers
+    /// advertised, when they have.
     pub(in crate::commands::dashboard) fn drain_agents_models(&mut self) {
         let Some(screen) = self.agent_builder.as_deref_mut() else {
             return;
         };
-        let Some(rx) = screen.models_rx.as_mut() else {
-            return;
-        };
-        loop {
-            match rx.try_recv() {
-                Ok(models) => {
-                    screen.model_catalog = models;
-                    if let Some(editor) = screen.editor.as_mut() {
-                        editor.models.extend(screen.model_catalog.iter().cloned());
-                        editor.models.sort();
-                        editor.models.dedup();
+        if let Some(rx) = screen.models_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(models) => {
+                        screen.model_catalog = models;
+                        if let Some(editor) = screen.editor.as_mut() {
+                            editor.models.extend(screen.model_catalog.iter().cloned());
+                            editor.models.sort();
+                            editor.models.dedup();
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    // The task has answered and gone: nothing more will come.
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        screen.models_rx = None;
+                        break;
                     }
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
-                // The task has answered and gone: nothing more will come.
+            }
+        }
+        let Some(rx) = screen.mcp_rx.as_mut() else {
+            return;
+        };
+        let mut changed = false;
+        loop {
+            match rx.try_recv() {
+                Ok((name, answer)) => {
+                    let state = match answer {
+                        Ok(tools) => McpServerTools::Listed(tools),
+                        Err(e) => McpServerTools::Failed(e),
+                    };
+                    screen.mcp.insert(name, state);
+                    changed = true;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                // Every sender is gone, which the screen holds one of for
+                // its whole life; a test that dropped it says nothing more
+                // will come.
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    screen.models_rx = None;
-                    return;
+                    screen.mcp_rx = None;
+                    break;
                 }
             }
+        }
+        if changed && let Some(editor) = screen.editor.as_mut() {
+            editor.rebuild_tools(&screen.mcp);
         }
     }
 

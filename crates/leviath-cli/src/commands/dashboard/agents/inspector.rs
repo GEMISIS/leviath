@@ -501,17 +501,25 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                     "Append a model to try when the ones above are not available.",
                 ));
             }
-            let tools = if stage.tools.is_empty() {
+            let mut granted: Vec<String> = stage.tools.clone();
+            granted.extend(
+                stage
+                    .connectors
+                    .iter()
+                    .map(|c| format!("{c} (MCP, every tool)")),
+            );
+            let tools = if granted.is_empty() {
                 "(none)".to_string()
             } else {
-                stage.tools.join(", ")
+                granted.join(", ")
             };
             out.push(Field::new(
                 FieldId::ToolSet,
                 "Tools it may use",
                 FieldValue::Row(tools),
-                "Enter picks from every tool this install has, or a group such as @builtin; \
-                 Space toggles one.",
+                "Enter picks from every tool this install has, each MCP server (every tool it \
+                 advertises) and its tools one by one, or a group such as @builtin; Space \
+                 toggles one.",
             ));
             // What each tool may be handed here: the tools named one by one
             // (a group has no row of its own), then any limit on a tool the

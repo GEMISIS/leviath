@@ -366,7 +366,10 @@ hidden, so the panel never reflows under the cursor:
   `markdown`, `json`, `text`, or any media type), and the output files it declares it hands back
   (`Enter` opens one, `x` drops it, the last row declares another and asks its name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
   drops it, `h` `l` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
-  use, picked from every tool this install has (`Space` toggles, `Enter` keeps), and under them what
+  use, picked from every tool this install has (`Space` toggles, `Enter` keeps): the groups, each
+  [MCP server](/docs/mcp) from your config and the agent's own manifest as a connector that grants
+  every tool it advertises, and, once the server has answered (it is asked when the screen opens),
+  its tools one by one under their `server__tool` names; and under them what
   each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another
   agent with images only, or hand a tool that takes text and images only text here.
   *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions

@@ -357,6 +357,23 @@ pub(super) async fn test_server(
     }
 }
 
+/// The tools `server` advertises, for a caller with no request to answer:
+/// the dashboard's agent editor asks this for every configured server, off
+/// its loop, so its tools chooser can offer them by name.
+pub(crate) async fn list_mcp_tools(
+    config: Config,
+    server: MCPServerConfig,
+) -> Result<Vec<String>, String> {
+    let paths = admin_paths();
+    let auth_header = OAuthClient::new()
+        .authorization_header(&server.name, &paths.store, system_now())
+        .await
+        .map_err(|e| e.to_string())?;
+    connect_and_list(&server, auth_header, &config.security.allow_env_vars)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Connect to `server` and return its tool names.
 ///
 /// The client is shut down on EVERY path, not just success: `MCPClient` has no
@@ -765,6 +782,49 @@ for line in sys.stdin:
         let (status_code, body) = send(&app, "POST", "/api/mcp/servers/local/test", None).await;
         assert_eq!(status_code, StatusCode::OK, "body: {body}");
         assert_eq!(body["tools"][0], "ping");
+    }
+
+    /// The editor's listing reaches a stdio server and names its tools, and
+    /// says why when it cannot.
+    #[tokio::test]
+    async fn list_mcp_tools_answers_for_the_dashboard() {
+        let stub = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line); m = req.get("method",""); i = req.get("id")
+    if m == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":i,"result":{"capabilities":{},"protocolVersion":"2024-11-05"}}), flush=True)
+    elif m == "tools/list":
+        print(json.dumps({"jsonrpc":"2.0","id":i,"result":{"tools":[{"name":"ping","inputSchema":{}}]}}), flush=True)
+"#;
+        let server = MCPServerConfig {
+            name: "local".to_string(),
+            command: Some("python3".to_string()),
+            args: vec!["-c".to_string(), stub.to_string()],
+            ..Default::default()
+        };
+        let tools = list_mcp_tools(Config::default(), server).await.unwrap();
+        assert_eq!(tools, vec!["ping"]);
+        let dead = MCPServerConfig {
+            name: "dead".to_string(),
+            command: Some("/nonexistent/mcp-server-binary".to_string()),
+            ..Default::default()
+        };
+        let err = list_mcp_tools(Config::default(), dead).await.unwrap_err();
+        assert!(!err.is_empty());
+        // A token store that will not load is the answer too, before any
+        // server is spoken to.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::write(&paths.store, "not json").unwrap();
+        let broken = MCPServerConfig::http("remote", "https://example.invalid/mcp");
+        let err = TEST_PATHS
+            .scope(paths, list_mcp_tools(Config::default(), broken))
+            .await
+            .unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[tokio::test]
