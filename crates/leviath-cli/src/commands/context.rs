@@ -128,7 +128,7 @@ mod tests {
                     entries: entries
                         .into_iter()
                         .map(|c| RegionEntrySnapshot {
-                            content: c.to_string(),
+                            content: c.to_string().into(),
                             tokens: 1,
                             kind: leviath_core::region::EntryKind::Text,
                             metadata: None,

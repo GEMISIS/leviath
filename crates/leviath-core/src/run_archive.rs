@@ -1132,7 +1132,7 @@ mod tests {
 
     fn entry(content: &str, tokens: usize) -> RegionEntrySnapshot {
         RegionEntrySnapshot {
-            content: content.to_string(),
+            content: content.into(),
             tokens,
             kind: crate::region::EntryKind::Text,
             metadata: None,
@@ -2710,7 +2710,7 @@ mod tests {
                 entries: entries
                     .iter()
                     .map(|(c, t)| RegionEntrySnapshot {
-                        content: c.to_string(),
+                        content: (*c).into(),
                         tokens: *t,
                         key: None,
                         kind: crate::region::EntryKind::Text,

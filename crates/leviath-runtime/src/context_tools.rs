@@ -242,7 +242,7 @@ pub(crate) fn handle_context_tool(
             if matches!(region.kind, RegionKind::HashMap { .. }) {
                 if let Some(k) = key {
                     match region.get_by_key(k) {
-                        Some(entry) => entry.content.clone(),
+                        Some(entry) => entry.content.to_string(),
                         None => {
                             format!("[not found] No entry with key '{k}' in region '{region_name}'")
                         }

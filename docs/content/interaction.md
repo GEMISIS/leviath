@@ -3,7 +3,7 @@ title: Human-in-the-loop
 description: What to do when a run shows waiting: answer agent questions, tool approvals, and checkpoints with lev respond, the dashboard, or the API.
 group: Concepts
 group_order: 2
-order: 10
+order: 11
 ---
 
 # Human-in-the-loop

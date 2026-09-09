@@ -2041,7 +2041,7 @@ condition = "error"
                 current_tokens: 2000,
                 max_tokens: 4000,
                 entries: vec![runstate::RegionEntrySnapshot {
-                    content: "Hello world".to_string(),
+                    content: "Hello world".to_string().into(),
                     tokens: 5,
                     kind: Default::default(),
                     metadata: None,
@@ -2341,7 +2341,7 @@ transform = "clear"
                 current_tokens: 2000,
                 max_tokens: 4000,
                 entries: vec![runstate::RegionEntrySnapshot {
-                    content: "hello token world".to_string(),
+                    content: "hello token world".to_string().into(),
                     tokens: 5,
                     kind: Default::default(),
                     metadata: None,
@@ -2435,7 +2435,7 @@ transform = "clear"
         // Make snapshot with many entries to exceed screen height
         let entries: Vec<runstate::RegionEntrySnapshot> = (0..50)
             .map(|i| runstate::RegionEntrySnapshot {
-                content: format!("content line {}", i),
+                content: format!("content line {}", i).into(),
                 tokens: 10,
                 kind: Default::default(),
                 metadata: None,
@@ -2785,7 +2785,7 @@ transform = "clear"
     /// A context window with more rows than a short pane can show.
     fn tall_context_agent(id: &str) -> DashboardAgent {
         let entry = |text: &str| runstate::RegionEntrySnapshot {
-            content: text.to_string(),
+            content: text.to_string().into(),
             tokens: 5,
             kind: Default::default(),
             metadata: None,

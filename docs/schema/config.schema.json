@@ -810,6 +810,89 @@
       "type": "boolean",
       "default": true,
       "description": "Whether lev asks GitHub for a newer release once a day and says so under a command's output. Set false where reaching out is the problem rather than the answer."
+    },
+    "media": {
+      "type": "object",
+      "description": "Limits on typed media parts: how large one may be, how much text stays inline, how many stored parts one request carries.",
+      "additionalProperties": false,
+      "properties": {
+        "max_part_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Bytes one part may be. Default 33554432 (32 MiB)."
+        },
+        "inline_text_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes of text kept inline in an entry before the part is stored by hash. Default 1048576."
+        },
+        "max_stored_per_request": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Stored parts one model request carries; the oldest beyond it are dropped. Default 100."
+        }
+      }
+    },
+    "media_types": {
+      "type": "object",
+      "description": "Rows added to the media registry, keyed by type/subtype or type/*. A row names only the fields it changes; the rest resolve from the built-in table.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "family": {
+            "type": "string",
+            "description": "What providers key their encoders on: text, image, audio, video, document, model, binary, or a name of your own."
+          },
+          "text": {
+            "type": "boolean",
+            "description": "The bytes are UTF-8 and may travel inline and reach a text model as text."
+          },
+          "tokens": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "How to estimate the part's tokens: exactly one of per_byte, per_pixel (with max), per_second, fixed.",
+            "properties": {
+              "per_byte": {
+                "type": "number",
+                "minimum": 0
+              },
+              "per_pixel": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "per_second": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "fixed": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File extensions, without the dot, that imply this type."
+          },
+          "magic": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]+$",
+            "description": "A hex prefix that identifies the bytes."
+          },
+          "stand_in": {
+            "type": "string",
+            "description": "The text a consumer that cannot take the type sees; supports {type} {name} {size} {dims} {duration}."
+          }
+        }
+      }
     }
   },
   "$defs": {

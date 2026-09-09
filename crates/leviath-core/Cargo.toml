@@ -24,6 +24,8 @@ dirs = { workspace = true }
 # regex entries compile at spawn and match against symlink-resolved paths.
 glob = { workspace = true }
 regex = { workspace = true }
+# Content addressing for stored media parts (`leviath_core::media::store`).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 # The always-on tracing subscriber, so log-macro bodies run under test.

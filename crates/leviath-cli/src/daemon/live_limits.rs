@@ -38,6 +38,8 @@ use crate::config::Config;
 struct Applied {
     limits: crate::config::LimitsConfig,
     title: leviath_core::config::TitleConfig,
+    media: crate::config::MediaConfig,
+    media_types: toml::Table,
 }
 
 impl Applied {
@@ -45,6 +47,8 @@ impl Applied {
         Self {
             limits: config.limits.clone(),
             title: config.title.clone(),
+            media: config.media.clone(),
+            media_types: config.media_types.clone(),
         }
     }
 }
@@ -124,6 +128,17 @@ impl LiveLimits {
         // The dispatcher's half of the title split; the spawner reads the same
         // document a moment later.
         ecs.insert_resource(leviath_runtime::title::TitleSettings(config.title.clone()));
+        // Typed parts: the operator's registry rows and size ceilings. Read
+        // wherever a part arrives or a request is hydrated, so a row added
+        // while the daemon runs types the next file rather than the next run.
+        ecs.insert_resource(leviath_runtime::blob_store::MediaRegistryHandle(
+            std::sync::Arc::new(config.media_registry_or_defaults()),
+        ));
+        ecs.insert_resource(leviath_runtime::blob_store::MediaLimits {
+            max_part_bytes: config.media.max_part_bytes,
+            inline_text_bytes: config.media.inline_text_bytes,
+            max_stored_per_request: config.media.max_stored_per_request,
+        });
 
         // Read when a prompt opens, so a prompt already waiting keeps the
         // deadline it opened with.

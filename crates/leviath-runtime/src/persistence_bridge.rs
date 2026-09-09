@@ -856,7 +856,7 @@ mod tests {
                 max_tokens: 100,
                 entries: (0..entries)
                     .map(|i| leviath_core::run_meta::RegionEntrySnapshot {
-                        content: format!("line {i}"),
+                        content: format!("line {i}").into(),
                         tokens: 1,
                         kind: leviath_core::region::EntryKind::Text,
                         metadata: None,

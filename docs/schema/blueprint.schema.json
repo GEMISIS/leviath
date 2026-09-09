@@ -437,7 +437,9 @@
             "hide": {
               "type": "array",
               "description": "Regions this stage leaves out of its prompt. Hidden, not destroyed: the content is kept and every other stage sees it. Names must be declared by a layout in this blueprint, and the always-visible regions (conversation, tool_results, final_output, stage_instructions) cannot be hidden.",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             }
           }
         },
@@ -684,6 +686,18 @@
         },
         "persistent": {
           "type": "boolean"
+        },
+        "accepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Media types this region takes, each type/subtype or type/*. Absent means anything. A write carrying a part outside the list is refused with the list."
+        },
+        "max_stored": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The most stored (non-text) parts the region holds across its entries. Past it the oldest entry carrying one is evicted, or the write is refused under admission = \"reject\"."
         }
       }
     },

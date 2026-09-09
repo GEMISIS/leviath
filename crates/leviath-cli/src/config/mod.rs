@@ -19,6 +19,8 @@ mod security;
 pub(crate) use security::*;
 mod serve;
 pub(crate) use serve::*;
+mod media;
+pub(crate) use media::*;
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -321,6 +323,18 @@ pub struct Config {
     #[serde(default)]
     pub serve: ServeConfig,
 
+    /// `[media]`: the size ceilings on typed media parts.
+    #[serde(default)]
+    pub media: MediaConfig,
+
+    /// `[media_types]`: rows added to the media registry, keyed by
+    /// `type/subtype` or `type/*`, layered over the compiled defaults. A row
+    /// names only the fields it changes. Kept as the table it was written as
+    /// and handed to `leviath_core::media::MediaRegistry::layer`, which is
+    /// the one reader and reports a malformed row by key.
+    #[serde(default)]
+    pub media_types: toml::Table,
+
     /// Per-agent read grants, keyed by agent name - the itemized counterpart
     /// of `SecurityConfig::allow_blueprint_read_paths`, analogous to
     /// [`Self::agent_tool_permissions`]:
@@ -370,6 +384,8 @@ impl Default for Config {
             tool_script_permissions: ScriptToolPermissions::default(),
             security: SecurityConfig::default(),
             serve: ServeConfig::default(),
+            media: MediaConfig::default(),
+            media_types: toml::Table::new(),
             agent_read_paths: HashMap::new(),
         }
     }
@@ -1697,6 +1713,12 @@ some_custom_thing = \"forwarded to the script\"
                 "ServeConfig",
                 "src/config/serve.rs",
                 &["properties", "serve", "properties"],
+                true,
+            ),
+            (
+                "MediaConfig",
+                "src/config/media.rs",
+                &["properties", "media", "properties"],
                 true,
             ),
             (
@@ -4010,6 +4032,8 @@ enabled = false
 
         let config = Config {
             update_check: true,
+            media: MediaConfig::default(),
+            media_types: toml::Table::new(),
             default_provider: "anthropic".to_string(),
             providers: ProviderConfig {
                 anthropic_api_key: Some("sk-ant-key".to_string()),

@@ -2579,6 +2579,49 @@ mode = "autonomous"
 }
 
 #[test]
+fn parse_manifest_region_accepts_and_max_stored() {
+    let toml = r#"
+[agent]
+name = "typed-regions"
+
+[context.regions]
+art = { kind = "pinned", accepts = ["Image/*", "text/plain"], max_stored = 4 }
+any = { kind = "pinned" }
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let art = bp
+        .context_layout
+        .regions
+        .iter()
+        .find(|r| r.name == "art")
+        .unwrap();
+    assert_eq!(art.accepts, vec!["image/*", "text/plain"]);
+    assert_eq!(art.max_stored, Some(4));
+    let any = bp
+        .context_layout
+        .regions
+        .iter()
+        .find(|r| r.name == "any")
+        .unwrap();
+    assert!(any.accepts.is_empty());
+    assert_eq!(any.max_stored, None);
+
+    for (bad, needle) in [
+        ("accepts = \"image/png\"", "expected a list"),
+        ("accepts = [1]", "expected a media type string"),
+        ("accepts = [\"png\"]", "expected type/subtype or type/*"),
+        ("accepts = [\"a b/*\"]", "expected type/subtype or type/*"),
+        ("max_stored = -1", "max_stored must not be negative"),
+    ] {
+        let toml = format!(
+            "[agent]\nname = \"typed-regions\"\n\n[context.regions]\nart = {{ kind = \"pinned\", {bad} }}\n"
+        );
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(err.contains(needle), "{bad}: {err}");
+    }
+}
+
+#[test]
 fn parse_manifest_stage_accepts_messages_false() {
     let toml = r#"
 [agent]

@@ -2527,7 +2527,7 @@ mod tests {
     fn context_agent(id: &str) -> DashboardAgent {
         let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
         let entry = |content: &str| leviath_core::run_meta::RegionEntrySnapshot {
-            content: content.to_string(),
+            content: content.to_string().into(),
             tokens: 5,
             kind: Default::default(),
             metadata: None,

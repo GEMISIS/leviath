@@ -435,7 +435,7 @@ mod tests {
                     max_tokens: 10_000,
                     entries: vec![
                         RegionEntrySnapshot {
-                            content: "prior user turn".to_string(),
+                            content: "prior user turn".into(),
                             tokens: 5,
                             kind: EntryKind::UserMessage,
                             metadata: None,
@@ -444,7 +444,7 @@ mod tests {
                             reasoning: None,
                         },
                         RegionEntrySnapshot {
-                            content: "prior assistant".to_string(),
+                            content: "prior assistant".into(),
                             tokens: 3,
                             kind: EntryKind::AssistantTurn { tool_calls: vec![] },
                             metadata: None,
@@ -462,7 +462,7 @@ mod tests {
                     current_tokens: 1,
                     max_tokens: 10,
                     entries: vec![RegionEntrySnapshot {
-                        content: "orphan".to_string(),
+                        content: "orphan".into(),
                         tokens: 1,
                         kind: EntryKind::Text,
                         metadata: None,
