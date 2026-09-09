@@ -43,6 +43,7 @@ mod event_seam_tests;
 
 pub(crate) use config::list_model_ids;
 pub(crate) use events::ServerEvent;
+pub(crate) use mcp::list_mcp_tools;
 pub(crate) use types::AppState;
 pub use types::ServeArgs;
 use types::ServeLimits;

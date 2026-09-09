@@ -161,6 +161,9 @@ pub(crate) struct StageView {
     pub models: Vec<String>,
     /// `available_tools`.
     pub tools: Vec<String>,
+    /// `available_connectors`: MCP servers whose whole tool set the stage
+    /// may use.
+    pub connectors: Vec<String>,
     /// `system_prompt`, or empty.
     pub system_prompt: String,
     /// `transition_prompt`, or empty.
@@ -545,6 +548,7 @@ fn stage_view(name: &str, item: &Item) -> StageView {
             allow_complete: get_bool(table, "allow_complete"),
             models: model_chain(table.get("model")),
             tools: get_strings(table, "available_tools"),
+            connectors: get_strings(table, "available_connectors"),
             system_prompt: get_str(table, "system_prompt")
                 .unwrap_or_default()
                 .to_string(),

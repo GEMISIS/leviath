@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 use super::super::state::Dashboard;
 use super::super::types::ConfirmAction;
+use super::choices::ToolChoice;
 use super::editor::{ModalBase, PickerFor, TYPE_ANOTHER};
 use super::inspector::{FieldId, Panel, REGION_KINDS};
 use crate::blueprint_edit::{
@@ -842,11 +843,11 @@ impl Dashboard {
     /// The tools multi-chooser, preselected with the stage's tools.
     fn editor_open_tools_picker(&mut self) {
         let stage = self.editor().panel_stage().expect("a stage field");
-        let have = self
+        let (have, connectors) = self
             .editor()
             .doc
             .stage(&stage)
-            .map(|s| s.tools)
+            .map(|s| (s.tools, s.connectors))
             .unwrap_or_default();
         let all = self.editor().tools.clone();
         let rows: Vec<PickerOption> = all
@@ -859,14 +860,18 @@ impl Dashboard {
         let chosen: Vec<usize> = all
             .iter()
             .enumerate()
-            .filter(|(_, t)| have.contains(&t.name))
+            .filter(|(_, t)| match t.connector {
+                true => connectors.contains(&t.name),
+                false => have.contains(&t.name),
+            })
             .map(|(i, _)| i)
             .collect();
         let mut picker = Picker::new(
             format!("Tools {stage} may use"),
             vec![
                 "A group such as @builtin grants every tool of that kind, installed now or \
-                 later; the rest are the tools this install has, one by one."
+                 later; an MCP server grants every tool it advertises, now or later; the \
+                 rest are tools one by one, an MCP server's as server__tool."
                     .to_string(),
             ],
             rows,
@@ -1006,11 +1011,16 @@ impl Dashboard {
     pub(super) fn editor_settle_tools(&mut self, chosen: &[usize]) {
         let stage = self.editor().panel_stage().expect("a stage field");
         let all = self.editor().tools.clone();
-        let tools: Vec<String> = chosen
+        let (connectors, tools): (Vec<&ToolChoice>, Vec<&ToolChoice>) = chosen
             .iter()
-            .filter_map(|i| all.get(*i).map(|t| t.name.clone()))
-            .collect();
-        self.editor_mutate(|d| d.set_tools(&stage, &tools));
+            .filter_map(|i| all.get(*i))
+            .partition(|t| t.connector);
+        let tools: Vec<String> = tools.into_iter().map(|t| t.name.clone()).collect();
+        let connectors: Vec<String> = connectors.into_iter().map(|t| t.name.clone()).collect();
+        self.editor_mutate(|d| {
+            d.set_tools(&stage, &tools)
+                .and_then(|()| d.set_connectors(&stage, &connectors))
+        });
     }
 
     /// Enter on the add-artifact prompt: a new declaration on the stage the

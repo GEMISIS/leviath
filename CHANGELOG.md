@@ -312,6 +312,12 @@ same list.
   *Output file* row per declared file. A fan-out's worker is picked from
   the agent's other stages or the installed agents instead of typed, with
   an *another…* row for an agent that is not installed here (#400).
+- The agent editor's tools chooser offers MCP servers. Every `[[mcp_servers]]`
+  in the config, and in the agent's own manifest, is a row that grants the
+  server whole (`available_connectors`), and each server is asked for its
+  tools when the Agents screen opens, so its tools appear one by one under
+  their `server__tool` names as the answers land; a server that could not
+  be asked says why on its row. A stage's tools row shows both (#400).
 
 ### Removed
 

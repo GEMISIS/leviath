@@ -372,6 +372,22 @@ impl ManifestDoc {
         Ok(())
     }
 
+    /// Set `available_connectors`, the MCP servers whose whole tool set the
+    /// stage may use; an empty list deletes it.
+    pub(crate) fn set_connectors(
+        &mut self,
+        name: &str,
+        servers: &[String],
+    ) -> Result<(), EditError> {
+        let stage = self.stage_table_mut(name)?;
+        if servers.is_empty() {
+            stage.remove("available_connectors");
+        } else {
+            set_strings(stage, "available_connectors", servers);
+        }
+        Ok(())
+    }
+
     /// Set one fan-out key of a stage.
     pub(crate) fn set_fan_out(&mut self, name: &str, field: FanOutField) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;

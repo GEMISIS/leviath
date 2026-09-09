@@ -8,6 +8,8 @@ use ratatui::text::Line;
 
 use super::super::state::Dashboard;
 use super::super::types::*;
+use super::McpCatalog;
+use super::choices::{ToolChoice, media_type_options, tool_choices};
 use super::inspector::{self, Field, FieldId, FieldValue, Panel, StageTab};
 use crate::blueprint_edit::check::{Problems, check};
 use crate::blueprint_edit::{
@@ -66,44 +68,6 @@ pub(in crate::commands::dashboard) struct ModalBase {
 /// The chooser row that means "type one in": a media type the list does
 /// not have.
 pub(in crate::commands::dashboard) const TYPE_ANOTHER: &str = "another…";
-
-/// The media types the choosers offer: every family, then every type the
-/// registry knows, read the way the daemon reads it (the compiled defaults,
-/// the config's rows, `media_types.toml`) with the blueprint's own rows on
-/// top, the way its runs read it.
-fn media_type_options(config_path: &std::path::Path, doc: &ManifestDoc) -> Vec<String> {
-    let mut registry = crate::config::Config::load_from_path_public(config_path)
-        .ok()
-        .and_then(|c| c.media_registry().ok())
-        .unwrap_or_else(leviath_core::media::MediaRegistry::builtin);
-    for key in crate::blueprint_edit::media_type_keys(doc) {
-        let _ = registry.layer(
-            &toml::Table::from_iter([(key, toml::Value::Table(toml::Table::new()))]),
-            "blueprint",
-        );
-    }
-    let mut out: Vec<String> = [
-        "*/*",
-        "text/*",
-        "image/*",
-        "audio/*",
-        "video/*",
-        "application/*",
-        "model/*",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    let mut keys: Vec<String> = registry
-        .keys()
-        .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| !out.contains(key))
-        .collect();
-    keys.sort();
-    out.extend(keys);
-    out
-}
 
 /// A full-screen overlay over the editor.
 #[derive(Debug, Clone)]
@@ -248,55 +212,6 @@ fn chain_graph(names: &[String]) -> Arc<StageGraph> {
     Arc::new(StageGraph::from_blueprint(&bp))
 }
 
-/// One row of the tools chooser: a name the stage may write, and what it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands::dashboard) struct ToolChoice {
-    /// The `available_tools` entry: a tool name or a group token.
-    pub(in crate::commands::dashboard) name: String,
-    /// Where it comes from, or what the group reaches, in a few words.
-    pub(in crate::commands::dashboard) detail: String,
-}
-
-/// Everything the tools chooser offers for the agent at `dir`: the group
-/// tokens first, since "all the built-ins" is the usual answer, then the
-/// tools this install has (built in, and scripts under the agent and the
-/// global directory), then whatever the manifest names that was not found.
-pub(super) fn tool_choices(
-    dir: &std::path::Path,
-    name: &str,
-    doc: &ManifestDoc,
-) -> Vec<ToolChoice> {
-    use leviath_core::blueprint::{ToolGroup, is_tool_group_token};
-
-    let mut choices: Vec<ToolChoice> = ToolGroup::ALL
-        .iter()
-        .map(|g| ToolChoice {
-            name: g.token().to_string(),
-            detail: g.describe().to_string(),
-        })
-        .collect();
-    let inventory = crate::tool_inventory::ToolInventory::discover(Some(dir), Some(name));
-    let mut named: Vec<ToolChoice> = inventory
-        .tools
-        .iter()
-        .map(|t| ToolChoice {
-            name: t.name.clone(),
-            detail: t.source.describe().to_string(),
-        })
-        .collect();
-    for tool in doc.known_tools() {
-        if !is_tool_group_token(&tool) && !named.iter().any(|t| t.name == tool) {
-            named.push(ToolChoice {
-                name: tool,
-                detail: "named by this agent, not found on this install".to_string(),
-            });
-        }
-    }
-    named.sort_by(|a, b| a.name.cmp(&b.name));
-    choices.extend(named);
-    choices
-}
-
 impl Editor {
     /// The graph the runtime would run; when the runtime rejects the
     /// manifest, the last graph that parsed, or a bare chain of the stage
@@ -313,6 +228,12 @@ impl Editor {
     /// The inspector's rows for the current panel.
     pub(in crate::commands::dashboard) fn fields(&self) -> Vec<Field> {
         inspector::fields(&self.doc, &self.panel)
+    }
+
+    /// Rebuild the tools chooser's rows over what the MCP servers have
+    /// said so far.
+    pub(in crate::commands::dashboard) fn rebuild_tools(&mut self, mcp: &McpCatalog) {
+        self.tools = tool_choices(&self.dir, &self.name, &self.doc, mcp);
     }
 
     /// The row under the inspector cursor.
@@ -528,8 +449,12 @@ impl Dashboard {
         );
         models.sort();
         models.dedup();
-        let tools = tool_choices(&dir, &name, &doc);
+        let mcp = self.agents().mcp.clone();
+        let tools = tool_choices(&dir, &name, &doc, &mcp);
         let media_types = media_type_options(&self.new_run_ctx.config_path, &doc);
+        // The agent's own servers join the config's in the chooser, asked
+        // for their tools the same way.
+        let own_servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(text);
         let mut editor = Editor {
             name,
             is_new,
@@ -566,6 +491,7 @@ impl Dashboard {
         };
         editor.apply_flags();
         self.agents().editor = Some(editor);
+        self.ask_mcp_servers(&own_servers);
     }
 
     /// The open editor.
