@@ -1834,6 +1834,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
         let args = resolve_spawn_args(LaunchRequest {
+            parts: Vec::new(),
             path: manifest.to_str().unwrap(),
             task: Some("do it"),
             stdin_is_terminal: &never_interactive,
@@ -1984,6 +1985,7 @@ mod part_tests {
         parts: Vec<InboundPart>,
     ) -> LaunchRequest<'a> {
         LaunchRequest {
+            yolo_profile: None,
             path: manifest,
             task,
             stdin_is_terminal: &never_interactive,
