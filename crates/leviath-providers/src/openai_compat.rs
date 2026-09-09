@@ -162,6 +162,14 @@ pub fn message_to_openai_with(
                 })
                 .collect();
 
+            // Stored parts, as this shape's content parts. A `tool` message
+            // takes a string only, so media beside a tool result travels in a
+            // `user` message after the results.
+            let media_parts: Vec<serde_json::Value> = blocks
+                .iter()
+                .filter_map(crate::media::openai_part)
+                .collect();
+
             // A block list can carry calls and results at once (a compacted
             // turn, or a stage that folded both into one entry). Emitting only
             // the calls silently dropped the results, leaving a function-call
@@ -186,7 +194,19 @@ pub fn message_to_openai_with(
                 })
             }));
             if out.is_empty() {
-                out.push(serde_json::json!({ "role": role, "content": text_parts.join("") }));
+                let text = text_parts.join("");
+                if media_parts.is_empty() {
+                    out.push(serde_json::json!({ "role": role, "content": text }));
+                } else {
+                    let mut parts = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(serde_json::json!({ "type": "text", "text": text }));
+                    }
+                    parts.extend(media_parts);
+                    out.push(serde_json::json!({ "role": role, "content": parts }));
+                }
+            } else if !media_parts.is_empty() {
+                out.push(serde_json::json!({ "role": "user", "content": media_parts }));
             }
             out
         }
@@ -1057,6 +1077,9 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
 
     None
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {

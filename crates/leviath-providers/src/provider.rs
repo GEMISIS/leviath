@@ -540,6 +540,57 @@ pub enum ContentBlock {
         /// Whether the tool refused or failed.
         is_error: bool,
     },
+    /// A stored media part: an image, a clip, a document, anything that is
+    /// not text.
+    ///
+    /// The neutral form. Assembly emits one per stored part with `data` empty;
+    /// hydration (`crate::media::hydrate_request`) fills `data` with the base64
+    /// bytes when the model takes the type, or turns the block into text. A
+    /// built-in provider encodes a hydrated block into its own shape (an
+    /// Anthropic `image` block, an OpenAI `image_url` part); a block that
+    /// reaches a provider with `data` still empty is sent as its stand-in
+    /// text, so no lane has to hydrate to stay correct. A Rhai provider sees
+    /// this form as it is.
+    #[serde(rename = "media")]
+    Media {
+        /// What the part is: hash, type, size, dimensions, the stand-in text.
+        part: leviath_core::media::BlobRef,
+        /// The bytes, base64, once hydrated. Empty until then.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        data: String,
+        /// The part's name, when it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The part's delivery override, when it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deliver: Option<leviath_core::media::Delivery>,
+    },
+}
+
+impl ContentBlock {
+    /// A media block for `part`, unhydrated.
+    pub fn media(part: &leviath_core::media::Part) -> Option<Self> {
+        let blob = part.blob()?;
+        Some(ContentBlock::Media {
+            part: blob.clone(),
+            data: String::new(),
+            name: part.name.clone(),
+            deliver: part.deliver,
+        })
+    }
+
+    /// The stand-in text of a media block, or `None` for any other block.
+    pub fn stand_in(&self) -> Option<&str> {
+        match self {
+            ContentBlock::Media { part, .. } => Some(part.stand_in.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a media block carrying its bytes.
+    pub fn is_hydrated_media(&self) -> bool {
+        matches!(self, ContentBlock::Media { data, .. } if !data.is_empty())
+    }
 }
 
 /// A system prompt block, separated from conversation messages.

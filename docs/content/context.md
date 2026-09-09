@@ -393,6 +393,23 @@ Empty regions contribute nothing - no heading, no blank block - so a blueprint
 can declare the regions it might need without paying for the ones it has not
 filled yet.
 
+### Stored parts in the prompt
+
+An entry can hold more than text: an image, a clip, a document, any
+[typed media](/docs/media) part. In a region that renders into the system prompt
+the part appears as its one-line stand-in, `[image/png 1024x768, 240 KB] hero.png`,
+and the bytes travel in one user message placed before the conversation, each
+after a pointer naming the region, the key and the part. In the conversation the
+part sits in its own turn, after the text it came with. A tool result's parts
+follow the result in the same turn.
+
+Whether the model gets the bytes is decided when the request is built, not
+when the entry is written. A model whose input types cover the part gets it as
+that provider's native block; a part whose bytes are text reaches any model as
+text; anything else is the stand-in alone, which still names the part so the
+model can hand it to a tool. The journal and `context.json` carry references,
+never the bytes.
+
 ## What caching costs
 
 A provider caches the prompt by **prefix**: it stores everything up to a marker, and next

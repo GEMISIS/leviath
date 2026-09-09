@@ -223,6 +223,27 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
         }
         MessageContent::Blocks(blocks) => {
             let mut text = String::new();
+            // Media parts waiting for the message item that carries them,
+            // beside the text gathered so far.
+            let mut media: Vec<Value> = Vec::new();
+            let flush = |input: &mut Vec<Value>, text: &mut String, media: &mut Vec<Value>| {
+                if text.is_empty() && media.is_empty() {
+                    return;
+                }
+                let mut parts = Vec::new();
+                if !text.is_empty() {
+                    parts.push(json!({
+                        "type": part_type(&message.role),
+                        "text": std::mem::take(text),
+                    }));
+                }
+                parts.append(media);
+                input.push(json!({
+                    "type": "message",
+                    "role": message.role,
+                    "content": parts,
+                }));
+            };
             for block in blocks {
                 match block {
                     ContentBlock::Text { text: t } => {
@@ -231,15 +252,16 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         }
                         text.push_str(t);
                     }
+                    ContentBlock::Media { .. } => {
+                        media.extend(crate::media::codex_part(block));
+                    }
                     ContentBlock::ToolUse {
                         id,
                         name,
                         input: args,
                         ..
                     } => {
-                        if !text.is_empty() {
-                            input.push(text_item(&message.role, &std::mem::take(&mut text)));
-                        }
+                        flush(input, &mut text, &mut media);
                         input.push(json!({
                             "type": "function_call",
                             // `call_id`, not the item id. The response carries
@@ -255,9 +277,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         content,
                         is_error,
                     } => {
-                        if !text.is_empty() {
-                            input.push(text_item(&message.role, &std::mem::take(&mut text)));
-                        }
+                        flush(input, &mut text, &mut media);
                         // There is no error flag on this item, and dropping the
                         // distinction would present a failure to the model as a
                         // result. The marker goes in the text instead.
@@ -273,9 +293,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                     }
                 }
             }
-            if !text.is_empty() {
-                input.push(text_item(&message.role, &text));
-            }
+            flush(input, &mut text, &mut media);
         }
     }
 }
@@ -283,15 +301,20 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
 /// A plain message item. The content type differs by direction: what the model
 /// produced is `output_text`, what it is given is `input_text`.
 fn text_item(role: &str, text: &str) -> Value {
-    let content_type = match role {
-        "assistant" => "output_text",
-        _ => "input_text",
-    };
     json!({
         "type": "message",
         "role": role,
-        "content": [{ "type": content_type, "text": text }],
+        "content": [{ "type": part_type(role), "text": text }],
     })
+}
+
+/// The text part type for a role: what the model produced is `output_text`,
+/// what it is given is `input_text`.
+fn part_type(role: &str) -> &'static str {
+    match role {
+        "assistant" => "output_text",
+        _ => "input_text",
+    }
 }
 
 /// A tool definition, in the flat Responses shape.
@@ -335,5 +358,7 @@ fn cache_key(request: &InferenceRequest) -> String {
     format!("lev-{:016x}", hasher.finish())
 }
 
+#[cfg(test)]
+mod media_tests;
 #[cfg(test)]
 mod tests;

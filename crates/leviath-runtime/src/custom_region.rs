@@ -258,25 +258,10 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
             let emitted_tokens: usize = blocks
                 .iter()
                 .map(|b| leviath_core::estimate_tokens(&b.text))
-                .chain(msgs.iter().map(|m| {
-                    match &m.content {
-                        leviath_providers::MessageContent::Text(t) => {
-                            leviath_core::estimate_tokens(t)
-                        }
-                        leviath_providers::MessageContent::Blocks(bs) => bs
-                            .iter()
-                            .map(|b| match b {
-                                leviath_providers::ContentBlock::Text { text } => {
-                                    leviath_core::estimate_tokens(text)
-                                }
-                                leviath_providers::ContentBlock::ToolUse { input, .. } => {
-                                    leviath_core::estimate_tokens(&input.to_string())
-                                }
-                                leviath_providers::ContentBlock::ToolResult { content, .. } => {
-                                    leviath_core::estimate_tokens(content)
-                                }
-                            })
-                            .sum(),
+                .chain(msgs.iter().map(|m| match &m.content {
+                    leviath_providers::MessageContent::Text(t) => leviath_core::estimate_tokens(t),
+                    leviath_providers::MessageContent::Blocks(bs) => {
+                        bs.iter().map(leviath_providers::media::block_tokens).sum()
                     }
                 }))
                 .sum();

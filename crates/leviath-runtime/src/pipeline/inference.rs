@@ -364,6 +364,22 @@ pub(crate) struct SystemPrefixHash(pub u64);
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct SystemBlockHashes(pub Vec<u64>);
 
+/// The optional resources dispatch reads, as one parameter: the operator's
+/// circuit and retry settings, and the media store, registry and limits. Every
+/// one is optional because a world assembled by hand in a test installs none
+/// of them, and each has a built-in answer for that case.
+#[derive(bevy_ecs::system::SystemParam)]
+pub(crate) struct DispatchTuning<'w> {
+    /// Which providers' circuits are open.
+    pub circuits: Option<Res<'w, ProviderCircuits>>,
+    /// When a circuit opens and how long it stays open.
+    pub policy: Option<Res<'w, CircuitPolicy>>,
+    /// The retry schedule.
+    pub retry: Option<Res<'w, InferenceRetryTuning>>,
+    /// The media store, registry and limits.
+    pub media: crate::blob_store::MediaParams<'w>,
+}
+
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
@@ -373,11 +389,15 @@ pub(crate) fn dispatch_inference(
     agents: Query<InferenceQuery, With<ReadyToInfer>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
-    circuits: Option<Res<ProviderCircuits>>,
-    policy: Option<Res<CircuitPolicy>>,
-    retry: Option<Res<InferenceRetryTuning>>,
+    tuning: DispatchTuning,
     par_commands: ParallelCommands,
 ) {
+    let DispatchTuning {
+        circuits,
+        policy,
+        retry,
+        media,
+    } = tuning;
     // Fan out across ready agents: request assembly (`build_request`) is the
     // per-agent CPU cost and is independent, so it runs in parallel on the
     // compute pool. Permit acquisition (an atomic semaphore) and the tokio spawn
@@ -397,6 +417,9 @@ pub(crate) fn dispatch_inference(
     // embedded host, and most tests) gets the built-in schedule.
     let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
+    // Every `PipelineWorld` installs these; a world assembled by hand in a
+    // test may not, and then stored parts go out as their stand-ins.
+    let (media_resources, max_stored) = media.hydration_inputs();
     agents.par_iter().for_each(
         |(
             entity,
@@ -495,6 +518,17 @@ pub(crate) fn dispatch_inference(
                 // asking anyway would pay for the fold and gain nothing.
                 let stream =
                     stage.stream_inference && provider.capabilities(&si.model).supports_streaming;
+                // The bytes of the request's stored parts are read in the
+                // job, off this thread, against what this model takes.
+                let hydration = media_resources.clone().map(|(store, registry)| {
+                    crate::inference_bridge::JobHydration {
+                        store,
+                        run_id: state.agent_id.clone(),
+                        registry,
+                        media: provider.media(&si.model),
+                        max_stored,
+                    }
+                });
                 let job = InferenceJob {
                     entity,
                     provider,
@@ -502,6 +536,7 @@ pub(crate) fn dispatch_inference(
                     permit,
                     calibration: calibration.copied(),
                     stream,
+                    hydration,
                 };
                 let cancel = crate::cancel::CancelToken::new();
                 // Supervised: this agent is about to become `AwaitingInference`,
