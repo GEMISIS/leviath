@@ -320,6 +320,9 @@ mod tests {
         assert!(url.starts_with("file:///"), "{url}");
         assert!(url.ends_with("/my%20dir/a%25b.png"), "{url}");
         assert!(!url.contains(' ') && !url.contains('\\'), "{url}");
+        // A path that already starts with a slash keeps exactly one, on
+        // every OS: this is the branch a Windows temp dir never takes.
+        assert_eq!(url_path("/tmp/my dir/a%b.png"), "/tmp/my%20dir/a%25b.png");
         let relative = file_url(Path::new("rel.png"));
         assert!(relative.starts_with("file:///"), "{relative}");
         assert!(relative.ends_with("/rel.png"), "{relative}");
