@@ -497,6 +497,7 @@ impl OllamaProvider {
                 LearnedModel {
                     max_context_tokens: window,
                     supports_tools: calls_tools(&show),
+                    input_types: sees_images(&show),
                     ..Default::default()
                 },
             );
@@ -518,6 +519,18 @@ impl OllamaProvider {
 fn calls_tools(show: &serde_json::Value) -> Option<bool> {
     let capabilities = show.get("capabilities")?.as_array()?;
     Some(capabilities.iter().any(|c| c.as_str() == Some("tools")))
+}
+
+/// What `/api/show` says the model takes: text and images when it lists
+/// `vision`, text alone when it lists capabilities without it, and `None`
+/// when the answer has no such array, so the name table keeps its guess.
+fn sees_images(show: &serde_json::Value) -> Option<Vec<String>> {
+    let capabilities = show.get("capabilities")?.as_array()?;
+    let vision = capabilities.iter().any(|c| c.as_str() == Some("vision"));
+    Some(match vision {
+        true => vec!["text/*".to_string(), "image/*".to_string()],
+        false => vec!["text/*".to_string()],
+    })
 }
 
 impl OllamaProvider {
@@ -743,6 +756,18 @@ impl Provider for OllamaProvider {
                 self.warn_if_guessed(model, &base);
                 base
             }
+        }
+    }
+
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        // The vision builds are known by name; `/api/show` corrects that
+        // when it lists `vision` among a model's capabilities.
+        let base = self
+            .learned
+            .media_corrected(model, crate::media_tables::ollama(model));
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
         }
     }
 
@@ -982,6 +1007,9 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
         reasoning: None,
     })
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3433,6 +3461,19 @@ mod tests {
             Some(false)
         );
         assert_eq!(calls_tools(&serde_json::json!({ "parameters": "" })), None);
+        assert_eq!(
+            sees_images(&serde_json::json!({ "capabilities": ["completion", "vision"] })),
+            Some(vec!["text/*".to_string(), "image/*".to_string()])
+        );
+        assert_eq!(
+            sees_images(&serde_json::json!({ "capabilities": ["completion"] })),
+            Some(vec!["text/*".to_string()])
+        );
+        assert_eq!(sees_images(&serde_json::json!({ "parameters": "" })), None);
+        assert_eq!(
+            sees_images(&serde_json::json!({ "capabilities": "vision" })),
+            None
+        );
         assert_eq!(
             calls_tools(&serde_json::json!({ "capabilities": "tools" })),
             None

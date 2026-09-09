@@ -579,6 +579,16 @@ impl Provider for RhaiProvider {
         }
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        // What the script's `@input_types` / `@output_types` headers declare,
+        // then the operator's entry on top.
+        let base = self.meta.media();
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
+        }
+    }
+
     /// Whether this script serves `model_key`, for resolving an open route.
     ///
     /// The default implementation reads the compiled-in capability table, which

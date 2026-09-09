@@ -235,6 +235,83 @@ impl Default for ModelCapabilities {
     }
 }
 
+/// What media a model takes and produces, as media type patterns.
+///
+/// Kept beside [`ModelCapabilities`] rather than inside it so the compiled
+/// tables, which build that struct in `const` context, stay as they are and a
+/// provider answers this the same three-layered way: its table, then what its
+/// listing said, then the operator's `[model_capabilities]` row.
+///
+/// A pattern is `type/subtype` or `type/*`. `text/*` is listed explicitly,
+/// because text is not assumed: a text-to-speech or image model may take no
+/// text at all, and a listing that omits it is saying so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelMedia {
+    /// Patterns the model accepts in a request.
+    pub input: Vec<String>,
+    /// Patterns the model can hand back in a reply.
+    pub output: Vec<String>,
+}
+
+impl Default for ModelMedia {
+    fn default() -> Self {
+        Self::text_only()
+    }
+}
+
+impl ModelMedia {
+    /// Text in, text out: the answer for a model nothing has described.
+    pub fn text_only() -> Self {
+        Self::new(&["text/*"], &["text/*"])
+    }
+
+    /// From two pattern lists.
+    pub fn new(input: &[&str], output: &[&str]) -> Self {
+        Self {
+            input: input.iter().map(|s| s.to_string()).collect(),
+            output: output.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Whether a part of `media_type` may go to the model.
+    pub fn accepts(&self, media_type: &leviath_core::media::MediaType) -> bool {
+        media_type.matches_any(&self.input)
+    }
+
+    /// Whether the model may hand back a part of `media_type`.
+    pub fn produces(&self, media_type: &leviath_core::media::MediaType) -> bool {
+        media_type.matches_any(&self.output)
+    }
+
+    /// Whether every pattern in `wanted` is covered by an input pattern.
+    ///
+    /// `image/png` is covered by `image/png`, `image/*` or `*/*`; `image/*`
+    /// only by `image/*` or `*/*`.
+    pub fn covers(&self, wanted: &[String]) -> bool {
+        wanted
+            .iter()
+            .all(|w| self.input.iter().any(|have| pattern_covers(have, w)))
+    }
+
+    /// Whether the model takes anything beyond text.
+    pub fn takes_media(&self) -> bool {
+        self.input.iter().any(|p| !p.starts_with("text/"))
+    }
+}
+
+/// Whether the pattern `have` covers everything `want` matches.
+pub fn pattern_covers(have: &str, want: &str) -> bool {
+    let have = have.trim().to_ascii_lowercase();
+    let want = want.trim().to_ascii_lowercase();
+    if have == "*/*" || have == want {
+        return true;
+    }
+    match (have.split_once('/'), want.split_once('/')) {
+        (Some((hk, "*")), Some((wk, _))) => hk == wk,
+        _ => false,
+    }
+}
+
 /// A `[model_capabilities]` entry: the fields an operator chose to change.
 ///
 /// Every field is optional and unset means "leave it alone", so an entry names
@@ -279,9 +356,25 @@ pub struct ModelCapabilityOverride {
     /// USD per million output tokens.
     #[serde(default)]
     pub output_per_mtok: Option<f64>,
+
+    /// Media type patterns the model accepts, replacing what the provider
+    /// reports: `["text/*", "image/*"]` for a local vision model.
+    #[serde(default)]
+    pub input_types: Option<Vec<String>>,
+    /// Media type patterns the model can hand back.
+    #[serde(default)]
+    pub output_types: Option<Vec<String>>,
 }
 
 impl ModelCapabilityOverride {
+    /// `base` media lists with the ones this entry names replaced.
+    pub fn apply_media(&self, base: ModelMedia) -> ModelMedia {
+        ModelMedia {
+            input: self.input_types.clone().unwrap_or(base.input),
+            output: self.output_types.clone().unwrap_or(base.output),
+        }
+    }
+
     /// `base` with every field this entry names replaced.
     pub fn apply_to(&self, base: ModelCapabilities) -> ModelCapabilities {
         ModelCapabilities {
@@ -328,7 +421,75 @@ impl From<ModelCapabilities> for ModelCapabilityOverride {
             cached_input_per_mtok: None,
             cache_write_per_mtok: None,
             output_per_mtok: None,
+            // Nor what media it takes; that is a separate answer.
+            input_types: None,
+            output_types: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use leviath_core::media::MediaType;
+
+    fn mt(s: &str) -> MediaType {
+        MediaType::parse(s).unwrap()
+    }
+
+    #[test]
+    fn text_only_is_the_default_and_takes_no_media() {
+        let m = ModelMedia::default();
+        assert_eq!(m, ModelMedia::text_only());
+        assert!(m.accepts(&mt("text/markdown")));
+        assert!(!m.accepts(&mt("image/png")));
+        assert!(m.produces(&mt("text/plain")));
+        assert!(!m.produces(&mt("image/png")));
+        assert!(!m.takes_media());
+        assert!(ModelMedia::new(&["text/*", "image/*"], &["text/*"]).takes_media());
+    }
+
+    #[test]
+    fn covers_compares_patterns_not_only_types() {
+        let vision = ModelMedia::new(&["text/*", "image/*"], &["text/*"]);
+        assert!(vision.covers(&["image/png".to_string()]));
+        assert!(vision.covers(&["image/*".to_string(), "text/plain".to_string()]));
+        assert!(!vision.covers(&["audio/*".to_string()]));
+        assert!(!vision.covers(&["application/pdf".to_string()]));
+        let exact = ModelMedia::new(&["image/png"], &[]);
+        assert!(exact.covers(&["image/png".to_string()]));
+        assert!(!exact.covers(&["image/*".to_string()]));
+        let any = ModelMedia::new(&["*/*"], &[]);
+        assert!(any.covers(&["video/mp4".to_string(), "audio/*".to_string()]));
+        assert!(any.covers(&[]));
+        assert!(pattern_covers("Image/*", "image/PNG"));
+        assert!(!pattern_covers("image", "image/png"));
+        assert!(!pattern_covers("image/png", "image/jpeg"));
+    }
+
+    #[test]
+    fn an_override_replaces_only_the_lists_it_names() {
+        let base = ModelMedia::new(&["text/*"], &["text/*"]);
+        let none = ModelCapabilityOverride::default();
+        assert_eq!(none.apply_media(base.clone()), base);
+        let input_only = ModelCapabilityOverride {
+            input_types: Some(vec!["text/*".into(), "image/*".into()]),
+            ..Default::default()
+        };
+        let merged = input_only.apply_media(base.clone());
+        assert!(merged.accepts(&mt("image/png")));
+        assert_eq!(merged.output, base.output);
+        let output_only = ModelCapabilityOverride {
+            output_types: Some(vec!["image/*".into()]),
+            ..Default::default()
+        };
+        let merged = output_only.apply_media(base.clone());
+        assert_eq!(merged.input, base.input);
+        assert!(merged.produces(&mt("image/png")));
+        let from_caps: ModelCapabilityOverride = ModelCapabilities::default().into();
+        assert!(from_caps.input_types.is_none() && from_caps.output_types.is_none());
+        let json = serde_json::to_string(&merged).unwrap();
+        assert!(json.contains("\"output\":[\"image/*\"]"));
     }
 }
 

@@ -90,6 +90,8 @@ The metadata directives, all optional:
 | `// @max_context_tokens <int>` | 8192 | the model's whole context window |
 | `// @max_output_tokens <int>` | 4096 | the largest reply the model can produce |
 | `// @supports_streaming <bool>` | false | advisory; real streaming needs a `stream` function |
+| `// @input_types <list>` | `text/*` | media type patterns the script's models accept, comma-separated: `text/*, image/*`. See [typed media](/docs/media) |
+| `// @output_types <list>` | `text/*` | media type patterns the script's models can hand back |
 
 > [!IMPORTANT]
 > `@max_context_tokens` is the window the

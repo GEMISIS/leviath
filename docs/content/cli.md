@@ -395,7 +395,7 @@ includes those checks, so a broken script is caught without spending anything.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default |
+| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MEDIA_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MEDIA` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`) |
 | `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above |
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,

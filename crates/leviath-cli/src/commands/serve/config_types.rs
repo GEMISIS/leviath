@@ -183,6 +183,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.parent",
     "runs.files.listing",
     "runs.files.workdir",
+    // `input_types` and `output_types` on every `GET /api/models` entry: the
+    // media type patterns a model takes and hands back. Announced so a
+    // console can offer "models that can see this image" without inferring
+    // it from names, and can tell a text-only answer from a missing field.
+    "models.media_types",
     "runs.stages",
     // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
     // the `visits` split beneath them. Without the price a console drawing a

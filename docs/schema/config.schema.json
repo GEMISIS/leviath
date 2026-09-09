@@ -694,6 +694,20 @@
             "type": "number",
             "minimum": 0,
             "description": "USD per million output tokens."
+          },
+          "input_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Media type patterns the model accepts in a request, text/* included: [\"text/*\", \"image/*\"] for a local vision model. Replaces what the provider reports."
+          },
+          "output_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Media type patterns the model can hand back in a reply."
           }
         }
       }

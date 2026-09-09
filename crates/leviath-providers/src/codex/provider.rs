@@ -385,6 +385,14 @@ impl Provider for CodexProvider {
         }
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        let base = crate::media_tables::codex(model);
+        match self.capability_overrides.get(model) {
+            Some(over) => over.apply_media(base),
+            None => base,
+        }
+    }
+
     async fn prime_capabilities(&self) -> Result<()> {
         // The plan tier is already in the stored id token, so this costs no
         // network at all in the common case. Only an unreadable token sends us

@@ -806,7 +806,14 @@ supports_tools       = true
 supports_system_prompt = true
 max_context_tokens   = 32768
 max_output_tokens    = 4096
+input_types          = ["text/*", "image/*"]   # what it takes in a request
+output_types         = ["text/*"]              # what it can hand back
 ```
+
+`input_types` and `output_types` are media type patterns, and they replace the provider's
+list rather than adding to it, so name `text/*` too. They are how a local vision model gets
+sent an image instead of a one-line stand-in for it. [Typed media](/docs/media) explains what a
+model does with each type.
 
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied, and says whether they came from the provider's own listing or this build's table.

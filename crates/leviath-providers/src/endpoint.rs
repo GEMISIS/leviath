@@ -411,6 +411,18 @@ impl Provider for EndpointProvider {
         caps
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        // A gateway id with a vendor prefix answers from that vendor's table;
+        // anything else is text until the operator's entry says otherwise.
+        let base = self
+            .learned
+            .media_corrected(model, crate::media_tables::by_prefix(model));
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
+        }
+    }
+
     fn serves_model(&self, model_key: &str) -> Option<String> {
         // The listing first, then the configured fallbacks. Nothing here can
         // claim a model it has not been told about: an arbitrary server has no
@@ -467,6 +479,9 @@ impl Provider for EndpointProvider {
             .to_model_infos(&self.name, |id| self.capabilities(id)))
     }
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {

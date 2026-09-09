@@ -46,6 +46,10 @@ pub struct ListArgs {
     /// Report the table as JSON, one object per model.
     #[arg(long)]
     pub json: bool,
+    /// Keep only models that accept this media type in a request, written
+    /// as `image/png` or `image/*`.
+    #[arg(long, value_name = "MEDIA_TYPE")]
+    pub accepts: Option<String>,
 }
 
 /// One model in `lev models list --json`.
@@ -74,6 +78,8 @@ struct ModelRow {
     retires: Option<String>,
     /// USD per million tokens, when the provider's listing quotes a rate.
     pricing: Option<ModelPricing>,
+    /// Media type patterns the model takes and can hand back.
+    media: leviath_providers::ModelMedia,
 }
 
 /// Arguments for `lev models show`.
@@ -161,7 +167,10 @@ fn catalogue_rows() -> Vec<ModelInfo> {
     builtin_catalog()
         .into_iter()
         .map(|e| {
-            ModelInfo::new(e.id, e.provider, e.capabilities).named(Some(e.display_name.to_string()))
+            let media = leviath_providers::media_tables::builtin_media(e.provider, e.id);
+            ModelInfo::new(e.id, e.provider, e.capabilities)
+                .named(Some(e.display_name.to_string()))
+                .with_media(media)
         })
         .collect()
 }
@@ -282,7 +291,10 @@ async fn list_with_registry_within(
                     // catalogue row it does not carry is a model it does not
                     // serve, and keeping it would list a model nothing can run.
                     entries.retain(|e| e.provider != provider_name);
-                    entries.extend(live);
+                    entries.extend(live.into_iter().map(|m| {
+                        let media = provider.media(&m.id);
+                        m.with_media(media)
+                    }));
                     live_providers.push(provider_name);
                 }
                 Ok(Err(e)) => {
@@ -328,7 +340,26 @@ async fn list_with_registry_within(
     for entry in entries.iter_mut() {
         if let Some(user_caps) = config.model_capabilities.get(&entry.id) {
             entry.capabilities = user_caps.apply_to(entry.capabilities.clone());
+            entry.media = user_caps.apply_media(entry.media.clone());
         }
+    }
+
+    // `--accepts image/png` keeps the models a stage holding such a part could
+    // send it to. After the overrides, so a `[model_capabilities]` entry that
+    // teaches a local model to see counts.
+    if let Some(wanted) = &args.accepts {
+        let pattern = wanted.trim().to_ascii_lowercase();
+        if !pattern.contains('/') {
+            anyhow::bail!(
+                "--accepts takes a media type such as image/png or image/*, not '{wanted}'"
+            );
+        }
+        entries.retain(|e| {
+            e.media
+                .input
+                .iter()
+                .any(|have| leviath_providers::capabilities::pattern_covers(have, &pattern))
+        });
     }
 
     // Provider, then newest first, then id: a live listing runs to hundreds
@@ -356,6 +387,7 @@ async fn list_with_registry_within(
                 released: e.released,
                 retires: e.retires,
                 pricing: e.pricing,
+                media: e.media,
             })
             .collect();
         // Owned scalars with no map keys to reject, so this cannot fail.
@@ -399,10 +431,19 @@ fn print_listing(
     live_providers: &[String],
 ) {
     println!(
-        "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<11} {:>8} {:>8}",
-        "PROVIDER", "MODEL ID", "TEMP", "TOOLS", "CTX", "OUTPUT", "RELEASED", "IN $/M", "OUT $/M"
+        "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<15} {:<11} {:>8} {:>8}",
+        "PROVIDER",
+        "MODEL ID",
+        "TEMP",
+        "TOOLS",
+        "CTX",
+        "OUTPUT",
+        "MEDIA",
+        "RELEASED",
+        "IN $/M",
+        "OUT $/M"
     );
-    println!("{}", "-".repeat(118));
+    println!("{}", "-".repeat(134));
 
     for entry in entries {
         let provider_col = if overridden.contains(&entry.id) {
@@ -430,9 +471,10 @@ fn print_listing(
             None => (UNPRICED.to_owned(), UNPRICED.to_owned()),
         };
 
+        let media = media_label(&entry.media);
         println!(
-            "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<11} {:>8} {:>8}",
-            provider_col, entry.id, temp, tools, ctx, out, released, input, output
+            "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<15} {:<11} {:>8} {:>8}",
+            provider_col, entry.id, temp, tools, ctx, out, media, released, input, output
         );
     }
 
@@ -499,6 +541,8 @@ async fn merge_script_provider(
         .await
         .map_err(|e| anyhow::anyhow!("provider '{name}' could not list its models: {e}"))?;
     for rm in models {
+        let media = provider.media(&rm.id);
+        let rm = rm.with_media(media);
         match entries.iter_mut().find(|e| e.id == rm.id) {
             Some(existing) => *existing = rm,
             None => entries.push(rm),
@@ -609,11 +653,13 @@ async fn show_with_registry_within(
     match (found, user_caps) {
         (Some(info), Some(user_caps)) => {
             let caps = user_caps.apply_to(info.capabilities);
+            let media = user_caps.apply_media(info.media);
             print_model_detail(
                 model_id,
                 info.display_name.as_deref(),
                 &info.provider,
                 &caps,
+                &media,
                 Source::Override,
                 info.pricing,
             );
@@ -629,6 +675,7 @@ async fn show_with_registry_within(
                 info.display_name.as_deref(),
                 &info.provider,
                 &info.capabilities,
+                &info.media,
                 source,
                 info.pricing,
             );
@@ -639,6 +686,7 @@ async fn show_with_registry_within(
                 None,
                 "config (user override)",
                 &user_caps.apply_to(ModelCapabilities::default()),
+                &user_caps.apply_media(leviath_providers::ModelMedia::text_only()),
                 Source::Override,
                 None,
             );
@@ -677,6 +725,38 @@ enum Source {
     Table,
     /// A `[model_capabilities]` entry, merged onto one of the above.
     Override,
+}
+
+/// The media column: what the model takes beyond text, then what it hands
+/// back beyond text after an arrow. `img,pdf` for a vision model, `->img` for
+/// an image generator, blank for text in and text out.
+fn media_label(media: &leviath_providers::ModelMedia) -> String {
+    fn short(patterns: &[String]) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for p in patterns {
+            let label = match p.split_once('/') {
+                Some(("text", _)) => continue,
+                Some(("image", _)) => "img",
+                Some(("audio", _)) => "aud",
+                Some(("video", _)) => "vid",
+                Some(("application", "pdf")) => "pdf",
+                Some(("model", _)) => "3d",
+                _ => "other",
+            };
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        out
+    }
+    let input = short(&media.input).join(",");
+    let output = short(&media.output).join(",");
+    match (input.is_empty(), output.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => input,
+        (true, false) => format!("->{output}"),
+        (false, false) => format!("{input}->{output}"),
+    }
 }
 
 fn bool_icon(b: bool) -> &'static str {
@@ -776,6 +856,7 @@ fn print_model_detail(
     display_name: Option<&str>,
     provider: &str,
     caps: &ModelCapabilities,
+    media: &leviath_providers::ModelMedia,
     source: Source,
     listed_pricing: Option<ModelPricing>,
 ) {
@@ -804,6 +885,8 @@ fn print_model_detail(
         caps.max_context_tokens,
         fmt_tokens(caps.max_context_tokens)
     );
+    println!("  Input types:    {}", media.input.join(", "));
+    println!("  Output types:   {}", media.output.join(", "));
     println!(
         "  Max output:     {} tokens ({})",
         caps.max_output_tokens,
@@ -930,22 +1013,65 @@ mod tests {
             limits_source: LimitsSource::Builtin,
         };
         // Should not panic
+        let media = leviath_providers::ModelMedia::new(&["text/*", "image/*"], &["text/*"]);
         print_model_detail(
             "test-model",
             Some("Test Model"),
             "test",
             &caps,
+            &media,
             Source::Table,
             None,
         );
-        print_model_detail("test-model", None, "test", &caps, Source::Override, None);
         print_model_detail(
             "test-model",
             None,
             "test",
             &caps,
+            &media,
+            Source::Override,
+            None,
+        );
+        print_model_detail(
+            "test-model",
+            None,
+            "test",
+            &caps,
+            &media,
             Source::Listing,
             Some(ModelPricing::flat(0.5, 1.5)),
+        );
+    }
+
+    #[test]
+    fn media_label_names_what_goes_beyond_text() {
+        use leviath_providers::ModelMedia;
+        assert_eq!(media_label(&ModelMedia::text_only()), "");
+        assert_eq!(
+            media_label(&ModelMedia::new(
+                &["text/*", "image/*", "application/pdf"],
+                &["text/*"]
+            )),
+            "img,pdf"
+        );
+        assert_eq!(
+            media_label(&ModelMedia::new(&["text/*"], &["image/*"])),
+            "->img"
+        );
+        assert_eq!(
+            media_label(&ModelMedia::new(
+                &[
+                    "text/*",
+                    "audio/*",
+                    "video/mp4",
+                    "model/obj",
+                    "x/y",
+                    "image/png",
+                    "image/jpeg"
+                ],
+                &["text/*", "audio/*"]
+            )),
+            "aud,vid,3d,other,img->aud"
         );
     }
 
@@ -985,6 +1111,7 @@ mod tests {
                         offline: false,
                         all: false,
                         json: false,
+                        accepts: None,
                     }),
                 };
                 // Should succeed: prints the builtin table
@@ -1007,6 +1134,7 @@ mod tests {
                         offline: false,
                         all: false,
                         json: false,
+                        accepts: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1028,6 +1156,7 @@ mod tests {
                         offline: false,
                         all: false,
                         json: false,
+                        accepts: None,
                     }),
                 };
                 // Nothing registered, nothing in the built-in table, no script
@@ -1148,6 +1277,7 @@ mod tests {
                         offline: false,
                         all: false,
                         json: false,
+                        accepts: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1171,6 +1301,7 @@ mod tests {
                         offline: false,
                         all: false,
                         json: false,
+                        accepts: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1265,6 +1396,7 @@ mod tests {
             Some("Test"),
             "test",
             &caps,
+            &leviath_providers::ModelMedia::text_only(),
             Source::Table,
             None,
         );
@@ -1279,6 +1411,7 @@ mod tests {
             None,
             "custom",
             &caps,
+            &leviath_providers::ModelMedia::text_only(),
             Source::Override,
             None,
         );
@@ -1332,6 +1465,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1359,6 +1493,7 @@ mod tests {
                     provider: Some("openai".to_string()),
                     all: false,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1378,6 +1513,7 @@ mod tests {
                     provider: None,
                     all: true,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1402,6 +1538,7 @@ mod tests {
             released_on: Some("1970-01-02".to_string()),
             retires: None,
             pricing: Some(ModelPricing::flat(1.0, 2.0)),
+            media: leviath_providers::ModelMedia::new(&["text/*", "image/*"], &["text/*"]),
         };
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -1411,6 +1548,10 @@ mod tests {
         assert_eq!(value["learned"], serde_json::json!(true));
         assert_eq!(value["released_on"], serde_json::json!("1970-01-02"));
         assert_eq!(value["pricing"]["output_per_mtok"], serde_json::json!(2.0));
+        assert_eq!(
+            value["media"]["input"],
+            serde_json::json!(["text/*", "image/*"])
+        );
     }
 
     #[tokio::test]
@@ -1424,6 +1565,7 @@ mod tests {
                     provider: Some("anthropic".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1443,6 +1585,7 @@ mod tests {
                     provider: Some("no-such-provider".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let err = list_with_registry(args, &build_provider_registry_from_config)
                     .await
@@ -1608,6 +1751,7 @@ mod tests {
                     provider: Some("mock".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let new_model = ModelInfo::new(
                     "mock-brand-new-model".to_string(),
@@ -1638,6 +1782,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let new_model = ModelInfo::new(
                     "mock-brand-new-model".to_string(),
@@ -1665,6 +1810,7 @@ mod tests {
                     provider: Some("mock".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let overriding_model =
                     ModelInfo::new(known_id, "mock".to_string(), ModelCapabilities::default())
@@ -1693,6 +1839,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 // A registry with exactly one provider that the builtin table
                 // also knows: its rows survive, everything else is filtered.
@@ -1726,6 +1873,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result =
                     list_with_registry(args, &mock_registry("anthropic", remote, false)).await;
@@ -1748,6 +1896,7 @@ mod tests {
                     provider: None,
                     all: true,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1777,6 +1926,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 // The provider's own listing carries the model, so the row is
                 // live and the override is merged onto it and marked.
@@ -1834,6 +1984,7 @@ mod tests {
                     provider: Some("mock".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
                 assert!(result.is_ok());
@@ -1859,6 +2010,7 @@ mod tests {
                     provider: Some("openai".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1976,6 +2128,7 @@ mod tests {
                     provider: Some("scripted".to_string()),
                     all: false,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2014,6 +2167,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok(), "one broken script does not fail the sweep");
@@ -2044,6 +2198,7 @@ mod tests {
                     provider: Some("once".to_string()),
                     all: false,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2073,6 +2228,7 @@ mod tests {
                     provider: Some("quiet".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2104,6 +2260,7 @@ mod tests {
                     provider: Some("angry".to_string()),
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let err = list_with_registry(args, &script_registry(dir))
                     .await
@@ -2147,6 +2304,7 @@ mod tests {
                     provider: Some("mirror".to_string()),
                     all: true,
                     json: true,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2174,6 +2332,7 @@ mod tests {
                     provider: Some("openai".to_string()),
                     all: true,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2305,6 +2464,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -2399,6 +2559,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_err());
@@ -2468,6 +2629,7 @@ mod tests {
             offline: false,
             all: false,
             json: false,
+            accepts: None,
         }));
     }
 
@@ -2575,6 +2737,7 @@ mod tests {
                     provider: None,
                     all: false,
                     json: false,
+                    accepts: None,
                 };
                 let err = list_with_registry(args, &cannot_build)
                     .await
@@ -2695,6 +2858,7 @@ mod live_listing_tests {
             offline,
             all: false,
             json,
+            accepts: None,
         }
     }
 
@@ -2710,6 +2874,41 @@ mod live_listing_tests {
             let result =
                 list_with_registry(list_args(false, false), &registry_with(models, false)).await;
             assert!(result.is_ok(), "{result:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accepts_keeps_the_models_that_take_the_type_and_refuses_a_bare_word() {
+        crate::config::with_isolated_config_path_async("models-accepts", |_| async move {
+            let args = ListArgs {
+                all: true,
+                accepts: Some("image/png".to_string()),
+                ..list_args(true, false)
+            };
+            let models = vec![learned_model("mock-live", Some(1), Some(1.0))];
+            let result = list_with_registry(args, &registry_with(models.clone(), false)).await;
+            assert!(result.is_ok(), "{result:?}");
+
+            let json = ListArgs {
+                all: true,
+                accepts: Some("audio/*".to_string()),
+                ..list_args(true, true)
+            };
+            let result = list_with_registry(json, &registry_with(models.clone(), false)).await;
+            assert!(result.is_ok(), "{result:?}");
+
+            let bare = ListArgs {
+                accepts: Some("png".to_string()),
+                ..list_args(true, false)
+            };
+            let err = list_with_registry(bare, &registry_with(models, false))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("--accepts takes a media type"),
+                "{err}"
+            );
         })
         .await;
     }

@@ -754,6 +754,7 @@ mod tests {
                     offline: false,
                     all: false,
                     json: false,
+                    accepts: None,
                 }),
             };
             let result = dispatch(Commands::Models(args), &MockRisky).await;

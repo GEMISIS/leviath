@@ -935,6 +935,16 @@ impl Provider for AnthropicProvider {
         }
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        let base = self
+            .learned
+            .media_corrected(model, crate::media_tables::anthropic(model));
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
+        }
+    }
+
     /// Every id the listing named, once primed.
     ///
     /// `GET /v1/models` carries chat models only, so unlike OpenAI's there is
@@ -1041,6 +1051,9 @@ impl AnthropicProvider {
         })
     }
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {

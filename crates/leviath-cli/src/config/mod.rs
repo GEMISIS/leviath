@@ -4025,6 +4025,8 @@ enabled = false
                 cached_input_per_mtok: Some(0.5),
                 cache_write_per_mtok: Some(6.25),
                 output_per_mtok: Some(25.0),
+                input_types: Some(vec!["text/*".to_string(), "image/*".to_string()]),
+                output_types: None,
             },
         );
         let mut tool_perms = HashMap::new();

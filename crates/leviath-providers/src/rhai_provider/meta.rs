@@ -26,6 +26,13 @@ pub struct ProviderMeta {
     pub max_output_tokens: usize,
     /// Advisory streaming flag (`@supports_streaming`).
     pub supports_streaming: bool,
+    /// Media type patterns the script's models accept (`@input_types`), as
+    /// a comma-separated list: `// @input_types text/*, image/*`. Empty means
+    /// text only.
+    pub input_types: Vec<String>,
+    /// Media type patterns the script's models can hand back
+    /// (`@output_types`). Empty means text only.
+    pub output_types: Vec<String>,
 }
 
 impl Default for ProviderMeta {
@@ -37,8 +44,34 @@ impl Default for ProviderMeta {
             max_context_tokens: 8192,
             max_output_tokens: 4096,
             supports_streaming: false,
+            input_types: Vec::new(),
+            output_types: Vec::new(),
         }
     }
+}
+
+impl ProviderMeta {
+    /// What the script declared its models take and produce; text only when
+    /// it declared nothing.
+    pub fn media(&self) -> crate::capabilities::ModelMedia {
+        let mut media = crate::capabilities::ModelMedia::text_only();
+        if !self.input_types.is_empty() {
+            media.input = self.input_types.clone();
+        }
+        if !self.output_types.is_empty() {
+            media.output = self.output_types.clone();
+        }
+        media
+    }
+}
+
+/// A comma-separated list of media type patterns, trimmed and lowercased,
+/// keeping only the ones shaped like a type.
+fn parse_type_list(arg: &str) -> Vec<String> {
+    arg.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s.contains('/') && !s.contains(char::is_whitespace))
+        .collect()
 }
 
 /// Parse a provider script's [`ProviderMeta`] from its source comment
@@ -79,6 +112,8 @@ pub fn parse_provider_annotations(src: &str) -> ProviderMeta {
                     meta.supports_streaming = b;
                 }
             }
+            "input_types" => meta.input_types = parse_type_list(arg),
+            "output_types" => meta.output_types = parse_type_list(arg),
             _ => {}
         }
     }
@@ -148,5 +183,25 @@ not a comment line
         // A directive keyword with no trailing argument at end-of-line.
         let meta = parse_provider_annotations("//@description");
         assert!(meta.description.is_empty());
+    }
+
+    #[test]
+    fn input_and_output_types_are_comma_lists_of_patterns() {
+        let src = "\
+// @input_types text/*, Image/PNG , not-a-type, bad type/x
+// @output_types audio/*
+fn inference(s, r) { #{} }
+";
+        let meta = parse_provider_annotations(src);
+        assert_eq!(meta.input_types, vec!["text/*", "image/png"]);
+        assert_eq!(meta.output_types, vec!["audio/*"]);
+        let media = meta.media();
+        assert_eq!(media.input, vec!["text/*", "image/png"]);
+        assert_eq!(media.output, vec!["audio/*"]);
+        let none = parse_provider_annotations("fn inference(s, r) { #{} }");
+        assert!(none.input_types.is_empty());
+        assert_eq!(none.media(), crate::capabilities::ModelMedia::text_only());
+        let input_only = parse_provider_annotations("// @input_types text/*, image/*\n");
+        assert_eq!(input_only.media().output, vec!["text/*"]);
     }
 }

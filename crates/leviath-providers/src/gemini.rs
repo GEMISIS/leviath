@@ -386,6 +386,16 @@ impl Provider for GeminiProvider {
         }
     }
 
+    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+        let base = self
+            .learned
+            .media_corrected(model, crate::media_tables::gemini(model));
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_media(base),
+            None => base,
+        }
+    }
+
     /// Every id the native listing named, once primed.
     ///
     /// Chat models only: `parse_native_entry` keeps an entry only when it
@@ -486,6 +496,9 @@ fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)
             pricing: None,
             released: None,
             retires: None,
+            // The listing names no modalities; the family table answers.
+            input_types: None,
+            output_types: None,
         },
     ))
 }
@@ -576,6 +589,9 @@ impl GeminiProvider {
         Ok(models)
     }
 }
+
+#[cfg(test)]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {
