@@ -521,9 +521,10 @@ fn protected_hit<'a>(
     // exist yet (`yolo.toml` before `lev yolo init`) still has an existing
     // parent whose symlinks decide what it really names.
     let target = leviath_core::canonicalize_for_match(&joined)?;
+    // A protected place nothing along which exists cannot be named by any
+    // real path either, so it matches nothing.
     protected.iter().find(|p| {
-        let root = leviath_core::canonicalize_for_match(&p.path).unwrap_or_else(|| p.path.clone());
-        target.starts_with(root)
+        leviath_core::canonicalize_for_match(&p.path).is_some_and(|root| target.starts_with(root))
     })
 }
 
@@ -2938,8 +2939,23 @@ mod policy_tests {
             )
             .is_none()
         );
-        // No path, another tool, or no lock: nothing to refuse.
+        // No path, a path that is not a string, another tool, or no lock:
+        // nothing to refuse.
         assert!(lock_check(&rig, "write_file", serde_json::json!({})).is_none());
+        assert!(lock_check(&rig, "write_file", serde_json::json!({"path": 5})).is_none());
+        assert!(lock_check(&rig, "shell", serde_json::json!({"command": 5})).is_none());
+        // A path nothing along which exists (a relative workdir that is not
+        // there) names nothing checkable, so it matches nothing.
+        assert!(
+            protected_path_refusal(
+                "write_file",
+                &serde_json::json!({"path": "yolo.toml"}),
+                std::path::Path::new("no-such-relative-workdir"),
+                Some(&rig.home),
+                &rig.protected,
+            )
+            .is_none()
+        );
         assert!(lock_check(&rig, "read_file", serde_json::json!({"path": yolo})).is_none());
         assert!(
             protected_path_refusal(

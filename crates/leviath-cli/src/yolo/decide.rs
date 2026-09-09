@@ -314,6 +314,13 @@ fn arg_matches(pattern: &str, word: &str, input: &DecideInput<'_>) -> bool {
     let Some(expanded) = expand_pattern(pattern, input.workdir, input.home) else {
         return false;
     };
+    // The pattern through the same resolution as the word, as far as it
+    // exists: its glob tail does not, and is re-appended as written, but the
+    // directory it hangs off may be a symlink (`/tmp` on macOS), and a word
+    // resolved to `/private/tmp/...` must still meet a pattern written as
+    // `/tmp/...`. A pattern nothing along which exists stays as written and
+    // matches nothing real.
+    let expanded = leviath_core::canonicalize_for_match(&expanded).unwrap_or(expanded);
     let pattern_text = leviath_core::read_paths::normalize_match_str(
         &expanded.to_string_lossy(),
         input.platform.windows,
@@ -367,12 +374,14 @@ fn fold_dot_dot(path: &Path) -> Option<PathBuf> {
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !matches!(out.components().next_back(), Some(Component::Normal(_))) {
-                    return None;
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-                out.pop();
-            }
+                // Nothing to climb out of: the root, or the start of a
+                // relative path.
+                _ => return None,
+            },
             other => out.push(other.as_os_str()),
         }
     }

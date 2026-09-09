@@ -106,7 +106,7 @@ pub(crate) async fn execute(args: YoloArgs) -> anyhow::Result<()> {
         YoloCommand::Show(a) => {
             let file = crate::yolo::load_current()?;
             let profile = file.resolve(Some(&a.name), &path)?;
-            render_show(&profile, a.json)?
+            render_show(&profile, a.json)
         }
         YoloCommand::Test(a) => {
             let file = crate::yolo::load_current()?;
@@ -179,17 +179,23 @@ fn human_word(h: crate::yolo::rules::Human) -> &'static str {
 
 /// One profile in full: its TOML as the file would spell it, and what it
 /// keeps for a person.
-fn render_show(profile: &YoloProfile, json: bool) -> anyhow::Result<String> {
+fn render_show(profile: &YoloProfile, json: bool) -> String {
     if json {
-        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+        return serde_json::to_string_pretty(&serde_json::json!({
             "name": profile.name,
             "spec": profile.spec,
             "holds": profile.holds(),
-        }))?);
+        }))
+        .expect("a profile serializes");
     }
+    // A spec is plain data that came out of a TOML table, so it goes back
+    // into one; neither step has a failure a caller could act on.
     let mut table = toml::map::Map::new();
-    table.insert(profile.name.clone(), toml::Value::try_from(&profile.spec)?);
-    let mut out = toml::to_string(&toml::Value::Table(table))?;
+    table.insert(
+        profile.name.clone(),
+        toml::Value::try_from(&profile.spec).expect("a profile spec is a TOML table"),
+    );
+    let mut out = toml::to_string(&toml::Value::Table(table)).expect("a TOML table prints");
     let holds = profile.holds();
     if !holds.is_empty() {
         out.push_str("\n# keeps for you:\n");
@@ -197,7 +203,7 @@ fn render_show(profile: &YoloProfile, json: bool) -> anyhow::Result<String> {
             out.push_str(&format!("#   {line}\n"));
         }
     }
-    Ok(out)
+    out
 }
 
 /// What the config layers say about the tool, before the profile: the
@@ -282,9 +288,11 @@ pub(crate) fn decision_json(
 ) -> anyhow::Result<serde_json::Value> {
     let arguments = arguments_of(args)?;
     let kind = kind_of(args)?;
+    // No workdir given means "here"; a process whose cwd cannot be read
+    // resolves relative paths against nothing, which matches nothing.
     let workdir = match &args.workdir {
         Some(dir) => dir.clone(),
-        None => std::env::current_dir()?,
+        None => std::env::current_dir().unwrap_or_default(),
     };
     let home = crate::yolo::home();
     let decision = profile.decide(&DecideInput {
@@ -314,7 +322,7 @@ fn render_test(
 ) -> anyhow::Result<String> {
     let decision = decision_json(profile, args, configured)?;
     if args.json {
-        return Ok(serde_json::to_string_pretty(&decision)?);
+        return Ok(serde_json::to_string_pretty(&decision).expect("a decision serializes"));
     }
     let policy = decision["policy"].as_str().unwrap_or_default();
     Ok(format!(
@@ -348,9 +356,7 @@ fn init(path: &Path, force: bool) -> anyhow::Result<String> {
             path.display()
         );
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
     std::fs::write(path, EXAMPLE_TOML)?;
     Ok(format!(
         "wrote {}\n  run one with `lev run <agent> --yolo=careful`, and `lev yolo list` shows the rest",
@@ -401,6 +407,9 @@ mod tests {
         );
         assert!(text.contains("tools 1/2/0  shell 3/1/1"), "{text}");
         assert!(text.contains("build-only"), "{text}");
+        let loose = YoloFile::from_toml("[loose]\ndefault = \"allow\"\n").unwrap();
+        let text = render_list(&loose, Path::new("/x/yolo.toml"), false);
+        assert!(text.contains("loose  default=allow"), "{text}");
         let json: serde_json::Value =
             serde_json::from_str(&render_list(&file, Path::new("/x/yolo.toml"), true)).unwrap();
         assert_eq!(json["exists"], true);
@@ -428,17 +437,16 @@ mod tests {
     fn show_prints_the_profile_as_toml_with_its_holds() {
         let file = YoloFile::from_toml(EXAMPLE_TOML).unwrap();
         let careful = file.get("careful").unwrap();
-        let text = render_show(&careful, false).unwrap();
+        let text = render_show(&careful, false);
         assert!(text.starts_with("[careful]"), "{text}");
         assert!(text.contains("default = \"ask\""), "{text}");
         assert!(text.contains("[[careful.shell.deny]]"), "{text}");
         assert!(text.contains("# keeps for you:"), "{text}");
         assert!(text.contains("#   the model's questions"), "{text}");
         let loose = YoloFile::from_toml("[loose]\ndefault = \"allow\"\n").unwrap();
-        let text = render_show(&loose.get("loose").unwrap(), false).unwrap();
+        let text = render_show(&loose.get("loose").unwrap(), false);
         assert!(!text.contains("keeps for you"), "{text}");
-        let json: serde_json::Value =
-            serde_json::from_str(&render_show(&careful, true).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&render_show(&careful, true)).unwrap();
         assert_eq!(json["name"], "careful");
         assert_eq!(json["spec"]["default"], "ask");
         assert!(json["holds"].as_array().unwrap().len() >= 2);
@@ -557,6 +565,15 @@ mod tests {
         args.configured = None;
         // No config: the built-in default, `ask` for the shell.
         assert_eq!(configured_policy(&args, None).unwrap(), ToolPolicy::Ask);
+        // Arguments that are not JSON stop here too, before any clamp.
+        let mut bad = test_args("p", "web_fetch", None);
+        bad.args = Some("nope".to_string());
+        assert!(
+            configured_policy(&bad, None)
+                .unwrap_err()
+                .to_string()
+                .contains("--args")
+        );
         // The user's global table is the ceiling, and a redirect is clamped by
         // `write_file` as in the tool lane.
         let config = crate::config::Config {
@@ -591,6 +608,14 @@ mod tests {
         std::fs::write(&path, "[x]\ndefault = \"allow\"\n").unwrap();
         init(&path, true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), EXAMPLE_TOML);
+        // A parent that is a file cannot be created; a path that is a
+        // directory cannot be written.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        assert!(init(&blocker.join("yolo.toml"), false).is_err());
+        let as_dir = dir.path().join("as_dir");
+        std::fs::create_dir(&as_dir).unwrap();
+        assert!(init(&as_dir, true).is_err());
     }
 
     /// The command end to end, through the isolated config path: every
@@ -635,6 +660,65 @@ mod tests {
             })
             .await
             .expect("test");
+            // Every way a subcommand can fail: an unknown profile in `test`,
+            // bad inputs to it, a second `init`, and a file that no longer
+            // loads under each reader.
+            let unknown = execute(YoloArgs {
+                command: YoloCommand::Test(test_args("nope", "shell", Some("ls"))),
+            })
+            .await
+            .expect_err("unknown profile");
+            assert!(unknown.to_string().contains("no yolo profile"), "{unknown}");
+            let mut bad_word = test_args("careful", "shell", Some("ls"));
+            bad_word.configured = Some("maybe".to_string());
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::Test(bad_word),
+                })
+                .await
+                .is_err()
+            );
+            let mut bad_kind = test_args("careful", "shell", Some("ls"));
+            bad_kind.kind = Some("robot".to_string());
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::Test(bad_kind),
+                })
+                .await
+                .is_err()
+            );
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::Init(InitArgs::default()),
+                })
+                .await
+                .is_err()
+            );
+            std::fs::write(yolo_path(), "[").unwrap();
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::List(ListArgs::default()),
+                })
+                .await
+                .is_err()
+            );
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::Show(ShowArgs {
+                        name: "careful".to_string(),
+                        json: true,
+                    }),
+                })
+                .await
+                .is_err()
+            );
+            assert!(
+                execute(YoloArgs {
+                    command: YoloCommand::Test(test_args("careful", "shell", Some("ls"))),
+                })
+                .await
+                .is_err()
+            );
         })
         .await;
     }
