@@ -165,6 +165,22 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
             .extend(transforms_arr.iter().map(parse_context_transform));
     }
 
+    // The agent's own media registry rows: [media_types]. Checked here by
+    // layering them onto an empty registry, so a misspelled field or a key
+    // that is not a type fails `lev validate` and the spawn rather than
+    // being skipped at the first file the agent touches.
+    if let Some(value) = parsed.get("media_types") {
+        let Some(rows) = value.as_table() else {
+            return Err(Error::Other(
+                "[media_types] must be a table of \"type/subtype\" rows".to_string(),
+            ));
+        };
+        crate::media::MediaRegistry::empty()
+            .layer(rows, "blueprint")
+            .map_err(|e| Error::Other(format!("[media_types]: {e}")))?;
+        blueprint.media_types = rows.clone();
+    }
+
     Ok(blueprint)
 }
 

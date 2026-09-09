@@ -135,6 +135,13 @@ pub struct Blueprint {
     /// producing no output: a stage may still ask for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output::OutputSpec>,
+
+    /// Rows this agent adds to the media registry, `[media_types]` in the
+    /// manifest: the types its tools produce and take, layered over the
+    /// operator's rows for this agent's runs only. Validated at parse; an
+    /// empty table is the common case and is not written back.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub media_types: toml::Table,
 }
 
 /// The `[safe_commands]` section of a manifest.
@@ -202,6 +209,7 @@ impl Blueprint {
             read_paths: None,
             safe_commands: None,
             output: None,
+            media_types: toml::Table::new(),
         }
     }
 

@@ -19,6 +19,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod cell;
+pub mod check;
 pub mod inbound;
 pub mod inline_refs;
 pub mod part;
@@ -26,10 +28,12 @@ pub mod probe;
 pub mod registry;
 pub mod store;
 
+pub use cell::RegistryCell;
+pub use check::{FnCheck, MediaCheck};
 pub use inbound::InboundPart;
 pub use part::{Blob, BlobRef, Delivery, Part, PartBody};
 pub use registry::{MediaInfo, MediaRegistry, TokenRule};
-pub use store::{BlobStore, MemoryBlobStore, is_sha256_hex, sha256_hex};
+pub use store::{BlobStore, MemoryBlobStore, is_sha256_hex, sha256_hex, verify_blob};
 
 /// A media type: `type/subtype`, lowercase, with no parameters.
 ///
