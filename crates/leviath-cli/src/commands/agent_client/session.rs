@@ -249,11 +249,25 @@ system_prompt = "Plan the work"
             output_format: None,
             output_instructions: None,
         };
-        let spawn = spawn_args(&resolved, "t", "/work", &args, Default::default());
+        let spawn = spawn_args(
+            &resolved,
+            "t",
+            "/work",
+            &args,
+            Default::default(),
+            Vec::new(),
+        );
         assert!(spawn.yolo);
         assert_eq!(spawn.yolo_profile.as_deref(), Some("careful"));
         args.yolo = Some(String::new());
-        let spawn = spawn_args(&resolved, "t", "/work", &args, Default::default());
+        let spawn = spawn_args(
+            &resolved,
+            "t",
+            "/work",
+            &args,
+            Default::default(),
+            Vec::new(),
+        );
         assert!(spawn.yolo);
         assert!(spawn.yolo_profile.is_none());
     }

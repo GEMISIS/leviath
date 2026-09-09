@@ -783,6 +783,7 @@ pub(crate) async fn dispatch_tools(
             crate::yolo::home().as_deref(),
             &state.protected.get(),
         ) {
+            let refusal: EntryContent = refusal.into();
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));
             continue;
@@ -883,6 +884,7 @@ pub(crate) async fn dispatch_tools(
                      re-reads it and does not need restarting.",
                     tc.name
                 );
+                let result: EntryContent = result.into();
                 progress(&tc.id, &result);
                 slots.push((tc.id.clone(), Some(result)));
             }
