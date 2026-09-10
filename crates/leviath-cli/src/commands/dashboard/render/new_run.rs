@@ -60,6 +60,8 @@ impl Dashboard {
         // The completion floats over the task pane, so it is drawn after it.
         self.draw_file_ref_popup(frame, task_area);
         self.draw_new_run_help_bar(frame, rows[1]);
+        // The file picker floats over the whole screen, so it is drawn last.
+        self.draw_new_run_picker(frame, area);
     }
 
     fn draw_new_run_agents(&self, frame: &mut Frame, area: Rect) {
@@ -261,6 +263,10 @@ impl Dashboard {
             (true, None) => "unattended: on".to_string(),
             (false, _) => "unattended: off".to_string(),
         };
+        if self.new_run_picker_open() {
+            return " ↑↓ move · Space toggle · Enter done · Esc cancel · type to filter "
+                .to_string();
+        }
         match (self.new_run_file_ref, self.new_run_focus) {
             (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ".to_string(),
             (false, NewRunPane::Agents) => format!(
@@ -271,7 +277,7 @@ impl Dashboard {
                 }
             ),
             (false, NewRunPane::Inputs) => format!(
-                " ↑↓ slot · type a file or text · Enter next · Tab write task · Shift+Tab agents · ^Y {unattended} · F1 help "
+                " ↑↓ slot · Enter/^O choose files · type for text · Tab write task · Shift+Tab agents · ^Y {unattended} · F1 help "
             ),
             // The formatting chord is named on the pane that has the toolbar,
             // and only there: on the picker it would be a key that does

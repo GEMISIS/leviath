@@ -200,7 +200,11 @@ same list.
   into the run's working directory on `w`, lists the files a run produced
   under its answer in the Final view, and attaches the files a task names
   with `@path` when a run starts from the new-run screen, counting them on
-  the task box as you type (#400).
+  the task box as you type. The new-run screen's Inputs pane gives a file
+  region a picker of the working directory, filtered to the types the region
+  accepts, so a file reaches a region by being chosen rather than named and
+  never with an `@`; a region that holds several (`max_stored`) takes several,
+  added and removed in the picker (#400).
 - The stage graph shows the mime a stage takes beyond text (`◧ image/*
   audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
   files it declares it hands back (`▤ video/mp4`), in the explorer, the
