@@ -60,7 +60,7 @@ pub(super) struct ToolStateParts<'a> {
     /// The host those scripts call back into.
     pub(super) script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// The parts handle that host reads, which the runtime's offers fill.
-    pub(super) offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::media::Part>>>,
+    pub(super) offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::mime::Part>>>,
     /// Re-resolution context, for a blueprint that rescans mid-run.
     pub(super) dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
     /// Whether this run answers its own prompts: `--yolo` under a profile

@@ -675,7 +675,7 @@ pub struct RegionDefinition {
     #[serde(default)]
     pub seed: Option<RegionSeed>,
 
-    /// Media type patterns this region takes; empty means anything. See
+    /// Mime type patterns this region takes; empty means anything. See
     /// [`crate::region::Region::accepts`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepts: Vec<String>,

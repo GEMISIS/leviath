@@ -13,9 +13,9 @@ use super::block_cache::{
 use super::*;
 
 mod eviction;
-/// Typed parts as provider content blocks: stand-ins, media blocks, and the
+/// Typed parts as provider content blocks: stand-ins, mime blocks, and the
 /// lifted message a system region's stored parts ride in.
-mod media;
+mod mime;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ pub(crate) struct InferenceConfig {
     /// `[stages.<name>.model] request_timeout_secs`. When `Some`, it overrides the
     /// default inference job timeout at dispatch; when `None`, the default applies.
     pub request_timeout_secs: Option<u64>,
-    /// Media type patterns whose parts reach this stage's model as text
+    /// Mime type patterns whose parts reach this stage's model as text
     /// whatever the model takes: `[stages.<name>.input] as_text`.
     pub as_text: Vec<String>,
 }
@@ -650,7 +650,7 @@ impl ContextWindow {
         let mut volatile_recency: Vec<i64> = Vec::new();
         // The stored parts of every region that renders into the system
         // prompt, which is text. They travel in one user message ahead of the
-        // conversation instead; see `media::lifted_blocks`.
+        // conversation instead; see `mime::lifted_blocks`.
         let mut lifted: Vec<leviath_providers::ContentBlock> = Vec::new();
 
         for region in &self.regions {
@@ -667,7 +667,7 @@ impl ContextWindow {
                 continue;
             }
             if !matches!(region.kind, leviath_core::RegionKind::SlidingWindow { .. }) {
-                lifted.extend(media::lifted_blocks(region));
+                lifted.extend(mime::lifted_blocks(region));
             }
 
             // Where this region's system blocks begin, so the recency mapping
@@ -735,7 +735,7 @@ impl ContextWindow {
                             EntryKind::UserMessage => {
                                 messages.push(leviath_providers::Message {
                                     role: "user".to_string(),
-                                    content: media::message_content(&entry.content),
+                                    content: mime::message_content(&entry.content),
                                     cache_breakpoint: false,
                                     reasoning: None,
                                 });
@@ -744,12 +744,12 @@ impl ContextWindow {
                                 if tool_calls.is_empty() {
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
-                                        content: media::message_content(&entry.content),
+                                        content: mime::message_content(&entry.content),
                                         cache_breakpoint: false,
                                         reasoning: entry.reasoning.clone(),
                                     });
                                 } else {
-                                    let mut blocks = media::content_blocks(&entry.content);
+                                    let mut blocks = mime::content_blocks(&entry.content);
                                     for tc in tool_calls {
                                         blocks.push(leviath_providers::ContentBlock::ToolUse {
                                             id: tc.id.clone(),
@@ -782,7 +782,7 @@ impl ContextWindow {
                                 // A tool result is text on every wire; the
                                 // parts it produced follow it in the same user
                                 // turn, after every result block.
-                                pending_tool_results.extend(media::media_blocks(&entry.content));
+                                pending_tool_results.extend(mime::mime_blocks(&entry.content));
                             }
                             EntryKind::Text => {
                                 let trimmed = entry.content.trim();
@@ -803,7 +803,7 @@ impl ContextWindow {
                                 } else {
                                     messages.push(leviath_providers::Message {
                                         role: "user".to_string(),
-                                        content: media::message_content(&entry.content),
+                                        content: mime::message_content(&entry.content),
                                         cache_breakpoint: false,
                                         reasoning: None,
                                     });

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_agent_client::ContentBlock;
-use leviath_core::media::{InboundPart, MediaType};
+use leviath_core::mime::{InboundPart, MimeType};
 
 /// The most a linked file may weigh before it is left as a name: the
 /// daemon's default part ceiling, so the bridge never reads what the run
@@ -50,10 +50,10 @@ fn link_parts_under(
                     .to_string()
             });
         let mut part = InboundPart::from_bytes(name, bytes);
-        part.media_type = block
+        part.mime_type = block
             .mime_type
             .as_deref()
-            .and_then(|m| MediaType::parse(m).ok());
+            .and_then(|m| MimeType::parse(m).ok());
         parts.push(part);
         fetched.push(uri.to_string());
     }
@@ -113,12 +113,12 @@ mod tests {
         assert_eq!(parts[0].name, "the plan");
         assert_eq!(parts[0].data, b"%PDF-1.7 plan");
         assert_eq!(
-            parts[0].media_type.as_ref().map(|t| t.as_str()),
+            parts[0].mime_type.as_ref().map(|t| t.as_str()),
             Some("application/pdf")
         );
         assert_eq!(parts[1].name, "plan.pdf");
         assert!(
-            parts[1].media_type.is_none(),
+            parts[1].mime_type.is_none(),
             "an unparsable type is left to the daemon"
         );
         assert_eq!(fetched, vec![file_url(&inside); 2]);

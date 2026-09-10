@@ -380,13 +380,13 @@ pub struct ModelInfo {
     /// table compiled into this build.
     pub learned: bool,
 
-    /// What media the model takes and can hand back. See [`Provider::media`].
-    pub media: crate::capabilities::ModelMedia,
+    /// What mime the model takes and can hand back. See [`Provider::mime`].
+    pub mime: crate::capabilities::ModelMime,
 }
 
 impl ModelInfo {
     /// An entry from a compiled table: nothing learned, nothing dated, text
-    /// in and text out until [`Self::with_media`] says otherwise.
+    /// in and text out until [`Self::with_mime`] says otherwise.
     pub fn new(
         id: impl Into<String>,
         provider: impl Into<String>,
@@ -401,13 +401,13 @@ impl ModelInfo {
             retires: None,
             pricing: None,
             learned: false,
-            media: crate::capabilities::ModelMedia::text_only(),
+            mime: crate::capabilities::ModelMime::text_only(),
         }
     }
 
     /// The same entry, with what the model takes and produces filled in.
-    pub fn with_media(mut self, media: crate::capabilities::ModelMedia) -> Self {
-        self.media = media;
+    pub fn with_mime(mut self, mime: crate::capabilities::ModelMime) -> Self {
+        self.mime = mime;
         self
     }
 
@@ -467,7 +467,7 @@ impl From<&str> for MessageContent {
 
 impl From<leviath_core::region::EntryContent> for MessageContent {
     /// The text an entry reads as. Assembly turns an entry's stored parts
-    /// into media blocks itself; this is the plain-text path.
+    /// into mime blocks itself; this is the plain-text path.
     fn from(c: leviath_core::region::EntryContent) -> Self {
         MessageContent::Text(c.into_string())
     }
@@ -540,21 +540,21 @@ pub enum ContentBlock {
         /// Whether the tool refused or failed.
         is_error: bool,
     },
-    /// A stored media part: an image, a clip, a document, anything that is
+    /// A stored mime part: an image, a clip, a document, anything that is
     /// not text.
     ///
     /// The neutral form. Assembly emits one per stored part with `data` empty;
-    /// hydration (`crate::media::hydrate_request`) fills `data` with the base64
+    /// hydration (`crate::mime::hydrate_request`) fills `data` with the base64
     /// bytes when the model takes the type, or turns the block into text. A
     /// built-in provider encodes a hydrated block into its own shape (an
     /// Anthropic `image` block, an OpenAI `image_url` part); a block that
     /// reaches a provider with `data` still empty is sent as its stand-in
     /// text, so no lane has to hydrate to stay correct. A Rhai provider sees
     /// this form as it is.
-    #[serde(rename = "media")]
-    Media {
+    #[serde(rename = "mime")]
+    Mime {
         /// What the part is: hash, type, size, dimensions, the stand-in text.
-        part: leviath_core::media::BlobRef,
+        part: leviath_core::mime::BlobRef,
         /// The bytes, base64, once hydrated. Empty until then.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         data: String,
@@ -563,15 +563,15 @@ pub enum ContentBlock {
         name: Option<String>,
         /// The part's delivery override, when it has one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        deliver: Option<leviath_core::media::Delivery>,
+        deliver: Option<leviath_core::mime::Delivery>,
     },
 }
 
 impl ContentBlock {
-    /// A media block for `part`, unhydrated.
-    pub fn media(part: &leviath_core::media::Part) -> Option<Self> {
+    /// A mime block for `part`, unhydrated.
+    pub fn mime(part: &leviath_core::mime::Part) -> Option<Self> {
         let blob = part.blob()?;
-        Some(ContentBlock::Media {
+        Some(ContentBlock::Mime {
             part: blob.clone(),
             data: String::new(),
             name: part.name.clone(),
@@ -579,17 +579,17 @@ impl ContentBlock {
         })
     }
 
-    /// The stand-in text of a media block, or `None` for any other block.
+    /// The stand-in text of a mime block, or `None` for any other block.
     pub fn stand_in(&self) -> Option<&str> {
         match self {
-            ContentBlock::Media { part, .. } => Some(part.stand_in.as_str()),
+            ContentBlock::Mime { part, .. } => Some(part.stand_in.as_str()),
             _ => None,
         }
     }
 
-    /// Whether this is a media block carrying its bytes.
-    pub fn is_hydrated_media(&self) -> bool {
-        matches!(self, ContentBlock::Media { data, .. } if !data.is_empty())
+    /// Whether this is a mime block carrying its bytes.
+    pub fn is_hydrated_mime(&self) -> bool {
+        matches!(self, ContentBlock::Mime { data, .. } if !data.is_empty())
     }
 }
 
@@ -741,12 +741,12 @@ pub struct InferenceResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
 
-    /// Media the model produced beside its text: an image from a model that
+    /// Mime the model produced beside its text: an image from a model that
     /// draws, audio from one that speaks. Bytes, not references, because the
     /// provider has no store; the runtime stores them on the assistant turn.
     /// Never serialised: a journal carries the stored reference instead.
     #[serde(skip)]
-    pub parts: Vec<leviath_core::media::Blob>,
+    pub parts: Vec<leviath_core::mime::Blob>,
 }
 
 // `TokenUsage` lives in `crate::pricing` alongside the rates it is priced
@@ -823,8 +823,8 @@ pub struct StreamChunk {
     /// carries the provider's reasoning item, not necessarily the last.
     pub reasoning: Option<String>,
 
-    /// See [`InferenceResponse::parts`]: media this chunk carried whole.
-    pub parts: Vec<leviath_core::media::Blob>,
+    /// See [`InferenceResponse::parts`]: mime this chunk carried whole.
+    pub parts: Vec<leviath_core::mime::Blob>,
 }
 
 /// A partial tool call update from streaming.
@@ -934,16 +934,16 @@ pub trait Provider: Send + Sync {
     /// Get the capabilities of the given model.
     fn capabilities(&self, model: &str) -> ModelCapabilities;
 
-    /// What media `model` takes and can hand back, as media type patterns.
+    /// What mime `model` takes and can hand back, as mime type patterns.
     ///
     /// Answered the way [`Self::capabilities`] is: the compiled table, then
     /// the provider's own listing, then the operator's `[model_capabilities]`
-    /// row. A provider that knows nothing about media answers text only,
+    /// row. A provider that knows nothing about mime answers text only,
     /// which is the default here, so a stored part sent its way arrives as
     /// text or as its stand-in rather than as bytes it would reject.
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         let _ = model;
-        crate::capabilities::ModelMedia::text_only()
+        crate::capabilities::ModelMime::text_only()
     }
 
     /// Learn what this provider's own API says about its models, before any

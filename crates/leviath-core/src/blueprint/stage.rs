@@ -653,21 +653,21 @@ pub struct Stage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output::OutputSpec>,
 
-    /// Media type patterns this stage takes as parts, when the regions it
+    /// Mime type patterns this stage takes as parts, when the regions it
     /// sees do not already say (`[stages.<name>.input] accepts`). Empty means
     /// "whatever the visible regions accept"; see
     /// [`Blueprint::stage_inputs`](crate::Blueprint::stage_inputs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_accepts: Vec<String>,
 
-    /// Media type patterns whose parts reach this stage's model as text,
+    /// Mime type patterns whose parts reach this stage's model as text,
     /// whatever the model takes (`[stages.<name>.input] as_text`): the text
     /// bypass, forced. For a type the registry already calls text this
     /// changes nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_as_text: Vec<String>,
 
-    /// What each tool may be handed at this stage, as media type patterns
+    /// What each tool may be handed at this stage, as mime type patterns
     /// (`[stages.<name>.tool_accepts]`: `spawn_agent = ["image/*"]`). A
     /// stored part outside a tool's list is out of that tool's reach here:
     /// `spawn_agent`'s `parts`, a script's `read_part` and `list_parts`, and
@@ -786,7 +786,7 @@ impl Stage {
             .filter(|t| !super::is_tool_group_token(t))
     }
 
-    /// The media type patterns `tool` may be handed at this stage, when the
+    /// The mime type patterns `tool` may be handed at this stage, when the
     /// stage limits it; `None` when it does not.
     pub fn tool_limit(&self, tool: &str) -> Option<&[String]> {
         self.tool_accepts.get(tool).map(Vec::as_slice)

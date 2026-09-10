@@ -46,9 +46,9 @@ pub struct ListArgs {
     /// Report the table as JSON, one object per model.
     #[arg(long)]
     pub json: bool,
-    /// Keep only models that accept this media type in a request, written
+    /// Keep only models that accept this mime type in a request, written
     /// as `image/png` or `image/*`.
-    #[arg(long, value_name = "MEDIA_TYPE")]
+    #[arg(long, value_name = "MIME_TYPE")]
     pub accepts: Option<String>,
 }
 
@@ -78,8 +78,8 @@ struct ModelRow {
     retires: Option<String>,
     /// USD per million tokens, when the provider's listing quotes a rate.
     pricing: Option<ModelPricing>,
-    /// Media type patterns the model takes and can hand back.
-    media: leviath_providers::ModelMedia,
+    /// Mime type patterns the model takes and can hand back.
+    mime: leviath_providers::ModelMime,
 }
 
 /// Arguments for `lev models show`.
@@ -167,10 +167,10 @@ fn catalogue_rows() -> Vec<ModelInfo> {
     builtin_catalog()
         .into_iter()
         .map(|e| {
-            let media = leviath_providers::media_tables::builtin_media(e.provider, e.id);
+            let mime = leviath_providers::mime_tables::builtin_mime(e.provider, e.id);
             ModelInfo::new(e.id, e.provider, e.capabilities)
                 .named(Some(e.display_name.to_string()))
-                .with_media(media)
+                .with_mime(mime)
         })
         .collect()
 }
@@ -292,8 +292,8 @@ async fn list_with_registry_within(
                     // serve, and keeping it would list a model nothing can run.
                     entries.retain(|e| e.provider != provider_name);
                     entries.extend(live.into_iter().map(|m| {
-                        let media = provider.media(&m.id);
-                        m.with_media(media)
+                        let mime = provider.mime(&m.id);
+                        m.with_mime(mime)
                     }));
                     live_providers.push(provider_name);
                 }
@@ -340,7 +340,7 @@ async fn list_with_registry_within(
     for entry in entries.iter_mut() {
         if let Some(user_caps) = config.model_capabilities.get(&entry.id) {
             entry.capabilities = user_caps.apply_to(entry.capabilities.clone());
-            entry.media = user_caps.apply_media(entry.media.clone());
+            entry.mime = user_caps.apply_mime(entry.mime.clone());
         }
     }
 
@@ -351,11 +351,11 @@ async fn list_with_registry_within(
         let pattern = wanted.trim().to_ascii_lowercase();
         if !pattern.contains('/') {
             anyhow::bail!(
-                "--accepts takes a media type such as image/png or image/*, not '{wanted}'"
+                "--accepts takes a mime type such as image/png or image/*, not '{wanted}'"
             );
         }
         entries.retain(|e| {
-            e.media
+            e.mime
                 .input
                 .iter()
                 .any(|have| leviath_providers::capabilities::pattern_covers(have, &pattern))
@@ -387,7 +387,7 @@ async fn list_with_registry_within(
                 released: e.released,
                 retires: e.retires,
                 pricing: e.pricing,
-                media: e.media,
+                mime: e.mime,
             })
             .collect();
         // Owned scalars with no map keys to reject, so this cannot fail.
@@ -438,7 +438,7 @@ fn print_listing(
         "TOOLS",
         "CTX",
         "OUTPUT",
-        "MEDIA",
+        "MIME",
         "RELEASED",
         "IN $/M",
         "OUT $/M"
@@ -471,10 +471,10 @@ fn print_listing(
             None => (UNPRICED.to_owned(), UNPRICED.to_owned()),
         };
 
-        let media = media_label(&entry.media);
+        let mime = mime_label(&entry.mime);
         println!(
             "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<15} {:<11} {:>8} {:>8}",
-            provider_col, entry.id, temp, tools, ctx, out, media, released, input, output
+            provider_col, entry.id, temp, tools, ctx, out, mime, released, input, output
         );
     }
 
@@ -541,8 +541,8 @@ async fn merge_script_provider(
         .await
         .map_err(|e| anyhow::anyhow!("provider '{name}' could not list its models: {e}"))?;
     for rm in models {
-        let media = provider.media(&rm.id);
-        let rm = rm.with_media(media);
+        let mime = provider.mime(&rm.id);
+        let rm = rm.with_mime(mime);
         match entries.iter_mut().find(|e| e.id == rm.id) {
             Some(existing) => *existing = rm,
             None => entries.push(rm),
@@ -653,13 +653,13 @@ async fn show_with_registry_within(
     match (found, user_caps) {
         (Some(info), Some(user_caps)) => {
             let caps = user_caps.apply_to(info.capabilities);
-            let media = user_caps.apply_media(info.media);
+            let mime = user_caps.apply_mime(info.mime);
             print_model_detail(
                 model_id,
                 info.display_name.as_deref(),
                 &info.provider,
                 &caps,
-                &media,
+                &mime,
                 Source::Override,
                 info.pricing,
             );
@@ -675,7 +675,7 @@ async fn show_with_registry_within(
                 info.display_name.as_deref(),
                 &info.provider,
                 &info.capabilities,
-                &info.media,
+                &info.mime,
                 source,
                 info.pricing,
             );
@@ -686,7 +686,7 @@ async fn show_with_registry_within(
                 None,
                 "config (user override)",
                 &user_caps.apply_to(ModelCapabilities::default()),
-                &user_caps.apply_media(leviath_providers::ModelMedia::text_only()),
+                &user_caps.apply_mime(leviath_providers::ModelMime::text_only()),
                 Source::Override,
                 None,
             );
@@ -727,10 +727,10 @@ enum Source {
     Override,
 }
 
-/// The media column: what the model takes beyond text, then what it hands
+/// The mime column: what the model takes beyond text, then what it hands
 /// back beyond text after an arrow. `img,pdf` for a vision model, `->img` for
 /// an image generator, blank for text in and text out.
-fn media_label(media: &leviath_providers::ModelMedia) -> String {
+fn mime_label(mime: &leviath_providers::ModelMime) -> String {
     fn short(patterns: &[String]) -> Vec<&'static str> {
         let mut out = Vec::new();
         for p in patterns {
@@ -749,8 +749,8 @@ fn media_label(media: &leviath_providers::ModelMedia) -> String {
         }
         out
     }
-    let input = short(&media.input).join(",");
-    let output = short(&media.output).join(",");
+    let input = short(&mime.input).join(",");
+    let output = short(&mime.output).join(",");
     match (input.is_empty(), output.is_empty()) {
         (true, true) => String::new(),
         (false, true) => input,
@@ -856,7 +856,7 @@ fn print_model_detail(
     display_name: Option<&str>,
     provider: &str,
     caps: &ModelCapabilities,
-    media: &leviath_providers::ModelMedia,
+    mime: &leviath_providers::ModelMime,
     source: Source,
     listed_pricing: Option<ModelPricing>,
 ) {
@@ -885,8 +885,8 @@ fn print_model_detail(
         caps.max_context_tokens,
         fmt_tokens(caps.max_context_tokens)
     );
-    println!("  Input types:    {}", media.input.join(", "));
-    println!("  Output types:   {}", media.output.join(", "));
+    println!("  Input types:    {}", mime.input.join(", "));
+    println!("  Output types:   {}", mime.output.join(", "));
     println!(
         "  Max output:     {} tokens ({})",
         caps.max_output_tokens,
@@ -1013,13 +1013,13 @@ mod tests {
             limits_source: LimitsSource::Builtin,
         };
         // Should not panic
-        let media = leviath_providers::ModelMedia::new(&["text/*", "image/*"], &["text/*"]);
+        let mime = leviath_providers::ModelMime::new(&["text/*", "image/*"], &["text/*"]);
         print_model_detail(
             "test-model",
             Some("Test Model"),
             "test",
             &caps,
-            &media,
+            &mime,
             Source::Table,
             None,
         );
@@ -1028,7 +1028,7 @@ mod tests {
             None,
             "test",
             &caps,
-            &media,
+            &mime,
             Source::Override,
             None,
         );
@@ -1037,29 +1037,29 @@ mod tests {
             None,
             "test",
             &caps,
-            &media,
+            &mime,
             Source::Listing,
             Some(ModelPricing::flat(0.5, 1.5)),
         );
     }
 
     #[test]
-    fn media_label_names_what_goes_beyond_text() {
-        use leviath_providers::ModelMedia;
-        assert_eq!(media_label(&ModelMedia::text_only()), "");
+    fn mime_label_names_what_goes_beyond_text() {
+        use leviath_providers::ModelMime;
+        assert_eq!(mime_label(&ModelMime::text_only()), "");
         assert_eq!(
-            media_label(&ModelMedia::new(
+            mime_label(&ModelMime::new(
                 &["text/*", "image/*", "application/pdf"],
                 &["text/*"]
             )),
             "img,pdf"
         );
         assert_eq!(
-            media_label(&ModelMedia::new(&["text/*"], &["image/*"])),
+            mime_label(&ModelMime::new(&["text/*"], &["image/*"])),
             "->img"
         );
         assert_eq!(
-            media_label(&ModelMedia::new(
+            mime_label(&ModelMime::new(
                 &[
                     "text/*",
                     "audio/*",
@@ -1396,7 +1396,7 @@ mod tests {
             Some("Test"),
             "test",
             &caps,
-            &leviath_providers::ModelMedia::text_only(),
+            &leviath_providers::ModelMime::text_only(),
             Source::Table,
             None,
         );
@@ -1411,7 +1411,7 @@ mod tests {
             None,
             "custom",
             &caps,
-            &leviath_providers::ModelMedia::text_only(),
+            &leviath_providers::ModelMime::text_only(),
             Source::Override,
             None,
         );
@@ -1538,7 +1538,7 @@ mod tests {
             released_on: Some("1970-01-02".to_string()),
             retires: None,
             pricing: Some(ModelPricing::flat(1.0, 2.0)),
-            media: leviath_providers::ModelMedia::new(&["text/*", "image/*"], &["text/*"]),
+            mime: leviath_providers::ModelMime::new(&["text/*", "image/*"], &["text/*"]),
         };
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -1549,7 +1549,7 @@ mod tests {
         assert_eq!(value["released_on"], serde_json::json!("1970-01-02"));
         assert_eq!(value["pricing"]["output_per_mtok"], serde_json::json!(2.0));
         assert_eq!(
-            value["media"]["input"],
+            value["mime"]["input"],
             serde_json::json!(["text/*", "image/*"])
         );
     }
@@ -2906,7 +2906,7 @@ mod live_listing_tests {
                 .await
                 .unwrap_err();
             assert!(
-                err.to_string().contains("--accepts takes a media type"),
+                err.to_string().contains("--accepts takes a mime type"),
                 "{err}"
             );
         })

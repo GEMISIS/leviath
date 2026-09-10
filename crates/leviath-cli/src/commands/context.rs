@@ -100,7 +100,7 @@ fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String 
 /// One part of an entry, indented under its region: a text part line by
 /// line (with its type first when it is not plain text), a stored part as
 /// one row naming what it is, its hash, and how it is delivered.
-fn part_lines(part: &leviath_core::media::Part) -> String {
+fn part_lines(part: &leviath_core::mime::Part) -> String {
     let mut out = String::new();
     match part.blob() {
         Some(blob) => {
@@ -111,8 +111,8 @@ fn part_lines(part: &leviath_core::media::Part) -> String {
             let stand_in = match blob.stand_in.is_empty() {
                 true => format!(
                     "[{}, {}] {}",
-                    blob.media_type,
-                    leviath_core::media::human_size(blob.size),
+                    blob.mime_type,
+                    leviath_core::mime::human_size(blob.size),
                     part.name.as_deref().unwrap_or("")
                 ),
                 false => blob.stand_in.clone(),
@@ -124,8 +124,8 @@ fn part_lines(part: &leviath_core::media::Part) -> String {
             ));
         }
         None => {
-            if part.media_type.as_str() != "text/plain" {
-                out.push_str(&format!("          [{}]\n", part.media_type));
+            if part.mime_type.as_str() != "text/plain" {
+                out.push_str(&format!("          [{}]\n", part.mime_type));
             }
             for line in part.inline_text().unwrap_or_default().lines() {
                 out.push_str(&format!("          {line}\n"));
@@ -136,11 +136,11 @@ fn part_lines(part: &leviath_core::media::Part) -> String {
 }
 
 /// A delivery as the blueprint spells it.
-fn delivery_word(d: leviath_core::media::Delivery) -> &'static str {
+fn delivery_word(d: leviath_core::mime::Delivery) -> &'static str {
     match d {
-        leviath_core::media::Delivery::Native => "native",
-        leviath_core::media::Delivery::Text => "text",
-        leviath_core::media::Delivery::StandIn => "stand_in",
+        leviath_core::mime::Delivery::Native => "native",
+        leviath_core::mime::Delivery::Text => "text",
+        leviath_core::mime::Delivery::StandIn => "stand_in",
     }
 }
 
@@ -230,11 +230,11 @@ mod tests {
     /// stand-in, hash, tokens and delivery, a typed text one under its type.
     #[test]
     fn render_full_shows_stored_parts_as_rows() {
-        use leviath_core::media::{BlobRef, Delivery, MediaType, Part};
+        use leviath_core::mime::{BlobRef, Delivery, MimeType, Part};
         let mut history = vec![point("plan", 1, vec!["hi"])];
         let blob = BlobRef {
             sha256: "abcdef0123456789".repeat(4),
-            media_type: MediaType::parse("image/png").unwrap(),
+            mime_type: MimeType::parse("image/png").unwrap(),
             size: 240 * 1024,
             width: Some(1024),
             height: Some(768),
@@ -248,7 +248,7 @@ mod tests {
             Part::stored(blob.clone())
                 .named("hero.png")
                 .delivered(Delivery::Text),
-            Part::inline(MediaType::parse("text/markdown").unwrap(), "# notes"),
+            Part::inline(MimeType::parse("text/markdown").unwrap(), "# notes"),
         ]);
         region.entries.push(RegionEntrySnapshot {
             content: leviath_core::region::EntryContent::from_parts(vec![

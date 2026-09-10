@@ -385,7 +385,7 @@ pub(crate) struct SystemPrefixHash(pub u64);
 pub(crate) struct SystemBlockHashes(pub Vec<u64>);
 
 /// The optional resources dispatch reads, as one parameter: the operator's
-/// circuit and retry settings, and the media store, registry and limits. Every
+/// circuit and retry settings, and the mime store, registry and limits. Every
 /// one is optional because a world assembled by hand in a test installs none
 /// of them, and each has a built-in answer for that case.
 #[derive(bevy_ecs::system::SystemParam)]
@@ -396,8 +396,8 @@ pub(crate) struct DispatchTuning<'w, 's> {
     pub policy: Option<Res<'w, CircuitPolicy>>,
     /// The retry schedule.
     pub retry: Option<Res<'w, InferenceRetryTuning>>,
-    /// The media store, registry and limits.
-    pub media: crate::blob_store::MediaParams<'w, 's>,
+    /// The mime store, registry and limits.
+    pub mime: crate::blob_store::MimeParams<'w, 's>,
 }
 
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
@@ -416,7 +416,7 @@ pub(crate) fn dispatch_inference(
         circuits,
         policy,
         retry,
-        media,
+        mime,
     } = tuning;
     // Fan out across ready agents: request assembly (`build_request`) is the
     // per-agent CPU cost and is independent, so it runs in parallel on the
@@ -540,17 +540,16 @@ pub(crate) fn dispatch_inference(
                 // by this run's registry. Every `PipelineWorld` installs the
                 // store; a world assembled by hand in a test may not, and
                 // then stored parts go out as their stand-ins.
-                let (media_resources, max_stored) = media.hydration_inputs(entity);
-                let hydration = media_resources.map(|(store, registry)| {
-                    crate::inference_bridge::JobHydration {
+                let (mime_resources, max_stored) = mime.hydration_inputs(entity);
+                let hydration =
+                    mime_resources.map(|(store, registry)| crate::inference_bridge::JobHydration {
                         store,
                         run_id: state.agent_id.clone(),
                         registry,
-                        media: provider.media(&si.model),
+                        mime: provider.mime(&si.model),
                         max_stored,
                         as_text: config.map(|c| c.as_text.clone()).unwrap_or_default(),
-                    }
-                });
+                    });
                 let job = InferenceJob {
                     entity,
                     provider,

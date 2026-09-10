@@ -968,7 +968,7 @@
           "agents"
         ],
         "summary": "A workdir file's bytes, under its own content type",
-        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the media registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. `download=1` adds a `Content-Disposition: attachment` naming the file.",
+        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. `download=1` adds a `Content-Disposition: attachment` naming the file.",
         "parameters": [
           {
             "name": "path",
@@ -992,7 +992,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The file's bytes, under its media type.",
+            "description": "The file's bytes, under its mime type.",
             "content": {
               "*/*": {
                 "schema": {
@@ -1096,7 +1096,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The bytes, under the part's media type.",
+            "description": "The bytes, under the part's mime type.",
             "content": {
               "*/*": {
                 "schema": {
@@ -1898,20 +1898,20 @@
         }
       }
     },
-    "/api/media": {
+    "/api/mime": {
       "get": {
         "tags": [
           "config"
         ],
-        "summary": "The effective media registry",
-        "description": "Every row of the media registry this server resolves types with, keys sorted, each with where it came from: `builtin`, `config` (`[media_types]` in config.toml), or the blueprint or provider that added it. A row names only what it sets, so a `family`, `text` or `extensions` that is absent is inherited from the pattern rows above it.",
+        "summary": "The effective mime registry",
+        "description": "Every row of the mime registry this server resolves types with, keys sorted, each with where it came from: `builtin`, `config` (`[mime_types]` in config.toml), or the blueprint or provider that added it. A row names only what it sets, so a `family`, `text` or `extensions` that is absent is inherited from the pattern rows above it.",
         "responses": {
           "200": {
             "description": "The listing.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MediaListing"
+                  "$ref": "#/components/schemas/MimeListing"
                 }
               }
             }
@@ -2978,7 +2978,7 @@
           "scripts"
         ],
         "summary": "Rhai scripts this scope can see",
-        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks, output validators and media checks the agent's manifest declares, the media checks the operator's `media_types.toml` and `[media_types]` rows name (resolved against the config's directory), and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`), a `declared` flag and whether it compiles right now; an agent-scoped entry also carries `relative_path`, where the file sits relative to the agent's own directory, which is the spelling a manifest wants. A provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
+        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks, output validators and mime checks the agent's manifest declares, the mime checks the operator's `mime_types.toml` and `[mime_types]` rows name (resolved against the config's directory), and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`), a `declared` flag and whether it compiles right now; an agent-scoped entry also carries `relative_path`, where the file sits relative to the agent's own directory, which is the spelling a manifest wants. A provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
         "parameters": [
           {
             "name": "agent",
@@ -3063,7 +3063,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
-                "media_check",
+                "mime_check",
                 "provider"
               ]
             }
@@ -3119,7 +3119,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
-                "media_check",
+                "mime_check",
                 "provider"
               ]
             }
@@ -3181,7 +3181,7 @@
                 "region_hook",
                 "stage_hook",
                 "output_validator",
-                "media_check",
+                "mime_check",
                 "provider"
               ]
             }
@@ -3484,7 +3484,7 @@
               "string",
               "null"
             ],
-            "description": "Whatever shape was asked for: \"markdown\", \"json\", \"a2ui\", a media type, anything. Not a closed set."
+            "description": "Whatever shape was asked for: \"markdown\", \"json\", \"a2ui\", a mime type, anything. Not a closed set."
           },
           "stage": {
             "type": "string",
@@ -3513,7 +3513,7 @@
         "required": [
           "name",
           "path",
-          "media_type",
+          "mime_type",
           "size"
         ],
         "properties": {
@@ -3525,9 +3525,9 @@
             "type": "string",
             "description": "The file, relative to the run's working directory."
           },
-          "media_type": {
+          "mime_type": {
             "type": "string",
-            "description": "Its media type, from the registry or as declared."
+            "description": "Its mime type, from the registry or as declared."
           },
           "size": {
             "type": "integer",
@@ -4087,9 +4087,9 @@
             "type": "string",
             "description": "The name the part carries; the file name when absent."
           },
-          "media_type": {
+          "mime_type": {
             "type": "string",
-            "description": "Its media type, when the bytes and name do not say."
+            "description": "Its mime type, when the bytes and name do not say."
           },
           "deliver": {
             "type": "string",
@@ -4110,7 +4110,7 @@
         "type": "object",
         "required": [
           "sha256",
-          "media_type",
+          "mime_type",
           "size",
           "tokens",
           "regions",
@@ -4121,7 +4121,7 @@
             "type": "string",
             "description": "The store's key: the bytes' sha256."
           },
-          "media_type": {
+          "mime_type": {
             "type": "string",
             "description": "The type the bytes were stored as."
           },
@@ -4177,14 +4177,14 @@
           }
         }
       },
-      "MediaTypeEntry": {
+      "MimeTypeEntry": {
         "type": "object",
         "required": [
-          "media_type",
+          "mime_type",
           "source"
         ],
         "properties": {
-          "media_type": {
+          "mime_type": {
             "type": "string",
             "description": "The row's key: a type, or a pattern such as image/*."
           },
@@ -4209,7 +4209,7 @@
           }
         }
       },
-      "MediaListing": {
+      "MimeListing": {
         "type": "object",
         "required": [
           "types"
@@ -4218,7 +4218,7 @@
           "types": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/MediaTypeEntry"
+              "$ref": "#/components/schemas/MimeTypeEntry"
             },
             "description": "Every row, keys sorted."
           }

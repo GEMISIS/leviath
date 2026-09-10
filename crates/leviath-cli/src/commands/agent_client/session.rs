@@ -61,7 +61,7 @@ pub(super) fn spawn_args(
     cwd: &str,
     args: &AgentClientArgs,
     regions: std::collections::HashMap<String, String>,
-    parts: Vec<leviath_core::media::InboundPart>,
+    parts: Vec<leviath_core::mime::InboundPart>,
 ) -> SpawnArgs {
     SpawnArgs {
         run_id: new_run_id(&blueprint.agent_name),

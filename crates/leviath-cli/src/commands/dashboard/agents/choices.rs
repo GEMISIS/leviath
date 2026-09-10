@@ -1,4 +1,4 @@
-//! What the editor's choosers offer: the media types a type field lists,
+//! What the editor's choosers offer: the mime types a type field lists,
 //! and the tools a stage may be granted (the groups, the MCP servers as
 //! connectors, every tool this install has, and each server's tools as it
 //! answers).
@@ -6,16 +6,16 @@
 use super::{McpCatalog, McpServerTools};
 use crate::blueprint_edit::ManifestDoc;
 
-/// The media types the choosers offer: every family, then every type the
+/// The mime types the choosers offer: every family, then every type the
 /// registry knows, read the way the daemon reads it (the compiled defaults,
-/// the config's rows, `media_types.toml`) with the blueprint's own rows on
+/// the config's rows, `mime_types.toml`) with the blueprint's own rows on
 /// top, the way its runs read it.
-pub(super) fn media_type_options(config_path: &std::path::Path, doc: &ManifestDoc) -> Vec<String> {
+pub(super) fn mime_type_options(config_path: &std::path::Path, doc: &ManifestDoc) -> Vec<String> {
     let mut registry = crate::config::Config::load_from_path_public(config_path)
         .ok()
-        .and_then(|c| c.media_registry().ok())
-        .unwrap_or_else(leviath_core::media::MediaRegistry::builtin);
-    for key in crate::blueprint_edit::media_type_keys(doc) {
+        .and_then(|c| c.mime_registry().ok())
+        .unwrap_or_else(leviath_core::mime::MimeRegistry::builtin);
+    for key in crate::blueprint_edit::mime_type_keys(doc) {
         let _ = registry.layer(
             &toml::Table::from_iter([(key, toml::Value::Table(toml::Table::new()))]),
             "blueprint",

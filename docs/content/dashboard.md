@@ -300,7 +300,7 @@ of everything it could do:
   The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
   them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the
   escapes from the current stage. A fan-out stage that is running shows its worker counts.
-  A stage that takes [files](/docs/media) beyond text wears what it takes (`◧ image/* audio/wav`,
+  A stage that takes [files](/docs/mime) beyond text wears what it takes (`◧ image/* audio/wav`,
   from its regions' `accepts` or its `[input] accepts`), and one that declares files it hands back
   wears their types (`▤ video/mp4`); a path whose file the next stage's regions cannot take
   carries `!` on its label, and selecting it says which type would cross as a stand-in.
@@ -367,9 +367,9 @@ hidden, so the panel never reflows under the cursor:
   from the agent's other stages or from every agent installed here (with an *another…* row for
   one that is not), and typed only when it is a query. *Inputs & outputs*: the input types (what
   the stage takes as files beyond text; left empty it is whatever its regions take, and each
-  region is listed under it with the [media](/docs/media) it takes, `Enter` opening it), what is
+  region is listed under it with the [mime](/docs/mime) it takes, `Enter` opening it), what is
   sent to the model as text whatever it takes, the output type (picked from the plain shapes,
-  `markdown`, `json`, `text`, or any media type), and the output files it declares it hands back
+  `markdown`, `json`, `text`, or any mime type), and the output files it declares it hands back
   (`Enter` opens one, `x` drops it, the last row declares another and asks its name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
   drops it, `h` `l` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
   use, picked from every tool this install has (`Space` toggles, `Enter` keeps): the groups, each
@@ -390,14 +390,14 @@ A region, a declared file and a stage's loop back to itself open in a window ove
 than in the inspector's place, so the panel they came from stays in view; `Esc` closes the window.
 
 - **A context region**: name, kind (each kind says what it does), share of the context window and
-  token cap, the sliding-window knobs when it is one, the media types it takes and how many stored
+  token cap, the sliding-window knobs when it is one, the mime types it takes and how many stored
   parts it keeps, whether it must be filled before the run goes on and what to say if it is not, what
   seeds it, description, delete.
 - **A declared file**: name, type or pattern, whether it is required, description, and a button to
   drop the declaration.
 
-Every media type field is one chooser: the families (`image/*`, `audio/*`, and so on), every type
-the registry knows (the built-in table, then your [`media_types.toml`](/docs/configuration#media_typestoml)),
+Every mime type field is one chooser: the families (`image/*`, `audio/*`, and so on), every type
+the registry knows (the built-in table, then your [`mime_types.toml`](/docs/configuration#mime_typestoml)),
 and an *another…* row that takes a `type/subtype` or `type/*` the list does not have. `Space`
 picks as many as the field takes, `Enter` keeps them, `x` on the field clears it.
 

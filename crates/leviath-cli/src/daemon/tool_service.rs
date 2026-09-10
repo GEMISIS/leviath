@@ -235,7 +235,7 @@ pub(crate) struct AgentToolState {
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// The stored parts the runtime offered from the window before the
     /// current batch, which the script host reads by name. Shared with it.
-    pub offered_parts: Arc<StdMutex<Vec<leviath_core::media::Part>>>,
+    pub offered_parts: Arc<StdMutex<Vec<leviath_core::mime::Part>>>,
     /// Present only for `dynamic_tools` agents: everything needed to re-discover
     /// and re-advertise this agent's tools mid-run.
     pub dynamic: Option<Arc<DynamicToolCtx>>,
@@ -532,7 +532,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
             }
             Err(e) => Err(e),
         };
-        mcp_content(&tc.name, result, state.builtins.media())
+        mcp_content(&tc.name, result, state.builtins.mime())
     }
 }
 
@@ -684,7 +684,7 @@ pub(crate) async fn dispatch_tools(
         {
             // Journal the user's answer now: pass 2 hasn't run yet, and losing
             // an answered prompt to a crash means re-asking it on resume.
-            let result = answer_content(&tc.name, text, attached, state.builtins.media());
+            let result = answer_content(&tc.name, text, attached, state.builtins.mime());
             progress(&tc.id, &result);
             slots.push((tc.id, Some(result)));
             continue;
@@ -980,7 +980,7 @@ impl CliToolService {
 }
 
 impl ToolService for CliToolService {
-    fn offer_parts(&self, entity: Entity, parts: Vec<leviath_core::media::Part>) {
+    fn offer_parts(&self, entity: Entity, parts: Vec<leviath_core::mime::Part>) {
         if let Some(state) = self.state_for(entity) {
             *state
                 .offered_parts
@@ -1410,7 +1410,7 @@ mod tests {
     /// the list from the script, and names the limit when one is asked for.
     #[tokio::test]
     async fn a_script_tool_sees_only_the_parts_its_stage_lets_it_have() {
-        use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, Part};
+        use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType, Part};
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
         allow.insert("count".to_string(), ToolPolicy::Allow);
@@ -1428,13 +1428,13 @@ mod tests {
             no_script_fields().2,
             allow,
         );
-        let store = leviath_core::media::MemoryBlobStore::new();
-        let registry = MediaRegistry::builtin();
+        let store = leviath_core::mime::MemoryBlobStore::new();
+        let registry = MimeRegistry::builtin();
         let png = store
             .put(
                 "r",
                 &Blob::new(
-                    MediaType::parse("image/png").unwrap(),
+                    MimeType::parse("image/png").unwrap(),
                     b"\x89PNG\r\n\x1a\nhero".to_vec(),
                 ),
                 &registry,
@@ -1443,7 +1443,7 @@ mod tests {
         let wav = store
             .put(
                 "r",
-                &Blob::new(MediaType::parse("audio/wav").unwrap(), b"RIFFwav".to_vec()),
+                &Blob::new(MimeType::parse("audio/wav").unwrap(), b"RIFFwav".to_vec()),
                 &registry,
             )
             .unwrap();
@@ -3009,7 +3009,7 @@ mod tests {
         assert!(tool_limit(&state, "read_file").is_none());
 
         // The runtime's offer lands on the state the script host shares.
-        service.offer_parts(e, vec![leviath_core::media::Part::text("x")]);
+        service.offer_parts(e, vec![leviath_core::mime::Part::text("x")]);
         assert_eq!(state.offered_parts.lock().unwrap().len(), 1);
         service.offer_parts(e, Vec::new());
         assert!(state.offered_parts.lock().unwrap().is_empty());
@@ -3542,7 +3542,7 @@ mod tests {
             yolo_profile: None,
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            media: None,
+            mime: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),
@@ -3620,13 +3620,13 @@ mod tests {
     /// sender asked; without one the text says what was dropped.
     #[tokio::test]
     async fn an_answers_files_are_stored_beside_its_text() {
-        use leviath_core::media::{InboundPart, MediaType};
+        use leviath_core::mime::{InboundPart, MimeType};
         fn ask(req: &InteractionRequest) -> InteractionResponse {
             InteractionResponse::text(&req.id, "see the sketch").with_parts(vec![
                 InboundPart::from_bytes("sketch.png", b"\x89PNG\r\n\x1a\nsketch".to_vec())
-                    .delivered(leviath_core::media::Delivery::Text),
+                    .delivered(leviath_core::mime::Delivery::Text),
                 InboundPart::from_bytes("notes", b"plain words".to_vec())
-                    .typed(MediaType::parse("text/plain").unwrap()),
+                    .typed(MimeType::parse("text/plain").unwrap()),
             ])
         }
         let call_it = || {
@@ -3639,17 +3639,17 @@ mod tests {
 
         let hub = InteractionHub::new();
         let ctx = leviath_tools::ToolContext::new(std::env::temp_dir())
-            .with_media(Arc::new(media_for_answers(1024)));
+            .with_mime(Arc::new(mime_for_answers(1024)));
         let state = state_with_ctx(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new(), ctx);
         let out = dispatch_answering(state, call_it(), ask, hub).await;
         let content = &out[0].1;
         assert!(content.as_str().starts_with("see the sketch"), "{content}");
         assert_eq!(content.stored_count(), 2);
         let png = &content.parts()[1];
-        assert_eq!(png.media_type.as_str(), "image/png");
+        assert_eq!(png.mime_type.as_str(), "image/png");
         assert_eq!(png.name.as_deref(), Some("sketch.png"));
-        assert_eq!(png.deliver, Some(leviath_core::media::Delivery::Text));
-        assert_eq!(content.parts()[2].media_type.as_str(), "text/plain");
+        assert_eq!(png.deliver, Some(leviath_core::mime::Delivery::Text));
+        assert_eq!(content.parts()[2].mime_type.as_str(), "text/plain");
 
         let hub = InteractionHub::new();
         let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
@@ -3669,10 +3669,10 @@ mod tests {
     }
 
     /// The store the answer tests give their tools.
-    fn media_for_answers(max: u64) -> leviath_tools::ToolMedia {
-        leviath_tools::ToolMedia {
-            store: Arc::new(leviath_core::media::MemoryBlobStore::new()),
-            registry: Arc::new(leviath_core::media::RegistryCell::default()),
+    fn mime_for_answers(max: u64) -> leviath_tools::ToolMime {
+        leviath_tools::ToolMime {
+            store: Arc::new(leviath_core::mime::MemoryBlobStore::new()),
+            registry: Arc::new(leviath_core::mime::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         }
@@ -4175,7 +4175,7 @@ mod tests {
 #[cfg(test)]
 mod mcp_content_tests {
     use super::*;
-    use leviath_core::media::{Blob, MediaType, MemoryBlobStore};
+    use leviath_core::mime::{Blob, MemoryBlobStore, MimeType};
 
     fn result(
         success: bool,
@@ -4191,7 +4191,7 @@ mod mcp_content_tests {
 
     fn png(name: Option<&str>) -> Blob {
         let blob = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nabc".to_vec(),
         );
         match name {
@@ -4200,10 +4200,10 @@ mod mcp_content_tests {
         }
     }
 
-    fn media(max: u64) -> leviath_tools::ToolMedia {
-        leviath_tools::ToolMedia {
+    fn mime(max: u64) -> leviath_tools::ToolMime {
+        leviath_tools::ToolMime {
             store: Arc::new(MemoryBlobStore::new()),
-            registry: Arc::new(leviath_core::media::RegistryCell::default()),
+            registry: Arc::new(leviath_core::mime::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         }
@@ -4211,7 +4211,7 @@ mod mcp_content_tests {
 
     #[test]
     fn binary_blocks_become_stored_parts_named_after_the_tool_or_the_resource() {
-        let m = media(1024);
+        let m = mime(1024);
         let out = mcp_content(
             "srv__shot",
             result(true, vec![png(None), png(Some("hero.png"))]),
@@ -4251,7 +4251,7 @@ mod mcp_content_tests {
             nameless.as_str().contains("[a file of 3 B dropped"),
             "{nameless}"
         );
-        let small = media(4);
+        let small = mime(4);
         let out = mcp_content("t", result(true, vec![png(None)]), Some(&small));
         assert!(
             out.as_str()
@@ -4262,7 +4262,7 @@ mod mcp_content_tests {
 
     #[test]
     fn a_failed_call_and_a_text_only_call_are_text() {
-        let m = media(1024);
+        let m = mime(1024);
         let out = mcp_content("t", result(false, vec![png(None)]), Some(&m));
         assert_eq!(out, "[error] the answer");
         let out = mcp_content("t", result(true, Vec::new()), Some(&m));

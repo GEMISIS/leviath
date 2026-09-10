@@ -145,7 +145,7 @@ pub(crate) fn resolve_stage_candidates(
     resolve_stage_candidates_for(model_cfg, model_override, defaults, registry, &[])
 }
 
-/// [`resolve_stage_candidates`], with the media the stage takes.
+/// [`resolve_stage_candidates`], with the mime the stage takes.
 ///
 /// `needs` is what the stage's regions accept beyond text. A candidate whose
 /// model takes all of it moves ahead of one that does not, in an otherwise
@@ -167,7 +167,7 @@ pub(crate) fn resolve_stage_candidates_for(
     let covers = |entry: &ModelEntry| {
         registry
             .get(&entry.provider)
-            .is_some_and(|p| p.media(&entry.model).covers(&needs))
+            .is_some_and(|p| p.mime(&entry.model).covers(&needs))
     };
     let (seeing, blind): (Vec<ModelEntry>, Vec<ModelEntry>) =
         candidates.drain(..).partition(covers);
@@ -177,7 +177,7 @@ pub(crate) fn resolve_stage_candidates_for(
     seeing.into_iter().chain(blind).collect()
 }
 
-/// The candidates in blueprint order, before any media preference.
+/// The candidates in blueprint order, before any mime preference.
 fn resolve_candidates_in_order(
     model_cfg: &ModelConfig,
     model_override: Option<&str>,
@@ -1184,7 +1184,7 @@ mod tests {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: None,
                     refusal: None,
-                    media: None,
+                    mime: None,
                 }),
             );
         }
@@ -1203,7 +1203,7 @@ mod tests {
         /// What it says about refusing something outside that catalogue.
         refusal: Option<String>,
         /// What its models take, when the test cares; text only otherwise.
-        media: Option<leviath_providers::ModelMedia>,
+        mime: Option<leviath_providers::ModelMime>,
     }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
@@ -1227,10 +1227,10 @@ mod tests {
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
-        fn media(&self, _m: &str) -> leviath_providers::ModelMedia {
-            self.media
+        fn mime(&self, _m: &str) -> leviath_providers::ModelMime {
+            self.mime
                 .clone()
-                .unwrap_or_else(leviath_providers::ModelMedia::text_only)
+                .unwrap_or_else(leviath_providers::ModelMime::text_only)
         }
         fn serves_model(&self, model_key: &str) -> Option<String> {
             self.serves
@@ -1258,7 +1258,7 @@ mod tests {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
                     catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
                     refusal: None,
-                    media: None,
+                    mime: None,
                 }),
             );
         }
@@ -1578,7 +1578,7 @@ mod tests {
                 refusal: Some(
                     "your ChatGPT plus plan does not include it. Available: gpt-5.5".to_string(),
                 ),
-                media: None,
+                mime: None,
             }),
         );
 
@@ -1853,12 +1853,12 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_that_takes_media_prefers_a_model_that_sees_it() {
+    fn a_stage_that_takes_mime_prefers_a_model_that_sees_it() {
         let mut registry = registry_with(&["blind"]);
         registry.register(
             "seeing".to_string(),
             Arc::new(FakeProvider {
-                media: Some(leviath_providers::ModelMedia::new(
+                mime: Some(leviath_providers::ModelMime::new(
                     &["text/*", "image/*"],
                     &["text/*"],
                 )),

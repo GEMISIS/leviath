@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use leviath_core::interaction::{InteractionKind, InteractionRequest};
-use leviath_core::media::{InboundPart, MediaRegistry, MediaType};
+use leviath_core::mime::{InboundPart, MimeRegistry, MimeType};
 use leviath_core::run_meta::RunStatus;
 
 use crate::protocol::{
@@ -96,7 +96,7 @@ pub fn flatten_prompt_with(blocks: &[ContentBlock], attached: &[String]) -> Stri
 /// travels with the part; the daemon's registry corrects one it cannot
 /// parse.
 pub fn prompt_parts(blocks: &[ContentBlock]) -> Vec<InboundPart> {
-    let registry = MediaRegistry::builtin();
+    let registry = MimeRegistry::builtin();
     let mut parts: Vec<InboundPart> = Vec::new();
     for block in blocks {
         let (data, mime, uri) = match block.kind.as_str() {
@@ -117,7 +117,7 @@ pub fn prompt_parts(blocks: &[ContentBlock]) -> Vec<InboundPart> {
         let Some(bytes) = bytes else {
             continue;
         };
-        let media_type = mime.and_then(|m| MediaType::parse(m).ok());
+        let mime_type = mime.and_then(|m| MimeType::parse(m).ok());
         let name = match uri {
             Some(uri) => uri
                 .rsplit('/')
@@ -125,7 +125,7 @@ pub fn prompt_parts(blocks: &[ContentBlock]) -> Vec<InboundPart> {
                 .unwrap_or("resource")
                 .to_string(),
             None => {
-                let ext = media_type
+                let ext = mime_type
                     .as_ref()
                     .and_then(|t| registry.info(t).extensions.first().cloned())
                     .map(|e| format!(".{e}"))
@@ -134,7 +134,7 @@ pub fn prompt_parts(blocks: &[ContentBlock]) -> Vec<InboundPart> {
             }
         };
         let mut part = InboundPart::from_bytes(name, bytes);
-        part.media_type = media_type;
+        part.mime_type = mime_type;
         parts.push(part);
     }
     parts
@@ -561,14 +561,14 @@ this trailing text is ignored";
         let parts = prompt_parts(&blocks);
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].name, "image-1.png");
-        assert_eq!(parts[0].media_type.as_ref().unwrap().as_str(), "image/png");
+        assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/png");
         assert_eq!(parts[1].name, "audio-2");
         assert!(
-            parts[1].media_type.is_none(),
+            parts[1].mime_type.is_none(),
             "a type that is not one is left to the registry"
         );
         assert_eq!(parts[2].name, "sketch");
-        assert_eq!(parts[2].media_type.as_ref().unwrap().as_str(), "image/webp");
+        assert_eq!(parts[2].mime_type.as_ref().unwrap().as_str(), "image/webp");
         assert!(parts.iter().all(|p| p.region.is_none()));
         assert_eq!(flatten_prompt(&blocks), "edit this");
 

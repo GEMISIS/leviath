@@ -698,14 +698,14 @@ impl Provider for OpenRouterProvider {
         caps
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // The listing's `architecture` block says outright what a model
         // takes; before priming, the vendor prefix is the best guess.
         let base = self
             .learned
-            .media_corrected(model, crate::media_tables::by_prefix(model));
+            .mime_corrected(model, crate::mime_tables::by_prefix(model));
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -788,7 +788,7 @@ impl Provider for OpenRouterProvider {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

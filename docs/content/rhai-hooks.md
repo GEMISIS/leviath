@@ -61,7 +61,7 @@ flowchart TD
 | `on_error` | run finished in error | the error message | the message |
 
 The three region hooks see each region's text under `regions` and, under `parts`, the stored
-[parts](/docs/media) each region holds, as maps with `media_type`, `name`, `sha256`, `size` and
+[parts](/docs/mime) each region holds, as maps with `mime_type`, `name`, `sha256`, `size` and
 `tokens`, keyed by region name; a region holding none is absent from `parts`. A hook can refuse to
 start a stage whose `storyboard` is empty, or note in `regions` that six frames arrived.
 

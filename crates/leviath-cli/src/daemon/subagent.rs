@@ -52,10 +52,10 @@ pub(crate) struct SubAgentHandle {
     pub model_override: Option<String>,
     /// The parent's stored parts, as the runtime last offered them to the
     /// tool lane: what `spawn_agent`'s `parts` names.
-    pub offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::media::Part>>>,
+    pub offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::mime::Part>>>,
     /// The parent's blob store, to read a named part's bytes from. `None`
     /// in a world with no store, where `parts` is refused.
-    pub media: Option<Arc<leviath_tools::ToolMedia>>,
+    pub mime: Option<Arc<leviath_tools::ToolMime>>,
 }
 
 /// The parts `spawn_agent`'s `parts` argument names, read from the parent's
@@ -67,7 +67,7 @@ fn parts_for_child(
     h: &SubAgentHandle,
     args: &serde_json::Value,
     limit: Option<&[String]>,
-) -> Result<Vec<leviath_core::media::InboundPart>, String> {
+) -> Result<Vec<leviath_core::mime::InboundPart>, String> {
     let wanted: Vec<&str> = args
         .get("parts")
         .and_then(|v| v.as_array())
@@ -76,7 +76,7 @@ fn parts_for_child(
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(media) = h.media.as_deref() else {
+    let Some(mime) = h.mime.as_deref() else {
         return Err(
             "this run has no blob store, so it has no parts to hand a sub-agent".to_string(),
         );
@@ -100,25 +100,25 @@ fn parts_for_child(
                 })?;
             // The stage's limit for this tool, when it has one.
             if let Some(limit) = limit
-                && !blob.media_type.matches_any(limit)
+                && !blob.mime_type.matches_any(limit)
             {
                 return Err(format!(
                     "'{name}' is {}; at this stage spawn_agent may be handed only {}",
-                    blob.media_type,
+                    blob.mime_type,
                     limit.join(", ")
                 ));
             }
-            let bytes = media
+            let bytes = mime
                 .store
-                .read(&media.run_id, &blob.sha256)
+                .read(&mime.run_id, &blob.sha256)
                 .map_err(|e| format!("'{name}' could not be read from the store: {e}"))?;
-            let mut inbound = leviath_core::media::InboundPart::from_bytes(
+            let mut inbound = leviath_core::mime::InboundPart::from_bytes(
                 part.name
                     .clone()
                     .unwrap_or_else(|| blob.short_sha().to_string()),
                 bytes.to_vec(),
             )
-            .typed(blob.media_type.clone());
+            .typed(blob.mime_type.clone());
             inbound.deliver = part.deliver;
             Ok(inbound)
         })
@@ -496,7 +496,7 @@ mod tests {
             yolo_profile: None,
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            media: None,
+            mime: None,
         };
 
         for bad in [
@@ -544,7 +544,7 @@ mod tests {
             yolo_profile: None,
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            media: None,
+            mime: None,
         };
         let out = spawn(
             &h,
@@ -566,7 +566,7 @@ mod tests {
     fn handle_with(sender: UnboundedSender<SubAgentOp>) -> SubAgentHandle {
         SubAgentHandle {
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
-            media: None,
+            mime: None,
             sender,
             parent_run_id: "parent".to_string(),
             // This crate's own directory, deliberately *not* the system temp
@@ -835,20 +835,20 @@ task = { kind = "pinned", max_tokens = 1000 }
     /// was, and refused by name when the parent has no such part or no store.
     #[tokio::test]
     async fn spawn_hands_named_parts_to_the_child() {
-        use leviath_core::media::{Blob, BlobStore, Delivery, MediaRegistry, MediaType, Part};
+        use leviath_core::mime::{Blob, BlobStore, Delivery, MimeRegistry, MimeType, Part};
         let bp = temp_blueprint();
         let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
-        let store = std::sync::Arc::new(leviath_core::media::MemoryBlobStore::new());
-        let registry = MediaRegistry::builtin();
+        let store = std::sync::Arc::new(leviath_core::mime::MemoryBlobStore::new());
+        let registry = MimeRegistry::builtin();
         let png = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nhero".to_vec(),
         );
         let stored = store.put("parent", &png, &registry).unwrap();
-        let other = Blob::new(MediaType::parse("image/png").unwrap(), b"other".to_vec());
+        let other = Blob::new(MimeType::parse("image/png").unwrap(), b"other".to_vec());
         let unnamed = store.put("parent", &other, &registry).unwrap();
         let sha = unnamed.sha256.clone();
-        let lost = leviath_core::media::BlobRef {
+        let lost = leviath_core::mime::BlobRef {
             sha256: "e".repeat(64),
             ..stored.clone()
         };
@@ -860,9 +860,9 @@ task = { kind = "pinned", max_tokens = 1000 }
             Part::stored(unnamed),
             Part::stored(lost).named("lost.png"),
         ];
-        h.media = Some(std::sync::Arc::new(leviath_tools::ToolMedia {
+        h.mime = Some(std::sync::Arc::new(leviath_tools::ToolMime {
             store,
-            registry: std::sync::Arc::new(leviath_core::media::RegistryCell::new(
+            registry: std::sync::Arc::new(leviath_core::mime::RegistryCell::new(
                 std::sync::Arc::new(registry),
             )),
             run_id: "parent".to_string(),
@@ -887,7 +887,7 @@ task = { kind = "pinned", max_tokens = 1000 }
             let parts = &seen[0].parts;
             assert_eq!(parts.len(), 2);
             assert_eq!(parts[0].name, "hero.png");
-            assert_eq!(parts[0].media_type.as_ref().unwrap().as_str(), "image/png");
+            assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/png");
             assert_eq!(parts[0].deliver, Some(Delivery::Text));
             assert_eq!(parts[0].data, b"\x89PNG\r\n\x1a\nhero");
             // The unnamed part is named by its hash.
@@ -945,7 +945,7 @@ task = { kind = "pinned", max_tokens = 1000 }
         }
         // No store at all: the argument is refused outright. Nothing named:
         // nothing handed on.
-        h.media = None;
+        h.mime = None;
         let out = handle(
             &h,
             &tc(

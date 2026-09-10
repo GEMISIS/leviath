@@ -1,5 +1,5 @@
-//! Where a run's stored media parts live on disk, and the world resources
-//! that hand the store and the media registry to every system.
+//! Where a run's stored mime parts live on disk, and the world resources
+//! that hand the store and the mime registry to every system.
 //!
 //! A part whose bytes are not text is written once under
 //! `<runs_dir>/<run_id>/blobs/<sha256>` and referenced by hash everywhere
@@ -14,57 +14,56 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use leviath_core::files::BLOBS_DIR;
-use leviath_core::media::registry::RegistryError;
-use leviath_core::media::{
-    Blob, BlobRef, BlobStore, MediaCheck, MediaRegistry, MemoryBlobStore, RegistryCell,
-    is_sha256_hex,
+use leviath_core::mime::registry::RegistryError;
+use leviath_core::mime::{
+    Blob, BlobRef, BlobStore, MemoryBlobStore, MimeCheck, MimeRegistry, RegistryCell, is_sha256_hex,
 };
 
 /// The store every system reads and writes stored parts through.
 #[derive(Resource, Clone)]
 pub struct BlobStoreHandle(pub Arc<dyn BlobStore>);
 
-/// The media registry a world was built with: the compiled defaults plus the
-/// operator's `[media_types]`. A blueprint's own rows layer on top per agent.
+/// The mime registry a world was built with: the compiled defaults plus the
+/// operator's `[mime_types]`. A blueprint's own rows layer on top per agent.
 #[derive(Resource, Clone)]
-pub struct MediaRegistryHandle(pub Arc<MediaRegistry>);
+pub struct MimeRegistryHandle(pub Arc<MimeRegistry>);
 
-impl Default for MediaRegistryHandle {
+impl Default for MimeRegistryHandle {
     fn default() -> Self {
-        Self(Arc::new(MediaRegistry::builtin()))
+        Self(Arc::new(MimeRegistry::builtin()))
     }
 }
 
 /// The registry one run reads: the world's rows with the blueprint's own
-/// `[media_types]` layered on top, and the blueprint's compiled checks
+/// `[mime_types]` layered on top, and the blueprint's compiled checks
 /// attached.
 ///
 /// Built once at spawn and held for the life of the run behind a
-/// [`RegistryCell`], which the tool lane shares (see `ToolMedia`), so the
+/// [`RegistryCell`], which the tool lane shares (see `ToolMime`), so the
 /// systems that type a run's bytes and the tools that store them read one
 /// registry. When the operator's rows change under a live daemon,
 /// [`refresh_run_registries`] rebuilds every run's registry over the new
 /// base and stores it into the same cell, and every holder's next read is
 /// the edited one.
 #[derive(Component, Clone, Debug)]
-pub struct RunMediaRegistry {
+pub struct RunMimeRegistry {
     /// The blueprint's rows, as written.
     rows: toml::Table,
     /// The blueprint's compiled checks, keyed by row.
-    checks: BTreeMap<String, Arc<dyn MediaCheck>>,
+    checks: BTreeMap<String, Arc<dyn MimeCheck>>,
     /// Where the built registry lives.
     cell: Arc<RegistryCell>,
 }
 
-impl RunMediaRegistry {
+impl RunMimeRegistry {
     /// `base` (the world's registry) with `rows` layered on top and `checks`
     /// attached. A row that will not layer, or a check on a key that is not
     /// a type, is the error: the spawn refuses rather than typing the run's
     /// bytes against half a table.
     pub fn new(
-        base: &MediaRegistry,
+        base: &MimeRegistry,
         rows: toml::Table,
-        checks: BTreeMap<String, Arc<dyn MediaCheck>>,
+        checks: BTreeMap<String, Arc<dyn MimeCheck>>,
     ) -> Result<Self, RegistryError> {
         let built = Self::build(base, &rows, &checks)?;
         Ok(Self {
@@ -75,10 +74,10 @@ impl RunMediaRegistry {
     }
 
     fn build(
-        base: &MediaRegistry,
+        base: &MimeRegistry,
         rows: &toml::Table,
-        checks: &BTreeMap<String, Arc<dyn MediaCheck>>,
-    ) -> Result<MediaRegistry, RegistryError> {
+        checks: &BTreeMap<String, Arc<dyn MimeCheck>>,
+    ) -> Result<MimeRegistry, RegistryError> {
         let mut registry = base.layered(rows, "blueprint")?;
         for (key, check) in checks {
             registry.attach_check(key, check.clone())?;
@@ -92,12 +91,12 @@ impl RunMediaRegistry {
     }
 
     /// The registry as it stands now.
-    pub fn registry(&self) -> Arc<MediaRegistry> {
+    pub fn registry(&self) -> Arc<MimeRegistry> {
         self.cell.load()
     }
 
     /// Rebuild over a new `base` and swap it in for every holder.
-    pub fn rebuild(&self, base: &MediaRegistry) -> Result<(), RegistryError> {
+    pub fn rebuild(&self, base: &MimeRegistry) -> Result<(), RegistryError> {
         let built = Self::build(base, &self.rows, &self.checks)?;
         self.cell.store(Arc::new(built));
         Ok(())
@@ -108,49 +107,49 @@ impl RunMediaRegistry {
 /// stands after a reload, and report how many were rebuilt. A run whose rows
 /// no longer layer keeps the registry it had, with a warning; its rows were
 /// checked at spawn, so that means the base changed under them.
-pub fn refresh_run_registries(world: &mut World, base: &MediaRegistry) -> usize {
+pub fn refresh_run_registries(world: &mut World, base: &MimeRegistry) -> usize {
     let mut refreshed = 0;
-    for (entity, run) in world.query::<(Entity, &RunMediaRegistry)>().iter(world) {
+    for (entity, run) in world.query::<(Entity, &RunMimeRegistry)>().iter(world) {
         match run.rebuild(base) {
             Ok(()) => refreshed += 1,
             Err(e) => tracing::warn!(
                 ?entity,
-                "[media] a run keeps its old media registry; its rows no longer layer: {e}"
+                "[mime] a run keeps its old mime registry; its rows no longer layer: {e}"
             ),
         }
     }
     refreshed
 }
 
-/// The media resources a system reads, as one parameter: the world's store,
+/// The mime resources a system reads, as one parameter: the world's store,
 /// registry and ceilings, and each live run's own registry.
 ///
 /// Every `PipelineWorld` installs the three resources; a world assembled by
 /// hand in a test may install none, and then [`Self::hydration_inputs`] says
 /// so and stored parts go out as their stand-ins.
 #[derive(bevy_ecs::system::SystemParam)]
-pub struct MediaParams<'w, 's> {
+pub struct MimeParams<'w, 's> {
     /// The run's blob store.
     pub store: Option<bevy_ecs::system::Res<'w, BlobStoreHandle>>,
     /// The registry that types parts, for a run without one of its own.
-    pub registry: Option<bevy_ecs::system::Res<'w, MediaRegistryHandle>>,
+    pub registry: Option<bevy_ecs::system::Res<'w, MimeRegistryHandle>>,
     /// The operator's ceilings.
-    pub limits: Option<bevy_ecs::system::Res<'w, MediaLimits>>,
+    pub limits: Option<bevy_ecs::system::Res<'w, MimeLimits>>,
     /// Each live run's own registry, where its spawn built one.
-    pub runs: bevy_ecs::system::Query<'w, 's, &'static RunMediaRegistry>,
+    pub runs: bevy_ecs::system::Query<'w, 's, &'static RunMimeRegistry>,
 }
 
 /// The store and registry a job hydrates with, when both are installed.
-pub type HydrationSources = Option<(Arc<dyn BlobStore>, Arc<MediaRegistry>)>;
+pub type HydrationSources = Option<(Arc<dyn BlobStore>, Arc<MimeRegistry>)>;
 
-impl MediaParams<'_, '_> {
+impl MimeParams<'_, '_> {
     /// The registry `entity`'s run reads: its own when its spawn built one,
     /// else the world's. `None` in a world with neither.
-    pub fn registry_for(&self, entity: Entity) -> Option<Arc<MediaRegistry>> {
+    pub fn registry_for(&self, entity: Entity) -> Option<Arc<MimeRegistry>> {
         self.runs
             .get(entity)
             .ok()
-            .map(RunMediaRegistry::registry)
+            .map(RunMimeRegistry::registry)
             .or_else(|| self.registry.as_deref().map(|r| r.0.clone()))
     }
 
@@ -165,7 +164,7 @@ impl MediaParams<'_, '_> {
         let max_stored = self
             .limits
             .as_deref()
-            .map_or(MediaLimits::default().max_stored_per_request, |l| {
+            .map_or(MimeLimits::default().max_stored_per_request, |l| {
                 l.max_stored_per_request
             });
         (both, max_stored)
@@ -175,13 +174,13 @@ impl MediaParams<'_, '_> {
     pub fn max_part_bytes(&self) -> u64 {
         self.limits
             .as_deref()
-            .map_or(MediaLimits::default().max_part_bytes, |l| l.max_part_bytes)
+            .map_or(MimeLimits::default().max_part_bytes, |l| l.max_part_bytes)
     }
 }
 
-/// The operator's ceilings on typed parts, from `[media]` in the config.
+/// The operator's ceilings on typed parts, from `[mime]` in the config.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MediaLimits {
+pub struct MimeLimits {
     /// Bytes one part may be; larger is refused wherever it arrives.
     pub max_part_bytes: u64,
     /// Bytes of text kept inline in an entry before the part is stored.
@@ -190,7 +189,7 @@ pub struct MediaLimits {
     pub max_stored_per_request: usize,
 }
 
-impl Default for MediaLimits {
+impl Default for MimeLimits {
     fn default() -> Self {
         Self {
             max_part_bytes: 32 * 1024 * 1024,
@@ -260,8 +259,8 @@ impl FsBlobStore {
 }
 
 impl BlobStore for FsBlobStore {
-    fn put(&self, run_id: &str, blob: &Blob, reg: &MediaRegistry) -> io::Result<BlobRef> {
-        leviath_core::media::verify_blob(reg, blob)?;
+    fn put(&self, run_id: &str, blob: &Blob, reg: &MimeRegistry) -> io::Result<BlobRef> {
+        leviath_core::mime::verify_blob(reg, blob)?;
         let r = blob.describe(reg);
         let dir = self.dir_for(run_id)?;
         let path = dir.join(&r.sha256);
@@ -310,11 +309,11 @@ impl BlobStore for FsBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::MediaType;
+    use leviath_core::mime::MimeType;
 
     fn png_blob() -> Blob {
         Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nbody".to_vec(),
         )
         .named("a.png")
@@ -324,7 +323,7 @@ mod tests {
     fn stores_reads_copies_and_lists() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(tmp.path().to_path_buf());
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let r = store.put("run-a", &png_blob(), &reg).unwrap();
         let again = store.put("run-a", &png_blob(), &reg).unwrap();
         assert_eq!(r, again);
@@ -353,17 +352,17 @@ mod tests {
     /// store refuses bytes that fail it and writes nothing.
     #[test]
     fn a_failed_check_writes_nothing() {
-        use leviath_core::media::FnCheck;
+        use leviath_core::mime::FnCheck;
         let tmp = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(tmp.path().to_path_buf());
-        let mut reg = MediaRegistry::builtin();
+        let mut reg = MimeRegistry::builtin();
         let rows: toml::Table = toml::from_str("[\"image/png\"]\ncheck = \"png.rhai\"\n").unwrap();
         reg.layer(&rows, "t").unwrap();
         reg.attach_check(
             "image/png",
             Arc::new(FnCheck::new(
                 "png",
-                |_: &MediaType, bytes: &[u8]| match bytes.starts_with(b"\x89PNG") {
+                |_: &MimeType, bytes: &[u8]| match bytes.starts_with(b"\x89PNG") {
                     true => Ok(()),
                     false => Err("no PNG signature".to_string()),
                 },
@@ -371,7 +370,7 @@ mod tests {
         )
         .unwrap();
         let fake =
-            Blob::new(MediaType::parse("image/png").unwrap(), b"GIF89a".to_vec()).named("shot.png");
+            Blob::new(MimeType::parse("image/png").unwrap(), b"GIF89a".to_vec()).named("shot.png");
         let err = store.put("run-a", &fake, &reg).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("no PNG signature"), "{err}");
@@ -384,25 +383,25 @@ mod tests {
     /// holder shares, and a base that no longer takes the rows is refused.
     #[test]
     fn a_run_registry_layers_the_blueprint_and_follows_a_rebuild() {
-        use leviath_core::media::FnCheck;
-        let base = MediaRegistry::builtin();
+        use leviath_core::mime::FnCheck;
+        let base = MimeRegistry::builtin();
         let rows: toml::Table = toml::from_str(
             "[\"application/x-acme-scene\"]\nfamily = \"model\"\ncheck = \"checks/scene.rhai\"\n",
         )
         .unwrap();
-        let mut checks: BTreeMap<String, Arc<dyn MediaCheck>> = BTreeMap::new();
+        let mut checks: BTreeMap<String, Arc<dyn MimeCheck>> = BTreeMap::new();
         checks.insert(
             "application/x-acme-scene".to_string(),
             Arc::new(FnCheck::new(
                 "scene",
-                |_: &MediaType, bytes: &[u8]| match bytes.starts_with(b"ACME") {
+                |_: &MimeType, bytes: &[u8]| match bytes.starts_with(b"ACME") {
                     true => Ok(()),
                     false => Err("missing the ACME tag".to_string()),
                 },
             )),
         );
-        let run = RunMediaRegistry::new(&base, rows.clone(), checks.clone()).unwrap();
-        let scene = MediaType::parse("application/x-acme-scene").unwrap();
+        let run = RunMimeRegistry::new(&base, rows.clone(), checks.clone()).unwrap();
+        let scene = MimeType::parse("application/x-acme-scene").unwrap();
         let held = run.cell();
         assert_eq!(run.registry().info(&scene).family, "model");
         assert_eq!(run.registry().info(&scene).source, "blueprint");
@@ -416,9 +415,9 @@ mod tests {
         // The operator edits the obj row: the rebuild reaches the shared cell
         // and keeps the blueprint's row and check.
         let edited: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
-        let next = base.layered(&edited, "media_types.toml").unwrap();
+        let next = base.layered(&edited, "mime_types.toml").unwrap();
         run.rebuild(&next).unwrap();
-        let obj = MediaType::parse("model/obj").unwrap();
+        let obj = MimeType::parse("model/obj").unwrap();
         assert_eq!(held.load().info(&obj).family, "scene");
         assert_eq!(held.load().info(&scene).family, "model");
         assert_eq!(
@@ -429,13 +428,13 @@ mod tests {
         // Bad rows are refused at construction, and a check on a key that is
         // not a type is refused too.
         let bad: toml::Table = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
-        assert!(RunMediaRegistry::new(&base, bad, BTreeMap::new()).is_err());
-        let mut bad_key: BTreeMap<String, Arc<dyn MediaCheck>> = BTreeMap::new();
+        assert!(RunMimeRegistry::new(&base, bad, BTreeMap::new()).is_err());
+        let mut bad_key: BTreeMap<String, Arc<dyn MimeCheck>> = BTreeMap::new();
         bad_key.insert(
             "png".to_string(),
             checks["application/x-acme-scene"].clone(),
         );
-        assert!(RunMediaRegistry::new(&base, rows, bad_key).is_err());
+        assert!(RunMimeRegistry::new(&base, rows, bad_key).is_err());
 
         // Across a world: every run with a registry is rebuilt; one whose
         // rows the new base refuses is left as it was, and counted out.
@@ -444,7 +443,7 @@ mod tests {
         world.spawn(());
         assert_eq!(refresh_run_registries(&mut world, &base), 1);
         assert_eq!(held.load().info(&obj).family, "model", "back on the base");
-        let stuck = RunMediaRegistry {
+        let stuck = RunMimeRegistry {
             rows: toml::from_str("[png]\nfamily = \"image\"\n").unwrap(),
             checks: BTreeMap::new(),
             cell: Arc::new(RegistryCell::default()),
@@ -457,29 +456,29 @@ mod tests {
     /// The parameter answers for a run: its own registry when it has one,
     /// the world's otherwise, and nothing in a world with neither.
     #[test]
-    fn media_params_resolve_a_registry_per_run() {
+    fn mime_params_resolve_a_registry_per_run() {
         let mut world = World::new();
         let bare = world.spawn(()).id();
         let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
         let own = world
-            .spawn(RunMediaRegistry::new(&MediaRegistry::builtin(), rows, BTreeMap::new()).unwrap())
+            .spawn(RunMimeRegistry::new(&MimeRegistry::builtin(), rows, BTreeMap::new()).unwrap())
             .id();
-        let obj = MediaType::parse("model/obj").unwrap();
+        let obj = MimeType::parse("model/obj").unwrap();
         {
-            let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
-            let media = state.get(&world).unwrap();
-            assert!(media.registry_for(bare).is_none());
-            assert_eq!(media.registry_for(own).unwrap().info(&obj).family, "scene");
-            assert!(media.hydration_inputs(own).0.is_none(), "no store yet");
+            let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+            let mime = state.get(&world).unwrap();
+            assert!(mime.registry_for(bare).is_none());
+            assert_eq!(mime.registry_for(own).unwrap().info(&obj).family, "scene");
+            assert!(mime.hydration_inputs(own).0.is_none(), "no store yet");
         }
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
-        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
-        let media = state.get(&world).unwrap();
-        assert_eq!(media.registry_for(bare).unwrap().info(&obj).family, "model");
-        let (sources, max) = media.hydration_inputs(own);
+        world.insert_resource(MimeRegistryHandle::default());
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        let mime = state.get(&world).unwrap();
+        assert_eq!(mime.registry_for(bare).unwrap().info(&obj).family, "model");
+        let (sources, max) = mime.hydration_inputs(own);
         assert_eq!(sources.unwrap().1.info(&obj).family, "scene");
-        assert_eq!(max, MediaLimits::default().max_stored_per_request);
+        assert_eq!(max, MimeLimits::default().max_stored_per_request);
     }
 
     #[test]
@@ -502,7 +501,7 @@ mod tests {
         assert!(store.list("run-f").is_err());
         assert!(store.list("../x").is_err());
         // The same bad ids are refused on every operation, before any I/O.
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let good = "0".repeat(64);
         assert!(store.put("../x", &png_blob(), &reg).is_err());
         assert!(store.read("../x", &good).is_err());
@@ -526,7 +525,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(tmp.path().to_path_buf());
         let r = store
-            .put("run-a", &png_blob(), &MediaRegistry::builtin())
+            .put("run-a", &png_blob(), &MimeRegistry::builtin())
             .unwrap();
         let path = store.path_for("run-a", &r.sha256).unwrap();
         assert_eq!(
@@ -546,7 +545,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(tmp.path().to_path_buf());
         let r = store
-            .put("run-a", &png_blob(), &MediaRegistry::builtin())
+            .put("run-a", &png_blob(), &MimeRegistry::builtin())
             .unwrap();
         let path = store.path_for("run-a", &r.sha256).unwrap();
         assert!(path.is_file());
@@ -556,7 +555,7 @@ mod tests {
     #[test]
     fn store_for_picks_by_runs_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let fs = store_for(Some(tmp.path()));
         let r = fs.put("run-a", &png_blob(), &reg).unwrap();
         assert!(
@@ -572,16 +571,16 @@ mod tests {
         assert!(mem.has("run-a", &r2.sha256));
         let handle = BlobStoreHandle(mem.clone());
         assert!(handle.0.has("run-a", &r2.sha256));
-        let reg_handle = MediaRegistryHandle::default();
+        let reg_handle = MimeRegistryHandle::default();
         assert!(reg_handle.0.row("image/png").is_some());
         let cloned = reg_handle.clone();
         assert!(Arc::ptr_eq(&cloned.0, &reg_handle.0));
-        let limits = MediaLimits::default();
+        let limits = MimeLimits::default();
         // The bundled parameter answers from a world that installs the
         // resources, and says "nothing to hydrate with" from one that does not.
         let mut world = bevy_ecs::world::World::new();
         let entity = world.spawn(()).id();
-        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
         let (none, cap) = state
             .get(&world)
             .expect("the parameter validates")
@@ -589,12 +588,12 @@ mod tests {
         assert!(none.is_none());
         assert_eq!(cap, 100);
         world.insert_resource(BlobStoreHandle(mem.clone()));
-        world.insert_resource(MediaRegistryHandle::default());
-        world.insert_resource(MediaLimits {
+        world.insert_resource(MimeRegistryHandle::default());
+        world.insert_resource(MimeLimits {
             max_stored_per_request: 3,
-            ..MediaLimits::default()
+            ..MimeLimits::default()
         });
-        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
         let (both, cap) = state
             .get(&world)
             .expect("the parameter validates")
@@ -605,6 +604,6 @@ mod tests {
         assert_eq!(limits.inline_text_bytes, 1024 * 1024);
         assert_eq!(limits.max_stored_per_request, 100);
         assert_eq!(limits, limits);
-        assert!(format!("{limits:?}").contains("MediaLimits"));
+        assert!(format!("{limits:?}").contains("MimeLimits"));
     }
 }

@@ -70,32 +70,32 @@ same list.
   refused before any policy is consulted, `--yolo` or not, and a seed at spawn
   is held to the same rule. An agent could otherwise widen what its next spawn
   is allowed to do from inside a run.
-- Typed media parts. A region entry, a tool result, a user message, a model
+- Typed mime parts. A region entry, a tool result, a user message, a model
   reply and a final output are each a list of parts, and a part is one piece
-  of content with a media type: a paragraph, a PNG, a WAV clip, an MP4, a PDF,
+  of content with a mime type: a paragraph, a PNG, a WAV clip, an MP4, a PDF,
   an OBJ model. Text is a part like any other; its bytes travel inside the
   entry, while any other part is stored once under `<run>/blobs/<sha256>` and
   referenced by hash everywhere else, so the journal and `context.json` never
-  grow by a file's size. What a type *is* comes from a media registry rather
-  than from code: the compiled defaults, then `[media_types]` in the config,
+  grow by a file's size. What a type *is* comes from a mime registry rather
+  than from code: the compiled defaults, then `[mime_types]` in the config,
   each row naming a family, whether the bytes are text, a token rule,
-  extensions, a magic prefix and a stand-in template. `[media]` sets the size ceilings. `lev doctor`
+  extensions, a magic prefix and a stand-in template. `[mime]` sets the size ceilings. `lev doctor`
   reports a row that will not load. A region says what it takes with
   `accepts = ["text/*", "image/png"]` and how many stored parts it holds with
   `max_stored`; a region with a `schema` takes text only. A snapshot or
   journal written before this reads back unchanged, since a plain string is
   still how a text-only entry is written (#400).
-- Every model says what it takes and what it can hand back, as media type
+- Every model says what it takes and what it can hand back, as mime type
   patterns. The built-in tables know that Claude reads images and PDFs, that
   Gemini also takes audio and video, which OpenAI models see, hear or draw,
   and which Ollama builds are vision models; OpenRouter's listing corrects
   that from its `architecture` block and Ollama's `/api/show` from its
   `capabilities`; `[model_capabilities.<id>] input_types / output_types`
   correct both, and a Rhai provider declares `// @input_types` and
-  `// @output_types`. `lev models` shows a `MEDIA` column and takes
+  `// @output_types`. `lev models` shows a `MIME` column and takes
   `--accepts image/png`, `lev models show` prints both lists, and
   `GET /api/models` carries `input_types` and `output_types` (#400).
-- A stored part reaches the model. Assembly emits a media block per stored
+- A stored part reaches the model. Assembly emits a mime block per stored
   part beside a one-line stand-in that names it, and the inference lane
   fills the bytes in right before the request goes out: as the vendor's own
   image, audio or document block when the model's input types cover the
@@ -105,10 +105,10 @@ same list.
   parts lifted into one leading user message, so the prefix still caches.
   Anthropic gets `image` and `document` blocks, the OpenAI-shaped providers
   `image_url`, `input_audio` and `file` parts, Codex `input_image` and
-  `input_file`, and a Rhai provider the neutral `media` block with the
+  `input_file`, and a Rhai provider the neutral `mime` block with the
   base64 in `data`; the Claude Code transport and every lane that does not
   hydrate send the stand-in. The journal and `context.json` never hold
-  base64. `[media] max_stored_per_request` caps how many parts one request
+  base64. `[mime] max_stored_per_request` caps how many parts one request
   carries, oldest dropped first (#400).
 - Stages declare typed inputs and outputs. `[stages.<name>.input] accepts`
   states what a stage takes as parts (else the union of its visible regions'
@@ -122,11 +122,11 @@ same list.
   type is refused back to the model, and each accepted file is typed,
   hashed, stored as a part of the run and mirrored into `final_output`.
   `artifacts` on the answer, in `meta.json`, on `GET /api/agents/{id}/result`
-  and on the completion webhook is now a list of `{ name, path, media_type,
+  and on the completion webhook is now a list of `{ name, path, mime_type,
   size, sha256 }` rather than paths; an answer recorded before this reads
   back with each path's file name and an unknown type. `lev result` lists
   them with their types and hashes, `lev validate` prints what each stage
-  takes and hands back and warns `media-unseen` when a stage's models cannot
+  takes and hands back and warns `mime-unseen` when a stage's models cannot
   see a type its regions take (#400).
 - Rhai scripts handle parts. A script tool reads a stored part's bytes with
   `read_part(name)` (by file name or hash prefix), stores new bytes with
@@ -158,11 +158,11 @@ same list.
   directory. `GET /api/agents/{id}/blobs` lists the stored parts a run
   holds and `/blobs/{sha256}` serves one under its own content type, `GET
   /api/agents/{id}/files/raw?path=` serves a workdir file the same way, and
-  `GET /api/media` lists the effective media registry. `[serve]
+  `GET /api/mime` lists the effective mime registry. `[serve]
   max_upload_bytes` (32 MiB by default) bounds a request body and is
   reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
   `runs.blobs`, `runs.files.raw`, `runs.result.artifacts` and
-  `media.registry` (#400).
+  `mime.registry` (#400).
 - Files reach a run from the command line. `lev run --attach
   path[:region][:type][:text]` puts a file in a region as a typed part, a
   `--<region> @file` whose bytes are not text attaches instead of seeding,
@@ -172,7 +172,7 @@ same list.
   landing beside the words as one entry. The control socket's spawn and
   message requests carry `parts` (base64 on the wire), the daemon stores
   each one under the run's `blobs/` and writes the reference into the
-  region, and a region that refuses the part's type or is over `[media]
+  region, and a region that refuses the part's type or is over `[mime]
   max_part_bytes` refuses the spawn by name, or drops the part from a
   message and keeps the text (#400).
 - Files come back out from the command line. `lev result --artifact <name>`
@@ -182,8 +182,8 @@ same list.
   answer recorded a hash, else from the working directory. `lev blobs
   <run>` lists every stored part a run holds with its type, size, shape,
   tokens, hash and regions, and `lev blobs <run> <name-or-hash>` fetches
-  one to stdout, `--out` a path, or `--open`. `lev media list` prints the
-  effective media registry with each row's source and `lev media check
+  one to stdout, `--out` a path, or `--open`. `lev mime list` prints the
+  effective mime registry with each row's source and `lev mime check
   <file>` says what a file resolves to and how a model would see it. `lev
   context --full` shows each stored part as its own row (#400).
 - A text answer to a question carries files. `lev respond --attach` and a
@@ -198,33 +198,33 @@ same list.
   under its answer in the Final view, and attaches the files a task names
   with `@path` when a run starts from the new-run screen, counting them on
   the task box as you type (#400).
-- The stage graph shows the media a stage takes beyond text (`◧ image/*
+- The stage graph shows the mime a stage takes beyond text (`◧ image/*
   audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
   files it declares it hands back (`▤ video/mp4`), in the explorer, the
   new-run preview, the agent editor and `lev validate --graph` alike. A path
   whose file the next stage's regions cannot take carries `!` on its label,
   and the explorer's caption names the type that would cross as a stand-in
   (#400).
-- The operator's media rows live in `media_types.toml` beside `config.toml`,
+- The operator's mime rows live in `mime_types.toml` beside `config.toml`,
   the way yolo profiles live in `yolo.toml`: a key per type with the same
   fields as before, layered over the compiled defaults and over a
-  `[media_types]` table in the config, which still loads. `lev media init`
-  writes a commented example, `lev media list` names the file as a row's
+  `[mime_types]` table in the config, which still loads. `lev mime init`
+  writes a commented example, `lev mime list` names the file as a row's
   source, `lev doctor` names it when it will not load, and
   `lock_permission_files` keeps a run's tools out of it. An edit reaches
   the next run without a restart (#400).
-- Every run types its bytes by its own copy of the media registry: the
-  operator's rows with the blueprint's own `[media_types]` layered on top,
+- Every run types its bytes by its own copy of the mime registry: the
+  operator's rows with the blueprint's own `[mime_types]` layered on top,
   built at spawn and read by the tools, the request builder and the message
   path alike. A blueprint's rows reach that agent's runs only, are checked
   when the manifest is parsed (a misspelled field fails `lev validate` and
   the spawn), and travel with the agent (#400).
-- An edit to `media_types.toml` or to `[media_types]` in the config reaches
+- An edit to `mime_types.toml` or to `[mime_types]` in the config reaches
   runs already under way, not only the next one. The daemon re-reads both on
   its own timer, every thirty seconds, and rebuilds every live run's registry
   over the new rows; a new run reads them as it spawns (#400).
-- A media row may name a `check`: a Rhai script beside the file that names
-  it whose `check(bytes, media_type)` refuses bytes that are not what they
+- A mime row may name a `check`: a Rhai script beside the file that names
+  it whose `check(bytes, mime_type)` refuses bytes that are not what they
   claim. It runs once, where bytes are stored, so an upload, a tool result, a
   `read_file`, a model's reply and a `submit_output` artifact are all refused
   with the reason when they fail it; a check that cannot run refuses too. The
@@ -232,21 +232,21 @@ same list.
   `lev doctor` when they will not load; a blueprint's at spawn, fenced to the
   blueprint's directory like its other scripts. Nothing checks the bytes of a
   type whose row names no check, as before (#400).
-- `lev media add <type>` writes a row into `media_types.toml` from flags
+- `lev mime add <type>` writes a row into `mime_types.toml` from flags
   (`--family`, `--text`, `--tokens`, `--extensions`, `--magic`, `--stand-in`,
-  `--check`) and sets the fields given on a row that is there; `lev media
-  remove <type>` takes one out; `lev media show <type>` prints one type as
+  `--check`) and sets the fields given on a row that is there; `lev mime
+  remove <type>` takes one out; `lev mime show <type>` prints one type as
   the registry resolves it. The file is checked before it is written. `lev
-  media list` gains a check column and `lev media check <file>` runs the
-  type's check over the file and prints the verdict. `lev media init` says
+  mime list` gains a check column and `lev mime check <file>` runs the
+  type's check over the file and prints the verdict. `lev mime init` says
   in its help that it is optional (#400).
-- `media_check` is a sixth `kind` on the scripts routes (`GET /api/scripts`,
-  `GET/PUT/DELETE /api/scripts/media_check/{name}`, `POST
+- `mime_check` is a sixth `kind` on the scripts routes (`GET /api/scripts`,
+  `GET/PUT/DELETE /api/scripts/mime_check/{name}`, `POST
   /api/scripts/validate`): the operator's checks are listed and addressed
   relative to the config's directory, a blueprint's beside the agent with
-  `?agent=`. `scripts.media_checks` in `capabilities` says so. `lev validate`
+  `?agent=`. `scripts.mime_checks` in `capabilities` says so. `lev validate`
   prints the rows a blueprint adds, the dashboard's type chooser offers them,
-  and a new `media-type-overrides-builtin` lint warns when a blueprint row
+  and a new `mime-type-overrides-builtin` lint warns when a blueprint row
   changes the family or the text flag of a built-in type (#400).
 - `[stages.<name>.tool_accepts]`: what each tool may be handed at a stage,
   as `tool = ["image/*"]`. A stored part outside the list is out of that
@@ -269,7 +269,7 @@ same list.
   (the chain, the tools, and what each tool may be handed at the stage)
   and *Context & tools*. A region, a declared file and a loop's path open
   in a window over the editor instead of replacing the inspector, and every
-  media type field is one chooser of the families, every type the registry
+  mime type field is one chooser of the families, every type the registry
   knows and a typed `type/subtype`. The keys round-trip the way the
   runtime reads them, and the graph beside the inspector wears the badges
   as you edit (#400).
@@ -284,7 +284,7 @@ same list.
   session's working directory. Embedders get the same: `SpawnSpec::attach`,
   `AgentWorld::send_message_with`, `InteractionResponse::with_parts`, and
   `artifacts` on the answer (#400).
-- Media a model produces comes back as parts. An OpenAI-shaped provider
+- Mime a model produces comes back as parts. An OpenAI-shaped provider
   reads data URIs off the reply (OpenRouter's `images` list, `image_url`
   items in a content array, streamed or not) and a Rhai provider returns
   them under `parts`; the runtime stores each one and writes it beside the
@@ -314,7 +314,7 @@ same list.
 - The agent editor's *Inputs & outputs* tab reads as inputs and outputs:
   an *Input types* row (the stage's own, or what its regions take, with the
   regions listed under it), *Sent as text*, an *Output type* picked from
-  the plain shapes and the media registry rather than typed, and one
+  the plain shapes and the mime registry rather than typed, and one
   *Output file* row per declared file. A fan-out's worker is picked from
   the agent's other stages or the installed agents instead of typed, with
   an *another…* row for an agent that is not installed here (#400).

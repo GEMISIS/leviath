@@ -38,11 +38,11 @@ use crate::config::Config;
 struct Applied {
     limits: crate::config::LimitsConfig,
     title: leviath_core::config::TitleConfig,
-    media: crate::config::MediaConfig,
-    media_types: toml::Table,
-    /// `media_types.toml` as it read last time, so an edit to the file is a
+    mime: crate::config::MimeConfig,
+    mime_types: toml::Table,
+    /// `mime_types.toml` as it read last time, so an edit to the file is a
     /// change to apply the way an edit to the config is.
-    media_types_file: Option<String>,
+    mime_types_file: Option<String>,
 }
 
 impl Applied {
@@ -50,9 +50,9 @@ impl Applied {
         Self {
             limits: config.limits.clone(),
             title: config.title.clone(),
-            media: config.media.clone(),
-            media_types: config.media_types.clone(),
-            media_types_file: std::fs::read_to_string(crate::config::media_types_path()).ok(),
+            mime: config.mime.clone(),
+            mime_types: config.mime_types.clone(),
+            mime_types_file: std::fs::read_to_string(crate::config::mime_types_path()).ok(),
         }
     }
 }
@@ -137,19 +137,16 @@ impl LiveLimits {
         // and every run already under way is rebuilt over it here, so a row
         // added while the daemon runs types the next file rather than the
         // next run.
-        let registry = std::sync::Arc::new(config.media_registry_or_defaults());
+        let registry = std::sync::Arc::new(config.mime_registry_or_defaults());
         let refreshed = leviath_runtime::blob_store::refresh_run_registries(ecs, &registry);
         if refreshed > 0 {
-            tracing::info!(
-                runs = refreshed,
-                "[media] live runs re-read the media types"
-            );
+            tracing::info!(runs = refreshed, "[mime] live runs re-read the mime types");
         }
-        ecs.insert_resource(leviath_runtime::blob_store::MediaRegistryHandle(registry));
-        ecs.insert_resource(leviath_runtime::blob_store::MediaLimits {
-            max_part_bytes: config.media.max_part_bytes,
-            inline_text_bytes: config.media.inline_text_bytes,
-            max_stored_per_request: config.media.max_stored_per_request,
+        ecs.insert_resource(leviath_runtime::blob_store::MimeRegistryHandle(registry));
+        ecs.insert_resource(leviath_runtime::blob_store::MimeLimits {
+            max_part_bytes: config.mime.max_part_bytes,
+            inline_text_bytes: config.mime.inline_text_bytes,
+            max_stored_per_request: config.mime.max_stored_per_request,
         });
 
         // Read when a prompt opens, so a prompt already waiting keeps the
@@ -407,13 +404,13 @@ mod tests {
         assert!(!world.stream_inference());
     }
 
-    /// An edited media row reaches a run already under way: the world's
+    /// An edited mime row reaches a run already under way: the world's
     /// registry is rebuilt and every live run's registry is rebuilt over it,
     /// keeping the run's own blueprint rows on top.
     #[test]
-    fn an_edited_media_row_reaches_a_run_already_under_way() {
-        crate::config::with_isolated_config_path("live-limits-media-rows", |_| {
-            use leviath_runtime::blob_store::{MediaRegistryHandle, RunMediaRegistry};
+    fn an_edited_mime_row_reaches_a_run_already_under_way() {
+        crate::config::with_isolated_config_path("live-limits-mime-rows", |_| {
+            use leviath_runtime::blob_store::{MimeRegistryHandle, RunMimeRegistry};
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let mut world = world(&runtime, 1);
             let live = applier();
@@ -421,20 +418,20 @@ mod tests {
             live.apply(&config, &mut world);
             let base = world
                 .world()
-                .get_resource::<MediaRegistryHandle>()
+                .get_resource::<MimeRegistryHandle>()
                 .unwrap()
                 .0
                 .clone();
             let rows: toml::Table =
                 toml::from_str("[\"application/x-acme-scene\"]\nfamily = \"model\"\n").unwrap();
-            let run = RunMediaRegistry::new(&base, rows, Default::default()).unwrap();
+            let run = RunMimeRegistry::new(&base, rows, Default::default()).unwrap();
             let held = run.cell();
             world.spawn_agent(run);
-            let obj: leviath_core::media::MediaType = "model/obj".parse().unwrap();
-            let scene: leviath_core::media::MediaType = "application/x-acme-scene".parse().unwrap();
+            let obj: leviath_core::mime::MimeType = "model/obj".parse().unwrap();
+            let scene: leviath_core::mime::MimeType = "application/x-acme-scene".parse().unwrap();
             assert_eq!(held.load().info(&obj).family, "model");
 
-            config.media_types = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
+            config.mime_types = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
             assert!(live.apply(&config, &mut world));
             let now = held.load();
             assert_eq!(

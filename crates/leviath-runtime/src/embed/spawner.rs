@@ -124,7 +124,7 @@ impl EmbedSpawner {
             global_nudge: // The default nudge policy; blueprints override per stage/agent.
             leviath_core::NudgeConfig::default(),
             region_scripts: HashMap::new(),
-            media_registry: None,
+            mime_registry: None,
         },
         )?;
 

@@ -365,12 +365,12 @@ impl PipelineWorld {
 
         let mut world = World::new();
         world.insert_resource(OwnWorldId(id));
-        // Stored media parts and the registry that types them. The registry
+        // Stored mime parts and the registry that types them. The registry
         // starts as the compiled defaults; a host layers the operator's
-        // `[media_types]` on by replacing the resource, as it does telemetry.
+        // `[mime_types]` on by replacing the resource, as it does telemetry.
         world.insert_resource(crate::blob_store::BlobStoreHandle(blob_store));
-        world.insert_resource(crate::blob_store::MediaRegistryHandle::default());
-        world.insert_resource(crate::blob_store::MediaLimits::default());
+        world.insert_resource(crate::blob_store::MimeRegistryHandle::default());
+        world.insert_resource(crate::blob_store::MimeLimits::default());
         world.insert_resource(Providers(providers));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot

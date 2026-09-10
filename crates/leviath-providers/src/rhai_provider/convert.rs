@@ -96,11 +96,11 @@ pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
 }
 
 /// The `parts` array of an `inference` result or a stream chunk: each a
-/// map with `bytes` (a Rhai blob) or `data` (base64), a `media_type`, and
+/// map with `bytes` (a Rhai blob) or `data` (base64), a `mime_type`, and
 /// an optional `name`. An entry with no bytes, or bytes that do not decode,
 /// is skipped; a missing or unparsable type is `application/octet-stream`,
 /// which the runtime's registry sniffs past.
-fn parse_parts(json: &Value) -> Vec<leviath_core::media::Blob> {
+fn parse_parts(json: &Value) -> Vec<leviath_core::mime::Blob> {
     use base64::Engine;
     json.get("parts")
         .and_then(|v| v.as_array())
@@ -121,12 +121,12 @@ fn parse_parts(json: &Value) -> Vec<leviath_core::media::Blob> {
                     if bytes.is_empty() {
                         return None;
                     }
-                    let media_type = item
-                        .get("media_type")
+                    let mime_type = item
+                        .get("mime_type")
                         .and_then(|v| v.as_str())
-                        .and_then(|t| leviath_core::media::MediaType::parse(t).ok())
-                        .unwrap_or_else(leviath_core::media::octet_stream);
-                    let mut blob = leviath_core::media::Blob::new(media_type, bytes);
+                        .and_then(|t| leviath_core::mime::MimeType::parse(t).ok())
+                        .unwrap_or_else(leviath_core::mime::octet_stream);
+                    let mut blob = leviath_core::mime::Blob::new(mime_type, bytes);
                     if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                         blob = blob.named(name);
                     }
@@ -365,44 +365,44 @@ mod cost_tests {
     /// A script's `parts` come through as blobs, as bytes or as base64, typed
     /// by what it said or as octet-stream, and named when it named them.
     #[test]
-    fn a_script_provider_can_hand_back_media() {
+    fn a_script_provider_can_hand_back_mime() {
         let value = rhai::serde::to_dynamic(serde_json::json!({
             "content": "drawn",
             "finish_reason": "stop",
             "parts": [
-                {"bytes": [137, 80, 78, 71], "media_type": "image/png", "name": "hero.png"},
+                {"bytes": [137, 80, 78, 71], "mime_type": "image/png", "name": "hero.png"},
                 {"data": "AQID"},
-                {"data": "!!", "media_type": "image/png"},
-                {"bytes": [], "media_type": "image/png"},
-                {"media_type": "image/png"},
-                {"data": "AQID", "media_type": "not a type"}
+                {"data": "!!", "mime_type": "image/png"},
+                {"bytes": [], "mime_type": "image/png"},
+                {"mime_type": "image/png"},
+                {"data": "AQID", "mime_type": "not a type"}
             ]
         }))
         .unwrap();
         let response = parse_inference_dynamic(value).unwrap();
         assert_eq!(response.parts.len(), 3);
         assert_eq!(response.parts[0].name.as_deref(), Some("hero.png"));
-        assert_eq!(response.parts[0].media_type.as_str(), "image/png");
+        assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
         assert_eq!(response.parts[0].bytes, vec![137, 80, 78, 71]);
         assert_eq!(
-            response.parts[1].media_type.as_str(),
+            response.parts[1].mime_type.as_str(),
             "application/octet-stream"
         );
         assert!(response.parts[1].name.is_none());
         assert_eq!(
-            response.parts[2].media_type.as_str(),
+            response.parts[2].mime_type.as_str(),
             "application/octet-stream"
         );
         let chunk = chunk_from_dynamic(
             rhai::serde::to_dynamic(serde_json::json!({
                 "delta": "x",
-                "parts": [{"data": "AQID", "media_type": "audio/wav"}]
+                "parts": [{"data": "AQID", "mime_type": "audio/wav"}]
             }))
             .unwrap(),
         )
         .unwrap();
         assert_eq!(chunk.parts.len(), 1);
-        assert_eq!(chunk.parts[0].media_type.as_str(), "audio/wav");
+        assert_eq!(chunk.parts[0].mime_type.as_str(), "audio/wav");
         let none = parse_inference_dynamic(
             rhai::serde::to_dynamic(serde_json::json!({"content": "plain"})).unwrap(),
         )

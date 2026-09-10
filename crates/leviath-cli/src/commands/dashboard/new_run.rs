@@ -305,7 +305,7 @@ impl Dashboard {
     /// name before the run starts.
     pub(super) fn new_run_attached_names(&self) -> Vec<String> {
         let workdir = &self.new_run_ctx.workdir;
-        leviath_core::media::inline_refs::extract(&self.new_run_task.text(), &mut |path| {
+        leviath_core::mime::inline_refs::extract(&self.new_run_task.text(), &mut |path| {
             workdir.join(path).is_file()
         })
         .refs

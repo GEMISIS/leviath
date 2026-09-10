@@ -171,7 +171,7 @@ pub struct ContentBlock {
     /// The bytes, base64, for `image` and `audio` blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
-    /// The media type of `data`, or of what a `resource_link` points at.
+    /// The mime type of `data`, or of what a `resource_link` points at.
     #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     /// What a `resource_link` points at.

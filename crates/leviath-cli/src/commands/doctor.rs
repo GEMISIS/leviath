@@ -528,12 +528,12 @@ pub(crate) fn missing_script_providers(
 /// Only native providers can be listed - a Rhai script provider is resolved by
 /// name on demand and never enumerated - so the line says so rather than
 /// implying the user's `.rhai` providers are missing.
-/// The media rows the daemon cannot load, in the config or in
-/// `media_types.toml`, as one note.
-fn malformed_media_types(config: &Config) -> Vec<String> {
-    match config.media_registry() {
+/// The mime rows the daemon cannot load, in the config or in
+/// `mime_types.toml`, as one note.
+fn malformed_mime_types(config: &Config) -> Vec<String> {
+    match config.mime_registry() {
         Ok(_) => Vec::new(),
-        Err(e) => vec![format!("media rows are ignored until fixed: {e}")],
+        Err(e) => vec![format!("mime rows are ignored until fixed: {e}")],
     }
 }
 
@@ -574,9 +574,9 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // A provider_order entry that names nothing configured never wins a route
     // and says nothing about it, the same silent kind of misconfiguration.
     notes.extend(misdirected_provider_order(config));
-    // A `[media_types]` row that will not load is skipped by the daemon, which
+    // A `[mime_types]` row that will not load is skipped by the daemon, which
     // then types that file by the built-in table instead of the operator's.
-    notes.extend(malformed_media_types(config));
+    notes.extend(malformed_mime_types(config));
     if !unread.is_empty() {
         let subject = match unread.len() {
             1 => "1 key in config.toml is".to_string(),

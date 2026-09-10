@@ -150,8 +150,8 @@ fn render(
                 "  {}  {}  {}  {}{sha}\n",
                 a.name,
                 a.path,
-                a.media_type,
-                leviath_core::media::human_size(a.size)
+                a.mime_type,
+                leviath_core::mime::human_size(a.size)
             ));
         }
     }

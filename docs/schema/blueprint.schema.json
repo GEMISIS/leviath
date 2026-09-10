@@ -144,9 +144,9 @@
         }
       }
     },
-    "media_types": {
+    "mime_types": {
       "type": "object",
-      "description": "Rows this agent adds to the media registry, keyed by type/subtype or type/*, layered over the operator's rows for this agent's runs. Name only what the row changes.",
+      "description": "Rows this agent adds to the mime registry, keyed by type/subtype or type/*, layered over the operator's rows for this agent's runs. Name only what the row changes.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
@@ -186,7 +186,7 @@
           },
           "check": {
             "type": "string",
-            "description": "A Rhai script, relative to the blueprint's directory, whose check(bytes, media_type) refuses bytes that are not what they claim. An empty string lifts a check a broader row put on the type."
+            "description": "A Rhai script, relative to the blueprint's directory, whose check(bytes, mime_type) refuses bytes that are not what they claim. An empty string lifts a check a broader row put on the type."
           }
         }
       }
@@ -329,7 +329,7 @@
               },
               "type": {
                 "type": "string",
-                "description": "The media type it must be, or a pattern it must match (video/*)."
+                "description": "The mime type it must be, or a pattern it must match (video/*)."
               },
               "required": {
                 "type": "boolean",
@@ -403,14 +403,14 @@
               "items": {
                 "type": "string"
               },
-              "description": "Media type patterns the stage takes as parts (image/*, audio/wav). Left off, the union of the visible regions' accepts. Shown by lev validate and used to prefer a model that covers them."
+              "description": "Mime type patterns the stage takes as parts (image/*, audio/wav). Left off, the union of the visible regions' accepts. Shown by lev validate and used to prefer a model that covers them."
             },
             "as_text": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "Media type patterns whose parts reach this stage's model as text whatever the model takes: the text bypass, forced. For a type the registry already calls text this changes nothing."
+              "description": "Mime type patterns whose parts reach this stage's model as text whatever the model takes: the text bypass, forced. For a type the registry already calls text this changes nothing."
             }
           }
         },
@@ -472,7 +472,7 @@
         },
         "tool_accepts": {
           "type": "object",
-          "description": "What each tool may be handed at this stage: a tool name to a list of media type patterns. A stored part outside the list is out of that tool's reach here (spawn_agent's parts, a script's read_part and list_parts, context_export). Inline text is never hidden.",
+          "description": "What each tool may be handed at this stage: a tool name to a list of mime type patterns. A stored part outside the list is out of that tool's reach here (spawn_agent's parts, a script's read_part and list_parts, context_export). Inline text is never hidden.",
           "additionalProperties": {
             "type": "array",
             "minItems": 1,
@@ -802,7 +802,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Media types this region takes, each type/subtype or type/*. Absent means anything. A write carrying a part outside the list is refused with the list."
+          "description": "Mime types this region takes, each type/subtype or type/*. Absent means anything. A write carrying a part outside the list is refused with the list."
         },
         "max_stored": {
           "type": "integer",

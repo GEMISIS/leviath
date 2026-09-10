@@ -51,10 +51,10 @@ pub struct LearnedModel {
     pub released: Option<i64>,
     /// When the provider will withdraw it, as the date string it published.
     pub retires: Option<String>,
-    /// Media type patterns the listing says the model accepts. `None` when
+    /// Mime type patterns the listing says the model accepts. `None` when
     /// the listing has no such field, as with every field here.
     pub input_types: Option<Vec<String>>,
-    /// Media type patterns the listing says the model can hand back.
+    /// Mime type patterns the listing says the model can hand back.
     pub output_types: Option<Vec<String>>,
 }
 
@@ -82,12 +82,12 @@ impl LearnedModel {
         }
     }
 
-    /// `base` with the media lists this record names replaced.
-    pub fn apply_media(
+    /// `base` with the mime lists this record names replaced.
+    pub fn apply_mime(
         &self,
-        base: crate::capabilities::ModelMedia,
-    ) -> crate::capabilities::ModelMedia {
-        crate::capabilities::ModelMedia {
+        base: crate::capabilities::ModelMime,
+    ) -> crate::capabilities::ModelMime {
+        crate::capabilities::ModelMime {
             input: self.input_types.clone().unwrap_or(base.input),
             output: self.output_types.clone().unwrap_or(base.output),
         }
@@ -159,14 +159,14 @@ impl LearnedModels {
         }
     }
 
-    /// `base` media lists corrected by what the listing said about `id`.
-    pub fn media_corrected(
+    /// `base` mime lists corrected by what the listing said about `id`.
+    pub fn mime_corrected(
         &self,
         id: &str,
-        base: crate::capabilities::ModelMedia,
-    ) -> crate::capabilities::ModelMedia {
+        base: crate::capabilities::ModelMime,
+    ) -> crate::capabilities::ModelMime {
         match self.get(id) {
-            Some(learned) => learned.apply_media(base),
+            Some(learned) => learned.apply_mime(base),
             None => base,
         }
     }
@@ -497,26 +497,26 @@ mod tests {
 }
 
 #[cfg(test)]
-mod media_tests {
+mod mime_tests {
     use super::*;
-    use crate::capabilities::ModelMedia;
+    use crate::capabilities::ModelMime;
 
     #[test]
-    fn a_record_replaces_only_the_media_lists_it_names() {
-        let base = ModelMedia::new(&["text/*"], &["text/*"]);
-        assert_eq!(LearnedModel::default().apply_media(base.clone()), base);
+    fn a_record_replaces_only_the_mime_lists_it_names() {
+        let base = ModelMime::new(&["text/*"], &["text/*"]);
+        assert_eq!(LearnedModel::default().apply_mime(base.clone()), base);
         let input = LearnedModel {
             input_types: Some(vec!["text/*".into(), "image/*".into()]),
             ..Default::default()
         };
-        let merged = input.apply_media(base.clone());
+        let merged = input.apply_mime(base.clone());
         assert_eq!(merged.input, vec!["text/*", "image/*"]);
         assert_eq!(merged.output, base.output);
         let output = LearnedModel {
             output_types: Some(vec!["image/*".into()]),
             ..Default::default()
         };
-        assert_eq!(output.apply_media(base.clone()).output, vec!["image/*"]);
+        assert_eq!(output.apply_mime(base.clone()).output, vec!["image/*"]);
     }
 
     #[test]
@@ -529,11 +529,11 @@ mod media_tests {
                 ..Default::default()
             },
         )]));
-        let base = ModelMedia::text_only();
+        let base = ModelMime::text_only();
         assert_eq!(
-            store.media_corrected("seer", base.clone()).input,
+            store.mime_corrected("seer", base.clone()).input,
             vec!["text/*", "video/*"]
         );
-        assert_eq!(store.media_corrected("blind", base.clone()), base);
+        assert_eq!(store.mime_corrected("blind", base.clone()), base);
     }
 }

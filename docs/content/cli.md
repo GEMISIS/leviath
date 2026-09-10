@@ -93,7 +93,7 @@ region from somewhere else and takes no caller input. A `--<name>` naming any ot
 dropped.
 
 A `@file` that is not text (an image, a recording, a PDF) is attached to the region as a typed
-[part](/docs/media) instead of being read as its seed text, and a required region counts as
+[part](/docs/mime) instead of being read as its seed text, and a required region counts as
 provided by it. `--attach` does the same for any region the blueprint declares, caller input or
 not, and says more about the file when the name alone does not:
 
@@ -104,7 +104,7 @@ lev run modeller --attach scene.bin:props:model/gltf-binary
 lev run reviewer --task "does @mockup.png match the brief?"
 ```
 
-The segments after the path are told apart by shape: `type/subtype` declares the media type when
+The segments after the path are told apart by shape: `type/subtype` declares the mime type when
 the registry cannot tell from the bytes or the extension, `text`, `native` or `stand_in` chooses how
 the part reaches the model, and anything else names the region. Left off, the region is the one
 the task lands in. A `@path` inside the task text or a region's text attaches that file to the
@@ -428,7 +428,7 @@ includes those checks, so a broken script is caught without spending anything.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MEDIA_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MEDIA` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`) |
+| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MIME_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MIME` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`) |
 | `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above |
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,
@@ -450,19 +450,19 @@ rather than printing an empty table, since there is nothing an empty table could
 A provider the built-in table knows but this install has no credential for is still an empty table
 and still exits 0.
 
-### `lev media`
+### `lev mime`
 
-The media registry as this install sees it, and what a file resolves to under it. See
-[Media](/docs/media) for what a row means.
+The mime registry as this install sees it, and what a file resolves to under it. See
+[Mime](/docs/mime) for what a row means.
 
 | Command | Flags |
 |---|---|
-| `lev media list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `media_types.toml`) and the [check](/docs/rhai-media-checks) its bytes must pass |
-| `lev media show <TYPE>` | `--json`. One type as the registry resolves it: every field, the token rule spelled out, the check and whether it loaded, and the source of the most specific row |
-| `lev media check <FILE>` | `--type <MEDIA_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest, and the verdict of the type's check over the file's bytes when a row names one |
-| `lev media init` | `--force`. Write a commented example [`media_types.toml`](/docs/configuration#media_typestoml) beside your config |
-| `lev media add <TYPE>` | `--family <NAME>`, `--text` or `--binary`, `--tokens <RULE>` (`per_byte=0.25`, `per_pixel=750,max=1600`, `per_second=32`, `fixed=1000`), `--extensions a,b`, `--magic <HEX>`, `--stand-in <TEMPLATE>`, `--check <PATH>` or `--no-check`. Add a row to `media_types.toml`, or set the fields given on a row that is there; `<TYPE>` may be `type/*` for a whole family. The file is checked before it is written, a `--check` script compiled included, so a flag that would leave it unloadable is refused with the reason |
-| `lev media remove <TYPE>` | Take a row out of `media_types.toml` |
+| `lev mime list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `mime_types.toml`) and the [check](/docs/rhai-mime-checks) its bytes must pass |
+| `lev mime show <TYPE>` | `--json`. One type as the registry resolves it: every field, the token rule spelled out, the check and whether it loaded, and the source of the most specific row |
+| `lev mime check <FILE>` | `--type <MIME_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest, and the verdict of the type's check over the file's bytes when a row names one |
+| `lev mime init` | `--force`. Write a commented example [`mime_types.toml`](/docs/configuration#mime_typestoml) beside your config |
+| `lev mime add <TYPE>` | `--family <NAME>`, `--text` or `--binary`, `--tokens <RULE>` (`per_byte=0.25`, `per_pixel=750,max=1600`, `per_second=32`, `fixed=1000`), `--extensions a,b`, `--magic <HEX>`, `--stand-in <TEMPLATE>`, `--check <PATH>` or `--no-check`. Add a row to `mime_types.toml`, or set the fields given on a row that is there; `<TYPE>` may be `type/*` for a whole family. The file is checked before it is written, a `--check` script compiled included, so a flag that would leave it unloadable is refused with the reason |
+| `lev mime remove <TYPE>` | Take a row out of `mime_types.toml` |
 
 `init` is optional. The registry works with no file at all, `add` creates the file when it has
 to, and the example `init` writes is a starting point for editing by hand, every field

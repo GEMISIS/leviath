@@ -96,7 +96,7 @@ lev run reviewer --diff @change.patch --criteria "does the code produce what aft
 
 Screenshots are a typed input: the `screenshots` region accepts `image/*` and holds six, so a
 mockup or a before-and-after reaches a model that can see images as pixels and any other as a
-line naming the file; a `@path` in `--criteria` attaches the same way. See [Media](/docs/media).
+line naming the file; a `@path` in `--criteria` attaches the same way. See [Mime](/docs/mime).
 
 The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then the review itself
 escalates to Opus to scrutinize only what was flagged, which keeps the expensive model focused.

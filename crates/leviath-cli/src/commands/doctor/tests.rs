@@ -516,17 +516,17 @@ fn config_check_names_a_script_provider_whose_file_is_missing() {
     );
 }
 
-/// A `[media_types]` row the registry refuses is skipped by the daemon, which
+/// A `[mime_types]` row the registry refuses is skipped by the daemon, which
 /// then types that file by the built-in table. The config still loads, so
 /// this is a note on an OK line, naming the row.
 #[test]
-fn config_check_notes_a_media_types_row_that_will_not_load() {
+fn config_check_notes_a_mime_types_row_that_will_not_load() {
     let config: Config = toml::from_str(
-        "default_provider = \"anthropic\"\n[media_types.\"model/obj\"]\nfamilies = \"model\"\n",
+        "default_provider = \"anthropic\"\n[mime_types.\"model/obj\"]\nfamilies = \"model\"\n",
     )
     .expect("the table takes arbitrary rows, so the typo deserializes");
     let check = checked(
-        "doctor-config_check_notes_a_media_types_row_that_will_not_load",
+        "doctor-config_check_notes_a_mime_types_row_that_will_not_load",
         &config,
         &ProviderRegistry::new(),
     );
@@ -534,22 +534,22 @@ fn config_check_notes_a_media_types_row_that_will_not_load() {
     assert!(
         check
             .detail
-            .contains("media rows are ignored until fixed: [media_types] in config.toml")
+            .contains("mime rows are ignored until fixed: [mime_types] in config.toml")
             && check.detail.contains("model/obj"),
         "got: {}",
         check.detail
     );
     let clean: Config = toml::from_str(
-        "default_provider = \"anthropic\"\n[media_types.\"model/obj\"]\ntext = true\n",
+        "default_provider = \"anthropic\"\n[mime_types.\"model/obj\"]\ntext = true\n",
     )
     .unwrap();
     let check = checked(
-        "doctor-config_check_accepts_a_good_media_types_row",
+        "doctor-config_check_accepts_a_good_mime_types_row",
         &clean,
         &ProviderRegistry::new(),
     );
     assert!(
-        !check.detail.contains("media_types"),
+        !check.detail.contains("mime_types"),
         "got: {}",
         check.detail
     );

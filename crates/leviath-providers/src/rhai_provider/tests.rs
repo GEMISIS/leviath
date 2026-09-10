@@ -1273,10 +1273,10 @@ fn a_declared_serves_list_is_a_catalogue_without_priming() {
 
 #[test]
 fn a_script_declares_what_its_models_take_and_the_operator_corrects_it() {
-    let png = leviath_core::media::MediaType::parse("image/png").unwrap();
+    let png = leviath_core::mime::MimeType::parse("image/png").unwrap();
     let src = "// @input_types text/*, image/*\n// @output_types text/*\nfn initialize(c) { #{} }\nfn inference(s, r) { #{} }";
     let mut p = build(src, Arc::new(FakeExecutor::default())).expect("it compiles");
-    assert!(p.media("any").accepts(&png));
+    assert!(p.mime("any").accepts(&png));
     p.capability_overrides.insert(
         "blind".to_string(),
         crate::capabilities::ModelCapabilityOverride {
@@ -1284,12 +1284,12 @@ fn a_script_declares_what_its_models_take_and_the_operator_corrects_it() {
             ..Default::default()
         },
     );
-    assert!(!p.media("blind").accepts(&png));
-    assert!(p.media("other").accepts(&png));
+    assert!(!p.mime("blind").accepts(&png));
+    assert!(p.mime("other").accepts(&png));
     let plain = build(
         "fn initialize(c) { #{} }\nfn inference(s, r) { #{} }",
         Arc::new(FakeExecutor::default()),
     )
     .expect("it compiles");
-    assert!(!plain.media("any").takes_media());
+    assert!(!plain.mime("any").takes_mime());
 }

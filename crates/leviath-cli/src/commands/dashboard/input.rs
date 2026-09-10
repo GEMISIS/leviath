@@ -3004,7 +3004,7 @@ mod tests {
             .insert_str("the arm is wrong, see @mark.png and @gone.png");
         dash.submit_input();
         let mark = || {
-            leviath_core::media::InboundPart::from_bytes(
+            leviath_core::mime::InboundPart::from_bytes(
                 "mark.png",
                 b"\x89PNG\r\n\x1a\nmark".to_vec(),
             )

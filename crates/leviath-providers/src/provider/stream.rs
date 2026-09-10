@@ -594,13 +594,13 @@ mod tests {
         );
     }
 
-    /// Media a chunk carried whole comes out on the collected response, in
+    /// Mime a chunk carried whole comes out on the collected response, in
     /// arrival order across chunks.
     #[tokio::test]
-    async fn collect_stream_keeps_the_media_chunks_carried() {
+    async fn collect_stream_keeps_the_mime_chunks_carried() {
         let blob = |name: &str| {
-            leviath_core::media::Blob::new(
-                leviath_core::media::MediaType::parse("image/png").unwrap(),
+            leviath_core::mime::Blob::new(
+                leviath_core::mime::MimeType::parse("image/png").unwrap(),
                 vec![1, 2, 3],
             )
             .named(name)

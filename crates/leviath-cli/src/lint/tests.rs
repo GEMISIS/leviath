@@ -50,17 +50,17 @@ fn with_code<'a>(findings: &'a [LintFinding], code: &str) -> Vec<&'a LintFinding
 /// A blueprint row that changes what a built-in type is warns; one that only
 /// adds to it, or describes a type of the agent's own, does not.
 #[test]
-fn a_media_row_that_changes_a_builtin_type_is_flagged() {
+fn a_mime_row_that_changes_a_builtin_type_is_flagged() {
     let text = format!(
-        "{}\n[media_types.\"image/png\"]\nfamily = \"model\"\ntext = true\n\
-         [media_types.\"image/webp\"]\nextensions = [\"webp\", \"wbp\"]\n\
-         [media_types.\"application/x-acme-scene\"]\nfamily = \"model\"\n\
-         [media_types.\"model/*\"]\ntext = true\n\
-         [media_types.\"model/obj\"]\ntext = true\n",
+        "{}\n[mime_types.\"image/png\"]\nfamily = \"model\"\ntext = true\n\
+         [mime_types.\"image/webp\"]\nextensions = [\"webp\", \"wbp\"]\n\
+         [mime_types.\"application/x-acme-scene\"]\nfamily = \"model\"\n\
+         [mime_types.\"model/*\"]\ntext = true\n\
+         [mime_types.\"model/obj\"]\ntext = true\n",
         manifest(CLEAN_STAGE)
     );
     let findings = lint(&text, &LintEnv::default());
-    let said = with_code(&findings, "media-type-overrides-builtin");
+    let said = with_code(&findings, "mime-type-overrides-builtin");
     // `image/png` and the `model/*` family row, whose text flag the compiled
     // table sets; `model/obj` already reads as text, and the rest add to
     // their types or describe a new one.
@@ -3401,10 +3401,10 @@ fn a_silent_native_provider_is_not_reported_as_unchecked() {
     );
 }
 
-// ─── Media a stage takes but its models cannot see ───────────────────────────
+// ─── Mime a stage takes but its models cannot see ───────────────────────────
 
 #[test]
-fn a_stage_taking_media_its_models_cannot_see_is_warned_once() {
+fn a_stage_taking_mime_its_models_cannot_see_is_warned_once() {
     let manifest = r#"
 [agent]
 name = "artist"
@@ -3452,7 +3452,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
     let findings = lint(manifest, &LintEnv::default());
     assert!(with_code(&findings, "tool-accepts-ungranted").is_empty());
-    let unseen = with_code(&findings, "media-unseen");
+    let unseen = with_code(&findings, "mime-unseen");
     assert_eq!(unseen.len(), 1, "{:?}", codes(&findings));
     assert_eq!(unseen[0].stage.as_deref(), Some("listen"));
     assert!(

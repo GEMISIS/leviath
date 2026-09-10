@@ -431,7 +431,7 @@ pub(super) enum DaemonCommand {
     Message {
         agent_id: String,
         content: String,
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
     },
 }
 
@@ -608,7 +608,7 @@ pub(super) struct SpawnCommand {
     pub(super) yolo_profile: Option<String>,
     /// The files the task named with `@path`, read from the workdir, and
     /// the files the Inputs pane's slots named, each in its region.
-    pub(super) parts: Vec<leviath_core::media::InboundPart>,
+    pub(super) parts: Vec<leviath_core::mime::InboundPart>,
     /// Text the Inputs pane's slots seed regions with, by caller key: what
     /// `--<key> text` sends on the command line.
     pub(super) regions: std::collections::HashMap<String, String>,

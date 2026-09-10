@@ -525,7 +525,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     if let Some(value) = stage_value.field("tool_accepts") {
         let Some(limits) = value.as_table() else {
             return Err(Error::Other(format!(
-                "stage '{stage_name}': tool_accepts must be a table of tool = [media types], \
+                "stage '{stage_name}': tool_accepts must be a table of tool = [mime types], \
                  e.g. spawn_agent = [\"image/*\"]"
             )));
         };
@@ -534,7 +534,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             let patterns = super::regions::parse_pattern_list(&where_, tool, Some(list))?;
             if patterns.is_empty() {
                 return Err(Error::Other(format!(
-                    "stage '{stage_name}': tool_accepts.{tool} must list at least one media \
+                    "stage '{stage_name}': tool_accepts.{tool} must list at least one mime \
                      type; drop the key to lift the limit"
                 )));
             }

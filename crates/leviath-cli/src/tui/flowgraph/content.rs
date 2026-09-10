@@ -139,7 +139,7 @@ pub(crate) struct StageNodeContent {
     pub(crate) is_entry: bool,
     pub(crate) is_terminal: bool,
     pub(crate) self_loop: bool,
-    /// Media the stage takes beyond text, as patterns (`image/*`).
+    /// Mime the stage takes beyond text, as patterns (`image/*`).
     pub(crate) inputs: Vec<String>,
     /// The types of the files it declares it hands back.
     pub(crate) outputs: Vec<String>,
@@ -242,7 +242,7 @@ impl StageNodeContent {
         parts.join(" · ")
     }
 
-    /// The second detail row: badges. Media the stage takes and hands back
+    /// The second detail row: badges. Mime the stage takes and hands back
     /// sit here too, so a glance at the graph shows where the files go.
     fn badge_row(&self) -> String {
         let mut parts: Vec<String> = Vec::new();

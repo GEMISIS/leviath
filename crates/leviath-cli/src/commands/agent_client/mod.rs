@@ -426,7 +426,7 @@ impl Server {
         reader: &mut BoxReader,
         task: String,
         regions: std::collections::HashMap<String, String>,
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
     ) -> StopReason {
         // Subscribe before spawning so no event between spawn and subscribe is
         // missed. An unreachable daemon ends the turn as a refusal.
@@ -577,7 +577,7 @@ impl Server {
         &mut self,
         task: String,
         regions: std::collections::HashMap<String, String>,
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
     ) -> RunStart {
         let existing = self
             .session
@@ -827,7 +827,7 @@ impl Server {
                     content: Box::new(ContentBlock::resource_link(
                         crate::commands::result::export::file_url(&path),
                         artifact.name.clone(),
-                        artifact.media_type.to_string(),
+                        artifact.mime_type.to_string(),
                     )),
                 },
             };

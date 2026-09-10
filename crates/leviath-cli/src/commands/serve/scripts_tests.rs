@@ -109,7 +109,7 @@ fn every_kind_round_trips_through_its_wire_spelling() {
         ScriptKind::RegionHook,
         ScriptKind::StageHook,
         ScriptKind::OutputValidator,
-        ScriptKind::MediaCheck,
+        ScriptKind::MimeCheck,
         ScriptKind::Provider,
     ] {
         assert_eq!(ScriptKind::parse(kind.as_str()), Some(kind));
@@ -153,29 +153,29 @@ fn each_kind_is_compiled_by_its_own_compiler() {
     assert!(compile_status(ScriptKind::Provider, "p", GOOD_PROVIDER, &[]).is_ok());
     assert!(
         compile_status(
-            ScriptKind::MediaCheck,
+            ScriptKind::MimeCheck,
             "m",
-            "fn check(bytes, media_type) { () }",
+            "fn check(bytes, mime_type) { () }",
             &[]
         )
         .is_ok()
     );
     let refused =
-        compile_status(ScriptKind::MediaCheck, "m", "fn check(bytes) { () }", &[]).unwrap_err();
+        compile_status(ScriptKind::MimeCheck, "m", "fn check(bytes) { () }", &[]).unwrap_err();
     assert!(refused.contains("exactly two parameters"), "{refused}");
 }
 
-/// A media check resolves beside the agent that names it in its manifest,
+/// A mime check resolves beside the agent that names it in its manifest,
 /// and beside the config for the operator's rows, since a row's `check` is
 /// relative to the file that names it.
 #[tokio::test]
-async fn a_media_check_resolves_beside_the_manifest_or_the_config() {
+async fn a_mime_check_resolves_beside_the_manifest_or_the_config() {
     with_home(|home| async move {
         let agent = agent_root(&home, "scenes");
         write(&agent.join("agent.leviath"), "[agent]\nname = \"scenes\"\n");
         let target = resolve(
             &Config::default(),
-            "media_check",
+            "mime_check",
             "checks/scene",
             Some("scenes"),
         )
@@ -184,7 +184,7 @@ async fn a_media_check_resolves_beside_the_manifest_or_the_config() {
         assert_eq!(target.path, agent.join("checks").join("scene.rhai"));
         assert_eq!(target.scope, "agent");
 
-        let global = resolve(&Config::default(), "media_check", "checks/scene", None)
+        let global = resolve(&Config::default(), "mime_check", "checks/scene", None)
             .expect("the config's directory");
         assert_eq!(global.dir, config_dir());
         assert_eq!(global.scope, "global");
@@ -196,7 +196,7 @@ async fn a_media_check_resolves_beside_the_manifest_or_the_config() {
 /// The operator's rows put their checks in the global listing, compiled or
 /// not; a blueprint's rows put theirs beside the agent's other scripts.
 #[tokio::test]
-async fn media_checks_are_listed_from_the_rows_that_name_them() {
+async fn mime_checks_are_listed_from_the_rows_that_name_them() {
     with_home(|home| async move {
         // Where the daemon reads the rows from under this home.
         let config_dir = config_dir();
@@ -204,10 +204,10 @@ async fn media_checks_are_listed_from_the_rows_that_name_them() {
         std::fs::create_dir_all(config_dir.join("checks")).unwrap();
         write(
             &config_dir.join("checks").join("scene.rhai"),
-            "fn check(bytes, media_type) { () }",
+            "fn check(bytes, mime_type) { () }",
         );
         write(
-            &config_dir.join("media_types.toml"),
+            &config_dir.join("mime_types.toml"),
             "[\"application/x-acme-scene\"]\ncheck = \"checks/scene.rhai\"\n\
              [\"model/obj\"]\ncheck = \"checks/gone.rhai\"\n\
              [\"x/y\"]\ncheck = \"notes.txt\"\n",
@@ -215,11 +215,11 @@ async fn media_checks_are_listed_from_the_rows_that_name_them() {
         let agent = agent_root(&home, "scenes");
         write(
             &agent.join("agent.leviath"),
-            "[agent]\nname = \"scenes\"\n\n[media_types.\"image/*\"]\ncheck = \"checks/image.rhai\"\n",
+            "[agent]\nname = \"scenes\"\n\n[mime_types.\"image/*\"]\ncheck = \"checks/image.rhai\"\n",
         );
         write(
             &agent.join("checks").join("image.rhai"),
-            "fn check(bytes, media_type) { \"never\" }",
+            "fn check(bytes, mime_type) { \"never\" }",
         );
         let (status, body) = call_with_paths(
             Vec::new(),
@@ -233,7 +233,7 @@ async fn media_checks_are_listed_from_the_rows_that_name_them() {
         let scripts = body["scripts"].as_array().unwrap();
         let checks: Vec<&serde_json::Value> = scripts
             .iter()
-            .filter(|s| s["kind"] == "media_check")
+            .filter(|s| s["kind"] == "mime_check")
             .collect();
         let find = |name: &str| {
             checks
@@ -264,20 +264,20 @@ async fn media_checks_are_listed_from_the_rows_that_name_them() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|s| s["kind"] == "media_check")
+            .filter(|s| s["kind"] == "mime_check")
             .map(|s| s["name"].as_str().unwrap().to_string())
             .collect();
         // In row order: the registry lists its keys sorted.
         assert_eq!(names, vec!["checks/scene", "checks/gone"]);
         // A file of rows the registry refuses names no checks.
-        write(&config_dir.join("media_types.toml"), "[png]\ncheck = \"x.rhai\"\n");
+        write(&config_dir.join("mime_types.toml"), "[png]\ncheck = \"x.rhai\"\n");
         let (_, body) = get_json("/api/scripts").await;
         assert!(
             !body["scripts"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|s| s["kind"] == "media_check")
+                .any(|s| s["kind"] == "mime_check")
         );
     })
     .await;

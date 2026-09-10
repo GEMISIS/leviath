@@ -19,8 +19,8 @@ mod security;
 pub(crate) use security::*;
 mod serve;
 pub(crate) use serve::*;
-mod media;
-pub(crate) use media::*;
+mod mime;
+pub(crate) use mime::*;
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -323,19 +323,19 @@ pub struct Config {
     #[serde(default)]
     pub serve: ServeConfig,
 
-    /// `[media]`: the size ceilings on typed media parts.
+    /// `[mime]`: the size ceilings on typed mime parts.
     #[serde(default)]
-    pub media: MediaConfig,
+    pub mime: MimeConfig,
 
-    /// `[media_types]`: rows added to the media registry, keyed by
+    /// `[mime_types]`: rows added to the mime registry, keyed by
     /// `type/subtype` or `type/*`, layered over the compiled defaults and
-    /// under `media_types.toml`, which is where such rows belong; the table
+    /// under `mime_types.toml`, which is where such rows belong; the table
     /// here still loads so an older config keeps working. A row names only
     /// the fields it changes. Kept as the table it was written as and handed
-    /// to `leviath_core::media::MediaRegistry::layer`, which is the one
+    /// to `leviath_core::mime::MimeRegistry::layer`, which is the one
     /// reader and reports a malformed row by key.
     #[serde(default)]
-    pub media_types: toml::Table,
+    pub mime_types: toml::Table,
 
     /// Per-agent read grants, keyed by agent name - the itemized counterpart
     /// of `SecurityConfig::allow_blueprint_read_paths`, analogous to
@@ -386,8 +386,8 @@ impl Default for Config {
             tool_script_permissions: ScriptToolPermissions::default(),
             security: SecurityConfig::default(),
             serve: ServeConfig::default(),
-            media: MediaConfig::default(),
-            media_types: toml::Table::new(),
+            mime: MimeConfig::default(),
+            mime_types: toml::Table::new(),
             agent_read_paths: HashMap::new(),
         }
     }
@@ -1718,9 +1718,9 @@ some_custom_thing = \"forwarded to the script\"
                 true,
             ),
             (
-                "MediaConfig",
-                "src/config/media.rs",
-                &["properties", "media", "properties"],
+                "MimeConfig",
+                "src/config/mime.rs",
+                &["properties", "mime", "properties"],
                 true,
             ),
             (
@@ -4036,8 +4036,8 @@ enabled = false
 
         let config = Config {
             update_check: true,
-            media: MediaConfig::default(),
-            media_types: toml::Table::new(),
+            mime: MimeConfig::default(),
+            mime_types: toml::Table::new(),
             default_provider: "anthropic".to_string(),
             providers: ProviderConfig {
                 anthropic_api_key: Some("sk-ant-key".to_string()),

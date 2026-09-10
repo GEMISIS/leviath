@@ -222,13 +222,13 @@ url = "https://mcp.example.com/v1"
 [mcp_servers.headers]
 Authorization = "Bearer ${MY_MCP_TOKEN}"
 
-# Ceilings on typed media parts (images, audio, video, documents, anything
-# with a media type). Defaults shown.
-[media]
+# Ceilings on typed mime parts (images, audio, video, documents, anything
+# with a mime type). Defaults shown.
+[mime]
 max_part_bytes = 33554432        # one part, at every ingress
 inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
 max_stored_per_request = 100     # stored parts one model request carries
 
-# Rows added to the media registry live in media_types.toml beside this
-# file (`lev media init` writes an example). A [media_types] table here
+# Rows added to the mime registry live in mime_types.toml beside this
+# file (`lev mime init` writes an example). A [mime_types] table here
 # still loads, under the file's rows.

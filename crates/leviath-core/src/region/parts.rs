@@ -1,7 +1,7 @@
 //! What a region entry holds: a list of typed parts, and the text they read as.
 //!
 //! An entry used to be a `String`. It is now any number of [`Part`]s, each
-//! with a media type: a paragraph, an image, a clip. Text parts keep their
+//! with a mime type: a paragraph, an image, a clip. Text parts keep their
 //! bytes inline; every other part is a reference into the run's blob store.
 //! The text those parts *read as* is kept beside them, rendered once when the
 //! content is built: inline text as it is, and for each stored part the
@@ -16,7 +16,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::media::{Part, PartBody};
+use crate::mime::{Part, PartBody};
 
 /// The typed content of one entry.
 #[derive(Clone, PartialEq, Eq)]
@@ -120,7 +120,7 @@ impl EntryContent {
             [p] => {
                 p.name.is_none()
                     && p.deliver.is_none()
-                    && p.media_type.as_str() == "text/plain"
+                    && p.mime_type.as_str() == "text/plain"
                     && matches!(p.body, PartBody::Inline(_))
             }
             _ => false,
@@ -202,7 +202,7 @@ impl Hash for EntryContent {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.text.hash(state);
         for p in &self.parts {
-            p.media_type.as_str().hash(state);
+            p.mime_type.as_str().hash(state);
             p.name.hash(state);
             if let Some(b) = p.blob() {
                 b.sha256.hash(state);
@@ -302,11 +302,11 @@ impl<'de> Deserialize<'de> for EntryContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::{Blob, MediaRegistry, MediaType};
+    use crate::mime::{Blob, MimeRegistry, MimeType};
 
     fn stored(name: &str) -> Part {
-        let reg = MediaRegistry::builtin();
-        let blob = Blob::new(MediaType::parse("image/png").unwrap(), vec![1, 2, 3]).named(name);
+        let reg = MimeRegistry::builtin();
+        let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]).named(name);
         Part::stored(blob.describe(&reg)).named(name)
     }
 
@@ -375,16 +375,16 @@ mod tests {
         let named = EntryContent::from_parts(vec![Part::text("t").named("n")]);
         assert!(serde_json::to_string(&named).unwrap().starts_with('['));
         let md = EntryContent::from_parts(vec![Part::inline(
-            MediaType::parse("text/markdown").unwrap(),
+            MimeType::parse("text/markdown").unwrap(),
             "# t",
         )]);
         assert!(serde_json::to_string(&md).unwrap().starts_with('['));
         let two = EntryContent::from_parts(vec![Part::text("a"), Part::text("b")]);
         assert_eq!(two.as_str(), "a\nb");
         assert!(serde_json::to_string(&two).unwrap().starts_with('['));
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let big_text = Blob::new(
-            MediaType::parse("text/plain").unwrap(),
+            MimeType::parse("text/plain").unwrap(),
             b"stored text".to_vec(),
         );
         let stored_text = EntryContent::from_parts(vec![Part::stored(big_text.describe(&reg))]);
@@ -414,7 +414,7 @@ mod tests {
         let err = region
             .add_entry(
                 EntryContent::from_parts(vec![Part::inline(
-                    MediaType::parse("text/markdown").unwrap(),
+                    MimeType::parse("text/markdown").unwrap(),
                     "# no",
                 )]),
                 5,

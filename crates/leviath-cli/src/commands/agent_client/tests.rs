@@ -233,14 +233,14 @@ fn completed_with_files(content: &str, paths: &[&str]) -> WorldEvent {
     if let WorldEvent::Completed { final_output, .. } = &mut event
         && let Some(output) = final_output
     {
-        let registry = leviath_core::media::MediaRegistry::builtin();
+        let registry = leviath_core::mime::MimeRegistry::builtin();
         output.artifacts = paths
             .iter()
             .map(|p| {
                 let mut artifact = leviath_core::output::Artifact::from_path(p);
-                artifact.media_type = registry
+                artifact.mime_type = registry
                     .from_name(p)
-                    .unwrap_or_else(leviath_core::media::octet_stream);
+                    .unwrap_or_else(leviath_core::mime::octet_stream);
                 artifact
             })
             .collect();

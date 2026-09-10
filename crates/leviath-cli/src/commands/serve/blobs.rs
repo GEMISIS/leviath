@@ -1,11 +1,11 @@
-//! A run's stored parts, its raw files, and the media registry, over HTTP.
+//! A run's stored parts, its raw files, and the mime registry, over HTTP.
 //!
 //! `GET /api/agents/{id}/blobs` lists every stored part the run's context
 //! holds, by hash, with what the context says about it: name, type, size,
 //! dimensions, and the regions carrying it. `GET .../blobs/{sha256}` serves
 //! the bytes under their own `Content-Type`, and `?download=1` asks the
 //! browser to save rather than show. `GET .../files/raw?path=` serves a
-//! workdir file the same way, typed by the registry. `GET /api/media` is
+//! workdir file the same way, typed by the registry. `GET /api/mime` is
 //! the effective registry: every row and where it came from.
 
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use leviath_core::media::{MediaRegistry, MediaType, is_sha256_hex};
+use leviath_core::mime::{MimeRegistry, MimeType, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -69,7 +69,7 @@ pub(super) struct BytesQuery {
 /// Bytes with their type, and a download hint when asked for.
 fn bytes_response(
     bytes: Vec<u8>,
-    media_type: &MediaType,
+    mime_type: &MimeType,
     name: &str,
     download: bool,
 ) -> Result<Response, ApiError> {
@@ -77,7 +77,7 @@ fn bytes_response(
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(media_type.as_str()).expect("a media type is printable ASCII"),
+        HeaderValue::from_str(mime_type.as_str()).expect("a mime type is printable ASCII"),
     );
     if download {
         let safe: String = name
@@ -127,15 +127,15 @@ pub(super) async fn get_blob(
         .unwrap_or_default()
         .into_iter()
         .find(|b| b.sha256 == sha256);
-    let registry = state.current_config().media_registry_or_defaults();
-    let media_type = known
+    let registry = state.current_config().mime_registry_or_defaults();
+    let mime_type = known
         .as_ref()
-        .and_then(|b| MediaType::parse(&b.media_type).ok())
+        .and_then(|b| MimeType::parse(&b.mime_type).ok())
         .unwrap_or_else(|| registry.resolve(None, None, &bytes));
     let name = known
         .and_then(|b| b.name)
         .unwrap_or_else(|| sha256.chars().take(12).collect());
-    bytes_response(bytes, &media_type, &name, query.download)
+    bytes_response(bytes, &mime_type, &name, query.download)
 }
 
 /// `?path=` and `?download=` on the raw file route.
@@ -193,16 +193,16 @@ pub(super) async fn raw_file(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let registry = state.current_config().media_registry_or_defaults();
-    let media_type = registry.resolve(None, Some(&name), &bytes);
-    bytes_response(bytes, &media_type, &name, query.download)
+    let registry = state.current_config().mime_registry_or_defaults();
+    let mime_type = registry.resolve(None, Some(&name), &bytes);
+    bytes_response(bytes, &mime_type, &name, query.download)
 }
 
-/// One row of the effective media registry.
+/// One row of the effective mime registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct MediaTypeEntry {
+pub(super) struct MimeTypeEntry {
     /// The row's key: a type, or a pattern such as `image/*`.
-    pub(super) media_type: String,
+    pub(super) mime_type: String,
     /// Where the row came from: `builtin`, `config`, or a blueprint or
     /// provider name.
     pub(super) source: String,
@@ -219,20 +219,20 @@ pub(super) struct MediaTypeEntry {
 
 /// The registry listing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct MediaListing {
+pub(super) struct MimeListing {
     /// Every row, keys sorted.
-    pub(super) types: Vec<MediaTypeEntry>,
+    pub(super) types: Vec<MimeTypeEntry>,
 }
 
 /// The rows of `registry`, keys sorted.
-pub(super) fn registry_rows(registry: &MediaRegistry) -> Vec<MediaTypeEntry> {
+pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
     let mut keys = registry.keys();
     keys.sort();
     keys.into_iter()
         .map(|(key, source)| {
             let row = registry.row(&key).cloned().unwrap_or_default();
-            MediaTypeEntry {
-                media_type: key,
+            MimeTypeEntry {
+                mime_type: key,
                 source,
                 family: row.family,
                 text: row.text,
@@ -242,10 +242,10 @@ pub(super) fn registry_rows(registry: &MediaRegistry) -> Vec<MediaTypeEntry> {
         .collect()
 }
 
-/// `GET /api/media`: the effective media registry.
-pub(super) async fn list_media(State(state): State<AppState>) -> Json<MediaListing> {
-    let registry = state.current_config().media_registry_or_defaults();
-    Json(MediaListing {
+/// `GET /api/mime`: the effective mime registry.
+pub(super) async fn list_mime(State(state): State<AppState>) -> Json<MimeListing> {
+    let registry = state.current_config().mime_registry_or_defaults();
+    Json(MimeListing {
         types: registry_rows(&registry),
     })
 }
@@ -259,7 +259,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
-    use leviath_core::media::{Blob, BlobStore, Part};
+    use leviath_core::mime::{Blob, BlobStore, Part};
     use leviath_core::region::EntryContent;
     use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta};
     use tokio::sync::broadcast;
@@ -284,7 +284,7 @@ mod tests {
             .route("/api/agents/{id}/blobs", get(list_blobs))
             .route("/api/agents/{id}/blobs/{sha256}", get(get_blob))
             .route("/api/agents/{id}/files/raw", get(raw_file))
-            .route("/api/media", get(list_media))
+            .route("/api/mime", get(list_mime))
             .with_state(state())
     }
 
@@ -310,19 +310,19 @@ mod tests {
             1,
         );
         runstate::create_run(&meta).unwrap();
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
         let png = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nhero".to_vec(),
         )
         .named("hero.png");
         let stored = Part::stored(store.put(run_id, &png, &registry).unwrap()).named("hero.png");
         let sha = stored.blob().unwrap().sha256.clone();
         // A part the context names but the store lacks.
-        let lost = Part::stored(leviath_core::media::BlobRef {
+        let lost = Part::stored(leviath_core::mime::BlobRef {
             sha256: "e".repeat(64),
-            media_type: MediaType::parse("audio/wav").unwrap(),
+            mime_type: MimeType::parse("audio/wav").unwrap(),
             size: 3,
             width: None,
             height: None,
@@ -419,12 +419,12 @@ mod tests {
             // A blob on disk that the context no longer names is typed by
             // sniffing and named by its hash.
             let orphan = Blob::new(
-                MediaType::parse("image/png").unwrap(),
+                MimeType::parse("image/png").unwrap(),
                 b"\x89PNG\r\n\x1a\norphan".to_vec(),
             );
             let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
             let orphan_sha = store
-                .put(run_id, &orphan, &MediaRegistry::builtin())
+                .put(run_id, &orphan, &MimeRegistry::builtin())
                 .unwrap()
                 .sha256;
             let (status, headers, _) = call(&format!(
@@ -504,22 +504,18 @@ mod tests {
 
     #[tokio::test]
     async fn the_registry_is_listed_with_sources() {
-        let (status, _, body) = call("/api/media").await;
+        let (status, _, body) = call("/api/mime").await;
         assert_eq!(status, StatusCode::OK);
-        let listing: MediaListing = serde_json::from_slice(&body).unwrap();
+        let listing: MimeListing = serde_json::from_slice(&body).unwrap();
         let png = listing
             .types
             .iter()
-            .find(|t| t.media_type == "image/png")
+            .find(|t| t.mime_type == "image/png")
             .expect("the built-in rows are there");
         assert_eq!(png.source, "builtin");
         assert_eq!(png.extensions.as_deref(), Some(&["png".to_string()][..]));
-        assert!(listing.types.iter().any(|t| t.media_type == "*/*"));
-        let names: Vec<&str> = listing
-            .types
-            .iter()
-            .map(|t| t.media_type.as_str())
-            .collect();
+        assert!(listing.types.iter().any(|t| t.mime_type == "*/*"));
+        let names: Vec<&str> = listing.types.iter().map(|t| t.mime_type.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
@@ -539,7 +535,7 @@ mod tests {
     fn a_name_the_header_cannot_carry_is_made_safe() {
         let response = bytes_response(
             vec![1],
-            &MediaType::parse("image/png").unwrap(),
+            &MimeType::parse("image/png").unwrap(),
             "we ird/na\"me.png",
             true,
         )

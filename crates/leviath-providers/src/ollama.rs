@@ -123,7 +123,7 @@ fn estimated_request_tokens(request: &InferenceRequest) -> usize {
 
 /// One content block's share of [`estimated_request_tokens`].
 fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
-    crate::media::block_tokens(block)
+    crate::mime::block_tokens(block)
 }
 
 /// How long a model warmed for a run stays resident with nothing calling it.
@@ -754,14 +754,14 @@ impl Provider for OllamaProvider {
         }
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // The vision builds are known by name; `/api/show` corrects that
         // when it lists `vision` among a model's capabilities.
         let base = self
             .learned
-            .media_corrected(model, crate::media_tables::ollama(model));
+            .mime_corrected(model, crate::mime_tables::ollama(model));
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -1007,7 +1007,7 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

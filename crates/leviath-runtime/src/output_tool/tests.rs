@@ -444,8 +444,8 @@ fn artifacts_inside_the_workdir_are_recorded() {
     let paths: Vec<&str> = output.artifacts.iter().map(|a| a.path.as_str()).collect();
     assert_eq!(paths, ["results.csv", "notes/summary.md"]);
     assert_eq!(output.artifacts[0].name, "results.csv");
-    assert_eq!(output.artifacts[0].media_type.as_str(), "text/csv");
-    assert_eq!(output.artifacts[1].media_type.as_str(), "text/markdown");
+    assert_eq!(output.artifacts[0].mime_type.as_str(), "text/csv");
+    assert_eq!(output.artifacts[1].mime_type.as_str(), "text/markdown");
 }
 
 /// A path that escapes the workdir is refused outright rather than dropped from
@@ -999,11 +999,11 @@ fn without_stage_names_a_submission_is_accepted_as_before() {
 /// the answer as its own entry, and the ack lists it.
 #[test]
 fn stored_artifacts_are_mirrored_beside_the_answer() {
-    use leviath_core::media::{BlobStore, MediaRegistry, MemoryBlobStore};
+    use leviath_core::mime::{BlobStore, MemoryBlobStore, MimeRegistry};
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("cut.mp4"), b"\x00\x00\x00\x18ftypmp42").expect("write");
     let store = MemoryBlobStore::new();
-    let registry = MediaRegistry::builtin();
+    let registry = MimeRegistry::builtin();
     let sink = crate::context_setup::PartSink {
         store: &store,
         registry: &registry,

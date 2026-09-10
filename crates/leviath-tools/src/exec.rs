@@ -121,8 +121,8 @@ pub fn resolve_within(
 
 impl BuiltinTools {
     /// The run's blob store as the tools see it, when the context has one.
-    pub fn media(&self) -> Option<&ToolMedia> {
-        self.ctx.media.as_deref()
+    pub fn mime(&self) -> Option<&ToolMime> {
+        self.ctx.mime.as_deref()
     }
 
     /// Execute a built-in tool by name (resolving aliases), returning the
@@ -350,18 +350,18 @@ impl BuiltinTools {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let Some(media) = &self.ctx.media else {
+        let Some(mime) = &self.ctx.mime else {
             return format!(
                 "[error] '{path_str}' is not a text file ({}), and this run has no blob store to \
                  hold it as a part",
-                leviath_core::media::human_size(bytes.len() as u64)
+                leviath_core::mime::human_size(bytes.len() as u64)
             )
             .into();
         };
-        let media_type = media.type_of(None, Some(&name), &bytes);
-        match media.store(leviath_core::media::Blob::new(media_type, bytes).named(name)) {
+        let mime_type = mime.type_of(None, Some(&name), &bytes);
+        match mime.store(leviath_core::mime::Blob::new(mime_type, bytes).named(name)) {
             Ok(part) => EntryContent::from_parts(vec![
-                leviath_core::media::Part::text(format!(
+                leviath_core::mime::Part::text(format!(
                     "'{path_str}' is not text. It is attached to this result as a part:"
                 )),
                 part,

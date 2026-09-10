@@ -902,8 +902,8 @@ fn an_empty_usage_url_leaves_the_default_alone() {
 #[test]
 fn codex_takes_images_until_an_override_says_otherwise() {
     let mut p = provider("http://x", Static::new("t"));
-    let png = leviath_core::media::MediaType::parse("image/png").unwrap();
-    assert!(p.media("gpt-5.5-codex").accepts(&png));
+    let png = leviath_core::mime::MimeType::parse("image/png").unwrap();
+    assert!(p.mime("gpt-5.5-codex").accepts(&png));
     p.capability_overrides.insert(
         "gpt-5.5-codex".to_string(),
         crate::capabilities::ModelCapabilityOverride {
@@ -911,5 +911,5 @@ fn codex_takes_images_until_an_override_says_otherwise() {
             ..Default::default()
         },
     );
-    assert!(!p.media("gpt-5.5-codex").accepts(&png));
+    assert!(!p.mime("gpt-5.5-codex").accepts(&png));
 }

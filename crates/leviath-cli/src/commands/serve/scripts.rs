@@ -1,7 +1,7 @@
 //! Read and write the Rhai scripts a machine runs.
 //!
 //! Six extension points share one API because they share one editor: a script
-//! tool, a region hook, a stage hook, an output validator, a media check and a
+//! tool, a region hook, a stage hook, an output validator, a mime check and a
 //! model provider are all a `.rhai` file somewhere under the home directory,
 //! and only the `kind` says which compiler has to accept it.
 //!
@@ -32,10 +32,10 @@
 //! so this route takes no `?agent=` and refuses one rather than inventing a
 //! per-agent layout that nothing would load.
 //!
-//! A **media check** is named by a registry row's `check`, and a row lives in
-//! two places: the operator's `media_types.toml` (or `[media_types]` in the
+//! A **mime check** is named by a registry row's `check`, and a row lives in
+//! two places: the operator's `mime_types.toml` (or `[mime_types]` in the
 //! config), whose scripts resolve against the config's directory, and a
-//! blueprint's own `[media_types]`, whose scripts resolve against the agent's
+//! blueprint's own `[mime_types]`, whose scripts resolve against the agent's
 //! directory like its hooks. So this kind takes an `?agent=` or not, and the
 //! listing derives it from the rows either way.
 //!
@@ -55,7 +55,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
-use super::scripts_media::{collect_media_checks, config_dir, row_checks};
+use super::scripts_mime::{collect_mime_checks, config_dir, row_checks};
 use super::tools::agent_dir;
 use super::types::{ApiError, AppState, err};
 
@@ -71,8 +71,8 @@ pub(super) enum ScriptKind {
     StageHook,
     /// A validator that decides whether an agent's output may be handed back.
     OutputValidator,
-    /// A check on the bytes behind a media type, named by a registry row.
-    MediaCheck,
+    /// A check on the bytes behind a mime type, named by a registry row.
+    MimeCheck,
     /// A drop-in model provider, global to the machine.
     Provider,
 }
@@ -85,7 +85,7 @@ impl ScriptKind {
             Self::RegionHook => "region_hook",
             Self::StageHook => "stage_hook",
             Self::OutputValidator => "output_validator",
-            Self::MediaCheck => "media_check",
+            Self::MimeCheck => "mime_check",
             Self::Provider => "provider",
         }
     }
@@ -98,7 +98,7 @@ impl ScriptKind {
             "region_hook" => Some(Self::RegionHook),
             "stage_hook" => Some(Self::StageHook),
             "output_validator" => Some(Self::OutputValidator),
-            "media_check" => Some(Self::MediaCheck),
+            "mime_check" => Some(Self::MimeCheck),
             "provider" => Some(Self::Provider),
             _ => None,
         }
@@ -106,7 +106,7 @@ impl ScriptKind {
 }
 
 /// The kinds, spelled the way the 400s list them.
-const KIND_LIST: &str = "tool, region_hook, stage_hook, output_validator, media_check or provider";
+const KIND_LIST: &str = "tool, region_hook, stage_hook, output_validator, mime_check or provider";
 
 /// The global drop-in directory, `~/.leviath/tools`.
 ///
@@ -282,7 +282,7 @@ fn resolve(
         (None, ScriptKind::Tool) => (global_tools_dir(), "global", None),
         (None, ScriptKind::Provider) => (global_providers_dir(), "global", None),
         // The operator's rows name a check relative to the config's directory.
-        (None, ScriptKind::MediaCheck) => (config_dir(), "global", None),
+        (None, ScriptKind::MimeCheck) => (config_dir(), "global", None),
         (None, _) => {
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -395,7 +395,7 @@ pub(super) fn compile_status(
         ScriptKind::OutputValidator => leviath_scripting::output_validator::compile(label, content)
             .map(drop)
             .map_err(|e| e.to_string()),
-        ScriptKind::MediaCheck => leviath_scripting::media_check::compile(label, content)
+        ScriptKind::MimeCheck => leviath_scripting::mime_check::compile(label, content)
             .map(drop)
             .map_err(|e| e.to_string()),
         ScriptKind::Provider => leviath_providers::rhai_provider::check_source(label, content)
@@ -494,7 +494,7 @@ fn provider_meta(kind: ScriptKind, content: &str) -> Option<ProviderScriptMeta> 
 /// One script in the listing.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ScriptItem {
-    /// `tool`, `region_hook`, `stage_hook`, `output_validator`, `media_check`
+    /// `tool`, `region_hook`, `stage_hook`, `output_validator`, `mime_check`
     /// or `provider`, or [`CANDIDATE_KIND`] for a file nothing has claimed yet.
     pub(super) kind: String,
     /// The `{name}` the read and write routes address it by, once a caller has
@@ -509,7 +509,7 @@ pub(super) struct ScriptItem {
     pub(super) path: String,
     /// The same file relative to the directory whose rows or manifest name
     /// it, which is the spelling that goes there (`validators/a2ui.rhai`;
-    /// `checks/scene.rhai` for a media check, relative to the config's
+    /// `checks/scene.rhai` for a mime check, relative to the config's
     /// directory when the row is the operator's). Absent for a global tool
     /// or a provider, which nothing names by path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -669,10 +669,8 @@ fn declared_scripts(bp: &leviath_core::Blueprint) -> BTreeMap<(ScriptKind, Strin
         }
     }
 
-    for (_, script) in row_checks(&bp.media_types) {
-        declared
-            .entry((ScriptKind::MediaCheck, script))
-            .or_default();
+    for (_, script) in row_checks(&bp.mime_types) {
+        declared.entry((ScriptKind::MimeCheck, script)).or_default();
     }
 
     declared
@@ -1004,7 +1002,7 @@ pub(super) async fn list_scripts(
         }
     }
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
-    collect_media_checks(&state.current_config(), &mut scripts);
+    collect_mime_checks(&state.current_config(), &mut scripts);
     collect_providers(&global_providers_dir(), &mut scripts);
     Ok(Json(ScriptsResp { scripts }))
 }

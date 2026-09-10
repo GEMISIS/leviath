@@ -25,7 +25,7 @@ use crate::runstate::{self, ContextSnapshot, RunMeta};
 /// (leaving whatever the blueprint declares).
 ///
 /// `output_format` is carried through as an opaque label and never checked
-/// against a known set, which is what lets a client ask for a2ui, a media type,
+/// against a known set, which is what lets a client ask for a2ui, a mime type,
 /// or a house format without any server-side support. `output_schema` is the
 /// one field with meaning here, and only because the runtime will check it.
 fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSpec> {
@@ -1308,10 +1308,10 @@ system_prompt = "Plan the work"
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["name"], "frame1.png");
         assert_eq!(parts[0]["region"], "storyboard");
-        assert_eq!(parts[0]["media_type"], "image/png");
+        assert_eq!(parts[0]["mime_type"], "image/png");
         assert_eq!(parts[1]["name"], "notes.txt");
         assert!(parts[1].get("region").is_none());
-        assert!(parts[1].get("media_type").is_none());
+        assert!(parts[1].get("mime_type").is_none());
 
         // A body with no `request` field, an unexpected field, and an empty
         // file are each refused.

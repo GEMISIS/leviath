@@ -77,8 +77,8 @@ can emit static scaffolding). `ctx`:
       "content": "...", "tokens": 12, "timestamp": 1710000000, "key": null,
       // every part of the entry, in order: inline text carries `text`, a stored
       // part carries `sha256`, `size`, `width`, `height`, `tokens`, `stand_in`
-      "parts": [ { "media_type": "text/plain", "text": "..." },
-                 { "media_type": "image/png", "name": "hero.png", "sha256": "...", "size": 9012 } ],
+      "parts": [ { "mime_type": "text/plain", "text": "..." },
+                 { "mime_type": "image/png", "name": "hero.png", "sha256": "...", "size": 9012 } ],
       "kind": "text" | "user_message" | "assistant_turn" | "tool_result",
       // assistant_turn only:
       "tool_calls": [ { "id": "...", "name": "...", "arguments": { } } ],

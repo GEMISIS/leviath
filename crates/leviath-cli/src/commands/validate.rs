@@ -303,7 +303,7 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
     for line in input_lines(blueprint) {
         println!("{line}");
     }
-    for line in media_lines(blueprint) {
+    for line in mime_lines(blueprint) {
         println!("{line}");
     }
 
@@ -340,13 +340,13 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
     }
 }
 
-/// One line per stage that takes media or hands back declared artifacts:
+/// One line per stage that takes mime or hands back declared artifacts:
 /// what `lev run --attach` may aim at it, and what `lev result` will list.
-fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+fn mime_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
     let mut lines = Vec::new();
-    if !blueprint.media_types.is_empty() {
+    if !blueprint.mime_types.is_empty() {
         let rows: Vec<String> = blueprint
-            .media_types
+            .mime_types
             .iter()
             .map(
                 |(key, row)| match row.get("check").and_then(|v| v.as_str()) {
@@ -356,7 +356,7 @@ fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
             )
             .collect();
         lines.push(format!(
-            "  Media types: adds {} row{} for its runs: {}",
+            "  Mime types: adds {} row{} for its runs: {}",
             rows.len(),
             match rows.len() {
                 1 => "",
@@ -381,7 +381,7 @@ fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
                         format!(
                             "{} ({}{})",
                             a.name,
-                            a.media_type,
+                            a.mime_type,
                             if a.required { ", required" } else { "" }
                         )
                     })
@@ -410,7 +410,7 @@ fn media_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
             parts.push(format!("limits {}", limits.join(", ")));
         }
         lines.push(format!(
-            "  Media, stage '{}': {}",
+            "  Mime, stage '{}': {}",
             stage.name,
             parts.join("; ")
         ));
@@ -1399,7 +1399,7 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
     }
 
     #[test]
-    fn media_lines_say_what_each_stage_takes_and_hands_back() {
+    fn mime_lines_say_what_each_stage_takes_and_hands_back() {
         let toml = make_blueprint_toml(
             r#"
 [stages.plan]
@@ -1443,36 +1443,36 @@ max_iterations = 5
 [stages.hear.input]
 accepts = ["audio/*"]
 
-[media_types."application/x-acme-scene"]
+[mime_types."application/x-acme-scene"]
 family = "model"
 check = "checks/scene.rhai"
-[media_types."model/obj"]
+[mime_types."model/obj"]
 text = true
 "#,
         );
-        let lines = media_lines(&parse(&toml));
+        let lines = mime_lines(&parse(&toml));
         assert_eq!(
             lines,
             vec![
-                "  Media types: adds 2 rows for its runs: application/x-acme-scene (check \
+                "  Mime types: adds 2 rows for its runs: application/x-acme-scene (check \
                  checks/scene.rhai), model/obj"
                     .to_string(),
-                "  Media, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
+                "  Mime, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
                  final (video/mp4, required), notes (text/*); limits spawn_agent to [image/*]"
                     .to_string(),
-                "  Media, stage 'ship': hands back bundle (application/zip)".to_string(),
-                "  Media, stage 'hear': takes audio/*".to_string(),
+                "  Mime, stage 'ship': hands back bundle (application/zip)".to_string(),
+                "  Mime, stage 'hear': takes audio/*".to_string(),
             ]
         );
         print_success(&parse(&toml));
         // One row, and a check lifted with an empty name, read as a bare key.
         let one = make_blueprint_toml(
             "[stages.plan]\nmode = \"autonomous\"\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-             description = \"Plan\"\nmax_iterations = 5\n\n[media_types.\"image/gif\"]\ncheck = \"\"\n",
+             description = \"Plan\"\nmax_iterations = 5\n\n[mime_types.\"image/gif\"]\ncheck = \"\"\n",
         );
         assert_eq!(
-            media_lines(&parse(&one)),
-            vec!["  Media types: adds 1 row for its runs: image/gif".to_string()]
+            mime_lines(&parse(&one)),
+            vec!["  Mime types: adds 1 row for its runs: image/gif".to_string()]
         );
     }
 

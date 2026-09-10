@@ -327,10 +327,10 @@ pub(crate) struct InferenceResult {
     /// hands it back; see `leviath_core::RegionEntry::reasoning`.
     pub reasoning: Option<String>,
 
-    /// Media the model produced, already in the run's store, or a text part
+    /// Mime the model produced, already in the run's store, or a text part
     /// saying what was dropped when it could not be stored. Written beside
     /// the reply's text on the assistant turn.
-    pub parts: Vec<leviath_core::media::Part>,
+    pub parts: Vec<leviath_core::mime::Part>,
 }
 
 /// A tool call requested by the model.
@@ -361,7 +361,7 @@ pub struct AgentMessage {
     pub target_region: Option<String>,
     /// Files attached to the message; stored when it is delivered and written
     /// beside the text in one entry.
-    pub parts: Vec<leviath_core::media::InboundPart>,
+    pub parts: Vec<leviath_core::mime::InboundPart>,
 }
 
 /// Inbox component for receiving messages sent to a running agent.

@@ -433,7 +433,7 @@ pub(crate) struct ProtectedPath {
 ///
 /// Each is either where a permission is granted (`config.toml`, `yolo.toml`,
 /// the taint policy and its rules), what types the files a run is handed
-/// (`media_types.toml`), or code every later run executes (the provider and
+/// (`mime_types.toml`), or code every later run executes (the provider and
 /// tool scripts). Writing any of them from inside a run is an
 /// agent changing what the next spawn will let it do.
 pub(crate) fn permission_files(config: &Config) -> Vec<ProtectedPath> {
@@ -450,8 +450,8 @@ pub(crate) fn permission_files(config: &Config) -> Vec<ProtectedPath> {
             label: "yolo.toml",
         },
         ProtectedPath {
-            path: crate::config::media_types_path(),
-            label: "media_types.toml",
+            path: crate::config::mime_types_path(),
+            label: "mime_types.toml",
         },
         ProtectedPath {
             path: crate::commands::policy::policy_path(),
@@ -3047,12 +3047,12 @@ mod policy_tests {
             let labels: Vec<&str> = files.iter().map(|p| p.label).collect();
             assert!(labels.contains(&"config.toml"), "{labels:?}");
             assert!(labels.contains(&"yolo.toml"), "{labels:?}");
-            assert!(labels.contains(&"media_types.toml"), "{labels:?}");
+            assert!(labels.contains(&"mime_types.toml"), "{labels:?}");
             assert!(labels.contains(&"the taint policy"), "{labels:?}");
             assert!(labels.contains(&"the taint-gate rules"), "{labels:?}");
             assert_eq!(files[0].path, dir.join("config.toml"));
             assert_eq!(files[1].path, dir.join("yolo.toml"));
-            assert_eq!(files[2].path, dir.join("media_types.toml"));
+            assert_eq!(files[2].path, dir.join("mime_types.toml"));
             config.security.lock_permission_files = false;
             assert!(permission_files(&config).is_empty());
         });

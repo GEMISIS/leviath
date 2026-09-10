@@ -136,12 +136,12 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output::OutputSpec>,
 
-    /// Rows this agent adds to the media registry, `[media_types]` in the
+    /// Rows this agent adds to the mime registry, `[mime_types]` in the
     /// manifest: the types its tools produce and take, layered over the
     /// operator's rows for this agent's runs only. Validated at parse; an
     /// empty table is the common case and is not written back.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
-    pub media_types: toml::Table,
+    pub mime_types: toml::Table,
 }
 
 /// The `[safe_commands]` section of a manifest.
@@ -209,7 +209,7 @@ impl Blueprint {
             read_paths: None,
             safe_commands: None,
             output: None,
-            media_types: toml::Table::new(),
+            mime_types: toml::Table::new(),
         }
     }
 
@@ -229,7 +229,7 @@ impl Blueprint {
 
     /// The caller input keys this blueprint does read, in declaration order.
     ///
-    /// The media type patterns `stage` takes as parts: its own
+    /// The mime type patterns `stage` takes as parts: its own
     /// `[input] accepts` when it declares one, else the union of `accepts`
     /// across the regions it sees. Text is always taken and never listed, so
     /// an empty answer means "text only, unless a region takes anything".

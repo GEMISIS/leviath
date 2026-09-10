@@ -252,8 +252,8 @@ pub(crate) fn handle_output_tool(
                 format!(
                     "{} ({}, {})",
                     a.name,
-                    a.media_type,
-                    leviath_core::media::human_size(a.size)
+                    a.mime_type,
+                    leviath_core::mime::human_size(a.size)
                 )
             })
             .collect();
@@ -279,7 +279,7 @@ pub(crate) fn handle_output_tool(
 fn mirror_into_region(
     window: &mut ContextWindow,
     content: &str,
-    parts: Vec<leviath_core::media::Part>,
+    parts: Vec<leviath_core::mime::Part>,
 ) {
     // Read the budget and clear in one borrow. Asking for the region twice
     // leaves a second "what if it is missing" branch that the first check has
@@ -303,7 +303,7 @@ fn mirror_into_region(
     for part in parts {
         let name = part.name.clone().unwrap_or_default();
         let content = leviath_core::region::EntryContent::from_parts(vec![
-            leviath_core::media::Part::text(format!("artifact '{name}':")),
+            leviath_core::mime::Part::text(format!("artifact '{name}':")),
             part,
         ]);
         let tokens = content.tokens_hint();

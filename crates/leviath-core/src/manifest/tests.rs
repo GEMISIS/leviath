@@ -2608,7 +2608,7 @@ any = { kind = "pinned" }
 
     for (bad, needle) in [
         ("accepts = \"image/png\"", "expected a list"),
-        ("accepts = [1]", "expected a media type string"),
+        ("accepts = [1]", "expected a mime type string"),
         ("accepts = [\"png\"]", "expected type/subtype or type/*"),
         ("accepts = [\"a b/*\"]", "expected type/subtype or type/*"),
         ("max_stored = -1", "max_stored must not be negative"),
@@ -2621,58 +2621,58 @@ any = { kind = "pinned" }
     }
 }
 
-/// A blueprint's `[media_types]` rows are carried as written, checked at
+/// A blueprint's `[mime_types]` rows are carried as written, checked at
 /// parse so a bad row fails here rather than being skipped at the first file.
 #[test]
-fn parse_manifest_reads_and_checks_media_type_rows() {
+fn parse_manifest_reads_and_checks_mime_type_rows() {
     let toml = r#"
 [agent]
 name = "scenes"
 
-[media_types."application/x-acme-scene"]
+[mime_types."application/x-acme-scene"]
 family = "model"
 extensions = ["scene"]
 magic = "41434D45"
 check = "checks/scene.rhai"
 
-[media_types."model/obj"]
+[mime_types."model/obj"]
 text = true
 "#;
     let bp = parse_manifest(toml).expect("parses");
-    assert_eq!(bp.media_types.len(), 2);
-    let reg = crate::media::MediaRegistry::builtin()
-        .layered(&bp.media_types, "blueprint")
+    assert_eq!(bp.mime_types.len(), 2);
+    let reg = crate::mime::MimeRegistry::builtin()
+        .layered(&bp.mime_types, "blueprint")
         .unwrap();
-    let scene = reg.info(&crate::media::MediaType::parse("application/x-acme-scene").unwrap());
+    let scene = reg.info(&crate::mime::MimeType::parse("application/x-acme-scene").unwrap());
     assert_eq!(scene.family, "model");
     assert_eq!(scene.check.as_deref(), Some("checks/scene.rhai"));
     assert_eq!(scene.source, "blueprint");
     // Round-trips through the blueprint's own serialisation, and an empty
     // table is left out of it.
     let json = serde_json::to_string(&bp).unwrap();
-    assert!(json.contains("\"media_types\""));
+    assert!(json.contains("\"mime_types\""));
     let back: crate::Blueprint = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.media_types, bp.media_types);
+    assert_eq!(back.mime_types, bp.mime_types);
     let plain = parse_manifest("[agent]\nname = \"plain\"\n").unwrap();
-    assert!(plain.media_types.is_empty());
+    assert!(plain.mime_types.is_empty());
     assert!(
         !serde_json::to_string(&plain)
             .unwrap()
-            .contains("media_types")
+            .contains("mime_types")
     );
 
     for (bad, needle) in [
-        ("media_types = 3", "[media_types] must be a table"),
+        ("mime_types = 3", "[mime_types] must be a table"),
         (
-            "[media_types.png]\nfamily = \"image\"",
-            "[media_types]: media_types key png",
+            "[mime_types.png]\nfamily = \"image\"",
+            "[mime_types]: mime_types key png",
         ),
         (
-            "[media_types.\"image/png\"]\nfamilies = 1",
+            "[mime_types.\"image/png\"]\nfamilies = 1",
             "unknown field `families`",
         ),
         (
-            "[media_types.\"image/png\"]\nmagic = \"zz\"",
+            "[mime_types.\"image/png\"]\nmagic = \"zz\"",
             "magic must be hex",
         ),
     ] {
@@ -6007,7 +6007,7 @@ type = "text/*"
     let spec = cut.output.as_ref().unwrap();
     assert_eq!(spec.artifacts.len(), 2);
     assert_eq!(spec.artifacts[0].name, "final");
-    assert_eq!(spec.artifacts[0].media_type, "video/mp4");
+    assert_eq!(spec.artifacts[0].mime_type, "video/mp4");
     assert!(spec.artifacts[0].required);
     assert_eq!(spec.artifacts[0].description.as_deref(), Some("the cut"));
     assert!(!spec.artifacts[1].required);
@@ -6048,7 +6048,7 @@ fn artifact_declarations_are_checked_at_load() {
         ("[stages.s.input]\nas_text = 5\n", "input"),
         (
             "[stages.s.tool_accepts]\nspawn_agent = []\n",
-            "must list at least one media type",
+            "must list at least one mime type",
         ),
         (
             "[stages.s.tool_accepts]\nspawn_agent = \"image/*\"\n",

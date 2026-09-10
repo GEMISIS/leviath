@@ -71,7 +71,7 @@ example = """
 """
 ```
 
-`format` is a label. Markdown, XML, CSV, [a2ui](https://a2ui.org/), a media type, or a format you
+`format` is a label. Markdown, XML, CSV, [a2ui](https://a2ui.org/), a mime type, or a format you
 invent this afternoon all work the same way. The label, your instructions, and your example go
 into the `submit_output` tool description, and into the stage's system prompt too when
 `require_output` is set.
@@ -359,10 +359,10 @@ submit_output(
 Every path must land inside the working directory, the same rule that governs serving one, and
 name a file that exists when you submit. A path that escapes, or a file that is not there, refuses
 the whole submission rather than being quietly dropped, so a named file is always a file you can
-fetch. Each accepted file is typed by the [media registry](/docs/media) (a `type` you give wins),
-hashed, and stored as a part of the run when it fits `[media] max_part_bytes`, so a later stage
+fetch. Each accepted file is typed by the [mime registry](/docs/mime) (a `type` you give wins),
+hashed, and stored as a part of the run when it fits `[mime] max_part_bytes`, so a later stage
 sees it in the `final_output` region the way it sees any other part. The answer records
-`name`, `path`, `media_type`, `size` and `sha256` per file.
+`name`, `path`, `mime_type`, `size` and `sha256` per file.
 
 A stage can say up front which files it hands back:
 
@@ -385,7 +385,7 @@ like the rest of the shape: the nearest non-empty list wins whole, and a caller 
 output with `--output-format` retires them with the schema and validator.
 
 Files are what a stage hands back; what it takes is its regions' `accepts`, and
-`[stages.<name>.input]` can narrow or widen that. See [Media](/docs/media).
+`[stages.<name>.input]` can narrow or widen that. See [Mime](/docs/mime).
 
 This is why there is no pagination. What a caller reads is bounded by what a model can say. What
 gets big is a file, and files are fetched by path.
@@ -415,7 +415,7 @@ unreachable.
 | `allow-complete-skips-output` | An earlier stage may end the run instead of routing onward |
 | `output-shape-not-required` | A shape is declared but nothing must produce it |
 | `output-stage-can-modify` | An output stage can also write files |
-| `media-unseen` | A stage's regions take a media type none of its listed models can see, so those parts reach the model as stand-ins |
+| `mime-unseen` | A stage's regions take a mime type none of its listed models can see, so those parts reach the model as stand-ins |
 
 The second one is worth knowing about. `allow_complete` offers the model a "DONE" it can choose
 instead of a transition. Leviath appends that option even to a stage's own `transition_prompt`, so a

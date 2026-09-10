@@ -642,7 +642,7 @@ pub(crate) fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<Re
 #[cfg(test)]
 mod ctx_tests {
     use super::*;
-    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore, Part};
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
     use leviath_core::region::EntryContent;
     use leviath_core::{Region, RegionKind};
 
@@ -651,9 +651,9 @@ mod ctx_tests {
         let mut window = ContextWindow::new(10_000);
         window.add_region(Region::new("brief".into(), RegionKind::Pinned, 1_000));
         window.add_region(Region::new("art".into(), RegionKind::Pinned, 5_000));
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let blob = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\n".to_vec(),
         )
         .named("a.png");
@@ -673,6 +673,6 @@ mod ctx_tests {
         assert_eq!(ctx["regions"]["brief"], "words");
         assert!(ctx["parts"].get("brief").is_none());
         assert_eq!(ctx["parts"]["art"][0]["name"], "a.png");
-        assert_eq!(ctx["parts"]["art"][0]["media_type"], "image/png");
+        assert_eq!(ctx["parts"]["art"][0]["mime_type"], "image/png");
     }
 }

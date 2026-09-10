@@ -14,10 +14,10 @@ pub(crate) struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Convert a provider response into the stored `InferenceResult` component.
 /// (Ported from `AgentEngine::apply_inference_response`.) `parts` are the
-/// response's media once stored, from [`store_model_parts`].
+/// response's mime once stored, from [`store_model_parts`].
 pub(crate) fn to_inference_result(
     response: &leviath_providers::InferenceResponse,
-    parts: Vec<leviath_core::media::Part>,
+    parts: Vec<leviath_core::mime::Part>,
 ) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
         response: response.content.clone(),
@@ -39,28 +39,28 @@ pub(crate) fn to_inference_result(
     }
 }
 
-/// Put the media a model produced into the run's store, each as a stored
+/// Put the mime a model produced into the run's store, each as a stored
 /// part named as the provider named it. A blob the run cannot keep (no
 /// store, over the ceiling) becomes a text part saying so, so the model's
 /// own reply still records that it made something.
 pub(crate) fn store_model_parts(
-    blobs: Vec<leviath_core::media::Blob>,
+    blobs: Vec<leviath_core::mime::Blob>,
     entity: Entity,
     run_id: &str,
-    media: &crate::blob_store::MediaParams,
-) -> Vec<leviath_core::media::Part> {
+    mime: &crate::blob_store::MimeParams,
+) -> Vec<leviath_core::mime::Part> {
     if blobs.is_empty() {
         return Vec::new();
     }
-    let (sources, _) = media.hydration_inputs(entity);
+    let (sources, _) = mime.hydration_inputs(entity);
     let Some((store, registry)) = sources else {
         return blobs
             .into_iter()
             .map(|blob| {
-                leviath_core::media::Part::text(format!(
+                leviath_core::mime::Part::text(format!(
                     "[{} of {} from the model dropped: this run has no blob store]",
-                    blob.media_type,
-                    leviath_core::media::human_size(blob.bytes.len() as u64)
+                    blob.mime_type,
+                    leviath_core::mime::human_size(blob.bytes.len() as u64)
                 ))
             })
             .collect();
@@ -69,7 +69,7 @@ pub(crate) fn store_model_parts(
         store: store.as_ref(),
         registry: &registry,
         run_id,
-        max_part_bytes: media.max_part_bytes(),
+        max_part_bytes: mime.max_part_bytes(),
     };
     blobs
         .into_iter()
@@ -79,10 +79,10 @@ pub(crate) fn store_model_parts(
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("model-{}", i + 1));
-            let mut inbound = leviath_core::media::InboundPart::from_bytes(name, blob.bytes);
-            inbound.media_type = Some(blob.media_type);
+            let mut inbound = leviath_core::mime::InboundPart::from_bytes(name, blob.bytes);
+            inbound.mime_type = Some(blob.mime_type);
             sink.store_part(&inbound).unwrap_or_else(|e| {
-                leviath_core::media::Part::text(format!("[model output dropped: {e}]"))
+                leviath_core::mime::Part::text(format!("[model output dropped: {e}]"))
             })
         })
         .collect()
@@ -175,7 +175,7 @@ pub(crate) fn collect_inference(
     mut circuits: Option<ResMut<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,
     persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
-    media: crate::blob_store::MediaParams,
+    mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -370,7 +370,7 @@ pub(crate) fn collect_inference(
                     response.parts.clone(),
                     outcome.entity,
                     &state.agent_id,
-                    &media,
+                    &mime,
                 );
                 let result = to_inference_result(&response, parts);
                 commands
@@ -915,7 +915,7 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
 }
 
 /// Record a reply with no tool calls in the conversation as the model's
-/// turn: its text and whatever media it produced. A reply with nothing in it
+/// turn: its text and whatever mime it produced. A reply with nothing in it
 /// (a cut-off tool call, an empty answer) leaves no entry: an empty
 /// assistant message is noise to the next request and some providers refuse
 /// it outright.
@@ -941,11 +941,11 @@ fn store_reply(
 /// there is nothing to record.
 pub(crate) fn reply_content(
     text: &str,
-    parts: &[leviath_core::media::Part],
+    parts: &[leviath_core::mime::Part],
 ) -> Option<leviath_core::region::EntryContent> {
     let mut all = Vec::with_capacity(parts.len() + 1);
     if !text.trim().is_empty() {
-        all.push(leviath_core::media::Part::text(text));
+        all.push(leviath_core::mime::Part::text(text));
     }
     all.extend(parts.iter().cloned());
     (!all.is_empty()).then(|| leviath_core::region::EntryContent::from_parts(all))

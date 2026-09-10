@@ -447,7 +447,7 @@ pub struct Region {
     #[serde(default)]
     pub volatility: Volatility,
 
-    /// Media type patterns this region takes (`text/*`, `image/png`). Empty
+    /// Mime type patterns this region takes (`text/*`, `image/png`). Empty
     /// means anything. A write carrying a part outside the list is refused
     /// with the list, so the writer learns what the region is for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -509,16 +509,16 @@ impl Region {
 
     /// Whether every part of `content` is a type this region takes.
     /// Always true for a region with no `accepts` list.
-    pub fn accepts_content(&self, content: &EntryContent) -> Result<(), crate::media::MediaType> {
+    pub fn accepts_content(&self, content: &EntryContent) -> Result<(), crate::mime::MimeType> {
         if self.accepts.is_empty() {
             return Ok(());
         }
         match content
             .parts()
             .iter()
-            .find(|p| !p.media_type.matches_any(&self.accepts))
+            .find(|p| !p.mime_type.matches_any(&self.accepts))
         {
-            Some(p) => Err(p.media_type.clone()),
+            Some(p) => Err(p.mime_type.clone()),
             None => Ok(()),
         }
     }
@@ -590,11 +590,11 @@ impl Region {
             }
             schema.validate(&content)?;
         }
-        if let Err(media_type) = self.accepts_content(&content) {
+        if let Err(mime_type) = self.accepts_content(&content) {
             return Err(crate::error::Error::RegionRefusedWrite {
                 region: self.name.clone(),
                 reason: format!(
-                    "it takes {} and this write carries {media_type}",
+                    "it takes {} and this write carries {mime_type}",
                     self.accepts.join(", ")
                 ),
             });

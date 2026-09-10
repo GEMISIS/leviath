@@ -908,8 +908,8 @@ fn final_output_lines(answer: &leviath_core::FinalOutput, width: u16) -> Vec<Lin
                     format!(
                         "  {}  {}  {}{sha}",
                         artifact.path,
-                        artifact.media_type,
-                        leviath_core::media::human_size(artifact.size)
+                        artifact.mime_type,
+                        leviath_core::mime::human_size(artifact.size)
                     ),
                     Style::default().fg(C_DIM),
                 ),
@@ -1595,7 +1595,7 @@ mod tests {
             leviath_core::output::Artifact {
                 name: "final".to_string(),
                 path: "out/final.mp4".to_string(),
-                media_type: leviath_core::media::MediaType::parse("video/mp4").unwrap(),
+                mime_type: leviath_core::mime::MimeType::parse("video/mp4").unwrap(),
                 size: 3 * 1024 * 1024,
                 sha256: "abcdef0123456789".repeat(4),
             },

@@ -24,10 +24,10 @@ dirs = { workspace = true }
 # regex entries compile at spawn and match against symlink-resolved paths.
 glob = { workspace = true }
 regex = { workspace = true }
-# Content addressing for stored media parts (`leviath_core::media::store`).
+# Content addressing for stored mime parts (`leviath_core::mime::store`).
 sha2 = { workspace = true }
 # A part's bytes on the control socket and in a JSON request
-# (`leviath_core::media::inbound`), which are text transports.
+# (`leviath_core::mime::inbound`), which are text transports.
 base64 = { workspace = true }
 
 [dev-dependencies]

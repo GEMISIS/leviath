@@ -48,8 +48,8 @@ pub enum Commands {
     /// List and inspect available models
     Models(commands::models::ModelsArgs),
 
-    /// Show the media registry, and what a file resolves to under it
-    Media(commands::media::MediaArgs),
+    /// Show the mime registry, and what a file resolves to under it
+    Mime(commands::mime::MimeArgs),
 
     /// Inspect and move the secrets Leviath holds
     Auth(commands::auth::AuthArgs),
@@ -176,7 +176,7 @@ Setup and configuration:
   providers     Show configured providers and set their priority order
   doctor        Check that provider wiring works, end to end
   models        List and inspect available models
-  media         Show the media registry, and what a file resolves to under it
+  mime         Show the mime registry, and what a file resolves to under it
   auth          Inspect and move the secrets Leviath holds
   mcp           Manage MCP tool servers and their authentication
   approvals     Show what runs without an approval prompt, and why
@@ -361,7 +361,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => ex.dashboard(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
-        Commands::Media(args) => commands::media::execute(args).await,
+        Commands::Mime(args) => commands::mime::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Approvals(args) => commands::approvals::execute(args).await,
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_blobs_and_media_variants_are_routed() {
+    async fn dispatch_blobs_and_mime_variants_are_routed() {
         // A run that is not there errors, which shows the routing reached it.
         let blobs = commands::blobs::BlobsArgs {
             run_id: "no-such-run-xyzzy".to_string(),
@@ -889,15 +889,15 @@ mod tests {
         assert!(dispatch(Commands::Blobs(blobs), &MockRisky).await.is_err());
         // A file that is not there errors the same way, before any config is
         // consulted for anything the test would have to isolate.
-        crate::config::with_isolated_config_path_async("dispatch-media", |_dir| async move {
-            let media = commands::media::MediaArgs {
-                command: commands::media::MediaCommand::Check(commands::media::CheckArgs {
+        crate::config::with_isolated_config_path_async("dispatch-mime", |_dir| async move {
+            let mime = commands::mime::MimeArgs {
+                command: commands::mime::MimeCommand::Check(commands::mime::CheckArgs {
                     file: std::path::PathBuf::from("/no/such/file.png"),
-                    media_type: None,
+                    mime_type: None,
                     json: false,
                 }),
             };
-            assert!(dispatch(Commands::Media(media), &MockRisky).await.is_err());
+            assert!(dispatch(Commands::Mime(mime), &MockRisky).await.is_err());
         })
         .await;
     }

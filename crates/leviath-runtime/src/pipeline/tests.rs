@@ -5508,8 +5508,8 @@ async fn dispatch_records_a_submitted_output_inline() {
 /// lands in the store as well as on the answer.
 #[tokio::test]
 async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
-    use crate::blob_store::{BlobStoreHandle, MediaRegistryHandle};
-    use leviath_core::media::{BlobStore, MemoryBlobStore};
+    use crate::blob_store::{BlobStoreHandle, MimeRegistryHandle};
+    use leviath_core::mime::{BlobStore, MemoryBlobStore};
     let (jtx, _jrx) = mpsc::unbounded_channel();
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("dataset.csv"), "a,b\n1,2\n").expect("write");
@@ -5518,7 +5518,7 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(BlobStoreHandle(store.clone()));
-    world.insert_resource(MediaRegistryHandle::default());
+    world.insert_resource(MimeRegistryHandle::default());
     let call = crate::components::ToolCall {
         tool_id: "o1".to_string(),
         name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
@@ -5542,7 +5542,7 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
     let recorded = world
         .get::<crate::persistence::FinalOutput>(e)
         .expect("recorded");
-    assert_eq!(recorded.0.artifacts[0].media_type.as_str(), "text/csv");
+    assert_eq!(recorded.0.artifacts[0].mime_type.as_str(), "text/csv");
     assert!(store.has(&agent_state().agent_id, &recorded.0.artifacts[0].sha256));
 }
 
@@ -11839,12 +11839,12 @@ fn collect_compaction_stores_summary_and_clears_source() {
 /// window with them, named in the log, while the bytes stay in the store.
 #[test]
 fn collect_compaction_names_the_stored_parts_a_summary_replaced() {
-    use leviath_core::media::{BlobRef, MediaType, Part};
+    use leviath_core::mime::{BlobRef, MimeType, Part};
     let (mut world, tx) = world_with_compaction_results();
     let mut window = compacting_window();
     let blob = BlobRef {
         sha256: "ab".repeat(32),
-        media_type: MediaType::parse("image/png").unwrap(),
+        mime_type: MimeType::parse("image/png").unwrap(),
         size: 3,
         width: None,
         height: None,
@@ -18087,8 +18087,8 @@ fn spawning_refuses_a_blueprint_with_no_stages_or_a_stage_count_mismatch() {
 
 mod message_parts {
     use super::*;
-    use crate::blob_store::{BlobStoreHandle, MediaLimits, MediaRegistryHandle};
-    use leviath_core::media::{InboundPart, MemoryBlobStore};
+    use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeRegistryHandle};
+    use leviath_core::mime::{InboundPart, MemoryBlobStore};
 
     fn png() -> Vec<u8> {
         b"\x89PNG\r\n\x1a\nbody".to_vec()
@@ -18099,7 +18099,7 @@ mod message_parts {
         let mut world = World::new();
         world.insert_resource(MessageIntake(rx));
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(MimeRegistryHandle::default());
         (world, tx)
     }
 
@@ -18172,9 +18172,9 @@ mod message_parts {
     #[test]
     fn a_part_the_run_cannot_take_is_dropped_and_the_text_still_lands() {
         let (mut world, tx) = world_with_store();
-        world.insert_resource(MediaLimits {
+        world.insert_resource(MimeLimits {
             max_part_bytes: 4,
-            ..MediaLimits::default()
+            ..MimeLimits::default()
         });
         let e = spawn_msg_agent(&mut world, true, &[("conversation", 10_000), ("tiny", 1)]);
         // Over the ceiling in the message's own region; over the ceiling in
@@ -18186,7 +18186,7 @@ mod message_parts {
                 InboundPart::from_bytes("big2.png", png()).in_region("conversation"),
                 InboundPart::from_bytes("x.bin", vec![1]).in_region("ghost"),
                 InboundPart::from_bytes("y.png", vec![1])
-                    .typed(leviath_core::media::MediaType::parse("image/png").unwrap())
+                    .typed(leviath_core::mime::MimeType::parse("image/png").unwrap())
                     .in_region("tiny"),
             ],
         ))
@@ -18227,9 +18227,9 @@ mod spawn_parts {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::blob_store::{BlobStoreHandle, MediaRegistryHandle};
+    use crate::blob_store::{BlobStoreHandle, MimeRegistryHandle};
     use crate::pipeline::spawn::{SeededSpawn, spawn_agent_seeded};
-    use leviath_core::media::{InboundPart, MemoryBlobStore};
+    use leviath_core::mime::{InboundPart, MemoryBlobStore};
 
     fn task_blueprint() -> leviath_core::Blueprint {
         let layout = leviath_core::layout::ContextLayout::new(
@@ -18257,7 +18257,7 @@ mod spawn_parts {
             global_hints: hints(true),
             global_nudge: leviath_core::NudgeConfig::default(),
             region_scripts: HashMap::new(),
-            media_registry: None,
+            mime_registry: None,
         }
     }
 
@@ -18269,7 +18269,7 @@ mod spawn_parts {
     fn attached_parts_land_after_the_seeds_in_the_task_region() {
         let mut world = World::new();
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(MimeRegistryHandle::default());
         let e = spawn_agent_seeded(&mut world, seeded(vec![png()])).expect("spawn");
         let task = world
             .get::<ContextWindow>(e)
@@ -18289,8 +18289,8 @@ mod spawn_parts {
         let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
         assert!(err.contains("no blob store"), "{err}");
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
-        world.insert_resource(crate::blob_store::MediaLimits {
+        world.insert_resource(MimeRegistryHandle::default());
+        world.insert_resource(crate::blob_store::MimeLimits {
             max_part_bytes: 2,
             ..Default::default()
         });
@@ -18304,24 +18304,24 @@ mod spawn_parts {
     /// blueprint's own, and types the attached parts by it; a host-built one
     /// is taken as is, and rows that will not layer refuse the spawn.
     #[test]
-    fn a_spawn_carries_the_blueprints_media_rows_onto_the_run() {
-        use crate::blob_store::RunMediaRegistry;
-        use leviath_core::media::{MediaRegistry, MediaType};
+    fn a_spawn_carries_the_blueprints_mime_rows_onto_the_run() {
+        use crate::blob_store::RunMimeRegistry;
+        use leviath_core::mime::{MimeRegistry, MimeType};
         let mut world = World::new();
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
+        world.insert_resource(MimeRegistryHandle::default());
         let mut spawn = seeded(vec![InboundPart::from_bytes(
             "a.scene",
             b"ACME\x00\x00\x00\x01".to_vec(),
         )]);
-        spawn.blueprint.media_types = toml::from_str(
+        spawn.blueprint.mime_types = toml::from_str(
             "[\"application/x-acme-scene\"]\nfamily = \"model\"\nextensions = [\"scene\"]\n",
         )
         .unwrap();
         let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let scene = MediaType::parse("application/x-acme-scene").unwrap();
+        let scene = MimeType::parse("application/x-acme-scene").unwrap();
         let run = world
-            .get::<RunMediaRegistry>(e)
+            .get::<RunMimeRegistry>(e)
             .expect("the run has a registry");
         assert_eq!(run.registry().info(&scene).source, "blueprint");
         let task = world
@@ -18331,7 +18331,7 @@ mod spawn_parts {
             .unwrap()
             .clone();
         assert_eq!(
-            task.content[1].content.stored().next().unwrap().media_type,
+            task.content[1].content.stored().next().unwrap().mime_type,
             scene,
             "the attached part is typed by the blueprint's extension row"
         );
@@ -18339,14 +18339,13 @@ mod spawn_parts {
         // A host-built registry is used as handed over.
         let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
         let mut spawn = seeded(Vec::new());
-        spawn.media_registry = Some(
-            RunMediaRegistry::new(&MediaRegistry::builtin(), rows, Default::default()).unwrap(),
-        );
+        spawn.mime_registry =
+            Some(RunMimeRegistry::new(&MimeRegistry::builtin(), rows, Default::default()).unwrap());
         let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let obj = MediaType::parse("model/obj").unwrap();
+        let obj = MimeType::parse("model/obj").unwrap();
         assert_eq!(
             world
-                .get::<RunMediaRegistry>(e)
+                .get::<RunMimeRegistry>(e)
                 .unwrap()
                 .registry()
                 .info(&obj)
@@ -18357,28 +18356,28 @@ mod spawn_parts {
         // Rows the registry refuses (an embedder's hand-built blueprint) are
         // the spawn's error.
         let mut spawn = seeded(Vec::new());
-        spawn.blueprint.media_types = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
+        spawn.blueprint.mime_types = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
         let err = spawn_agent_seeded(&mut world, spawn).unwrap_err();
-        assert!(err.starts_with("[media_types]:"), "{err}");
+        assert!(err.starts_with("[mime_types]:"), "{err}");
 
         // A world with no registry at all spawns without one.
         let mut bare = World::new();
         let e = spawn_agent_seeded(&mut bare, seeded(Vec::new())).expect("spawn");
-        assert!(bare.get::<RunMediaRegistry>(e).is_none());
+        assert!(bare.get::<RunMimeRegistry>(e).is_none());
     }
 }
 
-// ── media tools and typed tool results ──
+// ── mime tools and typed tool results ──
 
 mod typed_tool_results {
     use super::*;
-    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MemoryBlobStore, Part};
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, Part};
     use leviath_core::region::EntryContent;
 
     fn stored_png() -> Part {
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let blob = Blob::new(
-            leviath_core::media::MediaType::parse("image/png").unwrap(),
+            leviath_core::mime::MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nabc".to_vec(),
         )
         .named("shot.png");
@@ -18387,7 +18386,7 @@ mod typed_tool_results {
     }
 
     #[test]
-    fn a_media_tool_call_is_answered_inline_and_never_reaches_the_lane() {
+    fn a_mime_tool_call_is_answered_inline_and_never_reaches_the_lane() {
         let (mut world, mut jrx) = world_with_lane();
         let mut call = tc("c1", "context_export");
         call.arguments = serde_json::json!({});
@@ -18496,43 +18495,43 @@ mod typed_tool_results {
     }
 }
 
-/// Media a model produced: stored on the run and written beside the reply,
+/// Mime a model produced: stored on the run and written beside the reply,
 /// or described in the text when the run cannot keep it.
 mod model_parts {
     use super::*;
-    use crate::blob_store::{BlobStoreHandle, MediaLimits, MediaParams, MediaRegistryHandle};
+    use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeParams, MimeRegistryHandle};
     use crate::pipeline::response::{reply_content, store_model_parts};
     use crate::pipeline::tool_results::{Reply, apply_tool_results_with_parts};
-    use leviath_core::media::{Blob, MediaType, MemoryBlobStore, Part};
+    use leviath_core::mime::{Blob, MemoryBlobStore, MimeType, Part};
 
     fn png(name: &str) -> Blob {
         Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nbody".to_vec(),
         )
         .named(name)
     }
 
     #[test]
-    fn produced_media_is_stored_named_and_capped() {
+    fn produced_mime_is_stored_named_and_capped() {
         let mut world = World::new();
         world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MediaRegistryHandle::default());
-        world.insert_resource(MediaLimits {
+        world.insert_resource(MimeRegistryHandle::default());
+        world.insert_resource(MimeLimits {
             max_part_bytes: 16,
-            ..MediaLimits::default()
+            ..MimeLimits::default()
         });
         let entity = world.spawn(()).id();
-        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
-        let media = state.get(&world).expect("the parameter validates");
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        let mime = state.get(&world).expect("the parameter validates");
         let mut unnamed = png("x");
         unnamed.name = None;
-        let big = Blob::new(MediaType::parse("image/png").unwrap(), vec![0; 64]);
-        let parts = store_model_parts(vec![png("hero.png"), unnamed, big], entity, "run-m", &media);
+        let big = Blob::new(MimeType::parse("image/png").unwrap(), vec![0; 64]);
+        let parts = store_model_parts(vec![png("hero.png"), unnamed, big], entity, "run-m", &mime);
         assert_eq!(parts.len(), 3);
         assert!(parts[0].is_stored());
         assert_eq!(parts[0].name.as_deref(), Some("hero.png"));
-        assert_eq!(parts[0].media_type.as_str(), "image/png");
+        assert_eq!(parts[0].mime_type.as_str(), "image/png");
         assert_eq!(parts[1].name.as_deref(), Some("model-2"));
         assert!(
             parts[2]
@@ -18542,16 +18541,16 @@ mod model_parts {
             "{:?}",
             parts[2]
         );
-        assert!(store_model_parts(Vec::new(), entity, "run-m", &media).is_empty());
+        assert!(store_model_parts(Vec::new(), entity, "run-m", &mime).is_empty());
     }
 
     #[test]
     fn a_world_without_a_store_describes_what_it_dropped() {
         let mut world = World::new();
         let entity = world.spawn(()).id();
-        let mut state = bevy_ecs::system::SystemState::<MediaParams>::new(&mut world);
-        let media = state.get(&world).expect("the parameter validates");
-        let parts = store_model_parts(vec![png("hero.png")], entity, "run-m", &media);
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        let mime = state.get(&world).expect("the parameter validates");
+        let parts = store_model_parts(vec![png("hero.png")], entity, "run-m", &mime);
         assert_eq!(parts.len(), 1);
         assert_eq!(
             parts[0].inline_text().unwrap(),
@@ -18562,7 +18561,7 @@ mod model_parts {
     #[test]
     fn a_reply_is_its_text_and_its_parts_or_nothing() {
         let stored =
-            Part::stored(png("a.png").describe(&leviath_core::media::MediaRegistry::builtin()))
+            Part::stored(png("a.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("a.png");
         assert!(reply_content("  ", &[]).is_none());
         let text = reply_content("hi", &[]).unwrap();
@@ -18575,9 +18574,9 @@ mod model_parts {
     }
 
     #[test]
-    fn the_assistant_turn_carries_the_media_ahead_of_its_tool_results() {
+    fn the_assistant_turn_carries_the_mime_ahead_of_its_tool_results() {
         let stored =
-            Part::stored(png("a.png").describe(&leviath_core::media::MediaRegistry::builtin()))
+            Part::stored(png("a.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("a.png");
         let mut w = ctx(&[("conversation", 100_000)]);
         apply_tool_results_with_parts(

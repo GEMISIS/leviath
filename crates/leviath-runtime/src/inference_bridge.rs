@@ -158,26 +158,26 @@ impl Default for RetryPolicy {
 }
 
 /// A unit of inference work the dispatch system hands to the worker pool.
-/// What a job needs to fill its media blocks with bytes right before sending:
+/// What a job needs to fill its mime blocks with bytes right before sending:
 /// where the bytes are, what the model takes, and how many to send.
 #[derive(Clone)]
 pub(crate) struct JobHydration {
     /// The run's blob store.
-    pub store: Arc<dyn leviath_core::media::BlobStore>,
+    pub store: Arc<dyn leviath_core::mime::BlobStore>,
     /// The run whose blobs to read.
     pub run_id: String,
     /// The registry, for the text bypass.
-    pub registry: Arc<leviath_core::media::MediaRegistry>,
+    pub registry: Arc<leviath_core::mime::MimeRegistry>,
     /// What the model takes and hands back.
-    pub media: leviath_providers::ModelMedia,
+    pub mime: leviath_providers::ModelMime,
     /// The most stored parts one request carries with their bytes.
     pub max_stored: usize,
-    /// Media type patterns the stage sends as text whatever the model takes.
+    /// Mime type patterns the stage sends as text whatever the model takes.
     pub as_text: Vec<String>,
 }
 
 impl JobHydration {
-    /// Fill `request`'s media blocks, logging what happened when anything
+    /// Fill `request`'s mime blocks, logging what happened when anything
     /// was left out.
     fn apply(&self, request: &mut InferenceRequest) {
         // The stage's own bypass: a part of a type it named reaches the
@@ -188,21 +188,21 @@ impl JobHydration {
                     continue;
                 };
                 for block in blocks {
-                    if let leviath_providers::ContentBlock::Media { part, deliver, .. } = block
+                    if let leviath_providers::ContentBlock::Mime { part, deliver, .. } = block
                         && deliver.is_none()
-                        && part.media_type.matches_any(&self.as_text)
+                        && part.mime_type.matches_any(&self.as_text)
                     {
-                        *deliver = Some(leviath_core::media::Delivery::Text);
+                        *deliver = Some(leviath_core::mime::Delivery::Text);
                     }
                 }
             }
         }
         let fetch =
-            |blob: &leviath_core::media::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
-        let report = leviath_providers::media::hydrate_request(
+            |blob: &leviath_core::mime::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
+        let report = leviath_providers::mime::hydrate_request(
             request,
-            &leviath_providers::media::Hydration {
-                media: &self.media,
+            &leviath_providers::mime::Hydration {
+                mime: &self.mime,
                 registry: &self.registry,
                 max_stored: self.max_stored,
                 fetch: &fetch,
@@ -216,7 +216,7 @@ impl JobHydration {
                 stand_ins = report.stand_ins,
                 capped = report.capped,
                 missing = report.missing.len(),
-                "[media] stored parts the model did not receive as bytes"
+                "[mime] stored parts the model did not receive as bytes"
             );
         }
     }
@@ -295,19 +295,19 @@ pub async fn guard_context_window(
         return Ok(None);
     }
     let text = flatten_request_text(request);
-    // The text is counted; the media blocks carrying bytes are charged at the
+    // The text is counted; the mime blocks carrying bytes are charged at the
     // registry's estimate, which is all any tokenizer here can say about them.
-    let media = leviath_providers::media::media_tokens(request);
+    let mime = leviath_providers::mime::mime_tokens(request);
     let estimate =
         crate::pipeline::calibrated_tokens(leviath_core::estimate_tokens(&text), calibration)
-            .saturating_add(media);
+            .saturating_add(mime);
     if estimate.saturating_add(request.max_tokens) < max / COUNT_ABOVE_WINDOW_FRACTION {
         return Ok(None);
     }
     let used = provider
         .count_tokens(&text, &request.model)
         .await
-        .saturating_add(media);
+        .saturating_add(mime);
     if used.saturating_add(request.max_tokens) > max {
         return Err(ProviderError::TokenLimitExceeded {
             used,
@@ -1613,21 +1613,19 @@ mod tests {
     }
 
     #[test]
-    fn hydration_fills_media_blocks_from_the_store_and_names_what_is_missing() {
-        use leviath_core::media::{
-            Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore, Part,
-        };
-        use leviath_providers::{ContentBlock, Message, MessageContent, ModelMedia};
-        let registry = Arc::new(MediaRegistry::builtin());
+    fn hydration_fills_mime_blocks_from_the_store_and_names_what_is_missing() {
+        use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+        use leviath_providers::{ContentBlock, Message, MessageContent, ModelMime};
+        let registry = Arc::new(MimeRegistry::builtin());
         let store = Arc::new(MemoryBlobStore::new());
         let blob = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nbody".to_vec(),
         )
         .named("a.png");
         let reference = store.put("run-1", &blob, &registry).unwrap();
         let stored = Part::stored(reference.clone()).named("a.png");
-        let missing = Part::stored(leviath_core::media::BlobRef {
+        let missing = Part::stored(leviath_core::mime::BlobRef {
             sha256: "0".repeat(64),
             ..reference
         })
@@ -1636,8 +1634,8 @@ mod tests {
         request.messages.push(Message {
             role: "user".to_string(),
             content: MessageContent::Blocks(vec![
-                ContentBlock::media(&stored).unwrap(),
-                ContentBlock::media(&missing).unwrap(),
+                ContentBlock::mime(&stored).unwrap(),
+                ContentBlock::mime(&missing).unwrap(),
             ]),
             cache_breakpoint: false,
             reasoning: None,
@@ -1646,7 +1644,7 @@ mod tests {
             store,
             run_id: "run-1".to_string(),
             registry,
-            media: ModelMedia::new(&["text/*", "image/*"], &["text/*"]),
+            mime: ModelMime::new(&["text/*", "image/*"], &["text/*"]),
             max_stored: 10,
             as_text: Vec::new(),
         };
@@ -1654,7 +1652,7 @@ mod tests {
         // The stage's `as_text` sends a type the registry calls binary as
         // text, when its bytes read as text; a part that chose native keeps it.
         let scene = Blob::new(
-            MediaType::parse("application/x-scene").unwrap(),
+            MimeType::parse("application/x-scene").unwrap(),
             b"v 1 2 3".to_vec(),
         )
         .named("scene.bin");
@@ -1669,11 +1667,11 @@ mod tests {
         as_text.messages.push(Message {
             role: "user".to_string(),
             content: MessageContent::Blocks(vec![
-                ContentBlock::media(&scene).unwrap(),
-                ContentBlock::media(
+                ContentBlock::mime(&scene).unwrap(),
+                ContentBlock::mime(
                     &stored
                         .clone()
-                        .delivered(leviath_core::media::Delivery::Native),
+                        .delivered(leviath_core::mime::Delivery::Native),
                 )
                 .unwrap(),
             ]),
@@ -1703,18 +1701,18 @@ mod tests {
             }
         );
         assert!(
-            forced_blocks[1].is_hydrated_media(),
+            forced_blocks[1].is_hydrated_mime(),
             "a part that chose native keeps it"
         );
         assert!(blocks_of(&MessageContent::Text("t".into())).is_empty());
         let blocks = blocks_of(&request.messages[0].content);
-        assert!(blocks[0].is_hydrated_media());
+        assert!(blocks[0].is_hydrated_mime());
         assert_eq!(
             blocks[1],
             ContentBlock::Text {
                 text: "[image/png, 12 B] a.png".to_string()
             }
         );
-        assert_eq!(leviath_providers::media::media_tokens(&request), 1600);
+        assert_eq!(leviath_providers::mime::mime_tokens(&request), 1600);
     }
 }

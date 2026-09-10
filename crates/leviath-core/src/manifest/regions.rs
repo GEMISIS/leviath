@@ -219,7 +219,7 @@ pub(super) fn parse_region_layout(
 
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
-        // What the region takes, as media type patterns. Each is checked
+        // What the region takes, as mime type patterns. Each is checked
         // here so a typo is a load error and not a region that refuses every
         // write at runtime.
         let accepts = parse_accepts(region_name, region_value.get("accepts"))?;
@@ -404,14 +404,14 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
 /// `tests.rs` holds the published schema to it, and a key read above that is
 /// missing here, or here that is not read above, is the drift it exists to
 /// catch.
-/// `accepts = ["text/*", "image/png"]`: each entry a media type or a
+/// `accepts = ["text/*", "image/png"]`: each entry a mime type or a
 /// `type/*` pattern. Absent or empty means anything.
 pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
     parse_pattern_list(&format!("region '{region_name}'"), "accepts", value)
 }
 
-/// A list of media type patterns under `key` of `what` (a region, a stage's
-/// input table, a tool limit): each entry a media type or a `type/*`
+/// A list of mime type patterns under `key` of `what` (a region, a stage's
+/// input table, a tool limit): each entry a mime type or a `type/*`
 /// pattern, lowercased. Absent means empty.
 pub(super) fn parse_pattern_list(
     what: &str,
@@ -423,22 +423,22 @@ pub(super) fn parse_pattern_list(
     };
     let Some(items) = value.as_array() else {
         return Err(crate::error::Error::ValidationFailed(format!(
-            "{what} has {key} = {value}; expected a list of media types"
+            "{what} has {key} = {value}; expected a list of mime types"
         )));
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let Some(s) = item.as_str() else {
             return Err(crate::error::Error::ValidationFailed(format!(
-                "{what} has {key} entry {item}; expected a media type string"
+                "{what} has {key} entry {item}; expected a mime type string"
             )));
         };
         let s = s.trim().to_ascii_lowercase();
         let valid = match s.split_once('/') {
             Some((kind, "*")) => {
-                kind == "*" || crate::media::MediaType::parse(&format!("{kind}/x")).is_ok()
+                kind == "*" || crate::mime::MimeType::parse(&format!("{kind}/x")).is_ok()
             }
-            Some(_) => crate::media::MediaType::parse(&s).is_ok(),
+            Some(_) => crate::mime::MimeType::parse(&s).is_ok(),
             None => false,
         };
         if !valid {

@@ -149,7 +149,7 @@ pub(in crate::commands::dashboard) enum FieldId {
     RegionMessage,
     RegionSeed,
     RegionDescription,
-    /// The media type patterns the region takes (a chooser).
+    /// The mime type patterns the region takes (a chooser).
     RegionAccepts,
     /// The most stored parts the region keeps.
     RegionMaxStored,
@@ -260,7 +260,7 @@ pub(in crate::commands::dashboard) fn panel_title(panel: &Panel) -> String {
     }
 }
 
-/// A list of media types as a row reads it, or `empty` for none.
+/// A list of mime types as a row reads it, or `empty` for none.
 fn list_or(list: &[String], empty: &str) -> String {
     if list.is_empty() {
         empty.to_string()
@@ -680,7 +680,7 @@ fn io_fields(
             true => "(any)".to_string(),
             false => stage.output_format.clone(),
         }),
-        "The shape of the answer: markdown, json, text, or a media type. Told to the model \
+        "The shape of the answer: markdown, json, text, or a mime type. Told to the model \
          and recorded with the result. Enter picks one, x asks for no shape.",
     ));
     for (i, artifact) in stage.artifacts.iter().enumerate() {
@@ -690,7 +690,7 @@ fn io_fields(
             FieldValue::Row(format!(
                 "{}  {}{}",
                 artifact.name,
-                artifact.media_type,
+                artifact.mime_type,
                 if artifact.required { "  required" } else { "" }
             )),
             "A file the stage hands back beside its answer. Enter opens it in a window, x \
@@ -722,8 +722,8 @@ fn artifact_fields(doc: &ManifestDoc, stage: &str, index: usize) -> Vec<Field> {
         Field::new(
             FieldId::ArtifactType,
             "Type",
-            FieldValue::Row(artifact.media_type),
-            "The media type the file must be, or a pattern it must match: video/mp4, image/*. \
+            FieldValue::Row(artifact.mime_type),
+            "The mime type the file must be, or a pattern it must match: video/mp4, image/*. \
              Enter picks one.",
         ),
         Field::new(
@@ -847,7 +847,7 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
             FieldId::RegionAccepts,
             "Takes",
             FieldValue::Row(list_or(&region.accepts, "any type")),
-            "Media type patterns the region takes: image/*, audio/wav. A write outside them \
+            "Mime type patterns the region takes: image/*, audio/wav. A write outside them \
              is refused with the list. Enter picks the types, x takes anything again.",
         ),
         Field::new(

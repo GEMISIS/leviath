@@ -184,10 +184,10 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.files.listing",
     "runs.files.workdir",
     // `input_types` and `output_types` on every `GET /api/models` entry: the
-    // media type patterns a model takes and hands back. Announced so a
+    // mime type patterns a model takes and hands back. Announced so a
     // console can offer "models that can see this image" without inferring
     // it from names, and can tell a text-only answer from a missing field.
-    "models.media_types",
+    "models.mime_types",
     // `parts` and `multipart/form-data` on `POST /api/agents` and
     // `POST /api/agents/{id}/message`, and `@path` tokens in a task or
     // message resolved inside the run's working directory: a caller can send
@@ -201,12 +201,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `GET /api/agents/{id}/files/raw?path=`: a workdir file's bytes under
     // their own content type, where the JSON files route wraps text.
     "runs.files.raw",
-    // `artifacts` on a run's answer as `{ name, path, media_type, size,
+    // `artifacts` on a run's answer as `{ name, path, mime_type, size,
     // sha256 }` objects rather than paths.
     "runs.result.artifacts",
-    // `GET /api/media`: the effective media registry and where each row
+    // `GET /api/mime`: the effective mime registry and where each row
     // came from.
-    "media.registry",
+    "mime.registry",
     "runs.stages",
     // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
     // the `visits` split beneath them. Without the price a console drawing a
@@ -327,12 +327,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // circle the parameter exists to break: without it a console cannot tell
     // "this agent has no other scripts" from "this daemon does not look".
     "scripts.candidates",
-    // `media_check` as a sixth `kind` on the scripts routes: the byte checks
-    // a media row names, beside the config for the operator's rows and
+    // `mime_check` as a sixth `kind` on the scripts routes: the byte checks
+    // a mime row names, beside the config for the operator's rows and
     // beside the agent for a blueprint's. Announced for the same reason
     // `scripts.providers` is: a console offering the kind to an older
     // daemon would put an editor in front of a 400.
-    "scripts.media_checks",
+    "scripts.mime_checks",
     "config.gateways",
     // `kind`, `header_names` and `models` on each gateway `GET /api/config`
     // reports, and `kind`, `headers` and `models` on what `PUT /api/config`

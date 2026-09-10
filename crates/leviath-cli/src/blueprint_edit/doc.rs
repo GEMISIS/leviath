@@ -183,7 +183,7 @@ pub(crate) struct StageView {
     /// text whatever it takes.
     pub input_as_text: Vec<String>,
     /// The files the stage declares it hands back, in declaration order.
-    pub artifacts: Vec<super::media::ArtifactView>,
+    pub artifacts: Vec<super::mime::ArtifactView>,
     /// `[stages.<name>.output] format`, or empty.
     pub output_format: String,
     /// `[stages.<name>.tool_accepts]`: each tool and what it may be handed,
@@ -400,7 +400,7 @@ pub(crate) struct RegionView {
     pub overflow: Option<u64>,
     /// `description`, or empty.
     pub description: String,
-    /// `accepts`: the media type patterns the region takes; empty is
+    /// `accepts`: the mime type patterns the region takes; empty is
     /// anything.
     pub accepts: Vec<String>,
     /// `max_stored`: the most stored parts it keeps across its entries.
@@ -567,11 +567,11 @@ fn stage_view(name: &str, item: &Item) -> StageView {
                 .and_then(Item::as_table_like)
                 .is_some(),
             is_terminal: transitions.is_some_and(|t| t.is_empty()),
-            input_accepts: super::media::input_list(item, super::media::InputList::Accepts),
-            input_as_text: super::media::input_list(item, super::media::InputList::AsText),
-            artifacts: super::media::artifacts_of(item),
-            output_format: super::media::output_format_of(item),
-            tool_accepts: super::media::tool_limits_of(item),
+            input_accepts: super::mime::input_list(item, super::mime::InputList::Accepts),
+            input_as_text: super::mime::input_list(item, super::mime::InputList::AsText),
+            artifacts: super::mime::artifacts_of(item),
+            output_format: super::mime::output_format_of(item),
+            tool_accepts: super::mime::tool_limits_of(item),
         }
     }
 }

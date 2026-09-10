@@ -27,6 +27,6 @@ pub const ARCHIVE_FILE: &str = "run.lvr";
 /// The blueprint manifest inside an agent directory.
 pub const MANIFEST_FILENAME: &str = "agent.leviath";
 
-/// The directory inside a run holding stored media parts, one file per
+/// The directory inside a run holding stored mime parts, one file per
 /// SHA-256. Referenced from entries and events by hash, never inlined.
 pub const BLOBS_DIR: &str = "blobs";

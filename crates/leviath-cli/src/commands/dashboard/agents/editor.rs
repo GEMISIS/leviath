@@ -9,7 +9,7 @@ use ratatui::text::Line;
 use super::super::state::Dashboard;
 use super::super::types::*;
 use super::McpCatalog;
-use super::choices::{ToolChoice, media_type_options, tool_choices};
+use super::choices::{ToolChoice, mime_type_options, tool_choices};
 use super::inspector::{self, Field, FieldId, FieldValue, Panel, StageTab};
 use crate::blueprint_edit::check::{Problems, check};
 use crate::blueprint_edit::{
@@ -47,9 +47,9 @@ pub(in crate::commands::dashboard) enum PickerFor {
     RoutingTool,
     /// Where a tool's results land.
     RoutingRegion(String),
-    /// The media types of a field: what a region or a stage takes, what a
+    /// The mime types of a field: what a region or a stage takes, what a
     /// tool may be handed, a declared file's type.
-    MediaTypes(FieldId),
+    MimeTypes(FieldId),
 }
 
 /// The panel a window was opened over, kept while the window is up: the
@@ -65,7 +65,7 @@ pub(in crate::commands::dashboard) struct ModalBase {
     pub(in crate::commands::dashboard) anchor: Selection,
 }
 
-/// The chooser row that means "type one in": a media type the list does
+/// The chooser row that means "type one in": a mime type the list does
 /// not have.
 pub(in crate::commands::dashboard) const TYPE_ANOTHER: &str = "another…";
 
@@ -132,8 +132,8 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) modal: Option<ModalBase>,
     /// Where the last frame put the window's rows, for the mouse.
     pub(in crate::commands::dashboard) modal_hit: InspectorHits,
-    /// The media types the choosers offer.
-    pub(in crate::commands::dashboard) media_types: Vec<String>,
+    /// The mime types the choosers offer.
+    pub(in crate::commands::dashboard) mime_types: Vec<String>,
     pub(in crate::commands::dashboard) overlay: Option<Overlay>,
     /// The right-click menu, while one is open.
     pub(in crate::commands::dashboard) menu: Option<super::context_menu::ContextMenu>,
@@ -451,7 +451,7 @@ impl Dashboard {
         models.dedup();
         let mcp = self.agents().mcp.clone();
         let tools = tool_choices(&dir, &name, &doc, &mcp);
-        let media_types = media_type_options(&self.new_run_ctx.config_path, &doc);
+        let mime_types = mime_type_options(&self.new_run_ctx.config_path, &doc);
         // The agent's own servers join the config's in the chooser, asked
         // for their tools the same way.
         let own_servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(text);
@@ -475,7 +475,7 @@ impl Dashboard {
             add_artifact: None,
             modal: None,
             modal_hit: InspectorHits::default(),
-            media_types,
+            mime_types,
             overlay: None,
             menu: None,
             place_next: None,
