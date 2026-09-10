@@ -285,6 +285,22 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     let (task, named, missing) = attach::inline_parts(&task, None, &cwd)?;
     parts.extend(named);
     unresolved.extend(missing);
+    // The dashboard resolves a task's `@path` against its own workdir and hands
+    // the part over, then the line above resolves the same token again against
+    // the current directory - which, for a dashboard whose workdir is where it
+    // was launched, is the same file. Drop the exact repeat (same region, name
+    // and bytes), which no caller ever means; a file attached to two regions,
+    // or two different files, still differs in one of the three.
+    let mut deduped: Vec<leviath_core::media::InboundPart> = Vec::with_capacity(parts.len());
+    for part in parts {
+        let dup = deduped
+            .iter()
+            .any(|k| k.region == part.region && k.name == part.name && k.data == part.data);
+        if !dup {
+            deduped.push(part);
+        }
+    }
+    let parts = deduped;
     check_parts(&source.blueprint, &parts)?;
     attach::warn_unresolved(&unresolved);
 
@@ -2030,6 +2046,57 @@ mod part_tests {
         assert_eq!(args.parts[0].region.as_deref(), Some("art"));
         assert_eq!(args.parts[1].region, None);
         assert_eq!(args.parts[2].region, None);
+    }
+
+    /// The dashboard resolves a task's `@path` into a part and still sends the
+    /// task naming it, so the resolver finds the same file again; the exact
+    /// repeat is dropped. A copy in another region, or a different file, stays.
+    #[test]
+    fn an_exact_repeat_part_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_typed_manifest(&dir.path().join("artist"), TASK_AND_ART);
+        let png = dir.path().join("hero.png");
+        let bytes = b"\x89PNG\r\n\x1a\nbody".to_vec();
+        std::fs::write(&png, &bytes).unwrap();
+        let task = format!("see @{}", png.display());
+        let attached = InboundPart::from_bytes("hero.png", bytes.clone());
+        let args = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            Some(&task),
+            HashMap::new(),
+            vec![attached],
+        ))
+        .unwrap();
+        let names: Vec<&str> = args.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["hero.png"], "the exact repeat was dropped");
+
+        // The same bytes attached to a named region is a different part, and a
+        // different file is too: both are kept beside the task's copy.
+        let other = dir.path().join("other.png");
+        std::fs::write(&other, b"\x89PNG\r\n\x1a\nother").unwrap();
+        let task2 = format!("see @{} and @{}", png.display(), other.display());
+        let art = InboundPart::from_bytes("hero.png", bytes).in_region("art");
+        let args = resolve_spawn_args(request(
+            manifest.to_str().unwrap(),
+            Some(&task2),
+            HashMap::new(),
+            vec![art],
+        ))
+        .unwrap();
+        let mut got: Vec<(Option<&str>, &str)> = args
+            .parts
+            .iter()
+            .map(|p| (p.region.as_deref(), p.name.as_str()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (None, "hero.png"),
+                (None, "other.png"),
+                (Some("art"), "hero.png"),
+            ]
+        );
     }
 
     #[test]

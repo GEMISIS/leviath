@@ -347,6 +347,12 @@ same list.
   note beside it, a button row is its label with nothing in front of it,
   and a stage's *Move up / down in the file* buttons are gone (the paths
   decide the flow, so the order in the file changed nothing) (#400).
+- Starting a run from the dashboard that named a file with `@path` in the task
+  attached that file twice: the screen resolved it against its working
+  directory and the daemon resolved the same token again. A spawn now drops an
+  exact repeat (same region, name and bytes), so the model sees the picture
+  once. A file attached to two regions, or two different files, is unaffected
+  (#400).
 - `lev validate` warns (`blueprint-permission-clamped`) when a stage sets a
   granted tool more permissively than its built-in default, which a downloaded
   blueprint cannot do on its own: the runtime clamps `shell = "allow"` or
