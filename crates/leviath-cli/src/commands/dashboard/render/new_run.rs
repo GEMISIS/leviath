@@ -32,17 +32,30 @@ impl Dashboard {
         self.draw_new_run_agents(frame, panes[0]);
         // The selected blueprint's stage graph sits above the task editor,
         // when the pane has the rows for both; the editor keeps its minimum.
+        // Between them, the Inputs pane, when the blueprint has slots and the
+        // column has the rows for it.
+        self.sync_new_run_inputs();
         let preview_h = super::super::new_run_preview::preview_height(panes[1].height);
-        let task_area = if preview_h > 0 {
-            let right = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(preview_h), Constraint::Min(1)])
-                .split(panes[1]);
-            self.draw_new_run_preview(frame, right[0]);
-            right[1]
-        } else {
-            panes[1]
+        let inputs_h = self.new_run_inputs_height();
+        let inputs_h = match panes[1].height.saturating_sub(preview_h) > inputs_h + 8 {
+            true => inputs_h,
+            false => 0,
         };
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(preview_h),
+                Constraint::Length(inputs_h),
+                Constraint::Min(1),
+            ])
+            .split(panes[1]);
+        if preview_h > 0 {
+            self.draw_new_run_preview(frame, right[0]);
+        }
+        if inputs_h > 0 {
+            self.draw_new_run_inputs(frame, right[1]);
+        }
+        let task_area = right[2];
         self.draw_new_run_task(frame, task_area);
         // The completion floats over the task pane, so it is drawn after it.
         self.draw_file_ref_popup(frame, task_area);
@@ -251,7 +264,14 @@ impl Dashboard {
         match (self.new_run_file_ref, self.new_run_focus) {
             (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ".to_string(),
             (false, NewRunPane::Agents) => format!(
-                " ↑↓ select · type to filter · Tab write task · ^Y {unattended} · F1 help · Esc back "
+                " ↑↓ select · type to filter · Tab {} · ^Y {unattended} · F1 help · Esc back ",
+                match self.new_run_has_inputs() {
+                    true => "inputs",
+                    false => "write task",
+                }
+            ),
+            (false, NewRunPane::Inputs) => format!(
+                " ↑↓ slot · type a file or text · Enter next · Tab write task · Shift+Tab agents · ^Y {unattended} · F1 help "
             ),
             // The formatting chord is named on the pane that has the toolbar,
             // and only there: on the picker it would be a key that does

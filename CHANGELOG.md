@@ -256,6 +256,12 @@ same list.
   `lev validate` prints each stage's limits and warns
   (`tool-accepts-ungranted`) about a limit on a tool the stage does not
   grant (#400).
+- The dashboard's new-run screen has an Inputs box: one slot per region the
+  blueprint takes from the caller beyond the task. A file typed there is
+  attached to that region as a typed part, the way `lev run --pictures
+  @photo.png` is, and text seeds it, so a picture no longer has to ride in
+  the task region to reach an agent from the dashboard. `Tab` from the
+  agent list stops there when the agent has such regions (#400).
 - The dashboard's agent editor is laid out around what moves through a
   stage. Its tabs are *Behaviour*, *Inputs & outputs* (the regions the
   stage reads and what each takes, what it takes beyond them and reads as

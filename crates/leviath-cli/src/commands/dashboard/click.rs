@@ -158,6 +158,7 @@ impl Dashboard {
                 self.toggle_context_row();
             }
             ClickTarget::NewRunStart => self.submit_new_run(),
+            ClickTarget::NewRunInput(index) => self.click_new_run_input(index),
             ClickTarget::ResponseSend => self.submit_input(),
         }
         true

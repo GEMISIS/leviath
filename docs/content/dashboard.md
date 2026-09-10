@@ -145,7 +145,12 @@ skips marked runs that have already finished.
 
 Agent blueprints on the left, the task on the right, and above the task the selected blueprint's
 stage graph, so you can see what an agent will do before you give it a task: how many stages, in
-what order, where it loops back. It follows the selection, previews bundled blueprints that are not
+what order, where it loops back. Between the graph and the task, when the blueprint takes
+[inputs from the caller](/docs/context#seeding-a-region) beyond the task (a `pictures` region with
+`seed = "input"`, a `--diff`), an **Inputs** box with one slot per region: type a file from the
+working directory and it is attached to that region as a typed part, the way
+`lev run --pictures @photo.png` does, or type text and it seeds the region. The slot names what
+the region takes and whether it is required. It follows the selection, previews bundled blueprints that are not
 installed yet from the copy inside the binary, and says so when a manifest cannot be read. It is
 the explorer's canvas showing the whole graph: drag to pan, wheel to zoom; on a screen too short to
 fit both, the task keeps its rows and the preview is skipped. Once
@@ -155,7 +160,8 @@ rather than back into the form.
 | Key | Action |
 |---|---|
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
-| `Tab` / `Enter` | Move from the agent list to the task |
+| `Tab` / `Enter` | Move from the agent list to the inputs, when the agent has any, else to the task |
+| `↑` / `↓` (in the inputs) | Choose a slot. Typing fills it: a file in the working directory is attached to that region, anything else is the region's text (with `@path` inside it attached too). `Enter` moves to the next slot and, after the last, to the task; `Tab` to the task; `Shift+Tab` or `Esc` back to the agent list |
 | `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` also starts it, but only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and `Ctrl+S` or the Start button is the way to submit |
 | `Enter` / `Alt+Enter` | Newline |
 | `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |
@@ -163,7 +169,7 @@ rather than back into the form.
 | `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
 | `F1` | Help. `?` types a question mark here |
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
-| `Esc` or `Shift+Tab` (in the task) | Back to the agent list |
+| `Esc` (in the task) | Back to the agent list; `Shift+Tab` back to the inputs, when there are any |
 
 
 The task box wraps: a task longer than the pane is wide folds onto the next
