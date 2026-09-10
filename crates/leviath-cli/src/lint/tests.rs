@@ -763,7 +763,7 @@ required_tools = ["summarize", "read_file", "shell"]
 allow_blocking_tools = true
 
 [stages.main.tool_permissions]
-shell = "allow"
+shell = "ask"
 "#,
     );
     let findings = lint(&toml, &grouped_env());
@@ -780,7 +780,7 @@ required_tools = ["spawn_agent", "github__create_issue"]
 allow_blocking_tools = true
 
 [stages.main.tool_permissions]
-shell = "allow"
+shell = "ask"
 "#,
     );
     let findings = lint(&toml, &grouped_env());
@@ -1148,7 +1148,7 @@ max_iterations = 10
 available_tools = ["bash"]
 
 [stages.main.tool_permissions]
-bash = "allow"
+bash = "ask"
 "#,
     );
     assert!(lint(&toml, &LintEnv::default()).is_empty());
@@ -3516,5 +3516,80 @@ ghost = ["audio/*"]
             .fix
             .as_deref()
             .is_some_and(|f| f.contains("available_tools"))
+    );
+}
+
+/// A blueprint that sets a tool more permissive than its built-in default is
+/// warned that the runtime clamps it; a tool a blueprint may pre-approve, and
+/// one set no looser than the default, are left alone.
+#[test]
+fn a_blueprint_that_loosens_a_tool_is_told_the_runtime_clamps_it() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["shell", "write_file", "read_file", "web_search"]
+
+[stages.main.tool_permissions]
+shell = "allow"
+write_file = "allow"
+read_file = "allow"
+web_search = "allow"
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let clamped = with_code(&findings, "blueprint-permission-clamped");
+    // shell and write_file default to ask, so allow is clamped; read_file
+    // already defaults to allow (nothing loosened); web_search is on the
+    // pre-approvable list, so a blueprint may grant it.
+    assert_eq!(clamped.len(), 2, "{:?}", codes(&findings));
+    assert!(
+        clamped.iter().any(|f| f.message.contains("shell")),
+        "{clamped:?}"
+    );
+    assert!(
+        clamped.iter().any(|f| f.message.contains("write_file")),
+        "{clamped:?}"
+    );
+    assert!(clamped.iter().all(|f| f.stage.as_deref() == Some("main")));
+    assert!(
+        clamped.iter().all(|f| f.message.contains("clamps it back")
+            && f.fix.as_deref().is_some_and(|x| x.contains("--yolo"))),
+        "{clamped:?}"
+    );
+
+    // A stage that denies a tool (stricter than the default) is not loosening.
+    let strict = lint(
+        &toml.replace("shell = \"allow\"", "shell = \"deny\""),
+        &LintEnv::default(),
+    );
+    assert!(
+        !with_code(&strict, "blueprint-permission-clamped")
+            .iter()
+            .any(|f| f.message.contains("shell")),
+        "{strict:?}"
+    );
+
+    // The agent-level table is checked too, once per tool.
+    let agent_level = manifest(
+        r#"
+[tool_permissions]
+write_file = "allow"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["write_file"]
+"#,
+    );
+    let findings = lint(&agent_level, &LintEnv::default());
+    let clamped = with_code(&findings, "blueprint-permission-clamped");
+    assert_eq!(clamped.len(), 1, "{:?}", codes(&findings));
+    assert!(
+        clamped[0].message.contains("[tool_permissions]"),
+        "{clamped:?}"
     );
 }

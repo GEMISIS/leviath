@@ -347,6 +347,12 @@ same list.
   note beside it, a button row is its label with nothing in front of it,
   and a stage's *Move up / down in the file* buttons are gone (the paths
   decide the flow, so the order in the file changed nothing) (#400).
+- `lev validate` warns (`blueprint-permission-clamped`) when a stage sets a
+  granted tool more permissively than its built-in default, which a downloaded
+  blueprint cannot do on its own: the runtime clamps `shell = "allow"` or
+  `write_file = "allow"` back to its default, so the tool still asks. The line
+  looked like a decision and silenced `implicit-shell-policy` without doing
+  anything; the warning names how to make it stick, or to drop it (#400).
 - A model that cannot call tools (an image model such as Nano Banana, whose
   listing says `supports_tools = false`) was sent every tool call and result
   an earlier stage had left in the shared conversation, and its provider

@@ -288,7 +288,7 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
 }
 
 /// How restrictive a policy is, for clamping. `Allow` < `Ask` < `Deny`.
-fn restrictiveness(p: ToolPolicy) -> u8 {
+pub(crate) fn restrictiveness(p: ToolPolicy) -> u8 {
     match p {
         ToolPolicy::Allow => 0,
         ToolPolicy::Ask => 1,
@@ -759,7 +759,7 @@ fn target_path(target: &str, workdir: &std::path::Path) -> std::path::PathBuf {
 const BLUEPRINT_LOOSENABLE: &[&str] = &["web_search", "web_fetch"];
 
 /// Whether [`BLUEPRINT_LOOSENABLE`] names this tool, under any of its spellings.
-fn blueprint_loosenable(tool_name: &str) -> bool {
+pub(crate) fn blueprint_loosenable(tool_name: &str) -> bool {
     leviath_tools::tool_name_spellings(tool_name).any(|n| BLUEPRINT_LOOSENABLE.contains(&n))
 }
 
@@ -888,7 +888,7 @@ fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Optio
 /// anything unrecognised became `ask`, so a misspelled `deny` resolved to the
 /// more permissive of the two and could then be approved by a session grant or
 /// `--yolo`.
-fn parse_policy_str(s: &str) -> ToolPolicy {
+pub(crate) fn parse_policy_str(s: &str) -> ToolPolicy {
     match s.to_lowercase().as_str() {
         "allow" => ToolPolicy::Allow,
         "deny" => ToolPolicy::Deny,

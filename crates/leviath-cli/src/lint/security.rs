@@ -72,6 +72,86 @@ pub(super) fn lint_tool_policies(
         .collect()
 }
 
+/// Tool policies a blueprint sets more permissively than the built-in default,
+/// which the runtime clamps back unless the operator opts the blueprint in.
+///
+/// A downloaded blueprint cannot grant itself `write_file = "allow"` or
+/// `shell = "allow"`: [`crate::tools::resolve_policy`] clamps a blueprint
+/// policy to the stricter of it and the tool's built-in default unless the
+/// operator sets `[security] allow_blueprint_permissions = true` or the tool
+/// is one of the few a blueprint may pre-approve. Without this warning the
+/// line reads as a decision and is silently undone: the author sets `allow`,
+/// the `implicit-shell-policy` warning goes quiet, and the tool still asks.
+pub(super) fn lint_permission_clamp(
+    stage: &leviath_core::Stage,
+    agent_permissions: &HashMap<String, String>,
+) -> Vec<LintFinding> {
+    use crate::tools::{
+        blueprint_loosenable, default_tool_policy, parse_policy_str, restrictiveness,
+    };
+
+    // A permission on a tool the stage does not grant is already reported as an
+    // orphan; whether a group grant reaches a tool depends on the install, so a
+    // stage with a group is left to the runtime. Only a tool the stage names
+    // itself is judged here.
+    let names_it = |tool: &str| {
+        stage
+            .named_tools()
+            .any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool))
+    };
+    let clamped = |tool: &str, policy: &str| {
+        if !names_it(tool) {
+            return false;
+        }
+        let set = parse_policy_str(policy);
+        let is_builtin = leviath_tools::is_builtin_tool(canonical_tool_name(tool));
+        let default = default_tool_policy(tool, is_builtin);
+        // Loosening = the blueprint's policy is less restrictive than the
+        // default it would be clamped to. A tool on the pre-approvable list is
+        // allowed to loosen, so it is not clamped.
+        restrictiveness(set) < restrictiveness(default) && !blueprint_loosenable(tool)
+    };
+
+    // The stage's own permissions and the agent-level ones it inherits, each
+    // once, most specific first.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (scope, perms) in [
+        ("stages.", &stage.tool_permissions),
+        ("", agent_permissions),
+    ] {
+        for (tool, policy) in perms {
+            let canonical = canonical_tool_name(tool);
+            if !seen.insert(canonical.to_string()) || !clamped(tool, policy) {
+                continue;
+            }
+            let where_ = match scope.is_empty() {
+                true => "[tool_permissions]".to_string(),
+                false => format!("[stages.{}.tool_permissions]", stage.name),
+            };
+            let message = format!(
+                "sets {tool} = \"{policy}\" in {where_}, which a blueprint cannot \
+                 grant on its own, so the runtime clamps it back to its default \
+                 and the tool still asks"
+            );
+            let fix = "run it with --yolo, set [security] allow_blueprint_permissions = true, \
+                       or have the operator set this tool in config.toml; otherwise drop the \
+                       line, since it does nothing"
+                .to_string();
+            out.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "blueprint-permission-clamped",
+                    message,
+                )
+                .in_stage(&stage.name)
+                .with_fix(fix),
+            );
+        }
+    }
+    out
+}
+
 /// Regions whose `seed = { command = "..." }` runs a shell command at spawn.
 ///
 /// This one is an audit line rather than a complaint: the commands run before
