@@ -72,8 +72,10 @@ impl NewRunInput {
                 .any(|p| p == "*/*" || !p.starts_with("text/"))
     }
 
-    /// The dim note beside the key: what the region takes, how many, and
-    /// whether it is required.
+    /// The dim note beside the key: what the region takes, how many, the token
+    /// room it has, and whether it is required. The token budget is the honest
+    /// answer to "how many files fit": the count cap is one limit, the budget
+    /// the other.
     fn note(&self) -> String {
         let mut bits: Vec<String> = Vec::new();
         if !self.accepts.is_empty() {
@@ -81,6 +83,9 @@ impl NewRunInput {
         }
         if self.max_stored > 1 {
             bits.push(format!("up to {}", self.max_stored));
+        }
+        if self.max_tokens > 0 {
+            bits.push(format!("≤{} tok", compact_count(self.max_tokens)));
         }
         if self.required {
             bits.push("required".to_string());
@@ -99,7 +104,7 @@ impl NewRunInput {
             return self.file_spans(on);
         }
         let hint = match self.takes_files() {
-            true => "text, or Ctrl+O to choose files",
+            true => "text, or ^O for files",
             false => "text",
         };
         // Keep the hint visible whenever the field is empty, focused or not, so
@@ -419,6 +424,21 @@ fn focus_colour(focused: bool) -> ratatui::style::Color {
     }
 }
 
+/// A token count shortened for a label: `117000` reads `117k`, `1500` reads
+/// `1.5k`, and anything under a thousand stays exact.
+fn compact_count(n: usize) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        _ => {
+            let thousands = n as f64 / 1000.0;
+            match thousands >= 10.0 {
+                true => format!("{}k", thousands.round() as usize),
+                false => format!("{:.1}k", thousands),
+            }
+        }
+    }
+}
+
 /// `text` cut to `room` cells with an ellipsis.
 fn fit(text: &str, room: usize) -> String {
     if text.chars().count() <= room {
@@ -540,8 +560,12 @@ mod tests {
         assert_eq!(dash.new_run_inputs[0].region, "pictures");
         assert_eq!(dash.new_run_inputs[0].accepts, ["image/*"]);
         assert!(dash.new_run_inputs[0].required);
-        assert_eq!(dash.new_run_inputs[0].note(), " (image/*, required)");
-        assert_eq!(dash.new_run_inputs[1].note(), "");
+        // The note names the type, the token budget, and that it is required.
+        assert_eq!(
+            dash.new_run_inputs[0].note(),
+            " (image/*, ≤100k tok, required)"
+        );
+        assert_eq!(dash.new_run_inputs[1].note(), " (≤1.0k tok)");
         assert!(dash.new_run_has_inputs());
         assert_eq!(dash.new_run_inputs_height(), 4);
         // The same agent again keeps the slots; no agent clears them.
@@ -696,7 +720,10 @@ mod tests {
         dash.open_new_run_screen();
         let text = screen(&mut dash);
         assert!(text.contains("Inputs for looker"), "{text}");
-        assert!(text.contains("pictures (image/*, required)"), "{text}");
+        assert!(
+            text.contains("pictures (image/*, ≤100k tok, required)"),
+            "{text}"
+        );
         // The pictures row takes images only, so it prompts for a file rather
         // than a line of text.
         assert!(text.contains("no files chosen"), "{text}");
@@ -719,6 +746,34 @@ mod tests {
         let text = screen(&mut dash);
         assert!(text.contains("be brief"), "{text}");
         assert_eq!(fit("abcdef", 4), "abc…");
+    }
+
+    /// A slot with nothing worth noting (no type, one file, no budget, not
+    /// required) shows no note at all.
+    #[test]
+    fn a_plain_slot_has_no_note() {
+        let slot = NewRunInput {
+            key: "x".to_string(),
+            region: "x".to_string(),
+            accepts: Vec::new(),
+            required: false,
+            max_stored: 1,
+            max_tokens: 0,
+            edit: LineEdit::new(String::new(), false),
+            files: Vec::new(),
+        };
+        assert_eq!(slot.note(), "");
+    }
+
+    /// The token count in a note is shortened: exact under a thousand, one
+    /// decimal into the thousands, and whole thousands past ten.
+    #[test]
+    fn compact_count_shortens_a_token_figure() {
+        assert_eq!(compact_count(500), "500");
+        assert_eq!(compact_count(1500), "1.5k");
+        assert_eq!(compact_count(1000), "1.0k");
+        assert_eq!(compact_count(100000), "100k");
+        assert_eq!(compact_count(15500), "16k");
     }
 
     /// A file slot shows the files it holds: the names, the count against the
@@ -769,7 +824,7 @@ mod tests {
         dash.new_run_focus = NewRunPane::Inputs;
         dash.new_run_input_selected = 1;
         let text = screen(&mut dash);
-        assert!(text.contains("text, or Ctrl+O to choose files"), "{text}");
+        assert!(text.contains("text, or ^O for files"), "{text}");
     }
 
     /// A file slot opens the picker by key: Space (or Enter) on a file-only
