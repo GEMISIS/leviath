@@ -13,6 +13,7 @@ mod history;
 mod input;
 mod mcp;
 mod new_run;
+mod new_run_inputs;
 mod new_run_preview;
 mod parts;
 mod render;

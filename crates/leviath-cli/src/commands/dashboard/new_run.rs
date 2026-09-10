@@ -12,7 +12,6 @@
 //! `send_spawn` is deliberately not reused: it prints its report on stdout,
 //! which would land in the middle of the alternate screen.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
@@ -73,6 +72,10 @@ impl Dashboard {
         self.refresh_new_run_agents();
         self.select_last_launched_agent();
         self.new_run_files = collect_workdir_files(&self.new_run_ctx.workdir, FILE_CANDIDATE_CAP);
+        // Fresh slots for the agent the screen opened on: what was typed for
+        // a run already started is not what the next one wants.
+        self.new_run_inputs_key.clear();
+        self.sync_new_run_inputs();
     }
 
     /// Open on the agent last launched from here, when it is still offered.
@@ -182,10 +185,22 @@ impl Dashboard {
         // stand-in in the run. A token that names nothing stays text.
         let read =
             crate::commands::run::attach::inline_parts(&task, None, &self.new_run_ctx.workdir);
-        let (task, parts, unresolved) = match read {
+        let (task, mut parts, mut unresolved) = match read {
             Ok(read) => read,
             Err(e) => {
                 self.toast(format!("Could not attach a file: {e}"), ToastLevel::Error);
+                return;
+            }
+        };
+        // The Inputs pane's slots, each to its own region.
+        let regions = match self.new_run_input_values() {
+            Ok(inputs) => {
+                parts.extend(inputs.parts);
+                unresolved.extend(inputs.unresolved);
+                inputs.regions
+            }
+            Err(e) => {
+                self.toast(format!("Could not read an input: {e}"), ToastLevel::Error);
                 return;
             }
         };
@@ -207,6 +222,7 @@ impl Dashboard {
             yolo: self.new_run_yolo,
             yolo_profile: self.new_run_yolo_profile.clone(),
             parts,
+            regions,
         });
         // An unattended start is the warning the toggle gave, restated at the
         // moment it takes effect; an attended one is work in flight, not done.
@@ -417,6 +433,9 @@ impl Dashboard {
             self.remember_md_mode(outcome);
             return;
         }
+        // The slots follow the agent the cursor is on, so a Tab out of the
+        // agent list lands on the right ones.
+        self.sync_new_run_inputs();
         // Ahead of both panes: these belong to the screen, not to whichever
         // half of it currently has the cursor. F1 rather than `?`, which is a
         // question mark in both a filter box and a task.
@@ -434,8 +453,18 @@ impl Dashboard {
         }
         match self.new_run_focus {
             NewRunPane::Agents => self.handle_new_run_agents_key(key.code),
+            NewRunPane::Inputs => self.handle_new_run_inputs_key(key),
             NewRunPane::Task => self.handle_new_run_task_key(key),
             NewRunPane::Start => self.handle_new_run_start_key(key.code),
+        }
+    }
+
+    /// The pane after the agent list: the Inputs pane when the blueprint has
+    /// slots, else straight to the task.
+    fn new_run_pane_after_agents(&self) -> NewRunPane {
+        match self.new_run_has_inputs() {
+            true => NewRunPane::Inputs,
+            false => NewRunPane::Task,
         }
     }
 
@@ -454,7 +483,9 @@ impl Dashboard {
                     self.new_run_selected = 0;
                 }
             },
-            KeyCode::Tab | KeyCode::Enter => self.new_run_focus = NewRunPane::Task,
+            KeyCode::Tab | KeyCode::Enter => {
+                self.new_run_focus = self.new_run_pane_after_agents();
+            }
             KeyCode::BackTab => self.new_run_focus = NewRunPane::Start,
             KeyCode::Up => {
                 self.new_run_selected = self.new_run_selected.saturating_sub(1);
@@ -492,7 +523,12 @@ impl Dashboard {
         match key.code {
             KeyCode::Esc => self.new_run_focus = NewRunPane::Agents,
             KeyCode::Tab => self.new_run_focus = NewRunPane::Start,
-            KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
+            KeyCode::BackTab => {
+                self.new_run_focus = match self.new_run_has_inputs() {
+                    true => NewRunPane::Inputs,
+                    false => NewRunPane::Agents,
+                };
+            }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.submit_new_run();
             }
@@ -654,8 +690,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         yolo_profile: cmd.yolo_profile.clone(),
         allow: Vec::new(),
         max_depth: None,
-        // Region seeds are a `lev run` command line; this screen writes a task.
-        regions: HashMap::new(),
+        regions: cmd.regions,
         no_seed_commands: false,
         output_request: None,
         parts: cmd.parts,
@@ -1046,10 +1081,24 @@ mod tests {
         assert_eq!(dash.new_run_selected, count - 1, "down stops at the end");
     }
 
+    /// A dashboard opening on an agent that takes only a task, so Tab goes
+    /// straight from the agent list to the task. One with caller inputs
+    /// stops at the Inputs pane first; `new_run_inputs` covers that.
+    fn dash_on_a_plain_agent(dir: &Path) -> Dashboard {
+        write_agent(
+            &dir.join("agents").join("plain"),
+            "plain",
+            "takes only a task",
+        );
+        let mut dash = dash_at(dir);
+        dash.last_launched_agent = Some("plain".to_string());
+        dash
+    }
+
     #[test]
     fn tab_and_enter_reach_the_task_editor() {
         let dir = tempfile::tempdir().unwrap();
-        let mut dash = dash_at(dir.path());
+        let mut dash = dash_on_a_plain_agent(dir.path());
         for code in [KeyCode::Tab, KeyCode::Enter] {
             dash.open_new_run_screen();
             dash.handle_new_run_key(key(code));
@@ -1062,7 +1111,7 @@ mod tests {
     #[test]
     fn tab_cycles_agents_task_start_and_backtab_reverses() {
         let dir = tempfile::tempdir().unwrap();
-        let mut dash = dash_at(dir.path());
+        let mut dash = dash_on_a_plain_agent(dir.path());
         dash.open_new_run_screen();
         assert_eq!(dash.new_run_focus, NewRunPane::Agents);
         for expected in [
@@ -1126,7 +1175,7 @@ mod tests {
     #[test]
     fn escape_and_backtab_hand_focus_back_to_the_picker_and_tab_reaches_start() {
         let dir = tempfile::tempdir().unwrap();
-        let mut dash = dash_at(dir.path());
+        let mut dash = dash_on_a_plain_agent(dir.path());
         for code in [KeyCode::Esc, KeyCode::BackTab] {
             dash.open_new_run_screen();
             dash.new_run_focus = NewRunPane::Task;
@@ -1622,6 +1671,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
+                regions: std::collections::HashMap::new(),
             })
             .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
@@ -1674,6 +1724,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
+                regions: std::collections::HashMap::new(),
             },
         )
         .await;
@@ -1701,6 +1752,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
+                regions: std::collections::HashMap::new(),
             })
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)

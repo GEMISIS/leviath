@@ -190,6 +190,8 @@ pub(super) enum ClickTarget {
     ContextRow(usize),
     /// The new-run screen's Start button.
     NewRunStart,
+    /// A slot of the new-run screen's Inputs pane, by index.
+    NewRunInput(usize),
     /// The Send button under the response box (or the Save button under an
     /// in-place document edit): a click sends what was typed.
     ResponseSend,
@@ -552,6 +554,8 @@ pub(super) struct McpContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewRunPane {
     Agents,
+    /// The slots for the blueprint's caller-input regions, when it has any.
+    Inputs,
     Task,
     /// The Start button under the task editor: Enter or Space on it starts
     /// the run, which is how a terminal without the kitty keyboard protocol
@@ -602,8 +606,12 @@ pub(super) struct SpawnCommand {
     pub(super) yolo: bool,
     /// The yolo profile it does that under, when one was picked.
     pub(super) yolo_profile: Option<String>,
-    /// The files the task named with `@path`, read from the workdir.
+    /// The files the task named with `@path`, read from the workdir, and
+    /// the files the Inputs pane's slots named, each in its region.
     pub(super) parts: Vec<leviath_core::media::InboundPart>,
+    /// Text the Inputs pane's slots seed regions with, by caller key: what
+    /// `--<key> text` sends on the command line.
+    pub(super) regions: std::collections::HashMap<String, String>,
 }
 
 /// The result of a [`SpawnCommand`], drained each tick and shown as a toast.

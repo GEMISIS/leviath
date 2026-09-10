@@ -186,6 +186,21 @@ fn a_model_without_tools_gets_its_history_as_prose_and_no_tools() {
     .0;
     assert_eq!(req.tools.len(), 1);
     assert!(format!("{:?}", req.messages).contains("ToolUse"));
+    // A tool-less model on a stage that grants nothing: the usual image
+    // stage. Nothing to leave out, nothing to say about it.
+    let quiet = stage("nano-banana", vec![], None);
+    let req = build_request(
+        &w,
+        None,
+        &quiet,
+        &no_tools,
+        "generate",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert!(req.tools.is_empty());
+    assert!(!format!("{:?}", req.messages).contains("ToolUse"));
 }
 
 // ── build_request branch coverage ──

@@ -621,7 +621,15 @@ system_prompt = "do it"
             .uri(format!("/api/blueprints{extra}"))
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        // The listing scans the installed agents dir as well as `agent_paths`,
+        // so without this a developer's real `~/.leviath/agents` leaks into the
+        // catalog and the pagination fixtures land on a page past the last one
+        // the test reads. Point the installed dir at an empty scope.
+        let empty = tempfile::tempdir().unwrap();
+        let resp = TEST_AGENTS_DIR
+            .scope(empty.path().to_path_buf(), app.oneshot(req))
+            .await
+            .unwrap();
         let status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await

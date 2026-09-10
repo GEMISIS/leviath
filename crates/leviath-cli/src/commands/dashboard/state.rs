@@ -209,6 +209,13 @@ pub(crate) struct Dashboard {
     /// Workdir-relative file paths the `@` completion offers, walked once when
     /// the screen opens rather than per keystroke.
     pub(super) new_run_files: Vec<String>,
+    /// One slot per caller-input region of the selected blueprint.
+    pub(super) new_run_inputs: Vec<super::new_run_inputs::NewRunInput>,
+    /// The slot the Inputs pane's cursor is on.
+    pub(super) new_run_input_selected: usize,
+    /// The agent path the slots were built for, so a selection that has not
+    /// moved keeps what was typed.
+    pub(super) new_run_inputs_key: String,
     /// True while an `@` file reference is being typed, so the completion
     /// popup has the keys.
     pub(super) new_run_file_ref: bool,

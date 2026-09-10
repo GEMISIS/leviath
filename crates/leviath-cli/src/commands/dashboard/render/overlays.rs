@@ -467,9 +467,28 @@ fn new_run_sections() -> Vec<HelpSection> {
                 ("↑ ↓", "select an agent"),
                 ("any letter", "filter the list"),
                 ("backspace", "shorten the filter"),
-                ("tab / enter", "move to the task"),
+                (
+                    "tab / enter",
+                    "move to the inputs, when the agent has any, else to the task",
+                ),
                 ("esc", "clear the filter, then close"),
                 ("F1", "this help (? types a question mark here)"),
+            ],
+        },
+        HelpSection {
+            title: "New run: inputs",
+            entries: vec![
+                (
+                    "↑ ↓",
+                    "choose a slot: one per region the agent takes from the caller",
+                ),
+                (
+                    "type",
+                    "a file in the working directory (attached to that region), or text",
+                ),
+                ("enter", "the next slot; after the last, the task"),
+                ("tab", "the task"),
+                ("shift-tab / esc", "back to the agent list"),
             ],
         },
         HelpSection {
