@@ -341,6 +341,15 @@ same list.
   note beside it, a button row is its label with nothing in front of it,
   and a stage's *Move up / down in the file* buttons are gone (the paths
   decide the flow, so the order in the file changed nothing) (#400).
+- A model that cannot call tools (an image model such as Nano Banana, whose
+  listing says `supports_tools = false`) was sent every tool call and result
+  an earlier stage had left in the shared conversation, and its provider
+  refused the request outright ("Function calling is not enabled for this
+  model"), so a generate stage that a review stage looped back to died on
+  its second visit. Such a model now gets that history as prose, what was
+  called and what came back, and is advertised no tool whatever the stage
+  granted (the run log says so), so an image model can sit inside an
+  iterating graph (#400).
 - The test suite's blueprint route tests wrote their `test-bp-*` blueprints
   into the developer's real `~/.leviath/agents`, and one that failed before
   its own clean-up left them there. They run in a temp dir of their own now,

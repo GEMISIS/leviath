@@ -816,6 +816,12 @@ list rather than adding to it, so name `text/*` too. They are how a local vision
 sent an image instead of a one-line stand-in for it. [Typed media](/docs/media) explains what a
 model does with each type.
 
+`supports_tools = false` is more than "do not offer tools": such a model's provider refuses any
+request that carries a function call, the history included. A stage on that model gets whatever
+tools ran earlier in the run as prose (what was called, what came back) and is advertised no
+tool at all, whatever the stage grants; the run log notes the tools it left out. That is what
+lets an image model sit in a graph beside stages that use tools.
+
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied, and says whether they came from the provider's own listing or this build's table.
 

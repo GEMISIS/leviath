@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 struct Cfg {
     supports_temperature: bool,
     max_output: usize,
+    supports_tools: bool,
 }
 #[async_trait::async_trait]
 impl Provider for Cfg {
@@ -49,6 +50,7 @@ impl Provider for Cfg {
         leviath_providers::ModelCapabilities {
             supports_temperature: self.supports_temperature,
             max_output_tokens: self.max_output,
+            supports_tools: self.supports_tools,
             limits_source: LimitsSource::Builtin,
             ..Default::default()
         }
@@ -84,7 +86,106 @@ fn provider(supports_temperature: bool, max_output: usize) -> Arc<dyn Provider> 
     Arc::new(Cfg {
         supports_temperature,
         max_output,
+        supports_tools: true,
     })
+}
+
+/// A window whose conversation already holds a tool call and its result, the
+/// shape a stage inherits after an earlier stage used tools.
+fn window_with_tool_turns() -> ContextWindow {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 20,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        5000,
+    ));
+    w.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::AssistantTurn {
+            tool_calls: vec![leviath_core::SerializedToolCall {
+                id: "c1".into(),
+                name: "context_append".into(),
+                arguments: serde_json::json!({"region": "feedback", "content": "bigger bars"}),
+                thought_signature: None,
+            }],
+        },
+        String::new(),
+        1,
+    )
+    .unwrap();
+    w.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::ToolResult {
+            tool_call_id: "c1".into(),
+            tool_name: "context_append".into(),
+            is_error: false,
+        },
+        "appended".to_string(),
+        1,
+    )
+    .unwrap();
+    w
+}
+
+/// Regression: an image model (`supports_tools = false`) re-entered after a
+/// stage that called `context_append` was sent that call in its history and
+/// Google refused the request with "Function calling is not enabled for
+/// this model". The request such a model gets carries the history as prose
+/// and advertises no tool, whatever the stage granted.
+#[test]
+fn a_model_without_tools_gets_its_history_as_prose_and_no_tools() {
+    let w = window_with_tool_turns();
+    let si = stage("nano-banana", vec![tool("context_append")], None);
+    let no_tools = Arc::new(Cfg {
+        supports_temperature: true,
+        max_output: 1000,
+        supports_tools: false,
+    }) as Arc<dyn Provider>;
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &no_tools,
+        "generate",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert!(req.tools.is_empty(), "nothing advertised: {:?}", req.tools);
+    let blocks: Vec<&leviath_providers::ContentBlock> = req
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            leviath_providers::MessageContent::Blocks(b) => Some(b.iter()),
+            leviath_providers::MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        blocks
+            .iter()
+            .all(|b| matches!(b, leviath_providers::ContentBlock::Text { .. })),
+        "a tool block reached the request: {blocks:?}"
+    );
+    let text = format!("{:?}", req.messages);
+    assert!(text.contains("called context_append"), "{text}");
+    assert!(text.contains("appended"), "{text}");
+    // The same window to a model that calls tools keeps its structure.
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &provider(true, 1000),
+        "generate",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert_eq!(req.tools.len(), 1);
+    assert!(format!("{:?}", req.messages).contains("ToolUse"));
 }
 
 // ── build_request branch coverage ──
@@ -542,6 +643,7 @@ async fn cfg_provider_metadata_is_exercised() {
     let p = Cfg {
         supports_temperature: true,
         max_output: 1,
+        supports_tools: true,
     };
     assert_eq!(p.name(), "cfg");
     assert_eq!(p.count_tokens("t", "m").await, 1);

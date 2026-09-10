@@ -32,6 +32,7 @@ pub mod provider;
 pub mod rate_limit;
 pub mod rhai_provider;
 pub(crate) mod text_tools;
+pub use text_tools::flatten_tool_turns;
 pub mod tokenizer;
 
 #[cfg(test)]
