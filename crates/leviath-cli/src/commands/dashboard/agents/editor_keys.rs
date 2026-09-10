@@ -392,7 +392,7 @@ impl Dashboard {
             PickerOutcome::Pending => self.editor().picker = Some((purpose, picker)),
             PickerOutcome::Cancelled => {}
             PickerOutcome::ChosenMany(chosen) => match purpose {
-                PickerFor::MediaTypes(id) => {
+                PickerFor::MimeTypes(id) => {
                     let values = chosen
                         .iter()
                         .map(|i| picker.options[*i].value.clone())
@@ -406,7 +406,7 @@ impl Dashboard {
                 match purpose {
                     PickerFor::Field(id) => self.editor_pick(&id, &value),
                     PickerFor::ConnectFrom(from) => self.editor_connect(&from, &value),
-                    PickerFor::MediaTypes(id) => self.editor_settle_types(&id, vec![value]),
+                    PickerFor::MimeTypes(id) => self.editor_settle_types(&id, vec![value]),
                     other => self.editor_settle_more(other, &value),
                 }
             }

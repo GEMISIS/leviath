@@ -407,12 +407,12 @@ pub struct InteractionResponse {
     /// every answer written before parts existed, and on every answer that
     /// is not text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<crate::media::InboundPart>,
+    pub parts: Vec<crate::mime::InboundPart>,
 }
 
 impl InteractionResponse {
     /// The same answer, with files attached.
-    pub fn with_parts(mut self, parts: Vec<crate::media::InboundPart>) -> Self {
+    pub fn with_parts(mut self, parts: Vec<crate::mime::InboundPart>) -> Self {
         self.parts = parts;
         self
     }
@@ -786,7 +786,7 @@ mod tests {
         assert!(!json.contains("parts"), "{json}");
         let parsed: InteractionResponse = serde_json::from_str(&json).unwrap();
         assert!(parsed.parts.is_empty());
-        let with = bare.with_parts(vec![crate::media::InboundPart::from_bytes(
+        let with = bare.with_parts(vec![crate::mime::InboundPart::from_bytes(
             "a.png",
             vec![1, 2, 3],
         )]);

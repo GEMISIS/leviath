@@ -366,7 +366,7 @@ impl BuiltinTools {
                         },
                         "type": {
                             "type": "string",
-                            "description": "The media type (type/subtype), when the file's bytes and name do not say"
+                            "description": "The mime type (type/subtype), when the file's bytes and name do not say"
                         },
                         "deliver": {
                             "type": "string",
@@ -556,7 +556,7 @@ impl BuiltinTools {
                                         "properties": {
                                             "name": { "type": "string", "description": "The name the stage declared for this file, or any name you choose" },
                                             "path": { "type": "string", "description": "The file, relative to the working directory" },
-                                            "type": { "type": "string", "description": "Its media type, when the file's bytes and name do not say" }
+                                            "type": { "type": "string", "description": "Its mime type, when the file's bytes and name do not say" }
                                         },
                                         "required": ["path"]
                                     }
@@ -733,7 +733,7 @@ impl BuiltinTools {
                         },
                         "output_format": {
                             "type": "string",
-                            "description": "Optional shape to ask the sub-agent for its final answer in, overriding its blueprint's. Any label works (markdown, json, xml, a media type, your own); it is passed to the sub-agent, not interpreted here."
+                            "description": "Optional shape to ask the sub-agent for its final answer in, overriding its blueprint's. Any label works (markdown, json, xml, a mime type, your own); it is passed to the sub-agent, not interpreted here."
                         },
                         "output_instructions": {
                             "type": "string",

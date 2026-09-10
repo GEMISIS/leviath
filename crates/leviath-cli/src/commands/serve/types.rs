@@ -650,7 +650,7 @@ pub(super) struct SpawnAgentReq {
     /// `X-Leviath-Signature: sha256=<hex>` HMAC of the body keyed on this secret.
     pub(super) callback_secret: Option<String>,
     /// Ask for the run's final output in a particular shape, overriding what the
-    /// blueprint declares. Any label works - `markdown`, `xml`, `a2ui`, a media
+    /// blueprint declares. Any label works - `markdown`, `xml`, `a2ui`, a mime
     /// type, your own - because nothing converts between shapes: the label and
     /// instructions are handed to the model, which produces the bytes.
     pub(super) output_format: Option<String>,
@@ -1183,9 +1183,9 @@ pub(super) struct ModelEntry {
     pub(super) retires: Option<String>,
     /// USD per million tokens, when the provider's listing quotes a rate.
     pub(super) pricing: Option<leviath_providers::ModelPricing>,
-    /// Media type patterns the model accepts in a request, `text/*` included.
+    /// Mime type patterns the model accepts in a request, `text/*` included.
     pub(super) input_types: Vec<String>,
-    /// Media type patterns the model can hand back.
+    /// Mime type patterns the model can hand back.
     pub(super) output_types: Vec<String>,
 }
 

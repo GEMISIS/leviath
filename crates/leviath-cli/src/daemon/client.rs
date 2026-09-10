@@ -116,7 +116,7 @@ struct RegionSeeds {
     /// Text seeds, keyed by region.
     text: HashMap<String, String>,
     /// Files, each bound for its region.
-    parts: Vec<leviath_core::media::InboundPart>,
+    parts: Vec<leviath_core::mime::InboundPart>,
     /// `@path` tokens that named no file.
     unresolved: Vec<String>,
 }
@@ -130,10 +130,10 @@ struct RegionSeeds {
 /// editor writing the task. A part with no region goes where the task text
 /// goes, so it is checked against that region. An untyped part is not
 /// checked against `accepts`: only the daemon's registry, with the user's
-/// `[media_types]` in it, can say what it is.
+/// `[mime_types]` in it, can say what it is.
 fn check_parts(
     blueprint: &leviath_core::Blueprint,
-    parts: &[leviath_core::media::InboundPart],
+    parts: &[leviath_core::mime::InboundPart],
 ) -> anyhow::Result<()> {
     let regions = &blueprint.context_layout.regions;
     let task_region = regions
@@ -164,7 +164,7 @@ fn check_parts(
                     .join(", ")
             );
         };
-        if let Some(t) = &part.media_type
+        if let Some(t) = &part.mime_type
             && !region.accepts.is_empty()
             && !t.matches_any(&region.accepts)
         {
@@ -224,7 +224,7 @@ pub struct LaunchRequest<'a> {
     pub output_request: Option<leviath_core::output::OutputSpec>,
     /// Files attached with `--attach`, already read: their paths were
     /// relative to where the command ran, which only the caller knows.
-    pub parts: Vec<leviath_core::media::InboundPart>,
+    pub parts: Vec<leviath_core::mime::InboundPart>,
 }
 
 /// Resolve the local inputs of a spawn request: find and parse the manifest,
@@ -291,7 +291,7 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     // was launched, is the same file. Drop the exact repeat (same region, name
     // and bytes), which no caller ever means; a file attached to two regions,
     // or two different files, still differs in one of the three.
-    let mut deduped: Vec<leviath_core::media::InboundPart> = Vec::with_capacity(parts.len());
+    let mut deduped: Vec<leviath_core::mime::InboundPart> = Vec::with_capacity(parts.len());
     for part in parts {
         let dup = deduped
             .iter()
@@ -1974,7 +1974,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 #[cfg(test)]
 mod part_tests {
     use super::*;
-    use leviath_core::media::{InboundPart, MediaType};
+    use leviath_core::mime::{InboundPart, MimeType};
 
     fn write_typed_manifest(dir: &std::path::Path, regions: &str) -> std::path::PathBuf {
         std::fs::create_dir_all(dir).unwrap();
@@ -2106,7 +2106,7 @@ mod part_tests {
         let path = manifest.to_str().unwrap();
         let wav = InboundPart::from_bytes("song.wav", vec![1])
             .in_region("art")
-            .typed(MediaType::parse("audio/wav").unwrap());
+            .typed(MimeType::parse("audio/wav").unwrap());
         let err = resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![wav]))
             .unwrap_err()
             .to_string();
@@ -2137,7 +2137,7 @@ mod part_tests {
              art = { kind = \"pinned\", max_tokens = 4000, accepts = [\"image/*\"] }",
         );
         let wav = InboundPart::from_bytes("song.wav", vec![1])
-            .typed(MediaType::parse("audio/wav").unwrap());
+            .typed(MimeType::parse("audio/wav").unwrap());
         let err = resolve_spawn_args(request(
             manifest.to_str().unwrap(),
             Some("t"),

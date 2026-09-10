@@ -580,12 +580,12 @@ impl Provider for RhaiProvider {
         }
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // What the script's `@input_types` / `@output_types` headers declare,
         // then the operator's entry on top.
-        let base = self.meta.media();
+        let base = self.meta.mime();
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }

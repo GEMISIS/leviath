@@ -8,7 +8,7 @@
 //! the run when it fits the size ceiling, so a later stage and the API see
 //! the file the way they see any other part.
 
-use leviath_core::media::{Blob, MediaRegistry, MediaType, Part, sha256_hex};
+use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part, sha256_hex};
 use leviath_core::output::{Artifact, ArtifactSpec};
 
 use crate::context_setup::PartSink;
@@ -27,7 +27,7 @@ pub(super) struct Ingested {
 struct Named {
     name: Option<String>,
     path: String,
-    declared: Option<MediaType>,
+    declared: Option<MimeType>,
 }
 
 /// Read the `artifacts` argument in either shape.
@@ -54,7 +54,7 @@ fn listed(args: &serde_json::Value) -> Result<Vec<Named>, String> {
                         "[error] an artifact given as an object needs a path".to_string()
                     })?;
                 let declared = match map.get("type").and_then(|v| v.as_str()) {
-                    Some(t) => Some(MediaType::parse(t).map_err(|e| {
+                    Some(t) => Some(MimeType::parse(t).map_err(|e| {
                         format!("[error] artifact '{path}' has type '{t}', which is not one: {e}")
                     })?),
                     None => None,
@@ -118,10 +118,10 @@ pub(super) fn resolve(
         );
     };
     let builtin;
-    let registry: &MediaRegistry = match sink {
+    let registry: &MimeRegistry = match sink {
         Some(s) => s.registry,
         None => {
-            builtin = MediaRegistry::builtin();
+            builtin = MimeRegistry::builtin();
             &builtin
         }
     };
@@ -151,13 +151,13 @@ pub(super) fn resolve(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let name = item.name.unwrap_or_else(|| file_name.clone());
-        let media_type = registry.resolve(item.declared.as_ref(), Some(&file_name), &bytes);
+        let mime_type = registry.resolve(item.declared.as_ref(), Some(&file_name), &bytes);
         if let Some(spec) = declared.iter().find(|d| d.name == name)
-            && !media_type.matches(&spec.media_type)
+            && !mime_type.matches(&spec.mime_type)
         {
             return Err(format!(
-                "[error] artifact '{name}' must be {}, and '{}' is {media_type}",
-                spec.media_type, item.path
+                "[error] artifact '{name}' must be {}, and '{}' is {mime_type}",
+                spec.mime_type, item.path
             ));
         }
         let size = bytes.len() as u64;
@@ -165,17 +165,17 @@ pub(super) fn resolve(
         if let Some(sink) = sink
             && size <= sink.max_part_bytes
         {
-            let blob = Blob::new(media_type.clone(), bytes).named(&name);
+            let blob = Blob::new(mime_type.clone(), bytes).named(&name);
             match sink.store.put(sink.run_id, &blob, sink.registry) {
                 Ok(reference) => parts.push(Part::stored(reference).named(&name)),
-                Err(e) => tracing::warn!(artifact = %name, "[media] artifact not stored: {e}"),
+                Err(e) => tracing::warn!(artifact = %name, "[mime] artifact not stored: {e}"),
             }
         }
         records.retain(|r: &Artifact| r.name != name);
         records.push(Artifact {
             name,
             path: item.path,
-            media_type,
+            mime_type,
             size,
             sha256,
         });
@@ -197,20 +197,20 @@ pub(super) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::{BlobStore, MemoryBlobStore};
+    use leviath_core::mime::{BlobStore, MemoryBlobStore};
     use serde_json::json;
 
     fn specs() -> Vec<ArtifactSpec> {
         vec![
             ArtifactSpec {
                 name: "final".to_string(),
-                media_type: "video/*".to_string(),
+                mime_type: "video/*".to_string(),
                 required: true,
                 description: None,
             },
             ArtifactSpec {
                 name: "notes".to_string(),
-                media_type: "text/*".to_string(),
+                mime_type: "text/*".to_string(),
                 required: false,
                 description: Some("the shot list".to_string()),
             },
@@ -224,7 +224,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.md"), "# shots").unwrap();
         std::fs::write(dir.path().join("big.bin"), vec![0; 64]).unwrap();
         let store = MemoryBlobStore::new();
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let sink = PartSink {
             store: &store,
             registry: &registry,
@@ -241,12 +241,12 @@ mod tests {
         let out = resolve(&args, Some(dir.path()), &specs(), Some(&sink)).unwrap();
         let names: Vec<&str> = out.records.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["final", "notes.md", "notes", "big.bin"]);
-        assert_eq!(out.records[0].media_type.as_str(), "video/mp4");
+        assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert_eq!(out.records[0].size, 12);
         assert_eq!(out.records[0].sha256.len(), 64);
-        assert_eq!(out.records[2].media_type.as_str(), "text/markdown");
+        assert_eq!(out.records[2].mime_type.as_str(), "text/markdown");
         assert_eq!(
-            out.records[3].media_type.as_str(),
+            out.records[3].mime_type.as_str(),
             "application/octet-stream"
         );
         assert_eq!(
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(out.records.len(), 1);
         // Without a sink: typed by the built-in registry, nothing stored.
         let out = resolve(&args, Some(dir.path()), &[], None).unwrap();
-        assert_eq!(out.records[0].media_type.as_str(), "video/mp4");
+        assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert!(out.parts.is_empty());
     }
 
@@ -313,8 +313,8 @@ mod tests {
                 &self,
                 _: &str,
                 _: &Blob,
-                _: &MediaRegistry,
-            ) -> std::io::Result<leviath_core::media::BlobRef> {
+                _: &MimeRegistry,
+            ) -> std::io::Result<leviath_core::mime::BlobRef> {
                 Err(std::io::Error::other("full"))
             }
             fn read(&self, _: &str, _: &str) -> std::io::Result<std::sync::Arc<[u8]>> {
@@ -330,7 +330,7 @@ mod tests {
         assert!(Broken.read("r", "s").is_err());
         assert!(Broken.copy("r", "s", "t").is_err());
         assert!(Broken.list("r").unwrap().is_empty());
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let sink = PartSink {
             store: &Broken,
             registry: &registry,

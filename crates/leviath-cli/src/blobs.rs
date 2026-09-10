@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use leviath_core::media::{MediaRegistry, MediaType, is_sha256_hex};
+use leviath_core::mime::{MimeRegistry, MimeType, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
 use crate::runstate;
@@ -19,7 +19,7 @@ pub(crate) struct BlobEntry {
     /// The store's key: the bytes' sha256.
     pub(crate) sha256: String,
     /// The type the bytes were stored as.
-    pub(crate) media_type: String,
+    pub(crate) mime_type: String,
     /// The name the part carries, when the context gave it one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
@@ -46,11 +46,11 @@ pub(crate) struct BlobEntry {
 impl BlobEntry {
     /// A file name to export the part under: its own name, or its short hash
     /// with the extension the registry gives its type.
-    pub(crate) fn file_name(&self, registry: &MediaRegistry) -> String {
+    pub(crate) fn file_name(&self, registry: &MimeRegistry) -> String {
         export_name(
             self.name.as_deref(),
             &self.sha256,
-            &self.media_type,
+            &self.mime_type,
             registry,
         )
     }
@@ -70,14 +70,14 @@ impl BlobEntry {
 pub(crate) fn export_name(
     name: Option<&str>,
     sha256: &str,
-    media_type: &str,
-    registry: &MediaRegistry,
+    mime_type: &str,
+    registry: &MimeRegistry,
 ) -> String {
     if let Some(name) = name {
         return name.to_string();
     }
     let stem: String = sha256.chars().take(12).collect();
-    let extension = MediaType::parse(media_type)
+    let extension = MimeType::parse(mime_type)
         .ok()
         .and_then(|t| registry.info(&t).extensions.first().cloned());
     match extension {
@@ -121,7 +121,7 @@ pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
                             blob.sha256.clone(),
                             BlobEntry {
                                 sha256: blob.sha256.clone(),
-                                media_type: blob.media_type.to_string(),
+                                mime_type: blob.mime_type.to_string(),
                                 name: part.name.clone(),
                                 size: blob.size,
                                 width: blob.width,
@@ -182,12 +182,12 @@ pub(crate) fn read(run_id: &str, sha256: &str) -> std::io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType};
+    use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType};
 
     fn entry(name: Option<&str>, sha: &str) -> BlobEntry {
         BlobEntry {
             sha256: sha.to_string(),
-            media_type: "image/png".to_string(),
+            mime_type: "image/png".to_string(),
             name: name.map(str::to_string),
             size: 3,
             width: None,
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn an_export_name_is_the_part_name_or_the_hash_with_an_extension() {
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let sha = "0123456789abcdef".repeat(4);
         assert_eq!(
             entry(Some("hero.png"), &sha).file_name(&registry),
@@ -233,9 +233,9 @@ mod tests {
         );
         assert_eq!(entry(None, &sha).file_name(&registry), "0123456789ab.png");
         let mut odd = entry(None, &sha);
-        odd.media_type = "application/x-unknown-thing".to_string();
+        odd.mime_type = "application/x-unknown-thing".to_string();
         assert_eq!(odd.file_name(&registry), "0123456789ab");
-        odd.media_type = "not a type".to_string();
+        odd.mime_type = "not a type".to_string();
         assert_eq!(odd.file_name(&registry), "0123456789ab");
     }
 
@@ -256,9 +256,9 @@ mod tests {
             let run_id = "blob-run";
             runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
             let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
-            let blob = Blob::new(MediaType::parse("image/png").unwrap(), vec![1, 2, 3]);
+            let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]);
             let sha = store
-                .put(run_id, &blob, &MediaRegistry::builtin())
+                .put(run_id, &blob, &MimeRegistry::builtin())
                 .unwrap()
                 .sha256;
             assert_eq!(read(run_id, &sha).unwrap(), vec![1, 2, 3]);

@@ -263,7 +263,7 @@ lev msg <agent-id> "the arm is still wrong, see @marked_up.png" --attach notes.m
 ```
 
 A message can carry files. A `@path` in the text and every `--attach` become typed
-[parts](/docs/media) on the same entry as the words, in the region the message lands in; an
+[parts](/docs/mime) on the same entry as the words, in the region the message lands in; an
 attachment naming another region (`--attach notes.md:brief`) lands there on its own. A part the
 run cannot take (over the size ceiling, or a region that refuses its type) is logged and dropped,
 and the text is still delivered.
@@ -301,7 +301,7 @@ lev respond <request-id> "here" --attach sketch.png:sprites                # or 
 ```
 
 A text answer carries files the way a message does: every `--attach` and every `@path` in the
-words become typed [parts](/docs/media) stored by the run and written beside the answer in the
+words become typed [parts](/docs/mime) stored by the run and written beside the answer in the
 tool result, so the model reads the file where the words mention it. A choice or an approval has
 no text for a file to sit beside, and `--attach` on one is refused. The dashboard and the API take
 the same: a `@path` in a typed reply, and `parts` or a multipart upload on

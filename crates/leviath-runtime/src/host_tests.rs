@@ -550,7 +550,7 @@ async fn serve_runs_the_housekeeper_on_every_redrive() {
         // Handed the world itself, so the hook can install a resource.
         world
             .world_mut()
-            .insert_resource(crate::blob_store::MediaLimits::default());
+            .insert_resource(crate::blob_store::MimeLimits::default());
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }));
     let shutdown = host.world_mut().shutdown_handle();

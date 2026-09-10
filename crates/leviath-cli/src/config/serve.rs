@@ -10,7 +10,7 @@ pub(crate) const DEFAULT_MAX_CONCURRENT_REQUESTS: u64 = 64;
 pub(crate) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// The default ceiling on one request body: 32 MiB, enough for an image or a
-/// short recording, and the same figure as `[media] max_part_bytes`.
+/// short recording, and the same figure as `[mime] max_part_bytes`.
 pub(crate) const DEFAULT_MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `[serve]` in `~/.leviath/config.toml`.

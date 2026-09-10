@@ -99,7 +99,7 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
     ))
 }
 
-/// The listing's `architecture.<key>` words as media type patterns, or
+/// The listing's `architecture.<key>` words as mime type patterns, or
 /// `None` when the entry has no such list.
 fn modalities(entry: &serde_json::Value, key: &str) -> Option<Vec<String>> {
     let words = entry
@@ -110,7 +110,7 @@ fn modalities(entry: &serde_json::Value, key: &str) -> Option<Vec<String>> {
         words
             .iter()
             .filter_map(|w| w.as_str())
-            .filter_map(crate::media_tables::modality_pattern)
+            .filter_map(crate::mime_tables::modality_pattern)
             .map(str::to_string)
             .collect(),
     )
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn architecture_modalities_become_media_patterns() {
+    fn architecture_modalities_become_mime_patterns() {
         let entry = json!({
             "id": "google/gemini-3.5-flash",
             "architecture": {

@@ -163,7 +163,7 @@ pub struct SecurityConfig {
 
     /// Keep a run's tools away from the files that decide what agents may do.
     ///
-    /// **On by default.** `config.toml`, `yolo.toml`, `media_types.toml`,
+    /// **On by default.** `config.toml`, `yolo.toml`, `mime_types.toml`,
     /// the taint gate's `policy.toml` and `rules/`, and the `providers/` and
     /// `tools/` script directories are where permissions are granted, where
     /// the files a run is handed get their types, and where code every later

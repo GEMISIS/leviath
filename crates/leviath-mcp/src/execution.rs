@@ -49,7 +49,7 @@ pub struct ExecutionResult {
     /// The binary blocks the server returned (`image`, `audio`, and a
     /// `resource` carrying a `blob`), decoded, each typed by the server's
     /// `mimeType`. The caller stores them; the executor has nowhere to.
-    pub blobs: Vec<leviath_core::media::Blob>,
+    pub blobs: Vec<leviath_core::mime::Blob>,
 }
 
 /// A registered server's client, shared with every call in flight to it.
@@ -384,7 +384,7 @@ impl ToolExecutor {
 /// that is not base64 is dropped with a warning: the server's bug, and not a
 /// reason to fail a call whose text may still be useful.
 fn push_blob(
-    blobs: &mut Vec<leviath_core::media::Blob>,
+    blobs: &mut Vec<leviath_core::mime::Blob>,
     data: &str,
     mime_type: Option<&str>,
     name: Option<String>,
@@ -397,10 +397,10 @@ fn push_blob(
             return;
         }
     };
-    let media_type = mime_type
-        .and_then(|t| leviath_core::media::MediaType::parse(t).ok())
-        .unwrap_or_else(leviath_core::media::octet_stream);
-    let mut blob = leviath_core::media::Blob::new(media_type, bytes);
+    let mime_type = mime_type
+        .and_then(|t| leviath_core::mime::MimeType::parse(t).ok())
+        .unwrap_or_else(leviath_core::mime::octet_stream);
+    let mut blob = leviath_core::mime::Blob::new(mime_type, bytes);
     if let Some(name) = name {
         blob = blob.named(name);
     }
@@ -933,11 +933,11 @@ mod tests {
             2,
             "the block that is not base64 is dropped"
         );
-        assert_eq!(result.blobs[0].media_type.as_str(), "image/png");
+        assert_eq!(result.blobs[0].mime_type.as_str(), "image/png");
         assert_eq!(result.blobs[0].bytes, b"abc");
         assert_eq!(result.blobs[0].name, None);
         assert_eq!(
-            result.blobs[1].media_type.as_str(),
+            result.blobs[1].mime_type.as_str(),
             "application/octet-stream",
             "a mime type that does not parse falls back"
         );
@@ -1028,10 +1028,10 @@ mod tests {
         assert_eq!(result.text, "");
         assert_eq!(result.blobs.len(), 2);
         assert_eq!(result.blobs[0].name.as_deref(), Some("a.png"));
-        assert_eq!(result.blobs[0].media_type.as_str(), "image/png");
+        assert_eq!(result.blobs[0].mime_type.as_str(), "image/png");
         assert_eq!(result.blobs[1].name.as_deref(), Some("///"));
         assert_eq!(
-            result.blobs[1].media_type.as_str(),
+            result.blobs[1].mime_type.as_str(),
             "application/octet-stream"
         );
     }

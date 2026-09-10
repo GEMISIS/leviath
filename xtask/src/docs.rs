@@ -306,7 +306,7 @@ pub const SCHEMAS: &[&str] = &[
 pub const PUBLISHED_ARTIFACTS: &[&str] = &[
     "config.example.toml",
     "yolo.example.toml",
-    "media_types.example.toml",
+    "mime_types.example.toml",
 ];
 
 /// Every published schema must exist and be parseable JSON, and every other

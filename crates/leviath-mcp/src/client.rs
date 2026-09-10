@@ -100,7 +100,7 @@ pub enum ToolResultContent {
     Image {
         /// Base64-encoded bytes.
         data: String,
-        /// The media type those bytes are in.
+        /// The mime type those bytes are in.
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
@@ -109,7 +109,7 @@ pub enum ToolResultContent {
     Audio {
         /// Base64-encoded bytes.
         data: String,
-        /// The media type those bytes are in.
+        /// The mime type those bytes are in.
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
@@ -124,7 +124,7 @@ pub enum ToolResultContent {
         /// A longer description, when the server supplied one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        /// The media type behind the link, when the server declared it.
+        /// The mime type behind the link, when the server declared it.
         #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
     },

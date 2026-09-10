@@ -129,7 +129,7 @@ that produced it. Reading it from the event avoids a second call and avoids raci
 disk.
 
 `AgentWorld::result(&run_id)` asks for the same thing at any point while the run is loaded. Its
-`artifacts` are the files the run produced, each with a path relative to the workdir, a media
+`artifacts` are the files the run produced, each with a path relative to the workdir, a mime
 type, a size and the hash the run's blob store holds it under.
 
 Files go in the same way. `SpawnSpec::attach` puts an `InboundPart` on the spawn, typed by the

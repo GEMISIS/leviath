@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use leviath_core::media::Part;
+use leviath_core::mime::Part;
 use leviath_core::region::EntryContent;
 use leviath_core::text::{split_at_boundary, substring};
 use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
@@ -64,10 +64,10 @@ pub struct ScriptToolMeta {
     /// `filesystem`). The host drops the tool when the platform can't provide one -
     /// a script self-declares what it depends on. Empty = always available.
     pub required_caps: Vec<String>,
-    /// Media type patterns the tool takes as parts (`@accepts image/*`):
+    /// Mime type patterns the tool takes as parts (`@accepts image/*`):
     /// what it reads with `read_part`. Advisory, for `lev tools` and lint.
     pub accepts: Vec<String>,
-    /// Media type patterns the tool hands back as parts (`@produces`).
+    /// Mime type patterns the tool hands back as parts (`@produces`).
     pub produces: Vec<String>,
 }
 
@@ -111,7 +111,7 @@ impl ScriptToolMeta {
 /// - `// @requires <cap> [<cap>...]` - platform capabilities the tool needs
 ///   (`network`, `shell`, `filesystem`); comma/space-separated, repeatable.
 /// - `// @accepts <type/pattern> [...]` and `// @produces <type/pattern> [...]`:
-///   the media types the tool reads as parts and hands back as parts;
+///   the mime types the tool reads as parts and hands back as parts;
 ///   comma/space-separated, repeatable.
 ///
 /// Non-comment / unrecognized lines are ignored, so a script can mix ordinary
@@ -235,10 +235,10 @@ struct ToolTomlTool {
     /// Platform capabilities the tool requires (`network`, `shell`, `filesystem`).
     #[serde(default)]
     requires: Vec<String>,
-    /// Media type patterns the tool reads as parts.
+    /// Mime type patterns the tool reads as parts.
     #[serde(default)]
     accepts: Vec<String>,
-    /// Media type patterns the tool hands back as parts.
+    /// Mime type patterns the tool hands back as parts.
     #[serde(default)]
     produces: Vec<String>,
 }
@@ -329,16 +329,16 @@ pub trait ScriptHost: Send + Sync {
         Err(format!("this host holds no part named '{name_or_sha}'"))
     }
 
-    /// Store `bytes` as a part of this run, typed as `media_type` when given
+    /// Store `bytes` as a part of this run, typed as `mime_type` when given
     /// (else sniffed) and named `name` when given, returning the part's
     /// summary map. A host with no store refuses.
     fn write_part(
         &self,
         bytes: Vec<u8>,
-        media_type: Option<&str>,
+        mime_type: Option<&str>,
         name: Option<&str>,
     ) -> std::result::Result<serde_json::Value, String> {
-        let _ = (bytes, media_type, name);
+        let _ = (bytes, mime_type, name);
         Err("this host has no blob store to write a part into".to_string())
     }
 
@@ -761,17 +761,17 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
         })
     });
     let h = host.clone();
-    engine.register_fn("write_part", move |bytes: rhai::Blob, media_type: &str| {
+    engine.register_fn("write_part", move |bytes: rhai::Blob, mime_type: &str| {
         guard_dyn("write_part", &mut || {
-            written(h.write_part(bytes.clone(), Some(media_type), None))
+            written(h.write_part(bytes.clone(), Some(mime_type), None))
         })
     });
     let h = host.clone();
     engine.register_fn(
         "write_part",
-        move |bytes: rhai::Blob, media_type: &str, name: &str| {
+        move |bytes: rhai::Blob, mime_type: &str, name: &str| {
             guard_dyn("write_part", &mut || {
-                written(h.write_part(bytes.clone(), Some(media_type), Some(name)))
+                written(h.write_part(bytes.clone(), Some(mime_type), Some(name)))
             })
         },
     );
@@ -2161,14 +2161,14 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
 #[cfg(test)]
 mod parts_tests {
     use super::*;
-    use leviath_core::media::{Blob, BlobStore, MediaRegistry, MediaType, MemoryBlobStore};
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType};
     use std::sync::Mutex;
 
     /// A host over a memory store: what the daemon's host does, minus the
     /// permission layer.
     struct PartsHost {
         store: MemoryBlobStore,
-        registry: MediaRegistry,
+        registry: MimeRegistry,
         parts: Mutex<Vec<Part>>,
         allow_write: bool,
     }
@@ -2176,9 +2176,9 @@ mod parts_tests {
     impl PartsHost {
         fn arc(allow_write: bool) -> Arc<PartsHost> {
             let store = MemoryBlobStore::new();
-            let registry = MediaRegistry::builtin();
+            let registry = MimeRegistry::builtin();
             let blob = Blob::new(
-                MediaType::parse("image/png").unwrap(),
+                MimeType::parse("image/png").unwrap(),
                 b"\x89PNG\r\n\x1a\nhero".to_vec(),
             )
             .named("hero.png");
@@ -2236,13 +2236,13 @@ mod parts_tests {
         fn write_part(
             &self,
             bytes: Vec<u8>,
-            media_type: Option<&str>,
+            mime_type: Option<&str>,
             name: Option<&str>,
         ) -> std::result::Result<serde_json::Value, String> {
             if !self.allow_write {
                 return Err("[denied] write_part".to_string());
             }
-            let declared = media_type.and_then(|t| MediaType::parse(t).ok());
+            let declared = mime_type.and_then(|t| MimeType::parse(t).ok());
             let mt = self.registry.resolve(declared.as_ref(), name, &bytes);
             let blob = Blob::new(mt, bytes).named(name.unwrap_or("part"));
             let r = self.store.put("run", &blob, &self.registry).unwrap();
@@ -2302,7 +2302,7 @@ mod parts_tests {
              let copy = write_part(bytes, \"image/png\", \"copy.png\");\n\
              let typed = write_part(bytes, \"image/png\");\n\
              let sniffed = write_part(bytes);\n\
-             `${bytes.len()} ${all.len()} ${found.name} ${by_sha.name} ${missing == ()} ${copy.name} ${typed.media_type} ${sniffed.media_type}`",
+             `${bytes.len()} ${all.len()} ${found.name} ${by_sha.name} ${missing == ()} ${copy.name} ${typed.mime_type} ${sniffed.mime_type}`",
         );
         let out = execute(&tool, serde_json::json!({}), host.clone());
         assert_eq!(

@@ -274,7 +274,7 @@ pub(crate) fn collect_compaction(
                     tracing::warn!(
                         region = %region_name,
                         parts = %names,
-                        "[media] compaction replaced entries carrying stored parts with a text summary; \
+                        "[mime] compaction replaced entries carrying stored parts with a text summary; \
                          the parts stay in the run's store but leave the window"
                     );
                 }

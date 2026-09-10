@@ -58,7 +58,7 @@ Waiting does not hold a slot on the tool lane, so a parent waiting on a child ca
 child of the capacity it needs to finish.
 
 `seed_context` injects starting material into the child's first pinned region, `parts` hands
-it files this run holds as stored [parts](/docs/media), and
+it files this run holds as stored [parts](/docs/mime), and
 `output_format` / `output_instructions` ask it for a particular shape of answer, overriding its
 blueprint's.
 
@@ -72,7 +72,7 @@ spawn_agent({
 
 A stage can say what a child may be handed: `[stages.<name>.tool_accepts] spawn_agent =
 ["image/*"]` refuses a `parts` entry of any other type by name. See
-[What a tool may be handed](/docs/media#what-a-tool-may-be-handed).
+[What a tool may be handed](/docs/mime#what-a-tool-may-be-handed).
 
 Each named part is read from this run's store and lands in the child's task region as a typed
 part, delivered the way it was here, so a worker sees the image its parent was asked about rather

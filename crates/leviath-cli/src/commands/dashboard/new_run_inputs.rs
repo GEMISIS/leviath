@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use leviath_core::media::InboundPart;
+use leviath_core::mime::InboundPart;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -34,7 +34,7 @@ pub(super) struct NewRunInput {
     pub(super) key: String,
     /// The region the key seeds.
     pub(super) region: String,
-    /// The media type patterns the region takes; empty means anything.
+    /// The mime type patterns the region takes; empty means anything.
     pub(super) accepts: Vec<String>,
     /// Whether the run refuses to start without it.
     pub(super) required: bool,

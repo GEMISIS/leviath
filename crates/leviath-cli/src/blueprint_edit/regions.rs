@@ -207,7 +207,7 @@ impl ManifestDoc {
                 set_or_remove_str(table, "description", &t);
             }
             (RegionField::Accepts, RegionValue::Text(t)) => {
-                let list = super::media::split_list(&t);
+                let list = super::mime::split_list(&t);
                 if list.is_empty() {
                     table.remove("accepts");
                 } else {

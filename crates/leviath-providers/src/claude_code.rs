@@ -618,7 +618,7 @@ mod tests {
         assert!(caps.supports_system_prompt);
         // The subprocess flattens everything to text, so the trait's default
         // answer, text only, is the right one here.
-        assert!(!provider.media("claude-sonnet-4-6").takes_media());
+        assert!(!provider.mime("claude-sonnet-4-6").takes_mime());
     }
 
     #[test]

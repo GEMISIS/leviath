@@ -269,7 +269,7 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
                 .chain(msgs.iter().map(|m| match &m.content {
                     leviath_providers::MessageContent::Text(t) => leviath_core::estimate_tokens(t),
                     leviath_providers::MessageContent::Blocks(bs) => {
-                        bs.iter().map(leviath_providers::media::block_tokens).sum()
+                        bs.iter().map(leviath_providers::mime::block_tokens).sum()
                     }
                 }))
                 .sum();
@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(entries[3]["tool_call_id"], json!("c1"));
         assert_eq!(entries[3]["is_error"], json!(true));
         assert_eq!(entries[0]["parts"][0]["text"], json!("plain"));
-        assert_eq!(entries[0]["parts"][0]["media_type"], json!("text/plain"));
+        assert_eq!(entries[0]["parts"][0]["mime_type"], json!("text/plain"));
     }
 
     // ─── render: happy paths ─────────────────────────────────────────────

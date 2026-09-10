@@ -149,9 +149,9 @@ impl OutputSpec {
 pub struct ArtifactSpec {
     /// What the submission calls it: `final`, `scene`, `track`.
     pub name: String,
-    /// The media type it must be, or a pattern it must match (`video/*`).
+    /// The mime type it must be, or a pattern it must match (`video/*`).
     #[serde(rename = "type")]
-    pub media_type: String,
+    pub mime_type: String,
     /// Whether a submission without it is refused.
     #[serde(default)]
     pub required: bool,
@@ -173,7 +173,7 @@ pub struct Artifact {
     /// The file, relative to the working directory.
     pub path: String,
     /// The file's type.
-    pub media_type: crate::media::MediaType,
+    pub mime_type: crate::mime::MimeType,
     /// Size in bytes.
     #[serde(default)]
     pub size: u64,
@@ -195,7 +195,7 @@ impl Artifact {
         Self {
             name,
             path: path.to_string(),
-            media_type: crate::media::octet_stream(),
+            mime_type: crate::mime::octet_stream(),
             size: 0,
             sha256: String::new(),
         }
@@ -611,7 +611,7 @@ pub fn describe_spec(spec: &OutputSpec) -> String {
             .artifacts
             .iter()
             .map(|a| {
-                let mut line = format!("- {} ({}", a.name, a.media_type);
+                let mut line = format!("- {} ({}", a.name, a.mime_type);
                 if a.required {
                     line.push_str(", required");
                 }
@@ -676,12 +676,12 @@ mod tests {
         assert_eq!(output.descriptor().artifacts, output.artifacts);
         // An answer recorded before artifacts were typed carried bare paths.
         let old: FinalOutputDescriptor = serde_json::from_str(
-            "{\"stage\":\"s\",\"submitted_at\":1,\"artifacts\":[\"a/b.csv\",{\"name\":\"final\",\"path\":\"out.mp4\",\"media_type\":\"video/mp4\",\"size\":9}]}",
+            "{\"stage\":\"s\",\"submitted_at\":1,\"artifacts\":[\"a/b.csv\",{\"name\":\"final\",\"path\":\"out.mp4\",\"mime_type\":\"video/mp4\",\"size\":9}]}",
         )
         .unwrap();
         assert_eq!(old.artifacts[0].name, "b.csv");
         assert_eq!(
-            old.artifacts[0].media_type.as_str(),
+            old.artifacts[0].mime_type.as_str(),
             "application/octet-stream"
         );
         assert_eq!(old.artifacts[1].name, "final");
@@ -712,7 +712,7 @@ mod tests {
     fn declared_artifacts_cascade_whole_and_retire_on_a_reshape() {
         let art = |name: &str| ArtifactSpec {
             name: name.to_string(),
-            media_type: "video/*".to_string(),
+            mime_type: "video/*".to_string(),
             required: true,
             description: None,
         };
@@ -1207,13 +1207,13 @@ mod tests {
             artifacts: vec![
                 ArtifactSpec {
                     name: "final".to_string(),
-                    media_type: "video/mp4".to_string(),
+                    mime_type: "video/mp4".to_string(),
                     required: true,
                     description: Some("the cut".to_string()),
                 },
                 ArtifactSpec {
                     name: "notes".to_string(),
-                    media_type: "text/*".to_string(),
+                    mime_type: "text/*".to_string(),
                     required: false,
                     description: None,
                 },

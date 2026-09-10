@@ -385,10 +385,10 @@ impl Provider for CodexProvider {
         }
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
-        let base = crate::media_tables::codex(model);
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
+        let base = crate::mime_tables::codex(model);
         match self.capability_overrides.get(model) {
-            Some(over) => over.apply_media(base),
+            Some(over) => over.apply_mime(base),
             None => base,
         }
     }

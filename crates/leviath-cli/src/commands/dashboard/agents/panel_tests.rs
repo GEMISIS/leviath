@@ -721,13 +721,13 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     // operator's shows up in it.
     std::fs::write(
         &dash.new_run_ctx.config_path,
-        "[media_types.\"application/x-acme\"]\nfamily = \"model\"\n",
+        "[mime_types.\"application/x-acme\"]\nfamily = \"model\"\n",
     )
     .unwrap();
     // And a row of the blueprint's own, which its runs see on top.
     let manifest = root.join("agents").join("own").join("agent.leviath");
     let mut manifest_text = std::fs::read_to_string(&manifest).unwrap();
-    manifest_text.push_str("\n[media_types.\"application/x-mine\"]\nfamily = \"model\"\n");
+    manifest_text.push_str("\n[mime_types.\"application/x-mine\"]\nfamily = \"model\"\n");
     std::fs::write(&manifest, manifest_text).unwrap();
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     dash.handle_key(key(KeyCode::Char('2')));
@@ -863,13 +863,13 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     dash.handle_key(key(KeyCode::Enter));
     picker_goto(&mut dash, "video/mp4");
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/mp4");
+    assert_eq!(stage(&mut dash).artifacts[0].mime_type, "video/mp4");
     // "another…" with nothing typed leaves the type alone.
     dash.handle_key(key(KeyCode::Enter));
     picker_goto(&mut dash, "another…");
     dash.handle_key(key(KeyCode::Enter));
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/mp4");
+    assert_eq!(stage(&mut dash).artifacts[0].mime_type, "video/mp4");
     dash.handle_key(key(KeyCode::Enter));
     picker_goto(&mut dash, "another…");
     dash.handle_key(key(KeyCode::Enter));
@@ -878,7 +878,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     }
     type_str(&mut dash, "video/x-cut");
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(stage(&mut dash).artifacts[0].media_type, "video/x-cut");
+    assert_eq!(stage(&mut dash).artifacts[0].mime_type, "video/x-cut");
     goto(&mut dash, FieldId::ArtifactRequired);
     dash.handle_key(key(KeyCode::Enter));
     goto(&mut dash, FieldId::ArtifactDescription);
@@ -896,7 +896,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     assert_eq!(
         (
             a.name.as_str(),
-            a.media_type.as_str(),
+            a.mime_type.as_str(),
             a.required,
             a.description.as_str()
         ),

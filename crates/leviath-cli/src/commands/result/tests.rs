@@ -107,7 +107,7 @@ fn artifacts_are_listed_under_the_answer() {
         leviath_core::output::Artifact {
             name: "trend".to_string(),
             path: "charts/trend.svg".to_string(),
-            media_type: leviath_core::media::MediaType::parse("image/svg+xml").unwrap(),
+            mime_type: leviath_core::mime::MimeType::parse("image/svg+xml").unwrap(),
             size: 2048,
             sha256: "abcdef0123456789".repeat(4),
         },

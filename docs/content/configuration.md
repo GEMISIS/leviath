@@ -415,7 +415,7 @@ allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
 allow_blueprint_permissions   = false
-lock_permission_files      = true    # a run may not write config.toml, yolo.toml, media_types.toml, or the script dirs
+lock_permission_files      = true    # a run may not write config.toml, yolo.toml, mime_types.toml, or the script dirs
 shell_env                  = "filtered"   # filtered | strict | custom | inherit
 shell_env_withhold         = []          # names withheld under shell_env = "custom"
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
@@ -439,7 +439,7 @@ credential_store           = "file"   # file | keychain
 
 Six of those need more than a table cell.
 
-**`lock_permission_files`** keeps a run's tools out of `config.toml`, `yolo.toml`, `media_types.toml`, the taint
+**`lock_permission_files`** keeps a run's tools out of `config.toml`, `yolo.toml`, `mime_types.toml`, the taint
 gate's `policy.toml` and `rules/`, and the `providers/` and `tools/` script directories. Those are
 where permissions are granted and where code every later run executes lives, so an agent that
 could write them from inside a run could widen what its next spawn is allowed to do. With the lock
@@ -811,9 +811,9 @@ input_types          = ["text/*", "image/*"]   # what it takes in a request
 output_types         = ["text/*"]              # what it can hand back
 ```
 
-`input_types` and `output_types` are media type patterns, and they replace the provider's
+`input_types` and `output_types` are mime type patterns, and they replace the provider's
 list rather than adding to it, so name `text/*` too. They are how a local vision model gets
-sent an image instead of a one-line stand-in for it. [Typed media](/docs/media) explains what a
+sent an image instead of a one-line stand-in for it. [Typed mime](/docs/mime) explains what a
 model does with each type.
 
 `supports_tools = false` is more than "do not offer tools": such a model's provider refuses any
@@ -825,13 +825,13 @@ lets an image model sit in a graph beside stages that use tools.
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied, and says whether they came from the provider's own listing or this build's table.
 
-## `[media]`
+## `[mime]`
 
-Ceilings on typed media parts: the images, audio, video, documents and models that
-[typed media](/docs/media) moves through regions, tools and outputs. Defaults shown.
+Ceilings on typed mime parts: the images, audio, video, documents and models that
+[typed mime](/docs/mime) moves through regions, tools and outputs. Defaults shown.
 
 ```toml
-[media]
+[mime]
 max_part_bytes = 33554432        # one part, at every ingress (32 MiB)
 inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
 max_stored_per_request = 100     # stored parts one model request carries
@@ -842,12 +842,12 @@ result or a model reply. Text longer than `inline_text_bytes` is stored by hash 
 part and read back as text when a request is built. Beyond `max_stored_per_request` the oldest
 stored parts are left out of a request, with a warning in the run's log.
 
-<a id="media_typestypesubtype"></a>
+<a id="mime_typestypesubtype"></a>
 
-## `[media_types."type/subtype"]`
+## `[mime_types."type/subtype"]`
 
-Rows added to the media registry. They belong in [`media_types.toml`](#media_typestoml) beside
-this file, which is where `lev media init` puts them; a table here still loads, and the file's
+Rows added to the mime registry. They belong in [`mime_types.toml`](#mime_typestoml) beside
+this file, which is where `lev mime init` puts them; a table here still loads, and the file's
 rows layer over it. The row keys are the same in both places.
 
 `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
@@ -1137,7 +1137,7 @@ Everything persistent sits under the data root, `<home>/.leviath`, which `LEVIAT
 |---|---|
 | `config.toml` | This file, created `0600` |
 | `yolo.toml` | The named profiles behind `lev run --yolo=<name>`. See [below](#yolotoml) |
-| `media_types.toml` | Your rows in the media registry: what a type is. See [below](#media_typestoml) |
+| `mime_types.toml` | Your rows in the mime registry: what a type is. See [below](#mime_typestoml) |
 | `mcp-auth.json` | MCP OAuth tokens, created `0600` |
 | `runs/` | One directory per run: `meta.json`, `context.json`, `stages.json`, the `run.lvr` journal, per-stage logs |
 | `agents/` | Blueprints installed by `lev add` |
@@ -1189,17 +1189,17 @@ would not fail cleanly, it would produce nonsense. An older version reads normal
 there and keep everything before it - so an interrupted run still recovers to its last intact
 point.
 
-<a id="media_typestoml"></a>
+<a id="mime_typestoml"></a>
 
-## `media_types.toml`
+## `mime_types.toml`
 
-Your rows in the media registry, which says what each [media type](/docs/media) is, live in
-`media_types.toml` beside `config.toml` (so under the data root, and wherever
+Your rows in the mime registry, which says what each [mime type](/docs/mime) is, live in
+`mime_types.toml` beside `config.toml` (so under the data root, and wherever
 `LEVIATH_CONFIG_PATH` points when that is set). A key is a `type/subtype` or a `type/*`
 pattern; name only what you change, and every other field resolves from the built-in table (the
-exact type, then `type/*`, then `*/*`). `lev media init` writes this example to start from; the
-[live copy](/schema/media_types.example.toml) is the one the tests check, `lev media add` and
-`lev media remove` edit rows in place, and `lev media list` prints the table the file makes with
+exact type, then `type/*`, then `*/*`). `lev mime init` writes this example to start from; the
+[live copy](/schema/mime_types.example.toml) is the one the tests check, `lev mime add` and
+`lev mime remove` edit rows in place, and `lev mime list` prints the table the file makes with
 each row's source. An edit reaches the next run at once and every run already under way within
 the daemon's housekeeping interval of thirty seconds, with nothing restarted.
 
@@ -1224,11 +1224,11 @@ stand_in = "[{type} {size}] {name}"
 | `extensions` | Extensions, without the dot, that imply this type |
 | `magic` | A hex prefix that identifies the bytes |
 | `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
-| `check` | A [Rhai script](/docs/rhai-media-checks), relative to this file's directory, whose `check(bytes, media_type)` refuses bytes that are not what they claim; `""` lifts a check a broader row put on the type |
+| `check` | A [Rhai script](/docs/rhai-mime-checks), relative to this file's directory, whose `check(bytes, mime_type)` refuses bytes that are not what they claim; `""` lifts a check a broader row put on the type |
 
 A misspelled key inside a row is refused, a `check` that cannot be read or compiled is refused
 with its row named, and a file that will not load is skipped by the daemon and reported by
-`lev doctor`, named by path. A `[media_types]` block cut out of an
+`lev doctor`, named by path. A `[mime_types]` block cut out of an
 older `config.toml` loads as it was, wrapper and all. A run's tools may not write the file
 (`lock_permission_files`), since what a file is typed as decides what a model is shown.
 

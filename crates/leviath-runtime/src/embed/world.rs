@@ -75,7 +75,7 @@ pub struct SpawnSpec {
     pub output: Option<leviath_core::output::OutputSpec>,
     /// Files to put in the run's regions as typed parts: on the task region
     /// unless a part names another. Built with [`SpawnSpec::attach`].
-    pub parts: Vec<leviath_core::media::InboundPart>,
+    pub parts: Vec<leviath_core::mime::InboundPart>,
 }
 
 impl SpawnSpec {
@@ -100,14 +100,14 @@ impl SpawnSpec {
     /// Attach a file to the run: bytes with a name, typed by the run's
     /// registry unless the part declares a type, landing in the task region
     /// unless the part names another.
-    pub fn attach(mut self, part: leviath_core::media::InboundPart) -> Self {
+    pub fn attach(mut self, part: leviath_core::mime::InboundPart) -> Self {
         self.parts.push(part);
         self
     }
 
     /// Ask for the final output in `format`, with optional guidance.
     ///
-    /// `format` is carried through untouched: `"markdown"`, `"a2ui"`, a media
+    /// `format` is carried through untouched: `"markdown"`, `"a2ui"`, a mime
     /// type, or a shape invented for this program are all equally valid.
     pub fn output(mut self, format: impl Into<String>, instructions: Option<String>) -> Self {
         self.output = Some(leviath_core::output::OutputSpec {
@@ -481,7 +481,7 @@ impl AgentWorld {
         &self,
         id: &RunId,
         content: &str,
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
     ) -> bool {
         self.ask(|reply| ControlOp::Message {
             agent_id: id.0.clone(),
@@ -759,12 +759,12 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             "edit @hero.png",
             dir.path(),
         )
-        .attach(leviath_core::media::InboundPart::from_bytes(
+        .attach(leviath_core::mime::InboundPart::from_bytes(
             "hero.png",
             vec![1, 2, 3],
         ))
         .attach(
-            leviath_core::media::InboundPart::from_bytes("notes.md", b"# n".to_vec())
+            leviath_core::mime::InboundPart::from_bytes("notes.md", b"# n".to_vec())
                 .in_region("brief"),
         );
         assert_eq!(spec.parts.len(), 2);
@@ -934,7 +934,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                 .send_message_with(
                     &run_id,
                     "and see @sketch.png",
-                    vec![leviath_core::media::InboundPart::from_bytes(
+                    vec![leviath_core::mime::InboundPart::from_bytes(
                         "sketch.png",
                         b"\x89PNG\r\n\x1a\nsketch".to_vec()
                     )],

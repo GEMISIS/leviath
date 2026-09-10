@@ -86,14 +86,14 @@ A run that submits nothing adds nothing. Ask for a shape with `--output-format`,
 carries no field for it.
 
 The files a run produced follow the answer, one `resource_link` block per artifact with its name,
-its media type and a `file://` URI into the session's working directory, so a host can open or
+its mime type and a `file://` URI into the session's working directory, so a host can open or
 show them itself. Nothing is inlined: the host asked for a link it can follow, and a video does not
 belong in a chat stream.
 
 ## Files in a prompt
 
 `initialize` advertises `image` and `audio` prompt capabilities. An `image` or `audio` block's
-bytes, and a `resource` block carrying a `blob`, become typed [parts](/docs/media) on the task
+bytes, and a `resource` block carrying a `blob`, become typed [parts](/docs/mime) on the task
 region, exactly as `lev run --attach` sends them: the daemon stores each one and the model sees it
 natively when the model takes the type, or as a stand-in otherwise. An image or audio block has no
 name in the protocol, so it is named for its kind and position (`image-1.png`); a resource keeps the

@@ -13,7 +13,7 @@ use leviath_core::region::EntryContent;
 pub(super) fn mcp_content(
     tool: &str,
     result: anyhow::Result<leviath_mcp::execution::ExecutionResult>,
-    media: Option<&leviath_tools::ToolMedia>,
+    mime: Option<&leviath_tools::ToolMime>,
 ) -> EntryContent {
     let blobs = match &result {
         Ok(r) if r.success => r.blobs.clone(),
@@ -23,13 +23,13 @@ pub(super) fn mcp_content(
     let attached = blobs
         .into_iter()
         .map(|blob| Attached {
-            declared: Some(blob.media_type.to_string()),
+            declared: Some(blob.mime_type.to_string()),
             name: blob.name,
             data: blob.bytes,
             deliver: None,
         })
         .collect();
-    with_attached(tool, text, attached, media)
+    with_attached(tool, text, attached, mime)
 }
 
 /// A person's answer as the region will hold it: the text, then every file
@@ -38,19 +38,19 @@ pub(super) fn mcp_content(
 pub(super) fn answer_content(
     tool: &str,
     text: String,
-    attached: Vec<leviath_core::media::InboundPart>,
-    media: Option<&leviath_tools::ToolMedia>,
+    attached: Vec<leviath_core::mime::InboundPart>,
+    mime: Option<&leviath_tools::ToolMime>,
 ) -> EntryContent {
     let attached = attached
         .into_iter()
         .map(|part| Attached {
-            declared: part.media_type.map(|t| t.to_string()),
+            declared: part.mime_type.map(|t| t.to_string()),
             name: Some(part.name),
             data: part.data,
             deliver: part.deliver,
         })
         .collect();
-    with_attached(tool, text, attached, media)
+    with_attached(tool, text, attached, mime)
 }
 
 /// Bytes on their way into a region beside some text: an MCP block, or a
@@ -64,7 +64,7 @@ pub(super) struct Attached {
     /// The bytes.
     pub(super) data: Vec<u8>,
     /// How the part should reach a model, when the sender had a preference.
-    pub(super) deliver: Option<leviath_core::media::Delivery>,
+    pub(super) deliver: Option<leviath_core::mime::Delivery>,
 }
 
 /// `text`, then each of `attached` as a stored part. Nothing to attach is
@@ -74,36 +74,36 @@ pub(super) fn with_attached(
     tool: &str,
     text: String,
     attached: Vec<Attached>,
-    media: Option<&leviath_tools::ToolMedia>,
+    mime: Option<&leviath_tools::ToolMime>,
 ) -> EntryContent {
     if attached.is_empty() {
         return text.into();
     }
-    let mut parts = vec![leviath_core::media::Part::text(text)];
+    let mut parts = vec![leviath_core::mime::Part::text(text)];
     for (i, item) in attached.into_iter().enumerate() {
-        let size = leviath_core::media::human_size(item.data.len() as u64);
-        let Some(media) = media else {
+        let size = leviath_core::mime::human_size(item.data.len() as u64);
+        let Some(mime) = mime else {
             let what = match (&item.declared, &item.name) {
                 (Some(declared), _) => format!("{declared} block of {size}"),
                 (None, Some(name)) => format!("'{name}' ({size})"),
                 (None, None) => format!("a file of {size}"),
             };
-            parts.push(leviath_core::media::Part::text(format!(
+            parts.push(leviath_core::mime::Part::text(format!(
                 "[{what} dropped: this run has no blob store]"
             )));
             continue;
         };
-        let media_type = media.type_of(item.declared.as_deref(), item.name.as_deref(), &item.data);
+        let mime_type = mime.type_of(item.declared.as_deref(), item.name.as_deref(), &item.data);
         let name = item
             .name
-            .unwrap_or_else(|| media.name_for(&format!("{tool}-{}", i + 1), &media_type));
-        let blob = leviath_core::media::Blob::new(media_type, item.data).named(name);
-        match media.store(blob) {
+            .unwrap_or_else(|| mime.name_for(&format!("{tool}-{}", i + 1), &mime_type));
+        let blob = leviath_core::mime::Blob::new(mime_type, item.data).named(name);
+        match mime.store(blob) {
             Ok(part) => parts.push(match item.deliver {
                 Some(deliver) => part.delivered(deliver),
                 None => part,
             }),
-            Err(e) => parts.push(leviath_core::media::Part::text(format!(
+            Err(e) => parts.push(leviath_core::mime::Part::text(format!(
                 "[block dropped: {e}]"
             ))),
         }

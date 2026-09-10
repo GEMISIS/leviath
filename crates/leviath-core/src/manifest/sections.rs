@@ -211,24 +211,24 @@ fn parse_artifact_spec(where_: &str, item: &toml::Value) -> Result<crate::output
     let name = text("name")
         .ok_or_else(|| Error::Other(format!("{where_}: an artifact needs a name")))?
         .to_string();
-    let media_type = text("type")
+    let mime_type = text("type")
         .ok_or_else(|| {
             Error::Other(format!(
                 "{where_}: artifact '{name}' needs a type, such as \"video/mp4\" or \"image/*\""
             ))
         })?
         .to_ascii_lowercase();
-    let well_formed = media_type
+    let well_formed = mime_type
         .split_once('/')
         .is_some_and(|(kind, sub)| !kind.is_empty() && !sub.is_empty() && !sub.contains('/'));
     if !well_formed {
         return Err(Error::Other(format!(
-            "{where_}: artifact '{name}' has type '{media_type}', which is not type/subtype"
+            "{where_}: artifact '{name}' has type '{mime_type}', which is not type/subtype"
         )));
     }
     Ok(crate::output::ArtifactSpec {
         name,
-        media_type,
+        mime_type,
         required: table
             .get("required")
             .and_then(|v| v.as_bool())

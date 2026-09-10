@@ -149,7 +149,7 @@ pub(crate) fn message_parts(
     text: &str,
     attach: &[String],
     cwd: &std::path::Path,
-) -> anyhow::Result<(String, Vec<leviath_core::media::InboundPart>)> {
+) -> anyhow::Result<(String, Vec<leviath_core::mime::InboundPart>)> {
     let mut parts = crate::commands::run::attach::attach_all(attach, cwd)?;
     let (text, named, unresolved) = crate::commands::run::attach::inline_parts(text, None, cwd)?;
     parts.extend(named);

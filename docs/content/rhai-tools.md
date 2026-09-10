@@ -46,8 +46,8 @@ object. The recognized directives:
 - `// @requires <cap> [<cap>...]` lists platform capabilities the tool needs (`network`, `shell`,
   `filesystem`), comma or space separated and repeatable. Leviath drops the tool where the platform
   cannot provide one.
-- `// @accepts <type> [...]` and `// @produces <type> [...]` name the media types the tool reads as
-  [parts](/docs/media) and hands back as parts (`image/*`, `audio/wav`), comma or space separated
+- `// @accepts <type> [...]` and `// @produces <type> [...]` name the mime types the tool reads as
+  [parts](/docs/mime) and hands back as parts (`image/*`, `audio/wav`), comma or space separated
   and repeatable. Advisory: `lev tools` shows them, and a stage that needs a `video/mp4` can be
   checked against the tools it holds.
 
@@ -74,12 +74,12 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 | `read_file(path)` | Reads a file, always confined to the workdir |
 | `write_file(path, content)` | Writes a file |
 | `env_var(name)` | Reads an environment variable. Credential-shaped names need [`allow_env_vars`](/docs/configuration#security) |
-| `read_part(name)` | The bytes of a stored [part](/docs/media) the run holds, as a Rhai blob, by file name or by the first six or more characters of its sha256. Reading needs no permission: the part is already the run's |
+| `read_part(name)` | The bytes of a stored [part](/docs/mime) the run holds, as a Rhai blob, by file name or by the first six or more characters of its sha256. Reading needs no permission: the part is already the run's |
 | `write_part(bytes [, type [, name]])` | Stores bytes as a part of the run and returns its map. The type is sniffed when left off, the name made up (`part-3.png`). Gated like `write_file`, and charged to the run's write budget |
 | `list_parts()` | Every stored part the run holds, as maps |
 | `find_part(name)` | One part's map by name or hash prefix, or `()` |
 
-A part map carries `media_type`, `name`, `sha256`, `size`, `width`, `height`, `duration_ms`,
+A part map carries `mime_type`, `name`, `sha256`, `size`, `width`, `height`, `duration_ms`,
 `tokens` and `stand_in`. The parts a tool can name are the ones in the agent's context window when
 the batch was dispatched, plus whatever the tools in that batch wrote. A tool that takes an image by
 name reads `params.image` and calls `read_part` on it; the model names parts the way the stand-in

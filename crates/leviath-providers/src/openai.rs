@@ -460,12 +460,12 @@ impl Provider for OpenAIProvider {
         caps
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
-        // The listing says nothing about media either, so the table answers
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
+        // The listing says nothing about mime either, so the table answers
         // and the operator's entry corrects it.
-        let base = crate::media_tables::openai(model);
+        let base = crate::mime_tables::openai(model);
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -579,7 +579,7 @@ impl OpenAIProvider {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

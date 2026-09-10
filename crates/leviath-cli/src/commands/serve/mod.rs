@@ -22,7 +22,7 @@ mod providers;
 mod request_limits;
 mod runs;
 mod scripts;
-mod scripts_media;
+mod scripts_mime;
 mod search;
 #[cfg(test)]
 mod testutil;
@@ -166,9 +166,9 @@ fn api_router() -> Router<AppState> {
         .route("/api/yolo", get(yolo::list_profiles))
         .route("/api/yolo/test", post(yolo::test_profile))
         .route("/api/yolo/{name}", get(yolo::get_profile))
-        // The effective media registry, so a console can name a type's
+        // The effective mime registry, so a console can name a type's
         // family and extensions the way the daemon will.
-        .route("/api/media", get(blobs::list_media))
+        .route("/api/mime", get(blobs::list_mime))
         // Update - how this copy was installed, and what upgrades it. The
         // console has no other way to know, and printed a macOS-only command
         // to everyone because of it.

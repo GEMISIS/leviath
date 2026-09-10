@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use leviath_core::media::{MediaRegistry, human_size};
+use leviath_core::mime::{MimeRegistry, human_size};
 
 use super::result::export::{self, Opener};
 use crate::blobs::BlobEntry;
@@ -81,17 +81,13 @@ fn render(run_id: &str, entries: &[BlobEntry], json: bool) -> String {
     if entries.is_empty() {
         return format!("Run '{run_id}' holds no stored parts.\n");
     }
-    let registry = MediaRegistry::builtin();
+    let registry = MimeRegistry::builtin();
     let name_width = entries
         .iter()
         .map(|e| e.file_name(&registry).len())
         .max()
         .unwrap_or(0);
-    let type_width = entries
-        .iter()
-        .map(|e| e.media_type.len())
-        .max()
-        .unwrap_or(0);
+    let type_width = entries.iter().map(|e| e.mime_type.len()).max().unwrap_or(0);
     let mut out = format!("Stored parts of run '{run_id}' ({}):\n", entries.len());
     for entry in entries {
         let shape = entry.shape();
@@ -102,7 +98,7 @@ fn render(run_id: &str, entries: &[BlobEntry], json: bool) -> String {
         out.push_str(&format!(
             "  {:<name_width$}  {:<type_width$}  {:>8}  {:>9}  {:>6} tok  sha256:{}  in: {}{missing}\n",
             entry.file_name(&registry),
-            entry.media_type,
+            entry.mime_type,
             human_size(entry.size),
             shape,
             entry.tokens,
@@ -130,7 +126,7 @@ fn fetch(
              of a sha256, of exactly one part); `lev blobs {run_id}` lists them"
         )
     })?;
-    let registry = MediaRegistry::builtin();
+    let registry = MimeRegistry::builtin();
     let file_name = entry.file_name(&registry);
     let bytes = crate::blobs::read(run_id, &entry.sha256).map_err(|e| {
         anyhow::anyhow!("the bytes of '{file_name}' are not in the run's store: {e}")
@@ -139,7 +135,7 @@ fn fetch(
         format!(
             "{}  {}  {}",
             path.display(),
-            entry.media_type,
+            entry.mime_type,
             human_size(bytes.len() as u64)
         )
     };
@@ -174,7 +170,7 @@ fn fetch(
 mod tests {
     use super::*;
     use crate::runstate;
-    use leviath_core::media::{Blob, BlobStore, MediaType, Part};
+    use leviath_core::mime::{Blob, BlobStore, MimeType, Part};
     use leviath_core::region::EntryContent;
     use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
 
@@ -202,7 +198,7 @@ mod tests {
     fn entry(name: Option<&str>, stored: bool) -> BlobEntry {
         BlobEntry {
             sha256: "0123456789abcdef".repeat(4),
-            media_type: "image/png".to_string(),
+            mime_type: "image/png".to_string(),
             name: name.map(str::to_string),
             size: 240 * 1024,
             width: Some(1024),
@@ -217,10 +213,10 @@ mod tests {
     /// A run whose context names one stored PNG and one lost WAV.
     fn seed(run_id: &str) -> String {
         runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
         let png = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nhero".to_vec(),
         )
         .named("hero.png");

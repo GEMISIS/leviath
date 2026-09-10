@@ -108,7 +108,7 @@ pub struct RunArgs {
 
     /// Ask for the final output in a particular shape, overriding whatever the
     /// blueprint declares. Any label works - `markdown`, `json`, `xml`, `a2ui`,
-    /// a media type, a house format - because nothing converts between shapes:
+    /// a mime type, a house format - because nothing converts between shapes:
     /// the label and any instructions are handed to the model, which produces
     /// the bytes. Read the answer back with `lev result <run-id>`.
     ///
@@ -133,7 +133,7 @@ pub struct RunArgs {
 
     /// Attach a file to the run: `path[:region][:type][:text]`. The file lands
     /// in the named region (default: the task region) as a typed part. `:type`
-    /// names its media type when the registry cannot tell; `:text` sends its
+    /// names its mime type when the registry cannot tell; `:text` sends its
     /// bytes to the model as text whatever the model takes. Repeatable. A
     /// `@path` inside the task text does the same for that file.
     #[arg(long, value_name = "PATH[:REGION][:TYPE][:text]")]

@@ -386,12 +386,12 @@ impl Provider for GeminiProvider {
         }
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         let base = self
             .learned
-            .media_corrected(model, crate::media_tables::gemini(model));
+            .mime_corrected(model, crate::mime_tables::gemini(model));
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -591,7 +591,7 @@ impl GeminiProvider {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

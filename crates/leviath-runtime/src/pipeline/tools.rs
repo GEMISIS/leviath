@@ -58,7 +58,7 @@ pub trait ToolService: Send + Sync {
     /// find it off the tick. Called with the whole current list each time;
     /// an empty list means the window holds none. Default no-op for services
     /// whose tools take no parts.
-    fn offer_parts(&self, _entity: Entity, _parts: Vec<leviath_core::media::Part>) {}
+    fn offer_parts(&self, _entity: Entity, _parts: Vec<leviath_core::mime::Part>) {}
 
     /// Re-resolve `entity`'s advertised tool defs for the stage at `stage_index` -
     /// e.g. after new tools were discovered on disk. `None` means "no change"
@@ -373,7 +373,7 @@ pub(crate) fn dispatch_tools(
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     daemon: DaemonServices,
-    media: crate::blob_store::MediaParams,
+    mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     let DaemonServices {
@@ -509,13 +509,13 @@ pub(crate) fn dispatch_tools(
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
-            if crate::media_tools::is_media_tool(&c.name) {
-                let text = crate::media_tools::handle_media_tool(
+            if crate::mime_tools::is_mime_tool(&c.name) {
+                let text = crate::mime_tools::handle_mime_tool(
                     &c.name,
                     &c.arguments,
                     &mut window,
-                    &crate::media_tools::MediaToolContext {
-                        media: &media,
+                    &crate::mime_tools::MimeToolContext {
+                        mime: &mime,
                         entity,
                         run_id: &state.agent_id,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
@@ -633,7 +633,7 @@ pub(crate) fn dispatch_tools(
                     .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
                     .unwrap_or_default();
                 // The store the artifacts go into, when this world has one.
-                let (sources, _) = media.hydration_inputs(entity);
+                let (sources, _) = mime.hydration_inputs(entity);
                 let sink =
                     sources
                         .as_ref()
@@ -641,7 +641,7 @@ pub(crate) fn dispatch_tools(
                             store: store.as_ref(),
                             registry,
                             run_id: &state.agent_id,
-                            max_part_bytes: media.max_part_bytes(),
+                            max_part_bytes: mime.max_part_bytes(),
                         });
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
@@ -880,7 +880,7 @@ pub(crate) fn dispatch_tools(
         // What a tool may read by name: every stored part the window holds
         // right now, offered whole so a stale offer never outlives the entry
         // it came from.
-        let offered: Vec<leviath_core::media::Part> = window
+        let offered: Vec<leviath_core::mime::Part> = window
             .regions
             .iter()
             .flat_map(|r| r.content.iter())

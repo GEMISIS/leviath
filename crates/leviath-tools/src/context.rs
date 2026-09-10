@@ -42,7 +42,7 @@ pub struct ToolContext {
     /// The run's blob store, for a tool that has bytes the model cannot take
     /// as text. `None` in a context built without one, where such a tool
     /// says so instead of storing.
-    pub media: Option<Arc<ToolMedia>>,
+    pub mime: Option<Arc<ToolMime>>,
 }
 
 /// The resolved `[security] shell_env` decision for one run.
@@ -106,13 +106,13 @@ impl ToolContext {
             shell_env: ShellEnvPolicy::default(),
             tools_dir: leviath_core::tools_dir(),
             reserved_names: Vec::new(),
-            media: None,
+            mime: None,
         }
     }
 
     /// Give the tools somewhere to store bytes. Builder-style.
-    pub fn with_media(mut self, media: Arc<ToolMedia>) -> Self {
-        self.media = Some(media);
+    pub fn with_mime(mut self, mime: Arc<ToolMime>) -> Self {
+        self.mime = Some(mime);
         self
     }
 

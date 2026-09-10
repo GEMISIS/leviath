@@ -26,11 +26,11 @@ pub struct ProviderMeta {
     pub max_output_tokens: usize,
     /// Advisory streaming flag (`@supports_streaming`).
     pub supports_streaming: bool,
-    /// Media type patterns the script's models accept (`@input_types`), as
+    /// Mime type patterns the script's models accept (`@input_types`), as
     /// a comma-separated list: `// @input_types text/*, image/*`. Empty means
     /// text only.
     pub input_types: Vec<String>,
-    /// Media type patterns the script's models can hand back
+    /// Mime type patterns the script's models can hand back
     /// (`@output_types`). Empty means text only.
     pub output_types: Vec<String>,
 }
@@ -53,19 +53,19 @@ impl Default for ProviderMeta {
 impl ProviderMeta {
     /// What the script declared its models take and produce; text only when
     /// it declared nothing.
-    pub fn media(&self) -> crate::capabilities::ModelMedia {
-        let mut media = crate::capabilities::ModelMedia::text_only();
+    pub fn mime(&self) -> crate::capabilities::ModelMime {
+        let mut mime = crate::capabilities::ModelMime::text_only();
         if !self.input_types.is_empty() {
-            media.input = self.input_types.clone();
+            mime.input = self.input_types.clone();
         }
         if !self.output_types.is_empty() {
-            media.output = self.output_types.clone();
+            mime.output = self.output_types.clone();
         }
-        media
+        mime
     }
 }
 
-/// A comma-separated list of media type patterns, trimmed and lowercased,
+/// A comma-separated list of mime type patterns, trimmed and lowercased,
 /// keeping only the ones shaped like a type.
 fn parse_type_list(arg: &str) -> Vec<String> {
     arg.split(',')
@@ -195,13 +195,13 @@ fn inference(s, r) { #{} }
         let meta = parse_provider_annotations(src);
         assert_eq!(meta.input_types, vec!["text/*", "image/png"]);
         assert_eq!(meta.output_types, vec!["audio/*"]);
-        let media = meta.media();
-        assert_eq!(media.input, vec!["text/*", "image/png"]);
-        assert_eq!(media.output, vec!["audio/*"]);
+        let mime = meta.mime();
+        assert_eq!(mime.input, vec!["text/*", "image/png"]);
+        assert_eq!(mime.output, vec!["audio/*"]);
         let none = parse_provider_annotations("fn inference(s, r) { #{} }");
         assert!(none.input_types.is_empty());
-        assert_eq!(none.media(), crate::capabilities::ModelMedia::text_only());
+        assert_eq!(none.mime(), crate::capabilities::ModelMime::text_only());
         let input_only = parse_provider_annotations("// @input_types text/*, image/*\n");
-        assert_eq!(input_only.media().output, vec!["text/*"]);
+        assert_eq!(input_only.mime().output, vec!["text/*"]);
     }
 }

@@ -23,7 +23,7 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. A file that is not text (an image, a PDF, a model) is stored as a typed [part](/docs/media) on the result instead, so a model that takes the type sees the bytes and one that does not sees a one-line stand-in. | `path` |
+| `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. A file that is not text (an image, a PDF, a model) is stored as a typed [part](/docs/mime) on the result instead, so a model that takes the type sees the bytes and one that does not sees a one-line stand-in. | `path` |
 | `read_files` | Read several files in one call, separated by path headers. | `paths` (array) |
 | `write_file` | Write content to a file, creating parent directories as needed. | `path`, `content` |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
@@ -127,7 +127,7 @@ back into the system prompt on later turns.
 | `context_read` | Read a section, or a specific keyed entry within it. | `region`, `key` (optional) |
 | `context_delete` | Release an entry the agent is finished with, freeing its tokens. See [letting the agent decide what to forget](/docs/context#letting-the-agent-decide-what-to-forget). | `region`, and one of `key` / `index` / `oldest` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
-| `context_attach` | Put a file from the working directory into a section as a typed [part](/docs/media): an image, a recording, a document. A `key` makes a newer version replace the older one; a `caption` is stored beside it. | `region`, `path`, `key`, `caption`, `type`, `deliver` (all but the first two optional) |
+| `context_attach` | Put a file from the working directory into a section as a typed [part](/docs/mime): an image, a recording, a document. A `key` makes a newer version replace the older one; a `caption` is stored beside it. | `region`, `path`, `key`, `caption`, `type`, `deliver` (all but the first two optional) |
 | `context_export` | Write a stored part back into the working directory, by its file name or the start of its sha256, so a shell tool or a script can work on the bytes. | `name`, `path` (optional) |
 | `todo_add` | Add an open item to a [checklist region](/docs/context#tracking-work-with-a-checklist), returning its id. | `region`, `item` |
 | `todo_done` | Tick a checklist item off. | `region`, `id` |

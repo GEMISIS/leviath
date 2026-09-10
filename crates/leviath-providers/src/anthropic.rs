@@ -552,7 +552,7 @@ impl AnthropicProvider {
                     blocks
                         .iter()
                         .map(|block| {
-                            crate::media::anthropic_block(block).unwrap_or_else(|| {
+                            crate::mime::anthropic_block(block).unwrap_or_else(|| {
                                 serde_json::to_value(block).unwrap_or(serde_json::Value::Null)
                             })
                         })
@@ -954,12 +954,12 @@ impl Provider for AnthropicProvider {
         }
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         let base = self
             .learned
-            .media_corrected(model, crate::media_tables::anthropic(model));
+            .mime_corrected(model, crate::mime_tables::anthropic(model));
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -1072,7 +1072,7 @@ impl AnthropicProvider {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

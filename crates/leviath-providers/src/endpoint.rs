@@ -411,14 +411,14 @@ impl Provider for EndpointProvider {
         caps
     }
 
-    fn media(&self, model: &str) -> crate::capabilities::ModelMedia {
+    fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // A gateway id with a vendor prefix answers from that vendor's table;
         // anything else is text until the operator's entry says otherwise.
         let base = self
             .learned
-            .media_corrected(model, crate::media_tables::by_prefix(model));
+            .mime_corrected(model, crate::mime_tables::by_prefix(model));
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_media(base),
+            Some(o) => o.apply_mime(base),
             None => base,
         }
     }
@@ -481,7 +481,7 @@ impl Provider for EndpointProvider {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {

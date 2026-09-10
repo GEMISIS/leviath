@@ -45,7 +45,7 @@ pub struct SpawnArgs {
     /// region) as a stored part, beside the text it came with. Bytes ride
     /// base64 here; the run's blob store holds them from spawn on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<leviath_core::media::InboundPart>,
+    pub parts: Vec<leviath_core::mime::InboundPart>,
     /// Optional model override (`provider/model` or `model`).
     #[serde(default)]
     pub model: Option<String>,
@@ -362,7 +362,7 @@ pub type Resumer = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 /// The daemon-installed hook run on every safety re-drive, whether or not
 /// anything woke the host: the place for work that has to happen while the
 /// daemon is otherwise idle. The daemon uses it to notice an edited
-/// `config.toml` or `media_types.toml` and re-apply the settings that reach
+/// `config.toml` or `mime_types.toml` and re-apply the settings that reach
 /// runs already under way, so an edit lands within one re-drive interval
 /// rather than at the next spawn. Installed with
 /// [`super::WorldHost::set_housekeeper`]; a no-op when none is set.
@@ -516,7 +516,7 @@ pub enum ControlOp {
         /// Optional target region (defaults to the conversation region).
         target_region: Option<String>,
         /// Files sent with the message, written beside it as stored parts.
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },

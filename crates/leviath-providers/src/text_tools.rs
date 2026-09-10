@@ -153,7 +153,7 @@ fn parse_call_array(body: &str) -> Vec<(String, serde_json::Value)> {
 /// calling is not enabled for this model". The message array stays (this is
 /// not a text-only transport), but every tool block in it becomes plain
 /// text that reads as what happened, so the model sees the story and the
-/// provider sees no function call. Media blocks and text are left alone.
+/// provider sees no function call. Mime blocks and text are left alone.
 pub fn flatten_tool_turns(messages: Vec<Message>) -> Vec<Message> {
     messages
         .into_iter()
@@ -261,7 +261,7 @@ pub fn flatten_messages(messages: &[Message]) -> String {
                         // A text transport has nowhere to put bytes; the
                         // stand-in names the part so the model can still
                         // hand it to a tool.
-                        ContentBlock::Media { part, .. } => {
+                        ContentBlock::Mime { part, .. } => {
                             if !section.is_empty() {
                                 section.push('\n');
                             }
@@ -289,7 +289,7 @@ pub fn flatten_messages(messages: &[Message]) -> String {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 
 #[cfg(test)]
 mod tests {
@@ -466,17 +466,17 @@ mod tests {
     }
 
     /// Every tool block becomes prose a model without tools can read, folded
-    /// into the text beside it; plain text and media are left as they are.
+    /// into the text beside it; plain text and mime are left as they are.
     #[test]
     fn flatten_tool_turns_rewrites_only_the_tool_blocks() {
-        let reg = leviath_core::media::MediaRegistry::builtin();
-        let blob = leviath_core::media::Blob::new(
-            leviath_core::media::MediaType::parse("image/png").unwrap(),
+        let reg = leviath_core::mime::MimeRegistry::builtin();
+        let blob = leviath_core::mime::Blob::new(
+            leviath_core::mime::MimeType::parse("image/png").unwrap(),
             vec![1, 2, 3],
         )
         .named("a.png");
-        let part = leviath_core::media::Part::stored(blob.describe(&reg)).named("a.png");
-        let media = ContentBlock::media(&part).unwrap();
+        let part = leviath_core::mime::Part::stored(blob.describe(&reg)).named("a.png");
+        let mime = ContentBlock::mime(&part).unwrap();
         let blocks_msg = |role: &str, blocks: Vec<ContentBlock>| Message {
             role: role.to_string(),
             content: MessageContent::Blocks(blocks),
@@ -491,7 +491,7 @@ mod tests {
                     ContentBlock::Text {
                         text: "see".to_string(),
                     },
-                    media.clone(),
+                    mime.clone(),
                 ],
             ),
             blocks_msg(
@@ -516,7 +516,7 @@ mod tests {
                         content: "hello".to_string(),
                         is_error: false,
                     },
-                    media.clone(),
+                    mime.clone(),
                     ContentBlock::ToolResult {
                         tool_use_id: "c2".to_string(),
                         content: "no such file".to_string(),
@@ -542,7 +542,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "[tool result]\nhello".to_string()
                 },
-                media,
+                mime,
                 ContentBlock::Text {
                     text: "[tool error]\nno such file".to_string()
                 },

@@ -5,7 +5,7 @@
 //! A multipart body carries a `request` field holding the JSON the route
 //! takes as a plain body, then any number of file fields named `part` or
 //! `part:<region>`, each with a `filename` and a `Content-Type`. A JSON body
-//! instead carries `parts: [{ region?, name?, media_type?, path, deliver?,
+//! instead carries `parts: [{ region?, name?, mime_type?, path, deliver?,
 //! caption? }]`, each `path` resolved inside the run's working directory.
 //! Both end as [`InboundPart`]s on the control request, exactly what
 //! `lev run --attach` sends.
@@ -14,8 +14,8 @@ use std::path::Path;
 
 use axum::extract::multipart::Multipart;
 use axum::http::StatusCode;
-use leviath_core::media::inline_refs::extract;
-use leviath_core::media::{Delivery, InboundPart, MediaType};
+use leviath_core::mime::inline_refs::extract;
+use leviath_core::mime::{Delivery, InboundPart, MimeType};
 use serde::{Deserialize, Serialize};
 
 use super::types::{ApiError, err};
@@ -29,9 +29,9 @@ pub(super) struct PartRef {
     /// The name the part carries; the file name when absent.
     #[serde(default)]
     pub(super) name: Option<String>,
-    /// Its media type, when the bytes and name do not say.
+    /// Its mime type, when the bytes and name do not say.
     #[serde(default)]
-    pub(super) media_type: Option<String>,
+    pub(super) mime_type: Option<String>,
     /// The file, relative to the run's working directory.
     pub(super) path: String,
     /// How it reaches the model: `native`, `text` or `stand_in`.
@@ -106,12 +106,12 @@ pub(super) fn json_parts(
         if let Some(name) = &item.name {
             part.name = name.clone();
         }
-        if let Some(t) = &item.media_type {
-            part.media_type = Some(MediaType::parse(t).map_err(|e| {
+        if let Some(t) = &item.mime_type {
+            part.mime_type = Some(MimeType::parse(t).map_err(|e| {
                 err(
                     StatusCode::BAD_REQUEST,
                     format!(
-                        "part '{}' has media_type '{t}', which is not one: {e}",
+                        "part '{}' has mime_type '{t}', which is not one: {e}",
                         item.path
                     ),
                 )
@@ -142,8 +142,8 @@ pub(super) fn inline_parts(
     let mut parts = Vec::new();
     for r in &extracted.refs {
         let mut part = read_within(&r.path, workdir, max_bytes)?;
-        if let Some(t) = &r.media_type {
-            part.media_type = Some(t.clone());
+        if let Some(t) = &r.mime_type {
+            part.mime_type = Some(t.clone());
         }
         part.region = region.map(str::to_string);
         parts.push(part);
@@ -215,7 +215,7 @@ pub(super) async fn read_multipart(
             .filter(|f| !f.is_empty());
         let declared = field
             .content_type()
-            .and_then(|t| MediaType::parse(t).ok())
+            .and_then(|t| MimeType::parse(t).ok())
             .filter(|t| t.as_str() != "application/octet-stream");
         let data = field.bytes().await.map_err(|e| {
             err(
@@ -242,7 +242,7 @@ pub(super) async fn read_multipart(
         let name = file_name.unwrap_or_else(|| format!("part-{}", parts.len() + 1));
         let mut part = InboundPart::from_bytes(name, data.to_vec());
         part.region = region;
-        part.media_type = declared;
+        part.mime_type = declared;
         parts.push(part);
     }
     let Some(request) = request else {
@@ -306,7 +306,7 @@ mod tests {
         let listed = vec![PartRef {
             region: Some("art".to_string()),
             name: Some("the-hero".to_string()),
-            media_type: Some("image/png".to_string()),
+            mime_type: Some("image/png".to_string()),
             path: "hero.png".to_string(),
             deliver: Some("text".to_string()),
             caption: Some("v1".to_string()),
@@ -314,26 +314,26 @@ mod tests {
         let parts = json_parts(&listed, dir.path(), 1024).unwrap();
         assert_eq!(parts[0].name, "the-hero");
         assert_eq!(parts[0].region.as_deref(), Some("art"));
-        assert_eq!(parts[0].media_type.as_ref().unwrap().as_str(), "image/png");
+        assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/png");
         assert_eq!(parts[0].deliver, Some(Delivery::Text));
         assert_eq!(parts[0].caption.as_deref(), Some("v1"));
         let bare = vec![PartRef {
             region: None,
             name: None,
-            media_type: None,
+            mime_type: None,
             path: "hero.png".to_string(),
             deliver: None,
             caption: None,
         }];
         let parts = json_parts(&bare, dir.path(), 1024).unwrap();
         assert_eq!(parts[0].name, "hero.png");
-        assert_eq!(parts[0].media_type, None);
+        assert_eq!(parts[0].mime_type, None);
 
-        let refused = |path: &str, media_type: Option<&str>, deliver: Option<&str>, max: u64| {
+        let refused = |path: &str, mime_type: Option<&str>, deliver: Option<&str>, max: u64| {
             let listed = vec![PartRef {
                 region: None,
                 name: None,
-                media_type: media_type.map(str::to_string),
+                mime_type: mime_type.map(str::to_string),
                 path: path.to_string(),
                 deliver: deliver.map(str::to_string),
                 caption: None,
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(parts[0].name, "hero.png");
         assert_eq!(parts[0].region.as_deref(), Some("task"));
         let (_, typed) = inline_parts("@hero.png:image/webp", None, dir.path(), 1024).unwrap();
-        assert_eq!(typed[0].media_type.as_ref().unwrap().as_str(), "image/webp");
+        assert_eq!(typed[0].mime_type.as_ref().unwrap().as_str(), "image/webp");
         assert!(typed[0].region.is_none());
         assert_eq!(
             inline_parts("@hero.png", None, dir.path(), 4)
@@ -429,7 +429,7 @@ mod tests {
         // No file name: numbered. An octet-stream type: no type at all, so
         // the daemon sniffs one.
         assert_eq!(body.parts[0].name, "part-1");
-        assert_eq!(body.parts[0].media_type, None);
+        assert_eq!(body.parts[0].mime_type, None);
         assert_eq!(body.parts[0].region, None);
         // `part:` with nothing after the colon is the task region.
         assert_eq!(body.parts[1].name, "a.bin");

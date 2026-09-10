@@ -90,8 +90,8 @@ The metadata directives, all optional:
 | `// @max_context_tokens <int>` | 8192 | the model's whole context window |
 | `// @max_output_tokens <int>` | 4096 | the largest reply the model can produce |
 | `// @supports_streaming <bool>` | false | advisory; real streaming needs a `stream` function |
-| `// @input_types <list>` | `text/*` | media type patterns the script's models accept, comma-separated: `text/*, image/*`. See [typed media](/docs/media) |
-| `// @output_types <list>` | `text/*` | media type patterns the script's models can hand back |
+| `// @input_types <list>` | `text/*` | mime type patterns the script's models accept, comma-separated: `text/*, image/*`. See [typed mime](/docs/mime) |
+| `// @output_types <list>` | `text/*` | mime type patterns the script's models can hand back |
 
 > [!IMPORTANT]
 > `@max_context_tokens` is the window the
@@ -174,15 +174,15 @@ and must return:
                    "cached_tokens": 0, "cache_write_tokens": 0,
                    "cost_usd": 0.0 },
   "finish_reason": "Complete",  // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
-  "parts": [ { "bytes": <blob>, "media_type": "image/png", "name": "hero.png" } ]
+  "parts": [ { "bytes": <blob>, "mime_type": "image/png", "name": "hero.png" } ]
 }
 ```
 
 `parts` is what a model that draws or speaks handed back, and is usually absent. Each entry
-carries its bytes as a Rhai blob under `bytes` or as base64 under `data`, a `media_type`
+carries its bytes as a Rhai blob under `bytes` or as base64 under `data`, a `mime_type`
 (`application/octet-stream` when missing or unparsable, which the run's registry sniffs past),
 and an optional `name`. An entry with no bytes is skipped. A stream chunk takes the same key.
-See [Media](/docs/media#what-a-model-hands-back) for where the parts go.
+See [Mime](/docs/mime#what-a-model-hands-back) for where the parts go.
 
 `finish_reason` also accepts the common wire spellings (`tool_calls`, `tool_use`, `length`,
 `max_tokens`, `stop_sequence`), and anything unrecognized reads as `Complete`, so most APIs'

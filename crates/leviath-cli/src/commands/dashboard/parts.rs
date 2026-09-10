@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use leviath_core::media::{InboundPart, MediaRegistry, Part};
+use leviath_core::mime::{InboundPart, MimeRegistry, Part};
 
 use super::context_tree::TreeRow;
 use super::state::Dashboard;
@@ -110,15 +110,15 @@ impl Dashboard {
 
 /// The file name a part exports under.
 fn export_name_of(part: &Part) -> String {
-    let (sha, media_type) = part
+    let (sha, mime_type) = part
         .blob()
-        .map(|b| (b.sha256.as_str(), b.media_type.as_str()))
+        .map(|b| (b.sha256.as_str(), b.mime_type.as_str()))
         .unwrap_or_default();
     crate::blobs::export_name(
         part.name.as_deref(),
         sha,
-        media_type,
-        &MediaRegistry::builtin(),
+        mime_type,
+        &MimeRegistry::builtin(),
     )
 }
 
@@ -136,7 +136,7 @@ mod tests {
     use crate::commands::dashboard::types::{AgentDisplayStatus, DashboardAgent};
     use crate::runstate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use leviath_core::media::{Blob, BlobStore, MediaType};
+    use leviath_core::mime::{Blob, BlobStore, MimeType};
     use leviath_core::region::EntryContent;
     use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
 
@@ -183,11 +183,11 @@ mod tests {
         runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
         let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
         let png = Blob::new(
-            MediaType::parse("image/png").unwrap(),
+            MimeType::parse("image/png").unwrap(),
             b"\x89PNG\r\n\x1a\nhero".to_vec(),
         )
         .named("hero.png");
-        let stored = Part::stored(store.put(run_id, &png, &MediaRegistry::builtin()).unwrap())
+        let stored = Part::stored(store.put(run_id, &png, &MimeRegistry::builtin()).unwrap())
             .named("hero.png");
         let sha = stored.blob().unwrap().sha256.clone();
         let mut agent = test_agent(run_id);

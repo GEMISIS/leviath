@@ -453,7 +453,7 @@ pub(crate) fn lint_manifest(
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
-    findings.extend(lint_media_types(blueprint));
+    findings.extend(lint_mime_types(blueprint));
     for stage in &blueprint.stages {
         let keys = declared.stage(&stage.name);
         findings.extend(lint_declarations(stage, keys));
@@ -464,7 +464,7 @@ pub(crate) fn lint_manifest(
         findings.extend(lint_models(stage, env));
         findings.extend(lint_output_stage(stage));
         findings.extend(lint_fanout_escape(stage));
-        findings.extend(lint_stage_media(blueprint, stage));
+        findings.extend(lint_stage_mime(blueprint, stage));
         findings.extend(lint_tool_accepts(stage));
     }
 
@@ -610,9 +610,9 @@ impl Declared {
 // than re-exported: `lint_manifest` is the only caller and the only entry point
 // anyone outside this module needs, so the individual checks stay internal.
 mod checks;
-mod media;
+mod mime;
 use checks::*;
-use media::*;
+use mime::*;
 mod security;
 use security::*;
 

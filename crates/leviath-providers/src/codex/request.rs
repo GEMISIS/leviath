@@ -223,11 +223,11 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
         }
         MessageContent::Blocks(blocks) => {
             let mut text = String::new();
-            // Media parts waiting for the message item that carries them,
+            // Mime parts waiting for the message item that carries them,
             // beside the text gathered so far.
-            let mut media: Vec<Value> = Vec::new();
-            let flush = |input: &mut Vec<Value>, text: &mut String, media: &mut Vec<Value>| {
-                if text.is_empty() && media.is_empty() {
+            let mut mime: Vec<Value> = Vec::new();
+            let flush = |input: &mut Vec<Value>, text: &mut String, mime: &mut Vec<Value>| {
+                if text.is_empty() && mime.is_empty() {
                     return;
                 }
                 let mut parts = Vec::new();
@@ -237,7 +237,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         "text": std::mem::take(text),
                     }));
                 }
-                parts.append(media);
+                parts.append(mime);
                 input.push(json!({
                     "type": "message",
                     "role": message.role,
@@ -252,8 +252,8 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         }
                         text.push_str(t);
                     }
-                    ContentBlock::Media { .. } => {
-                        media.extend(crate::media::codex_part(block));
+                    ContentBlock::Mime { .. } => {
+                        mime.extend(crate::mime::codex_part(block));
                     }
                     ContentBlock::ToolUse {
                         id,
@@ -261,7 +261,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         input: args,
                         ..
                     } => {
-                        flush(input, &mut text, &mut media);
+                        flush(input, &mut text, &mut mime);
                         input.push(json!({
                             "type": "function_call",
                             // `call_id`, not the item id. The response carries
@@ -277,7 +277,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         content,
                         is_error,
                     } => {
-                        flush(input, &mut text, &mut media);
+                        flush(input, &mut text, &mut mime);
                         // There is no error flag on this item, and dropping the
                         // distinction would present a failure to the model as a
                         // result. The marker goes in the text instead.
@@ -293,7 +293,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                     }
                 }
             }
-            flush(input, &mut text, &mut media);
+            flush(input, &mut text, &mut mime);
         }
     }
 }
@@ -359,6 +359,6 @@ fn cache_key(request: &InferenceRequest) -> String {
 }
 
 #[cfg(test)]
-mod media_tests;
+mod mime_tests;
 #[cfg(test)]
 mod tests;

@@ -303,12 +303,12 @@ read-only, and every access is checked against the symlink-resolved real path. R
 `lev validate` to see which of them the config on this machine actually grants. See
 [Security](/docs/security) for the grant stanzas and the full matching rules.
 
-## Media types the agent brings
+## Mime types the agent brings
 
 An agent whose tools make or take a format nothing else knows can describe it itself:
 
 ```toml
-[media_types."application/x-acme-scene"]
+[mime_types."application/x-acme-scene"]
 family = "model"
 extensions = ["scene"]
 magic = "41434D45"
@@ -316,12 +316,12 @@ check = "checks/scene.rhai"      # relative to this directory; refuses bytes tha
 ```
 
 The rows are the same shape as the operator's
-[`media_types.toml`](/docs/configuration#media_typestoml) and layer over it for this agent's
+[`mime_types.toml`](/docs/configuration#mime_typestoml) and layer over it for this agent's
 runs only, so a blueprint travels with the types it needs and never changes what another agent
 sees. They are checked when the manifest is parsed, so a misspelled field fails `lev validate`
 and the spawn, and a `check` script is compiled beside the agent's other scripts with the same
-fence: it has to live inside the blueprint's directory. [Media](/docs/media#the-registry) has
-every field and [Rhai media checks](/docs/rhai-media-checks) the script.
+fence: it has to live inside the blueprint's directory. [Mime](/docs/mime#the-registry) has
+every field and [Rhai mime checks](/docs/rhai-mime-checks) the script.
 
 ## How the coding agent verifies its work
 

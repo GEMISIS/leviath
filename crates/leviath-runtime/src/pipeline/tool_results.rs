@@ -147,16 +147,16 @@ pub(crate) fn apply_tool_results(
     );
 }
 
-/// A reply as the assistant turn records it: its text and any media the
+/// A reply as the assistant turn records it: its text and any mime the
 /// model produced beside its tool calls.
 pub(crate) struct Reply<'a> {
     /// The reply's text.
     pub(crate) text: &'a str,
-    /// The media it produced, already stored.
-    pub(crate) parts: &'a [leviath_core::media::Part],
+    /// The mime it produced, already stored.
+    pub(crate) parts: &'a [leviath_core::mime::Part],
 }
 
-/// [`apply_tool_results`] for a reply that produced media beside its tool
+/// [`apply_tool_results`] for a reply that produced mime beside its tool
 /// calls: the parts ride the assistant turn ahead of the tool results.
 pub(crate) fn apply_tool_results_with_parts(
     window: &mut ContextWindow,
@@ -225,7 +225,7 @@ pub(crate) fn apply_one_tool_result(
     // The cap below is about text. A stored part is priced by its own
     // estimate and kept whole: cutting an image in half is not a smaller
     // image.
-    let stored: Vec<leviath_core::media::Part> = result.stored().cloned().collect();
+    let stored: Vec<leviath_core::mime::Part> = result.stored().cloned().collect();
     let mut result_text = match stored.is_empty() {
         true => result.into_string(),
         false => result.inline_text(),
@@ -255,7 +255,7 @@ pub(crate) fn apply_one_tool_result(
     let result_content = match stored.is_empty() {
         true => leviath_core::region::EntryContent::text(result_text),
         false => {
-            let mut parts = vec![leviath_core::media::Part::text(result_text)];
+            let mut parts = vec![leviath_core::mime::Part::text(result_text)];
             parts.extend(stored);
             leviath_core::region::EntryContent::from_parts(parts)
         }

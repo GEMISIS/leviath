@@ -7,17 +7,17 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::media::inline_refs::extract;
-use leviath_core::media::{Delivery, InboundPart, MediaRegistry, MediaType};
+use leviath_core::mime::inline_refs::extract;
+use leviath_core::mime::{Delivery, InboundPart, MimeRegistry, MimeType};
 
 /// The registry the CLI reads files with.
 ///
 /// The built-in rows only: the daemon types every part again with the
-/// user's `[media_types]` layered in, and a part leaves here untyped unless
+/// user's `[mime_types]` layered in, and a part leaves here untyped unless
 /// the user named a type, so the CLI never has to know more than whether a
 /// `--<region> @file` reads as text.
-pub fn cli_registry() -> MediaRegistry {
-    MediaRegistry::builtin()
+pub fn cli_registry() -> MimeRegistry {
+    MimeRegistry::builtin()
 }
 
 /// Every `--attach` value as a part, in order.
@@ -39,7 +39,7 @@ pub fn warn_unresolved(unresolved: &[String]) {
 /// Parse one `--attach` value: `path[:region][:type][:text]`.
 ///
 /// The segments after the path are told apart by shape: `type/subtype` is a
-/// media type, `text` is the delivery, anything else is the region. A path
+/// mime type, `text` is the delivery, anything else is the region. A path
 /// with a drive letter (`C:\a.png`) keeps its colon because a one-letter
 /// segment followed by a backslash is not a region name.
 pub fn parse_attach(spec: &str, cwd: &Path) -> anyhow::Result<InboundPart> {
@@ -54,8 +54,8 @@ pub fn parse_attach(spec: &str, cwd: &Path) -> anyhow::Result<InboundPart> {
             "native" => part.deliver = Some(Delivery::Native),
             "stand_in" => part.deliver = Some(Delivery::StandIn),
             s if s.contains('/') => {
-                part.media_type =
-                    Some(MediaType::parse(s).map_err(|e| anyhow::anyhow!("--attach {spec}: {e}"))?);
+                part.mime_type =
+                    Some(MimeType::parse(s).map_err(|e| anyhow::anyhow!("--attach {spec}: {e}"))?);
             }
             s if !s.is_empty() => part.region = Some(s.to_string()),
             _ => {}
@@ -123,8 +123,8 @@ pub fn inline_parts(
     let mut parts = Vec::new();
     for r in &extracted.refs {
         let mut part = read_part(&r.path, cwd)?;
-        if let Some(t) = &r.media_type {
-            part.media_type = Some(t.clone());
+        if let Some(t) = &r.mime_type {
+            part.mime_type = Some(t.clone());
         }
         part.region = region.map(str::to_string);
         parts.push(part);
@@ -151,7 +151,7 @@ pub fn read_region_input(
     region: &str,
     raw: &str,
     cwd: &Path,
-    registry: &MediaRegistry,
+    registry: &MimeRegistry,
 ) -> anyhow::Result<RegionInput> {
     if let Some(path) = raw.strip_prefix('@')
         && !path.contains(char::is_whitespace)
@@ -159,8 +159,8 @@ pub fn read_region_input(
         let full = resolve_against(path, cwd);
         let data = std::fs::read(&full)
             .map_err(|e| anyhow::anyhow!("Failed to read region file '{}': {}", path, e))?;
-        let media_type = registry.resolve(None, Some(path), &data);
-        if registry.info(&media_type).text
+        let mime_type = registry.resolve(None, Some(path), &data);
+        if registry.info(&mime_type).text
             && let Ok(text) = std::str::from_utf8(&data)
         {
             let trimmed = text.trim().to_string();
@@ -205,14 +205,14 @@ mod tests {
         std::fs::write(dir.path().join("scene.bin"), [0u8, 1, 2]).unwrap();
         let part = parse_attach("m.png", dir.path()).unwrap();
         assert_eq!(part.name, "m.png");
-        assert_eq!(part.media_type, None);
+        assert_eq!(part.mime_type, None);
         assert!(part.region.is_none());
         let part = parse_attach("m.png:mockups", dir.path()).unwrap();
         assert_eq!(part.region.as_deref(), Some("mockups"));
         let part = parse_attach("scene.bin:art:model/gltf-binary:text", dir.path()).unwrap();
         assert_eq!(part.region.as_deref(), Some("art"));
         assert_eq!(
-            part.media_type.as_ref().unwrap().as_str(),
+            part.mime_type.as_ref().unwrap().as_str(),
             "model/gltf-binary"
         );
         assert_eq!(part.deliver, Some(Delivery::Text));
@@ -259,7 +259,7 @@ mod tests {
         assert!(parts[0].region.is_none());
         assert_eq!(unresolved, vec!["missing.png"]);
         let (_, parts, _) = inline_parts("@hero.png:image/webp", Some("art"), dir.path()).unwrap();
-        assert_eq!(parts[0].media_type.as_ref().unwrap().as_str(), "image/webp");
+        assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/webp");
         assert_eq!(parts[0].region.as_deref(), Some("art"));
     }
 
@@ -269,7 +269,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.md"), "  # notes  ").unwrap();
         std::fs::write(dir.path().join("m.png"), png()).unwrap();
         std::fs::write(dir.path().join("blank.md"), "  ").unwrap();
-        let reg = MediaRegistry::builtin();
+        let reg = MimeRegistry::builtin();
         let text = read_region_input("brief", "@notes.md", dir.path(), &reg).unwrap();
         assert_eq!(text.text, "# notes");
         assert!(text.parts.is_empty());

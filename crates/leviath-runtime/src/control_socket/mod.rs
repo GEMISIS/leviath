@@ -245,7 +245,7 @@ pub enum ControlRequest {
         target_region: Option<String>,
         /// Files attached to the message, landing in the same entry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        parts: Vec<leviath_core::media::InboundPart>,
+        parts: Vec<leviath_core::mime::InboundPart>,
     },
     /// List open interactions awaiting an answer.
     ListInteractions,
@@ -1140,7 +1140,7 @@ mod tests {
                 agent_id: "a".to_string(),
                 content: "hi".to_string(),
                 target_region: None,
-                parts: vec![leviath_core::media::InboundPart::from_bytes(
+                parts: vec![leviath_core::mime::InboundPart::from_bytes(
                     "a.png",
                     vec![1, 2, 3],
                 )],

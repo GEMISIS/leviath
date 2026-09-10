@@ -10,7 +10,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use leviath_core::media::human_size;
+use leviath_core::mime::human_size;
 use leviath_core::output::{Artifact, FinalOutput};
 
 /// What hands a URL to the operating system: `leviath_sys::open_url` in the
@@ -214,7 +214,7 @@ pub(crate) fn deliver(
         format!(
             "{}  {}  {}",
             path.display(),
-            artifact.media_type,
+            artifact.mime_type,
             human_size(len as u64)
         )
     };
@@ -251,7 +251,7 @@ pub(crate) fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::MediaType;
+    use leviath_core::mime::MimeType;
     use std::sync::Mutex;
 
     /// The last URL an opener was handed, for the tests that inject one.
@@ -270,7 +270,7 @@ mod tests {
         Artifact {
             name: name.to_string(),
             path: path.to_string(),
-            media_type: MediaType::parse("image/png").unwrap(),
+            mime_type: MimeType::parse("image/png").unwrap(),
             size: 3,
             sha256: sha256.to_string(),
         }
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn artifact_bytes_come_from_the_store_then_the_workdir() {
         crate::runstate::with_isolated_runs_dir("export-artifact-bytes", |_d| {
-            use leviath_core::media::{Blob, BlobStore, MediaRegistry};
+            use leviath_core::mime::{Blob, BlobStore, MimeRegistry};
             let run_id = "export-run";
             crate::runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
             let workdir = tempfile::tempdir().unwrap();
@@ -366,11 +366,11 @@ mod tests {
 
             let store = leviath_runtime::blob_store::FsBlobStore::new(crate::runstate::runs_dir());
             let blob = Blob::new(
-                MediaType::parse("image/png").unwrap(),
+                MimeType::parse("image/png").unwrap(),
                 b"from store".to_vec(),
             );
             let sha = store
-                .put(run_id, &blob, &MediaRegistry::builtin())
+                .put(run_id, &blob, &MimeRegistry::builtin())
                 .unwrap()
                 .sha256;
 

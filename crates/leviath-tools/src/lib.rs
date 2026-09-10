@@ -21,8 +21,8 @@ mod exec;
 pub use exec::is_null_device;
 pub use exec::resolve_within;
 mod install;
-pub mod media;
-pub use media::ToolMedia;
+pub mod mime;
+pub use mime::ToolMime;
 mod platform;
 pub mod validate;
 pub use context::*;
@@ -2477,7 +2477,7 @@ mod tests {
 #[cfg(test)]
 mod binary_read_tests {
     use super::*;
-    use leviath_core::media::{BlobStore, MemoryBlobStore};
+    use leviath_core::mime::{BlobStore, MemoryBlobStore};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -2488,10 +2488,10 @@ mod binary_read_tests {
         dir
     }
 
-    fn media(store: Arc<MemoryBlobStore>, max: u64) -> Arc<ToolMedia> {
-        Arc::new(ToolMedia {
+    fn mime(store: Arc<MemoryBlobStore>, max: u64) -> Arc<ToolMime> {
+        Arc::new(ToolMime {
             store,
-            registry: Arc::new(leviath_core::media::RegistryCell::default()),
+            registry: Arc::new(leviath_core::mime::RegistryCell::default()),
             run_id: "run-1".to_string(),
             max_part_bytes: max,
         })
@@ -2502,9 +2502,9 @@ mod binary_read_tests {
         let dir = png_dir();
         let store = Arc::new(MemoryBlobStore::new());
         let tools = BuiltinTools::new(
-            ToolContext::new(dir.path().to_path_buf()).with_media(media(store.clone(), 16)),
+            ToolContext::new(dir.path().to_path_buf()).with_mime(mime(store.clone(), 16)),
         );
-        assert!(tools.media().is_some());
+        assert!(tools.mime().is_some());
         let out = tools
             .execute("read_file", json!({"path": "hero.png"}))
             .await;
@@ -2527,7 +2527,7 @@ mod binary_read_tests {
     async fn without_a_store_the_model_is_told() {
         let dir = png_dir();
         let tools = BuiltinTools::new(ToolContext::new(dir.path().to_path_buf()));
-        assert!(tools.media().is_none());
+        assert!(tools.mime().is_none());
         let out = tools
             .execute("read_file", json!({"path": "hero.png"}))
             .await;

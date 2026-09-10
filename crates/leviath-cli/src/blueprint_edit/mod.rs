@@ -33,7 +33,7 @@ pub(crate) mod check;
 mod doc;
 mod edges;
 mod layout_store;
-mod media;
+mod mime;
 mod order;
 mod regions;
 mod stages;
@@ -49,8 +49,8 @@ pub(crate) use doc::{FanOutView, ToolRouting};
 pub(crate) use edges::Rule;
 pub(crate) use layout_store::{LayoutStore, Positions};
 #[cfg(test)]
-pub(crate) use media::ArtifactView;
-pub(crate) use media::{ArtifactField, InputList, media_type_keys, split_list};
+pub(crate) use mime::ArtifactView;
+pub(crate) use mime::{ArtifactField, InputList, mime_type_keys, split_list};
 pub(crate) use regions::{RegionField, RegionScope, RegionValue};
 pub(crate) use stages::{FanOutField, StageText};
 

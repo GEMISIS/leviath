@@ -8,7 +8,7 @@
 //! refuses the spawn or the message, naming the part, rather than dropping
 //! it where nobody would notice.
 
-use leviath_core::media::{Blob, BlobStore, InboundPart, MediaRegistry, Part};
+use leviath_core::mime::{Blob, BlobStore, InboundPart, MimeRegistry, Part};
 use leviath_core::region::EntryContent;
 
 use crate::components::ContextWindow;
@@ -18,7 +18,7 @@ pub(crate) struct PartSink<'a> {
     /// The run's blob store.
     pub store: &'a dyn BlobStore,
     /// The registry that types the bytes.
-    pub registry: &'a MediaRegistry,
+    pub registry: &'a MimeRegistry,
     /// The run the bytes belong to.
     pub run_id: &'a str,
     /// The largest part accepted, in bytes.
@@ -30,18 +30,18 @@ impl PartSink<'_> {
     pub(crate) fn store_part(&self, inbound: &InboundPart) -> Result<Part, String> {
         if inbound.data.len() as u64 > self.max_part_bytes {
             return Err(format!(
-                "part '{}' is {} bytes, over the {} byte ceiling ([media] max_part_bytes)",
+                "part '{}' is {} bytes, over the {} byte ceiling ([mime] max_part_bytes)",
                 inbound.name,
                 inbound.data.len(),
                 self.max_part_bytes
             ));
         }
-        let media_type = self.registry.resolve(
-            inbound.media_type.as_ref(),
+        let mime_type = self.registry.resolve(
+            inbound.mime_type.as_ref(),
             Some(&inbound.name),
             &inbound.data,
         );
-        let blob = Blob::new(media_type, inbound.data.clone()).named(&inbound.name);
+        let blob = Blob::new(mime_type, inbound.data.clone()).named(&inbound.name);
         let reference = self
             .store
             .put(self.run_id, &blob, self.registry)
@@ -110,7 +110,7 @@ pub(crate) fn ingest_parts(
             .is_some_and(|c| !c.trim().is_empty());
         if captioned
             && !target.accepts.is_empty()
-            && !leviath_core::media::text_plain().matches_any(&target.accepts)
+            && !leviath_core::mime::text_plain().matches_any(&target.accepts)
         {
             return Err(format!(
                 "the caption on '{}' has nowhere to go: region '{region}' takes {} only; \
@@ -133,7 +133,7 @@ pub(crate) fn ingest_parts(
             region = %region,
             name = %inbound.name,
             bytes = inbound.data.len(),
-            "[media] stored an attached part"
+            "[mime] stored an attached part"
         );
     }
     Ok(())
@@ -142,7 +142,7 @@ pub(crate) fn ingest_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::media::{MediaType, MemoryBlobStore};
+    use leviath_core::mime::{MemoryBlobStore, MimeType};
     use leviath_core::region::{Region, RegionKind};
 
     fn window() -> ContextWindow {
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn parts_land_in_their_regions_with_captions_and_types() {
         let store = MemoryBlobStore::new();
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let sink = PartSink {
             store: &store,
             registry: &registry,
@@ -175,8 +175,8 @@ mod tests {
         let png =
             InboundPart::from_bytes("hero.png", b"\x89PNG\r\n\x1a\nbody".to_vec()).in_region("art");
         let note = InboundPart::from_bytes("notes.txt", b"plain notes".to_vec())
-            .typed(MediaType::parse("text/plain").unwrap())
-            .delivered(leviath_core::media::Delivery::Text)
+            .typed(MimeType::parse("text/plain").unwrap())
+            .delivered(leviath_core::mime::Delivery::Text)
             .captioned("my notes");
         ingest_parts(&mut window, &blueprint(), vec![png, note], &sink).unwrap();
         let art = window.get_region("art").unwrap();
@@ -193,15 +193,15 @@ mod tests {
             "my notes\n[text/plain, 11 B] notes.txt"
         );
         let part = task.content[0].content.parts()[1].clone();
-        assert_eq!(part.media_type.as_str(), "text/plain");
-        assert_eq!(part.deliver, Some(leviath_core::media::Delivery::Text));
+        assert_eq!(part.mime_type.as_str(), "text/plain");
+        assert_eq!(part.deliver, Some(leviath_core::mime::Delivery::Text));
         assert!(store.has("run-1", &part.blob().unwrap().sha256));
     }
 
     #[test]
     fn refusals_name_the_part() {
         let store = MemoryBlobStore::new();
-        let registry = MediaRegistry::builtin();
+        let registry = MimeRegistry::builtin();
         let sink = PartSink {
             store: &store,
             registry: &registry,
@@ -261,8 +261,8 @@ mod tests {
                 &self,
                 _: &str,
                 _: &Blob,
-                _: &MediaRegistry,
-            ) -> std::io::Result<leviath_core::media::BlobRef> {
+                _: &MimeRegistry,
+            ) -> std::io::Result<leviath_core::mime::BlobRef> {
                 Err(std::io::Error::other("disk is full"))
             }
             fn read(&self, _: &str, _: &str) -> std::io::Result<std::sync::Arc<[u8]>> {

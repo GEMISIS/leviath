@@ -83,7 +83,7 @@ fn stored_indices(entry: &leviath_core::run_meta::RegionEntrySnapshot) -> Vec<us
 
 /// What a stored part's row says it is: the stand-in the model sees, or,
 /// for a part recorded before stand-ins were, its type, size and name.
-pub(super) fn part_label(part: &leviath_core::media::Part) -> String {
+pub(super) fn part_label(part: &leviath_core::mime::Part) -> String {
     let Some(blob) = part.blob() else {
         return part.inline_text().unwrap_or_default().to_string();
     };
@@ -91,8 +91,8 @@ pub(super) fn part_label(part: &leviath_core::media::Part) -> String {
         false => blob.stand_in.clone(),
         true => format!(
             "[{}, {}] {}",
-            blob.media_type,
-            leviath_core::media::human_size(blob.size),
+            blob.mime_type,
+            leviath_core::mime::human_size(blob.size),
             part.name.as_deref().unwrap_or("")
         )
         .trim_end()
@@ -612,10 +612,10 @@ mod tests {
     /// the cursor sequence and the drawn lines, and folds away with it.
     #[test]
     fn stored_parts_get_rows_under_an_expanded_entry() {
-        use leviath_core::media::{BlobRef, MediaType, Part};
+        use leviath_core::mime::{BlobRef, MimeType, Part};
         let blob = BlobRef {
             sha256: "abcdef0123456789".repeat(4),
-            media_type: MediaType::parse("image/png").unwrap(),
+            mime_type: MimeType::parse("image/png").unwrap(),
             size: 240 * 1024,
             width: Some(1024),
             height: Some(768),

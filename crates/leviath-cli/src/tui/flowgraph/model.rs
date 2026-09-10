@@ -47,7 +47,7 @@ pub(crate) struct StageNode {
     pub(crate) max_iterations: Option<usize>,
     pub(crate) max_revisits: Option<usize>,
     pub(crate) description: Option<String>,
-    /// Media type patterns the stage takes as parts beyond text: its
+    /// Mime type patterns the stage takes as parts beyond text: its
     /// `[input] accepts`, or the `accepts` of the regions it sees. A region
     /// that takes anything (`*/*`) is no constraint and is left out.
     pub(crate) inputs: Vec<String>,
@@ -197,7 +197,7 @@ impl StageEdge {
 impl StageNode {
     /// What a box is sized for: the id, or more when the badge row needs
     /// it. A box is `hint + 10` cells wide and its badge row gets `hint + 7`
-    /// of them, so the loop, end and media badges that never change are
+    /// of them, so the loop, end and mime badges that never change are
     /// counted here and a stage that takes or hands back files gets a box
     /// that shows it.
     pub(crate) fn width_hint(&self) -> usize {
@@ -364,7 +364,7 @@ impl StageGraph {
                 outputs: stage
                     .output
                     .as_ref()
-                    .map(|o| o.artifacts.iter().map(|a| a.media_type.clone()).collect())
+                    .map(|o| o.artifacts.iter().map(|a| a.mime_type.clone()).collect())
                     .unwrap_or_default(),
             });
         }
@@ -526,11 +526,11 @@ mod tests {
     /// whose file the next stage cannot take says so; an escape path and a
     /// hand-off to a worker blueprint are never judged.
     #[test]
-    fn media_in_and_out_ride_on_the_nodes_and_mark_a_path_that_drops_a_file() {
+    fn mime_in_and_out_ride_on_the_nodes_and_mark_a_path_that_drops_a_file() {
         let g = graph(
             r#"
 [agent]
-name = "media"
+name = "mime"
 [context.regions]
 brief = { kind = "pinned", seed = "task_input", accepts = ["text/*"] }
 shots = { kind = "pinned", accepts = ["image/*", "audio/wav"] }

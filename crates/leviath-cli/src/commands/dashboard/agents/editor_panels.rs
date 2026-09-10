@@ -18,7 +18,7 @@ use crate::blueprint_edit::{
 /// The output type that asks for no shape.
 const OUTPUT_ANY: &str = "(any)";
 
-/// The plain shapes the output type chooser offers ahead of the media
+/// The plain shapes the output type chooser offers ahead of the mime
 /// types, each with what it means.
 const OUTPUT_SHAPES: [(&str, &str); 4] = [
     (OUTPUT_ANY, "no shape asked for"),
@@ -627,7 +627,7 @@ impl Dashboard {
                 view.map(|s| s.input_accepts).unwrap_or_default(),
                 false,
                 "What the stage takes, beyond its regions".to_string(),
-                "Media type patterns the stage takes as parts. Left empty, its regions decide."
+                "Mime type patterns the stage takes as parts. Left empty, its regions decide."
                     .to_string(),
             ),
             FieldId::StageAsText => (
@@ -653,11 +653,11 @@ impl Dashboard {
             FieldId::ArtifactType => (
                 self.panel_artifact()
                     .and_then(|(s, i)| self.editor().doc.artifacts(&s).into_iter().nth(i))
-                    .map(|a| vec![a.media_type])
+                    .map(|a| vec![a.mime_type])
                     .unwrap_or_default(),
                 true,
                 "The file's type".to_string(),
-                "The media type the file must be, or a pattern it must match.".to_string(),
+                "The mime type the file must be, or a pattern it must match.".to_string(),
             ),
             FieldId::OutputFormat => (
                 vec![
@@ -668,7 +668,7 @@ impl Dashboard {
                 true,
                 "The answer's type".to_string(),
                 "A label the model is told and the result records: markdown, json, text, or a \
-                 media type. Nothing converts between shapes."
+                 mime type. Nothing converts between shapes."
                     .to_string(),
             ),
             _ => (
@@ -678,25 +678,25 @@ impl Dashboard {
                     .unwrap_or_default(),
                 false,
                 "What the region takes".to_string(),
-                "Media type patterns the region takes; a write outside them is refused with \
+                "Mime type patterns the region takes; a write outside them is refused with \
                  the list. Nothing picked takes anything."
                     .to_string(),
             ),
         }
     }
 
-    /// The media type chooser for a field: every family, every type the
+    /// The mime type chooser for a field: every family, every type the
     /// registry knows, whatever the field already holds, and a row to type
     /// one in.
     fn editor_open_type_chooser(&mut self, id: &FieldId) {
         let (current, single, title, explain) = self.type_field_state(id);
-        // The output type is a label before it is a media type: the plain
+        // The output type is a label before it is a mime type: the plain
         // shapes come first, then every type the registry knows.
         let mut values: Vec<String> = match id {
             FieldId::OutputFormat => OUTPUT_SHAPES.iter().map(|(v, _)| v.to_string()).collect(),
             _ => Vec::new(),
         };
-        values.extend(self.editor().media_types.iter().cloned());
+        values.extend(self.editor().mime_types.iter().cloned());
         for held in &current {
             if !values.contains(held) {
                 values.push(held.clone());
@@ -732,7 +732,7 @@ impl Dashboard {
                     .collect(),
             );
         }
-        self.editor().picker = Some((PickerFor::MediaTypes(id.clone()), picker));
+        self.editor().picker = Some((PickerFor::MimeTypes(id.clone()), picker));
     }
 
     /// What the type chooser settled on. The "another…" row opens the line
@@ -928,7 +928,7 @@ impl Dashboard {
             PickerFor::Tools
             | PickerFor::Field(_)
             | PickerFor::ConnectFrom(_)
-            | PickerFor::MediaTypes(_) => {}
+            | PickerFor::MimeTypes(_) => {}
         }
     }
 

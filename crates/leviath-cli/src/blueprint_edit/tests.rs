@@ -1239,7 +1239,7 @@ fn region_fields_write_the_lairs_way() {
 }
 
 #[test]
-fn media_keys_write_the_way_the_runtime_reads_them() {
+fn mime_keys_write_the_way_the_runtime_reads_them() {
     use ArtifactField as A;
     let mut doc = starter();
     let s = RegionScope::Shared;
@@ -1343,13 +1343,13 @@ fn media_keys_write_the_way_the_runtime_reads_them() {
         vec![
             ArtifactView {
                 name: "final".into(),
-                media_type: "video/mp4".into(),
+                mime_type: "video/mp4".into(),
                 required: true,
                 description: "the cut".into(),
             },
             ArtifactView {
                 name: "audio".into(),
-                media_type: "*/*".into(),
+                mime_type: "*/*".into(),
                 required: false,
                 description: String::new(),
             },
@@ -1380,7 +1380,7 @@ fn media_keys_write_the_way_the_runtime_reads_them() {
     let work = bp.stages.iter().find(|s| s.name == "work").unwrap();
     let declared = &work.output.as_ref().unwrap().artifacts;
     assert_eq!(declared.len(), 2);
-    assert!(declared[0].required && declared[0].media_type == "video/mp4");
+    assert!(declared[0].required && declared[0].mime_type == "video/mp4");
     doc.set_artifact("work", 0, A::Required(false)).unwrap();
     doc.set_artifact("work", 0, A::Description(String::new()))
         .unwrap();
@@ -1434,7 +1434,7 @@ fn media_keys_write_the_way_the_runtime_reads_them() {
     inline
         .set_artifact("a", 1, A::Type("text/plain".into()))
         .unwrap();
-    assert_eq!(inline.artifacts("a")[1].media_type, "text/plain");
+    assert_eq!(inline.artifacts("a")[1].mime_type, "text/plain");
     runtime_ok(&inline);
     assert!(matches!(
         inline.delete_artifact("a", 5),
@@ -1474,7 +1474,7 @@ fn media_keys_write_the_way_the_runtime_reads_them() {
     ));
     assert_eq!(odd.artifacts("b").len(), 1);
     odd.set_artifact("b", 0, A::Type("z".into())).unwrap();
-    assert_eq!(odd.artifacts("b")[0].media_type, "z");
+    assert_eq!(odd.artifacts("b")[0].mime_type, "z");
     odd.delete_artifact("b", 0).unwrap();
     assert!(odd.artifacts("b").is_empty());
     assert_eq!(

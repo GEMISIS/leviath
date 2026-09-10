@@ -272,7 +272,7 @@ fn make_resumer(
 
 /// The hook the host runs on every safety re-drive: the config as it stands
 /// on disk now, applied to the world where it differs from what is in it.
-/// One stat of `config.toml` and one read of `media_types.toml` when nothing
+/// One stat of `config.toml` and one read of `mime_types.toml` when nothing
 /// changed. Factored out so the closure body is unit-testable.
 fn make_housekeeper(
     reloader: Arc<crate::daemon::config_reload::ConfigReloader>,
@@ -543,7 +543,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
 
     // Housekeeping: on the host's own timer, whether or not a spawn comes
     // along, re-read the config layers that reach runs already under way.
-    // This is what makes an edit to `media_types.toml` (or a `[limits]` key)
+    // This is what makes an edit to `mime_types.toml` (or a `[limits]` key)
     // land in a live run within one re-drive interval rather than waiting
     // for the next `lev run` to walk the spawn path.
     host.set_housekeeper(make_housekeeper(reloader.clone(), live_limits.clone()));
@@ -886,7 +886,7 @@ mod tests {
     /// parent paged back in before its workers register) is a no-op, and one
     /// with state has its config layers re-read.
     /// The housekeeper applies the config as it stands on disk, so an edit
-    /// to `media_types.toml` reaches the world on the next pass with no
+    /// to `mime_types.toml` reaches the world on the next pass with no
     /// spawn to carry it.
     #[tokio::test]
     async fn make_housekeeper_applies_the_files_on_disk() {
@@ -911,11 +911,11 @@ mod tests {
                 leviath_runtime::host::HostSettings::default(),
             );
             let mut housekeeper = make_housekeeper(reloader, live);
-            let obj: leviath_core::media::MediaType = "model/obj".parse().unwrap();
+            let obj: leviath_core::mime::MimeType = "model/obj".parse().unwrap();
             let family = |world: &PipelineWorld| {
                 world
                     .world()
-                    .get_resource::<leviath_runtime::blob_store::MediaRegistryHandle>()
+                    .get_resource::<leviath_runtime::blob_store::MimeRegistryHandle>()
                     .expect("the first pass installs the registry")
                     .0
                     .info(&obj)
@@ -925,7 +925,7 @@ mod tests {
             housekeeper(&mut world);
             assert_eq!(family(&world), "model");
             std::fs::write(
-                dir.join("media_types.toml"),
+                dir.join("mime_types.toml"),
                 "[\"model/obj\"]\nfamily = \"scene\"\n",
             )
             .unwrap();
