@@ -152,7 +152,8 @@ that takes files opens a picker of the working directory, filtered to the types 
 accepts, so you choose a file from a list rather than typing its name (and never with an `@`); a
 slot for a text region takes a line of text. A region that holds several files (its `max_stored`)
 takes several, added and removed in the same picker. The slot names what the region takes, how
-many, and whether it is required. It follows the selection, previews bundled blueprints that are not
+many, its token budget (`≤117k tok`, the region's share of the entry model's context window), and
+whether it is required. It follows the selection, previews bundled blueprints that are not
 installed yet from the copy inside the binary, and says so when a manifest cannot be read. It is
 the explorer's canvas showing the whole graph: drag to pan, wheel to zoom; on a screen too short to
 fit both, the task keeps its rows and the preview is skipped. Once
