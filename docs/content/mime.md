@@ -201,7 +201,7 @@ lev run reviewer --task "does @mockup.png match @spec.md?"
 lev respond <id> --attach marked_up.png "the arm is still wrong, see the circle"
 ```
 
-`--attach path[:region][:type][:text]` puts a file in a region. An `@path` inside any text does
+`--attach path[:region][:type][:text|native|stand_in]` puts a file in a region. An `@path` inside any text does
 the same for the region the text lands in, and keeps the text exactly as written so the model
 and the stand-in agree on the name. Write `\@` for a literal `@`. A token that names no file is
 left alone, so an email address is never mistaken for one. On the command line, paths resolve

@@ -47,7 +47,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--output-format <LABEL>` | Ask for the final output in this shape. A label that differs from what the blueprint declares retires its Rhai validator and JSON schema, with a warning on stderr. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
-| `--attach <PATH[:REGION][:TYPE][:text]>` | Put a file in a region as a typed part. Repeatable. See below |
+| `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Put a file in a region as a typed part. Repeatable. See below |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
 
 **`--workdir`** decides more than where commands run. File tools are confined to it, and relative
@@ -586,7 +586,7 @@ Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the ope
 | `--feedback <TEXT>` | With `--deny`, what the model should do instead. It reads the text inside the refused call's tool result. An error with anything but `--deny` |
 | `--stage` | With `--approve`, allow what this call runs until the run leaves the current stage |
 | `--session` | With `--approve`, allow what this call runs for the rest of the run (alias `--run`) |
-| `--attach <PATH[:REGION][:TYPE][:text]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. A `@path` inside the answer attaches that file too. Refused on a choice or an approval |
+| `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. A `@path` inside the answer attaches that file too. Refused on a choice or an approval |
 
 See [Human-in-the-loop](/docs/interaction) for what raises these.
 

@@ -83,6 +83,36 @@ same blueprint works across models with different window sizes.
 **Journal**: the append-only record of what a run did, written as it happens. It is what lets the
 daemon reload an interrupted run without repeating tool calls that already took effect.
 
+## Typed mime
+
+**Part**: one typed piece of content. A [context region](/docs/context) entry, a tool result, a
+message you send, a model's reply, and a run's output are each a list of parts. A part is a
+mime type and a body: a text body travels inline, any other body is a
+stored part. See [Typed mime](/docs/mime).
+
+**Mime type**: `type/subtype`, naming what a part is, such as `image/png`, `application/pdf` or
+`model/obj`. It is not a fixed list; the mime registry says what each one means.
+
+**Mime registry**: the table that says what a mime type *is*: its family, whether its bytes are
+text, its file extensions, and its token cost. Compiled defaults, layered under rows from your
+config, a blueprint, or a provider. See [Typed mime](/docs/mime#the-registry).
+
+**Blob**: the bytes of a stored part, kept once by content hash under a run's
+`blobs/` directory and referenced from wherever the part appears. Deleted with the run.
+
+**Stored part**: a part whose bytes live in the blob store rather than inline, because its type is
+not text: an image, an audio clip, a document, a model.
+
+**Stand-in**: the short text a stored part shows to a reader, or to a model that cannot take its
+bytes, such as `[image/png 1024x768, 240 KB] hero.png`.
+
+**Delivery**: how a stored part reaches a model: **native** (the bytes as an image, audio or file
+block), **text** (its bytes as text, for a text type), or **stand-in** (only the description). The
+registry picks a default and a stage or an attach can override it.
+
+**Artifact**: a typed file a stage declares and a run submits as output, validated against its
+declared type and served over the API. See [Outputs](/docs/outputs).
+
 ## Running many agents
 
 **Sub-agent**: a child agent started by another one, running in the same process at some **depth**.
