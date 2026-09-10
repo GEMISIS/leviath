@@ -261,8 +261,8 @@ same list.
   stage reads and what each takes, what it takes beyond them and reads as
   text, the answer's format, the files it hands back), *Models & tools*
   (the chain, the tools, and what each tool may be handed at the stage)
-  and *Context*. A region, a declared file and a loop's path open in a
-  window over the editor instead of replacing the inspector, and every
+  and *Context & tools*. A region, a declared file and a loop's path open
+  in a window over the editor instead of replacing the inspector, and every
   media type field is one chooser of the families, every type the registry
   knows and a typed `type/subtype`. The keys round-trip the way the
   runtime reads them, and the graph beside the inspector wears the badges
@@ -333,9 +333,12 @@ same list.
   which cut the last tab in two and drew every row one line below where
   the mouse map had it, so a click landed on the row under the pointer.
   The strip shortens its titles when the full ones do not fit, labels are
-  cut to their column, and the body is never wrapped. `←`/`→` walk a
-  stage's tabs (`h`/`l` change a row in place), and a live row's label is
-  no longer drawn in the dim colour that meant "cannot be edited" (#400).
+  cut to their column, and the body is never wrapped. The inspector is
+  wider, `Tab`/`Shift-Tab` walk a stage's tabs (the arrows change a row in
+  place, as they do on every other panel, and `Esc` goes back to the
+  graph), a live row's label is no longer drawn in the dim colour that
+  meant "cannot be edited", and a chooser keeps a long name clear of the
+  note beside it (#400).
 - The crates.io publish on a stable release stopped at `leviath-alloc`. An
   August hygiene commit marked the crate `publish = false` while the prod
   workflow's publish loop still named it and `leviath-cli`'s default allocator

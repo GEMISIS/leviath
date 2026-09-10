@@ -372,7 +372,7 @@ hidden, so the panel never reflows under the cursor:
   its tools one by one under their `server__tool` names; and under them what
   each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another
   agent with images only, or hand a tool that takes text and images only text here.
-  *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
+  *Context & tools*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
   it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
   tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
   routing the tool).
@@ -415,7 +415,7 @@ directory), so a graph opens the way you left it; it is never part of the manife
 | Key | Action |
 |---|---|
 | `Ctrl-S` | Save (checks first; errors block it and open the problems list) |
-| `Tab` | Move the keys between the graph and the inspector |
+| `Tab` | From the graph: move the keys to the inspector. On a stage's inspector: the next tab (`Shift-Tab` the one before). On any other panel: back to the graph |
 | `Ctrl-Z` / `Ctrl-Y` | Undo / redo (`Ctrl-Shift-Z` redoes too) |
 | `v` | The definition; `y` copies it, `Esc` closes it |
 | `p` | Open or close the problems list under the graph |
@@ -441,10 +441,9 @@ On the inspector:
 |---|---|
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
 | `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
-| `←` / `→` | On a stage, the previous / next tab. On any other panel, change the row in place |
-| `h` / `l` | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
+| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
 | `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration, a list of types |
-| `1` `2` `3` `4` | A stage's tabs: behaviour, inputs & outputs, models & tools, context |
+| `1` `2` `3` `4` | A stage's tabs: behaviour, inputs & outputs, models & tools, context & tools |
 | `Esc` | Close the window a region, a file or a loop is open in; otherwise back to the graph |
 | mouse | Click a row to pick it (again to open it); click a tab to switch to it; drag a model's `⠿` grip to move it in the chain |
 
@@ -470,7 +469,8 @@ In the prompts:
 Both boxes wrap and carry the formatting toolbar; see
 [Formatting a long-form box](#formatting-a-long-form-box).
 
-On a terminal under 110 columns the graph and the inspector take turns; `Tab` swaps them.
+On a terminal under 120 columns the graph and the inspector take turns: `Tab` moves to the
+inspector and `Esc` back to the graph.
 
 ### MCP servers (`m`)
 

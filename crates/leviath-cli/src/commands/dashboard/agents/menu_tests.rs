@@ -54,7 +54,7 @@ fn panel(dash: &mut Dashboard) -> Panel {
 fn a_click_off_everything_clears_the_selection_but_a_pan_keeps_it() {
     let (mut dash, root) = dashboard("click_off");
     open_editor_on(&mut dash, "own");
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     let (x, y) = inside(&mut dash, "finish");
     click(&mut dash, MouseButton::Left, x, y);
     assert!(matches!(panel(&mut dash), Panel::Stage { .. }));
@@ -84,7 +84,7 @@ fn a_click_off_everything_clears_the_selection_but_a_pan_keeps_it() {
 fn a_right_click_opens_a_menu_for_what_is_under_it() {
     let (mut dash, root) = dashboard("menus");
     open_editor_on(&mut dash, "own");
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     // A stage: its menu, drawn where the click landed, with the keys named.
     let (x, y) = inside(&mut dash, "work");
     click(&mut dash, MouseButton::Right, x, y);
@@ -203,7 +203,7 @@ fn a_right_click_opens_a_menu_for_what_is_under_it() {
 fn every_menu_row_does_what_its_key_does() {
     let (mut dash, root) = dashboard("menu_rows");
     open_editor_on(&mut dash, "own");
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     let (x, y) = inside(&mut dash, "work");
     let pick = |dash: &mut Dashboard, row: usize| {
         click(dash, MouseButton::Right, x, y);
@@ -243,7 +243,7 @@ fn every_menu_row_does_what_its_key_does() {
         ["work", "next", "finish"]
     );
     dash.handle_key(key(KeyCode::Esc));
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     // Rename: the name row is being typed.
     pick(&mut dash, 3);
     assert!(matches!(
@@ -252,7 +252,7 @@ fn every_menu_row_does_what_its_key_does() {
     ));
     dash.handle_key(key(KeyCode::Esc));
     dash.handle_key(key(KeyCode::Esc));
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     // Edit prompts: the overlay.
     pick(&mut dash, 4);
     assert!(matches!(
@@ -261,7 +261,7 @@ fn every_menu_row_does_what_its_key_does() {
     ));
     dash.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
     dash.handle_key(key(KeyCode::Esc));
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     // Delete stage: asks.
     pick(&mut dash, 5);
     assert!(dash.pending_confirm.is_some());
@@ -354,7 +354,7 @@ fn the_bars_name_the_controls_on_every_screen() {
     dash.handle_key(key(KeyCode::Esc));
     // The wheel over the catalog list moves the cursor; off it, or with the
     // chooser open, it does not.
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     let list = dash.agents().list_area;
     let before = dash.agents().catalog.selected;
     dash.handle_mouse(mouse(MouseEventKind::ScrollDown, list.x + 2, list.y + 2));

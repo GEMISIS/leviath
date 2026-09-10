@@ -21,9 +21,9 @@ use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, chord_label};
 use crate::tui::widgets::popup::{centered, popup_frame};
 
 /// Under this many columns the panes take turns.
-const SIDE_BY_SIDE_MIN_WIDTH: u16 = 110;
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 120;
 /// The inspector's width when both panes are on.
-const INSPECTOR_WIDTH: u16 = 58;
+const INSPECTOR_WIDTH: u16 = 74;
 /// Rows the expanded problems list takes.
 const PROBLEMS_ROWS: u16 = 6;
 /// The grip drawn beside a row the mouse can pick up and drag, with the space
@@ -255,11 +255,11 @@ impl Dashboard {
                     "Select a stage or a path on the canvas to edit it; Tab moves here.".to_string()
                 }
                 Panel::Stage { .. } => {
-                    "Tab moves the keys here; ↑↓ pick a row, Enter edits it, ←→ switch tabs."
+                    "↑↓ pick a row, Enter edits it, ←→ change it in place; Tab and Shift-Tab switch tabs, Esc goes back to the graph."
                         .to_string()
                 }
                 _ => {
-                    "Tab moves the keys here; ↑↓ pick a row, Enter edits it, h l change it in place."
+                    "↑↓ pick a row, Enter edits it, ←→ change it in place; Tab or Esc goes back to the graph."
                         .to_string()
                 }
             });
@@ -433,17 +433,16 @@ impl Dashboard {
                         hint("↑↓", "row"),
                         hint("enter", "edit"),
                     ];
-                    // On a stage the arrows walk the tabs and h/l change a
-                    // row; anywhere else there are no tabs to walk.
+                    hints.push(hint("←→", "change"));
+                    // On a stage Tab walks the tabs; anywhere else there are
+                    // none to walk and it goes back to the canvas.
                     if editor.panel_tab().is_some() {
-                        hints.push(hint("←→ 1-4", "tab"));
-                        hints.push(hint("h l", "change"));
+                        hints.push(hint("tab ⇧tab 1-4", "tab"));
                     } else {
-                        hints.push(hint("←→", "change"));
+                        hints.push(hint("tab", "canvas"));
                     }
                     hints.extend([
                         hint("x", "remove"),
-                        hint("tab", "canvas"),
                         hint("^z", "undo"),
                         hint("click", "pick a row"),
                         hint("drag ⠿", "reorder"),
