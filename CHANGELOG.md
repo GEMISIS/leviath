@@ -341,6 +341,10 @@ same list.
   note beside it, a button row is its label with nothing in front of it,
   and a stage's *Move up / down in the file* buttons are gone (the paths
   decide the flow, so the order in the file changed nothing) (#400).
+- The test suite's blueprint route tests wrote their `test-bp-*` blueprints
+  into the developer's real `~/.leviath/agents`, and one that failed before
+  its own clean-up left them there. They run in a temp dir of their own now,
+  through the same kind of test-only path override the MCP routes use.
 - The crates.io publish on a stable release stopped at `leviath-alloc`. An
   August hygiene commit marked the crate `publish = false` while the prod
   workflow's publish loop still named it and `leviath-cli`'s default allocator
