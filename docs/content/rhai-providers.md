@@ -92,6 +92,7 @@ The metadata directives, all optional:
 | `// @supports_streaming <bool>` | false | advisory; real streaming needs a `stream` function |
 | `// @input_types <list>` | `text/*` | mime type patterns the script's models accept, comma-separated: `text/*, image/*`. See [typed mime](/docs/mime) |
 | `// @output_types <list>` | `text/*` | mime type patterns the script's models can hand back |
+| `// @mime_type <type> ...` | none | a [mime registry](/docs/mime) row the provider ships, repeatable. See below |
 
 > [!IMPORTANT]
 > `@max_context_tokens` is the window the
@@ -104,6 +105,31 @@ The metadata directives, all optional:
 > stage's `max_output_tokens`. Declare the backing model's real window here, or override it
 > per model with a [`[model_capabilities]`](/docs/configuration#model_capabilitiesmodel_id) entry;
 > a `list_models` answer is a listing, and does not feed the guard.
+
+### A provider ships the types its models are built for
+
+A model built for a type the registry does not know can still be reached, but nothing downstream
+knows what that type *is*: what family a provider encodes it as, whether its bytes are text, what a
+stand-in for it should say. A provider declares that with `@mime_type`, one row per line:
+
+```rhai
+// @provider acme
+// @output_types application/x-acme-scene
+// @mime_type application/x-acme-scene family=model extensions=scene magic=41434D45
+```
+
+Each row names a `type/subtype` (or `type/*`) and then the fields it sets: `family=` (what a
+provider keys its encoder on), `text=<bool>` (whether the bytes are UTF-8), `extensions=` (a
+comma-separated list, no spaces) and `magic=` (a hex prefix for sniffing). A key it does not
+recognize is ignored, and a line with no type is dropped, so a typo never fails a load. A provider
+declares a type's *shape*, not a byte [check](/docs/rhai-mime-checks) - a check lives beside the
+config or blueprint that names it, not in a provider.
+
+The rows layer into every run's [mime registry](/docs/mime#the-registry) under the built-in table,
+so a run that resolves onto the provider knows the type, and the operator's `mime_types.toml` and a
+blueprint's own rows still win over it. `lev mime list` shows each provider row with its source
+(`provider:<name>`), and editing the script reaches live runs on the daemon's next config pass, the
+same way an edited `mime_types.toml` does.
 
 `initialize(config)` runs once when the provider loads. It runs **offline**, so no HTTP host
 functions are available here. Return a state map that is persisted and passed to every later call.

@@ -12,6 +12,11 @@
 /// - `// @max_output_tokens <int>` (default 4096)
 /// - `// @supports_streaming <bool>` (advisory; real streaming is driven by
 ///   whether the script defines a `stream` function).
+/// - `// @mime_type <type> family=<f> [text=<bool>] [extensions=<a,b>] [magic=<hex>]`
+///   is a registry row the provider ships, so a run resolving onto it knows a
+///   type its models are built for. Repeatable, one row per line. A provider
+///   declares a type's shape, not a byte check; the operator's config and a
+///   blueprint still override it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderMeta {
     /// Informational provider name (`@provider`).
@@ -33,6 +38,55 @@ pub struct ProviderMeta {
     /// Mime type patterns the script's models can hand back
     /// (`@output_types`). Empty means text only.
     pub output_types: Vec<String>,
+    /// Registry rows the provider ships (`@mime_type`), so a run that resolves
+    /// onto it knows a type its models are built for. Empty when it declares
+    /// none.
+    pub mime_rows: Vec<ProviderMimeRow>,
+}
+
+/// One `@mime_type` row: a type and the fields a provider may set on it. Not a
+/// byte check - that lives beside the config or blueprint that names it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderMimeRow {
+    /// The `type/subtype` (or `type/*`) the row answers for.
+    pub mime_type: String,
+    /// The family a provider keys its encoder on (`text`, `image`, `model`, ...).
+    pub family: Option<String>,
+    /// Whether the bytes are UTF-8 text.
+    pub text: Option<bool>,
+    /// File extensions, lowercase, without the dot.
+    pub extensions: Vec<String>,
+    /// A hex prefix identifying the bytes.
+    pub magic: Option<String>,
+}
+
+impl ProviderMimeRow {
+    /// The row as a TOML table body, for `MimeRegistry::layer`. Only the
+    /// fields the directive set are written.
+    pub fn to_toml(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        if let Some(f) = &self.family {
+            t.insert("family".into(), toml::Value::String(f.clone()));
+        }
+        if let Some(b) = self.text {
+            t.insert("text".into(), toml::Value::Boolean(b));
+        }
+        if !self.extensions.is_empty() {
+            t.insert(
+                "extensions".into(),
+                toml::Value::Array(
+                    self.extensions
+                        .iter()
+                        .map(|e| toml::Value::String(e.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(m) = &self.magic {
+            t.insert("magic".into(), toml::Value::String(m.clone()));
+        }
+        t
+    }
 }
 
 impl Default for ProviderMeta {
@@ -46,11 +100,22 @@ impl Default for ProviderMeta {
             supports_streaming: false,
             input_types: Vec::new(),
             output_types: Vec::new(),
+            mime_rows: Vec::new(),
         }
     }
 }
 
 impl ProviderMeta {
+    /// The provider's `@mime_type` rows as one registry table, keyed by type;
+    /// empty when it declared none. A duplicate type keeps the last row.
+    pub fn mime_rows_table(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        for row in &self.mime_rows {
+            t.insert(row.mime_type.clone(), toml::Value::Table(row.to_toml()));
+        }
+        t
+    }
+
     /// What the script declared its models take and produce; text only when
     /// it declared nothing.
     pub fn mime(&self) -> crate::capabilities::ModelMime {
@@ -72,6 +137,41 @@ fn parse_type_list(arg: &str) -> Vec<String> {
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| s.contains('/') && !s.contains(char::is_whitespace))
         .collect()
+}
+
+/// Parse one `@mime_type <type> key=value ...` directive. The first token is
+/// the type; the rest are `family=`, `text=`, `extensions=` (comma list) and
+/// `magic=`. An unknown key is ignored, and a directive with no type is
+/// dropped, so a typo never fails a load.
+fn parse_mime_row(arg: &str) -> Option<ProviderMimeRow> {
+    let mut parts = arg.split_whitespace();
+    let mime_type = parts.next()?.to_ascii_lowercase();
+    if !mime_type.contains('/') {
+        return None;
+    }
+    let mut row = ProviderMimeRow {
+        mime_type,
+        ..Default::default()
+    };
+    for kv in parts {
+        let Some((key, value)) = kv.split_once('=') else {
+            continue;
+        };
+        match key {
+            "family" if !value.is_empty() => row.family = Some(value.to_ascii_lowercase()),
+            "text" => row.text = value.parse::<bool>().ok(),
+            "extensions" => {
+                row.extensions = value
+                    .split(',')
+                    .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect();
+            }
+            "magic" if !value.is_empty() => row.magic = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(row)
 }
 
 /// Parse a provider script's [`ProviderMeta`] from its source comment
@@ -114,6 +214,11 @@ pub fn parse_provider_annotations(src: &str) -> ProviderMeta {
             }
             "input_types" => meta.input_types = parse_type_list(arg),
             "output_types" => meta.output_types = parse_type_list(arg),
+            "mime_type" => {
+                if let Some(row) = parse_mime_row(arg) {
+                    meta.mime_rows.push(row);
+                }
+            }
             _ => {}
         }
     }
@@ -157,6 +262,55 @@ fn inference(s, r) { #{} }
         assert_eq!(meta.max_context_tokens, 131072);
         assert_eq!(meta.max_output_tokens, 32768);
         assert!(meta.supports_streaming);
+    }
+
+    #[test]
+    fn parses_mime_type_rows() {
+        let src = "// @mime_type application/x-acme-scene family=model extensions=scene,scn magic=41434D45 text=false bareword unknown=9
+// @mime_type model/gltf-binary family=model
+// @mime_type text/x-note text=true
+// @mime_type notatype ignored
+// @mime_type
+fn inference(s, r) { #{} }
+";
+        let meta = parse_provider_annotations(src);
+        // The three well-formed rows; the one with no `/` and the empty one drop.
+        assert_eq!(meta.mime_rows.len(), 3);
+        // A row that sets no family carries none, and only what it did set.
+        let note = &meta.mime_rows[2];
+        assert_eq!(note.mime_type, "text/x-note");
+        assert!(note.family.is_none());
+        assert_eq!(note.text, Some(true));
+        assert_eq!(note.to_toml().len(), 1);
+        let scene = &meta.mime_rows[0];
+        assert_eq!(scene.mime_type, "application/x-acme-scene");
+        assert_eq!(scene.family.as_deref(), Some("model"));
+        assert_eq!(scene.text, Some(false));
+        assert_eq!(scene.extensions, ["scene", "scn"]);
+        assert_eq!(scene.magic.as_deref(), Some("41434D45"));
+        assert_eq!(meta.mime_rows[1].mime_type, "model/gltf-binary");
+        assert!(meta.mime_rows[1].extensions.is_empty());
+
+        // Rendered as a registry table keyed by type, only the set fields.
+        let table = meta.mime_rows_table();
+        assert_eq!(table.len(), 3);
+        let row = table["application/x-acme-scene"].as_table().unwrap();
+        assert_eq!(row["family"].as_str(), Some("model"));
+        assert_eq!(row["text"].as_bool(), Some(false));
+        assert_eq!(row["magic"].as_str(), Some("41434D45"));
+        assert_eq!(row["extensions"].as_array().unwrap().len(), 2);
+        // A row that set nothing but the family carries only the family.
+        let gltf = table["model/gltf-binary"].as_table().unwrap();
+        assert_eq!(gltf.len(), 1);
+        assert!(gltf.contains_key("family"));
+        // And the whole thing layers into a real registry.
+        let mut reg = leviath_core::mime::MimeRegistry::builtin();
+        reg.layer(&table, "provider:acme").unwrap();
+        assert_eq!(
+            reg.info(&leviath_core::mime::MimeType::parse("application/x-acme-scene").unwrap())
+                .family,
+            "model"
+        );
     }
 
     #[test]

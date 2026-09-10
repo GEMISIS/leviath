@@ -359,6 +359,12 @@ same list.
   `write_file = "allow"` back to its default, so the tool still asks. The line
   looked like a decision and silenced `implicit-shell-policy` without doing
   anything; the warning names how to make it stick, or to drop it (#400).
+- A Rhai provider ships the mime types its models are built for, with a
+  `// @mime_type <type> family=... [text=...] [extensions=...] [magic=...]`
+  annotation, repeatable. The rows layer into every run's registry under the
+  built-in table, so a run that resolves onto the provider knows the type,
+  and the operator's config and a blueprint still win over it. `lev mime list`
+  shows each with a `provider:<name>` source (#400).
 - A model that cannot call tools (an image model such as Nano Banana, whose
   listing says `supports_tools = false`) was sent every tool call and result
   an earlier stage had left in the shared conversation, and its provider
