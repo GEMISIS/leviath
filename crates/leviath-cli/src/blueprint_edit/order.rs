@@ -143,31 +143,27 @@ pub(super) fn stage_block(order: &[Vec<Seg>], name: &str) -> Vec<Vec<Seg>> {
         .collect()
 }
 
-/// Move stage `name`'s block of tables to just before (`before = true`) or
-/// just after the block of `other`, and renumber the file to match.
-pub(super) fn move_stage_block(doc: &mut DocumentMut, name: &str, other: &str, before: bool) {
+/// Move stage `name`'s block of tables to just after the block of `after`
+/// (a stage the caller has checked is there, and not `name` itself), and
+/// renumber the file to match. An inline `stages` table has no blocks to
+/// move: its entries sit where they were written.
+pub(super) fn place_stage_after(doc: &mut DocumentMut, name: &str, after: &str) {
     let order = written_order(doc);
     let block = stage_block(&order, name);
-    let anchor = stage_block(&order, other);
-    if name == other || block.is_empty() || anchor.is_empty() {
+    let Some(anchor_end) = stage_block(&order, after).pop() else {
         return;
-    }
+    };
     let mut rest: Vec<Vec<Seg>> = order
         .iter()
         .filter(|p| !block.contains(p))
         .cloned()
         .collect();
     // The anchor is in the order and not in the block, so it is in `rest`.
-    let at = if before {
-        rest.iter()
-            .position(|p| p == &anchor[0])
-            .expect("the anchor's first table is in the rest")
-    } else {
-        rest.iter()
-            .position(|p| p == anchor.last().expect("non-empty"))
-            .expect("the anchor's last table is in the rest")
-            + 1
-    };
+    let at = rest
+        .iter()
+        .position(|p| *p == anchor_end)
+        .expect("the anchor's last table is in the rest")
+        + 1;
     rest.splice(at..at, block);
     renumber(doc, &rest);
 }

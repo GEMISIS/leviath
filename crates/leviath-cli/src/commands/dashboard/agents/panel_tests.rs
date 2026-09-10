@@ -2302,10 +2302,11 @@ fn segments_buttons_and_name_popups_draw() {
     dash.handle_key(key(KeyCode::Enter));
     dash.editor_add_region("scratch");
     dash.handle_key(key(KeyCode::Esc));
-    // A button row is its label, arrowed.
+    // A button row is its label, nothing in front of it.
     let screen = text(&mut dash);
-    assert!(screen.contains("▸ Add a region"), "{screen}");
-    assert!(screen.contains("▸ Back to the shared layout"), "{screen}");
+    assert!(screen.contains("  Add a region"), "{screen}");
+    assert!(!screen.contains("▸ Add a region"), "{screen}");
+    assert!(screen.contains("Back to the shared layout"), "{screen}");
     // The add-stage popup and the add-region popup share a frame.
     dash.agents().editor.as_mut().unwrap().focus = Focus::Canvas;
     dash.handle_key(key(KeyCode::Char('a')));

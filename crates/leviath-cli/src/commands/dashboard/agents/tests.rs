@@ -1228,19 +1228,7 @@ fn the_inspector_edits_every_kind_of_field() {
             .allow_complete,
         None
     );
-    // Move down, then up; the tabs; the delete button (asks).
-    dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MoveDown);
-    dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        dash.agents().editor.as_ref().unwrap().doc.stage_names(),
-        ["finish", "work2"]
-    );
-    dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::MoveUp);
-    dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        dash.agents().editor.as_ref().unwrap().doc.stage_names(),
-        ["work2", "finish"]
-    );
+    // The tabs; the delete button (asks).
     dash.handle_key(key(KeyCode::Char('3')));
     assert!(text(&mut dash).contains("Models & tools"));
     dash.handle_key(key(KeyCode::Char('2')));

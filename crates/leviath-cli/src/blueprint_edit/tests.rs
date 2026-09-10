@@ -611,46 +611,6 @@ fn deleting_a_stage_takes_its_paths_and_repoints_the_entry() {
 }
 
 #[test]
-fn moving_a_stage_swaps_it_with_its_neighbour_in_the_file() {
-    let mut doc = coder();
-    let names = doc.stage_names();
-    doc.move_stage("plan", true).unwrap();
-    let moved = doc.stage_names();
-    assert_eq!(moved[0], "plan");
-    assert_eq!(moved[1], "discover");
-    assert_eq!(&moved[2..], &names[2..]);
-    // The file agrees, subtables and all, and still parses.
-    let text = doc.to_toml();
-    assert!(text.find("[stages.plan]").unwrap() < text.find("[stages.discover]").unwrap());
-    assert!(
-        text.find("[stages.plan.transitions.implement]").unwrap()
-            < text.find("[stages.discover]").unwrap()
-    );
-    assert!(
-        text.find("[[stages.plan.interaction_points]]").unwrap()
-            < text.find("[stages.discover]").unwrap()
-    );
-    runtime_ok(&doc);
-    doc.move_stage("plan", false).unwrap();
-    assert_eq!(doc.stage_names(), names);
-    // At the ends nothing moves; a ghost is refused.
-    doc.move_stage("discover", true).unwrap();
-    assert_eq!(doc.stage_names(), names);
-    let last = names.last().unwrap().clone();
-    doc.move_stage(&last, false).unwrap();
-    assert_eq!(doc.stage_names(), names);
-    assert_eq!(
-        doc.move_stage("ghost", true),
-        Err(EditError::NoSuchStage("ghost".into()))
-    );
-    // Re-read after renumbering: same order.
-    assert_eq!(
-        ManifestDoc::parse(&doc.to_toml()).unwrap().stage_names(),
-        names
-    );
-}
-
-#[test]
 fn stage_fields_write_and_delete_the_way_the_lair_does() {
     let mut doc = starter();
     doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
@@ -1712,12 +1672,6 @@ fn odd_content_is_refused_rather_than_clobbered() {
     runtime_ok(&inline);
     inline.rename_stage("a", "start").unwrap();
     assert!(inline.edge("start", "b").is_some());
-    inline.move_stage("b", true).unwrap();
-    assert_eq!(
-        inline.stage_names(),
-        ["start", "b"],
-        "inline stages have no position to move"
-    );
     // An inline `context = {}` gets an inline copy of the shared regions.
     let mut ctx = ManifestDoc::parse(
         "[agent]\nname = \"c\"\n[context.regions]\nnotes = { kind = \"pinned\" }\n[stages.a]\ncontext = { }\n",

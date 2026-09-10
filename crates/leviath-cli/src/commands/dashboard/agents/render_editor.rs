@@ -696,7 +696,7 @@ fn value_text(field: &Field, on: bool) -> (String, Style) {
             base,
         ),
         FieldValue::Button => (
-            format!("▸ {}", field.label),
+            field.label.clone(),
             if !enabled {
                 Style::default().fg(C_DIM)
             } else if on {
