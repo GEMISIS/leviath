@@ -264,7 +264,7 @@ impl Dashboard {
             (false, _) => "unattended: off".to_string(),
         };
         if self.new_run_picker_open() {
-            return " ↑↓ move · Space toggle · Enter done · Esc cancel · type to filter "
+            return " ↑↓ move · Space select · Enter done · Esc cancel · type to filter "
                 .to_string();
         }
         match (self.new_run_file_ref, self.new_run_focus) {

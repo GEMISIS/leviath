@@ -95,16 +95,23 @@ impl NewRunInput {
         if self.takes_files() && !self.takes_text() {
             return self.file_spans(on);
         }
-        let mut spans = self.edit.display_spans(true).spans;
-        if self.edit.value().is_empty() && !on {
-            spans = vec![Span::styled(
-                match self.takes_files() {
-                    true => "text, or Ctrl+O to choose files",
-                    false => "text",
-                },
-                Style::default().fg(C_DIM),
-            )];
-        }
+        let hint = match self.takes_files() {
+            true => "text, or Ctrl+O to choose files",
+            false => "text",
+        };
+        // Keep the hint visible whenever the field is empty, focused or not, so
+        // a slot never looks blank and nobody forgets what it wants. Focused,
+        // the cursor stays and the hint trails it dim; unfocused, the hint
+        // stands alone.
+        let mut spans = match (self.edit.value().is_empty(), on) {
+            (true, true) => {
+                let mut spans = self.edit.display_spans(true).spans;
+                spans.push(Span::styled(format!(" {hint}"), Style::default().fg(C_DIM)));
+                spans
+            }
+            (true, false) => vec![Span::styled(hint, Style::default().fg(C_DIM))],
+            (false, _) => self.edit.display_spans(true).spans,
+        };
         // A region that takes both shows any chosen files after the text.
         if self.takes_files() && !self.files.is_empty() {
             spans.push(Span::styled(
@@ -692,6 +699,22 @@ mod tests {
         let text = screen(&mut dash);
         assert!(text.contains("look"), "{text}");
         assert!(text.contains("+c.png"), "{text}");
+    }
+
+    /// An empty text slot keeps its hint while it has focus, so it never looks
+    /// blank and nobody forgets what it wants.
+    #[test]
+    fn an_empty_text_slot_keeps_its_hint_while_focused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        // Focus the notes slot (takes text and files); empty, it still shows
+        // the hint.
+        dash.new_run_focus = NewRunPane::Inputs;
+        dash.new_run_input_selected = 1;
+        let text = screen(&mut dash);
+        assert!(text.contains("text, or Ctrl+O to choose files"), "{text}");
     }
 
     /// A file slot opens the picker by key: Space (or Enter) on a file-only
