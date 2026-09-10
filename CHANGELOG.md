@@ -158,7 +158,10 @@ same list.
   directory. `GET /api/agents/{id}/blobs` lists the stored parts a run
   holds and `/blobs/{sha256}` serves one under its own content type, `GET
   /api/agents/{id}/files/raw?path=` serves a workdir file the same way, and
-  `GET /api/mime` lists the effective mime registry. `[serve]
+  `GET /api/mime` lists the effective mime registry. Both byte routes
+  advertise `Accept-Ranges: bytes` and answer a single `Range` request with
+  `206 Partial Content` and a `Content-Range`, so a client can scrub or
+  resume. `[serve]
   max_upload_bytes` (32 MiB by default) bounds a request body and is
   reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
   `runs.blobs`, `runs.files.raw`, `runs.result.artifacts` and

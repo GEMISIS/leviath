@@ -678,6 +678,13 @@ directory no longer holds. `GET /api/agents/{id}/blobs/{sha256}` serves one part
 own `Content-Type`, so an `<img src=...>` pointed at it renders, and `?download=1` adds a
 `Content-Disposition: attachment` carrying the part's name.
 
+Both byte routes advertise `Accept-Ranges: bytes` and honour a single-range `Range` request, so a
+player can scrub a video or a client can resume a download. `Range: bytes=1024-2047` is answered
+`206 Partial Content` with a `Content-Range: bytes 1024-2047/<total>` header and just those bytes;
+an open end (`bytes=1024-`) or a suffix (`bytes=-4096`, the last 4 KiB) works too. A range that
+starts past the end is `416 Range Not Satisfiable` with `Content-Range: bytes */<total>`. A
+malformed or multi-range header is ignored and the whole body served.
+
 `GET /api/agents/{id}/files/raw?path=` does the same for any file inside the working directory,
 typed by the registry from its bytes and name, where the JSON `files` route wraps text. The answer's
 `artifacts` carry each file's `path` and, when the run could store it, its `sha256`, so a client can
