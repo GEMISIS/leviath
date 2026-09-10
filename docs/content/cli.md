@@ -261,6 +261,7 @@ that was looked for.
 | warning | `region-seed-not-understood` | A region's `seed` is not a recognized form, so the region starts empty. See below |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
+| warning | `blueprint-permission-clamped` | A `tool_permissions` entry that sets a granted tool more permissively than its built-in default, which a blueprint cannot do on its own. The runtime clamps it back, so the tool still asks. See below |
 | warning | `unknown-model` | A model this build has not heard of. See below |
 | warning | `catalog-unchecked` | A script provider that will not say which models it serves, so a name against it went unchecked. See below |
 | warning | `no-reachable-provider` | Nothing in the stage's models list can run here, so it falls through to your default model. See below |
@@ -274,7 +275,7 @@ that was looked for.
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
 | note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Fifteen of those findings need more than a phrase.
+Sixteen of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -298,6 +299,15 @@ killed. Set `allow_blocking_tools = true` on the stage to say you meant it. A st
 **`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
 prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
 grant with no `shell` policy is reported too.
+
+**`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
+`write_file`, `edit_file`, `install_tool`) silences `implicit-shell-policy`, but a downloaded
+blueprint is not allowed to grant itself write or shell access: the runtime clamps the policy back
+to the stricter of it and the built-in default, so the tool still asks. The line looks like a
+decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
+= true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
+blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
+default (`ask`, `deny`) is fine.
 
 **`unserved-model`** is the one model finding that fails the command, because it is the one that can
 be proved. The provider is configured here, it published the full list of what it carries, and the
