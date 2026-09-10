@@ -357,7 +357,7 @@ hidden, so the panel never reflows under the cursor:
   stage tries first, and the shared context regions (`Enter` on one opens it).
 - **A stage**, on four tabs (`1` to `4`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
-  has one, the prompts, its place in the file, delete. The worker a fan-out runs as is picked
+  has one, the prompts, delete. The worker a fan-out runs as is picked
   from the agent's other stages or from every agent installed here (with an *another…* row for
   one that is not), and typed only when it is a query. *Inputs & outputs*: the input types (what
   the stage takes as files beyond text; left empty it is whatever its regions take, and each

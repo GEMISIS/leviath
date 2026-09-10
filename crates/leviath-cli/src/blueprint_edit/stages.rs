@@ -142,7 +142,7 @@ impl ManifestDoc {
             .as_table_like_mut()
             .expect("parse() checked [stages] is a table")
             .insert(name, stage);
-        order::move_stage_block(self.doc_mut(), name, &after, false);
+        order::place_stage_after(self.doc_mut(), name, &after);
         Ok(())
     }
 
@@ -226,23 +226,6 @@ impl ManifestDoc {
             .expect("parse() checked [agent] is a table");
         if get_str(agent, "entry_stage") == Some(name) {
             set_str(agent, "entry_stage", &first);
-        }
-        Ok(())
-    }
-
-    /// Swap a stage with its neighbour in the file (`up` = towards the
-    /// start). At either end nothing happens.
-    pub(crate) fn move_stage(&mut self, name: &str, up: bool) -> Result<(), EditError> {
-        self.require_stage(name)?;
-        let names = self.stage_names();
-        let index = names.iter().position(|n| n == name).expect("listed");
-        let other = if up {
-            index.checked_sub(1).map(|i| &names[i])
-        } else {
-            names.get(index + 1)
-        };
-        if let Some(other) = other {
-            order::move_stage_block(self.doc_mut(), name, other, up);
         }
         Ok(())
     }

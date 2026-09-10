@@ -108,8 +108,6 @@ pub(in crate::commands::dashboard) enum FieldId {
     MaxWorkers,
     MaxItems,
     OnWorkerFailure,
-    MoveUp,
-    MoveDown,
     DeleteStage,
     EdgeKind,
     EdgeHint,
@@ -338,7 +336,6 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 }),
             };
             let names = doc.stage_names();
-            let index = names.iter().position(|n| n == name).unwrap_or(0);
             let own_loop = doc.edge(name, name);
             let mut out = vec![
                 Field::new(
@@ -448,20 +445,6 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                     FieldValue::Button,
                     "What the stage is told to do, and how it decides where to go next.",
                 ),
-                Field::new(
-                    FieldId::MoveUp,
-                    "Move up in the file",
-                    FieldValue::Button,
-                    "Order in the file only; the paths decide the flow.",
-                )
-                .enabled(index > 0),
-                Field::new(
-                    FieldId::MoveDown,
-                    "Move down in the file",
-                    FieldValue::Button,
-                    "Order in the file only; the paths decide the flow.",
-                )
-                .enabled(index + 1 < names.len()),
                 Field::new(
                     FieldId::DeleteStage,
                     "Delete stage",

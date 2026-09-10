@@ -957,11 +957,6 @@ impl Dashboard {
     /// Enter on a button row.
     pub(in crate::commands::dashboard) fn editor_button(&mut self, id: &FieldId) {
         match id {
-            FieldId::MoveUp | FieldId::MoveDown => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                let up = *id == FieldId::MoveUp;
-                self.editor_mutate(|d| d.move_stage(&stage, up));
-            }
             FieldId::DeleteStage => {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 self.editor_request_delete_stage(&stage);

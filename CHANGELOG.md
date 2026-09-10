@@ -337,8 +337,10 @@ same list.
   wider, `Tab`/`Shift-Tab` walk a stage's tabs (the arrows change a row in
   place, as they do on every other panel, and `Esc` goes back to the
   graph), a live row's label is no longer drawn in the dim colour that
-  meant "cannot be edited", and a chooser keeps a long name clear of the
-  note beside it (#400).
+  meant "cannot be edited", a chooser keeps a long name clear of the
+  note beside it, a button row is its label with nothing in front of it,
+  and a stage's *Move up / down in the file* buttons are gone (the paths
+  decide the flow, so the order in the file changed nothing) (#400).
 - The crates.io publish on a stable release stopped at `leviath-alloc`. An
   August hygiene commit marked the crate `publish = false` while the prod
   workflow's publish loop still named it and `leviath-cli`'s default allocator
