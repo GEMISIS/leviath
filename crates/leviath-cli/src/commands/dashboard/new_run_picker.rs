@@ -10,10 +10,11 @@
 //! than one file (`max_stored > 1`) takes several, toggled on and off, up to
 //! its cap; the modal is the add-and-remove surface the row points at.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
+use leviath_core::mime::MimeRegistry;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -49,6 +50,14 @@ pub(super) struct FilePicker {
     region: String,
     /// How many files the region holds; the choice cannot exceed it.
     max_stored: usize,
+    /// The region's token budget, resolved against the entry model's window.
+    /// `0` means the region declares none, so no token limit is enforced.
+    budget: usize,
+    /// The working directory the files are read from, to estimate a file's
+    /// token cost as it is toggled.
+    workdir: PathBuf,
+    /// The registry the estimate resolves types and rules with.
+    registry: MimeRegistry,
     /// Every candidate, already filtered to the region's `accepts`.
     files: Vec<PickerFile>,
     /// Indices into `files` matching the current name filter, in order.
@@ -57,8 +66,10 @@ pub(super) struct FilePicker {
     query: String,
     /// Highlighted row of `filtered`.
     selected: usize,
-    /// The files chosen so far, by workdir-relative path.
-    chosen: BTreeSet<PathBuf>,
+    /// The files chosen so far, each with its estimated token cost.
+    chosen: BTreeMap<PathBuf, usize>,
+    /// A one-line reason the last pick was refused, shown until the next key.
+    warn: Option<String>,
 }
 
 impl FilePicker {
@@ -83,28 +94,74 @@ impl FilePicker {
         self.filtered.get(self.selected).map(|&i| &self.files[i])
     }
 
+    /// The tokens the choice costs so far.
+    fn chosen_tokens(&self) -> usize {
+        self.chosen.values().sum()
+    }
+
     /// Toggle the highlighted file in or out of the choice. A region that holds
-    /// one file swaps rather than adds; a full multi-file choice ignores a new
-    /// pick, so the cap is never exceeded.
+    /// one file swaps rather than adds. A pick is refused, with a reason, when
+    /// it would take the count past `max_stored` or the tokens past the budget.
     fn toggle_highlighted(&mut self) {
+        self.warn = None;
         let Some(path) = self.highlighted().map(|f| f.rel.clone()) else {
             return;
         };
-        if self.chosen.remove(&path) {
+        if self.chosen.remove(&path).is_some() {
             return;
         }
+        let tokens = estimate_file_tokens(&self.workdir.join(&path), &self.registry);
+        // A one-file region swaps; a many-file region checks the count first.
         if self.max_stored <= 1 {
             self.chosen.clear();
         } else if self.chosen.len() >= self.max_stored {
+            self.warn = Some(format!("holds at most {} files", self.max_stored));
             return;
         }
-        self.chosen.insert(path);
+        if self.budget > 0 && self.chosen_tokens() + tokens > self.budget {
+            let left = self.budget.saturating_sub(self.chosen_tokens());
+            self.warn = Some(format!(
+                "no room: ~{} tokens, {} left of {}",
+                tokens, left, self.budget
+            ));
+            return;
+        }
+        self.chosen.insert(path, tokens);
     }
 
     /// The choice as an ordered list.
     fn chosen_paths(&self) -> Vec<PathBuf> {
-        self.chosen.iter().cloned().collect()
+        self.chosen.keys().cloned().collect()
     }
+}
+
+/// A token estimate for a workdir file, offline: its type's rule applied to the
+/// file's size, with image dimensions and audio duration read from the header
+/// when the rule needs them. It matches what the daemon charges the part at
+/// ingest closely enough to keep a budget honest, without reading the whole
+/// file, and errs high (an unprobed image falls to the per-pixel cap), which is
+/// the safe direction for a budget.
+pub(super) fn estimate_file_tokens(path: &Path, registry: &MimeRegistry) -> usize {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let name = path.file_name().and_then(|n| n.to_str());
+    let head = read_head(path, 64 * 1024);
+    let mime_type = registry.resolve(None, name, &head);
+    let info = registry.info(&mime_type);
+    let dims = leviath_core::mime::probe::dimensions(&mime_type, &head);
+    let duration = leviath_core::mime::probe::duration_ms(&mime_type, &head);
+    info.tokens.estimate(size, dims, duration)
+}
+
+/// The first `cap` bytes of `path`, enough for the header probes; empty if it
+/// cannot be opened or read.
+fn read_head(path: &Path, cap: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = vec![0u8; cap];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| file.read(&mut buf))
+        .unwrap_or(0);
+    buf.truncate(read);
+    buf
 }
 
 /// Whether a workdir file belongs in a picker for `accepts`, and the type
@@ -145,22 +202,35 @@ impl Dashboard {
         let region = slot.region.clone();
         let accepts = slot.accepts.clone();
         let max_stored = slot.max_stored.max(1);
-        let chosen: BTreeSet<PathBuf> = slot.files.iter().cloned().collect();
+        let budget = slot.max_tokens;
+        let workdir = self.new_run_ctx.workdir.clone();
         let registry = cli_registry();
-        let files: Vec<PickerFile> =
-            super::new_run::collect_workdir_files(&self.new_run_ctx.workdir, FILE_CAP)
-                .iter()
-                .filter_map(|name| candidate(name, &registry, &accepts))
-                .collect();
+        // The files already on the row start chosen, each with its estimate.
+        let chosen: BTreeMap<PathBuf, usize> = slot
+            .files
+            .iter()
+            .map(|p| {
+                let tokens = estimate_file_tokens(&workdir.join(p), &registry);
+                (p.clone(), tokens)
+            })
+            .collect();
+        let files: Vec<PickerFile> = super::new_run::collect_workdir_files(&workdir, FILE_CAP)
+            .iter()
+            .filter_map(|name| candidate(name, &registry, &accepts))
+            .collect();
         let mut picker = FilePicker {
             row,
             region,
             max_stored,
+            budget,
+            workdir,
+            registry,
             files,
             filtered: Vec::new(),
             query: String::new(),
             selected: 0,
             chosen,
+            warn: None,
         };
         picker.refilter();
         self.new_run_picker = Some(picker);
@@ -178,6 +248,9 @@ impl Dashboard {
         let Some(picker) = self.new_run_picker.as_mut() else {
             return;
         };
+        // Any key dismisses a refusal reason; a Space that is refused again
+        // sets a fresh one.
+        picker.warn = None;
         match key.code {
             KeyCode::Esc => self.new_run_picker = None,
             KeyCode::Enter => {
@@ -227,11 +300,18 @@ impl Dashboard {
             true => format!("up to {}", picker.max_stored),
             false => "one file".to_string(),
         };
+        // The token line is the honest answer to "how many files fit": the
+        // budget is the region's share of the model's context window.
+        let budget_note = match picker.budget > 0 {
+            true => format!(", ≈{}/{} tokens", picker.chosen_tokens(), picker.budget),
+            false => String::new(),
+        };
         let title = format!(
-            " Choose files for {} ({}, {} chosen) ",
+            " Choose files for {} ({}, {} chosen{}) ",
             picker.region,
             cap_note,
-            picker.chosen.len()
+            picker.chosen.len(),
+            budget_note,
         );
         frame.render_widget(Clear, popup);
         frame.render_widget(
@@ -277,7 +357,7 @@ impl Dashboard {
             for &fi in picker.filtered.iter().skip(start).take(list_rows) {
                 let file = &picker.files[fi];
                 let on = Some(fi) == picker.filtered.get(picker.selected).copied();
-                let ticked = picker.chosen.contains(&file.rel);
+                let ticked = picker.chosen.contains_key(&file.rel);
                 let mark = match ticked {
                     true => "[x] ",
                     false => "[ ] ",
@@ -305,9 +385,20 @@ impl Dashboard {
         }
         frame.render_widget(Paragraph::new(lines), inner);
 
-        let footer = match picker.max_stored > 1 {
-            true => " Space add/remove · Enter done · Esc cancel · type to filter ",
-            false => " Space choose (swaps) · Enter done · Esc cancel · type to filter ",
+        // A refused pick replaces the key hint with its reason until the next
+        // key, so the person sees why nothing happened.
+        let footer = match &picker.warn {
+            Some(reason) => Line::from(Span::styled(
+                format!(" {reason} "),
+                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+            )),
+            None => Line::from(Span::styled(
+                match picker.max_stored > 1 {
+                    true => " Space add/remove · Enter done · Esc cancel · type to filter ",
+                    false => " Space choose (swaps) · Enter done · Esc cancel · type to filter ",
+                },
+                Style::default().fg(C_MUTED),
+            )),
         };
         let footer_area = Rect {
             x: inner.x,
@@ -315,13 +406,7 @@ impl Dashboard {
             width: inner.width,
             height: 1,
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                footer,
-                Style::default().fg(C_MUTED),
-            ))),
-            footer_area,
-        );
+        frame.render_widget(Paragraph::new(footer), footer_area);
     }
 }
 
@@ -357,9 +442,10 @@ mod tests {
              [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
              [context.regions]\n\
              task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             cover = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"] }\n\
-             gallery = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"], max_stored = 3 }\n\
+             cover = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
+             gallery = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], max_stored = 3 }\n\
              notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
+             tight = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"], max_stored = 4 }\n\
              conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
         )
         .unwrap();
@@ -667,6 +753,68 @@ mod tests {
         dash.handle_new_run_key(key(KeyCode::Char(' ')));
         dash.handle_new_run_key(key(KeyCode::Enter));
         assert!(dash.new_run_inputs[0].files.is_empty());
+    }
+
+    /// A region whose budget an image would blow refuses the pick, says why in
+    /// the footer, and shows the running tokens against the budget in the title.
+    #[test]
+    fn a_tight_budget_refuses_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        let tight = dash
+            .new_run_inputs
+            .iter()
+            .position(|s| s.region == "tight")
+            .unwrap();
+        assert_eq!(dash.new_run_inputs[tight].max_tokens, 1000);
+        dash.open_new_run_picker(tight);
+        // The title shows the budget.
+        let text = draw(&mut dash);
+        assert!(text.contains("/1000 tokens"), "{text}");
+        // A ~1600-token image does not fit 1000: refused, with a reason.
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
+        assert!(dash.new_run_picker.as_ref().unwrap().chosen.is_empty());
+        assert!(
+            dash.new_run_picker.as_ref().unwrap().warn.is_some(),
+            "a refusal is recorded"
+        );
+        let text = draw(&mut dash);
+        assert!(text.contains("no room"), "{text}");
+    }
+
+    /// A region with no token budget (0) enforces no token limit and shows no
+    /// token line.
+    #[test]
+    fn no_budget_means_no_token_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        // Force the cover slot to declare no budget.
+        dash.new_run_inputs[0].max_tokens = 0;
+        dash.open_new_run_picker(0);
+        let text = draw(&mut dash);
+        assert!(
+            !text.contains("tokens)"),
+            "no token line in the title: {text}"
+        );
+        // Toggling still works with no budget to check against.
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
+        assert_eq!(dash.new_run_picker.as_ref().unwrap().chosen.len(), 1);
+    }
+
+    /// The token estimate handles a file that is not there: no size, no header,
+    /// and a zero-ish estimate rather than a panic.
+    #[test]
+    fn estimate_handles_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::commands::run::attach::cli_registry();
+        // A missing file: metadata and the header read both fail, so the
+        // estimate falls to the size-0 case (a token floor, not a panic).
+        let tokens = estimate_file_tokens(&dir.path().join("gone.bin"), &reg);
+        assert!(tokens <= 1, "a missing file costs about nothing: {tokens}");
     }
 
     /// Opening on a row that is not there does nothing.

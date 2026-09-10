@@ -204,7 +204,11 @@ same list.
   region a picker of the working directory, filtered to the types the region
   accepts, so a file reaches a region by being chosen rather than named and
   never with an `@`; a region that holds several (`max_stored`) takes several,
-  added and removed in the picker (#400).
+  added and removed in the picker. The picker shows the tokens the choice costs
+  against the region's budget (its share of the entry model's context window),
+  refuses a file that would overflow it, and the run is stopped with a named
+  error rather than started with a region that cannot hold what it was given
+  (#400).
 - The stage graph shows the mime a stage takes beyond text (`◧ image/*
   audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
   files it declares it hands back (`▤ video/mp4`), in the explorer, the
