@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use leviath_core::mime::{MimeRegistry, MimeType, is_sha256_hex};
 use serde::{Deserialize, Serialize};
@@ -66,19 +66,106 @@ pub(super) struct BytesQuery {
     pub(super) download: bool,
 }
 
-/// Bytes with their type, and a download hint when asked for.
+/// The `Range` request header as a string, when the caller sent one.
+fn range_header(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+}
+
+/// What a `Range` header asks for against a body of `total` bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeResult {
+    /// No range, or one this route does not honor: send the whole body.
+    Full,
+    /// An inclusive byte range `[start, end]` to send as `206`.
+    Partial(u64, u64),
+    /// A range that names bytes the body does not have: `416`.
+    Unsatisfiable,
+}
+
+/// Resolve a single-range `Range: bytes=...` header against a `total`-byte
+/// body. A missing header, an unknown unit, a multi-range list, or a
+/// malformed spec all read as [`RangeResult::Full`] - RFC 7233 says an
+/// unsatisfiable *parse* is ignored and the whole body served. A well-formed
+/// range past the end is [`RangeResult::Unsatisfiable`].
+fn resolve_range(header: Option<&str>, total: u64) -> RangeResult {
+    let Some(spec) = header.and_then(|h| h.strip_prefix("bytes=")) else {
+        return RangeResult::Full;
+    };
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return RangeResult::Full;
+    }
+    let Some((from, to)) = spec.split_once('-') else {
+        return RangeResult::Full;
+    };
+    let (start, end) = if from.is_empty() {
+        // `-N`: the last N bytes.
+        let Ok(n) = to.parse::<u64>() else {
+            return RangeResult::Full;
+        };
+        if n == 0 {
+            return RangeResult::Unsatisfiable;
+        }
+        (total.saturating_sub(n), total.saturating_sub(1))
+    } else {
+        let Ok(start) = from.parse::<u64>() else {
+            return RangeResult::Full;
+        };
+        let end = match to.is_empty() {
+            true => total.saturating_sub(1),
+            false => match to.parse::<u64>() {
+                Ok(e) => e.min(total.saturating_sub(1)),
+                Err(_) => return RangeResult::Full,
+            },
+        };
+        (start, end)
+    };
+    if total == 0 || start >= total || start > end {
+        return RangeResult::Unsatisfiable;
+    }
+    RangeResult::Partial(start, end)
+}
+
+/// Bytes with their type, a download hint when asked for, and single-range
+/// support so a client can seek (video scrubbing, resuming a download). Every
+/// response advertises `Accept-Ranges: bytes`.
 fn bytes_response(
     bytes: Vec<u8>,
     mime_type: &MimeType,
     name: &str,
     download: bool,
+    range: Option<&str>,
 ) -> Result<Response, ApiError> {
-    let mut response = (StatusCode::OK, bytes).into_response();
+    let total = bytes.len() as u64;
+    let (status, body, content_range) = match resolve_range(range, total) {
+        RangeResult::Full => (StatusCode::OK, bytes, None),
+        RangeResult::Partial(start, end) => {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            (
+                StatusCode::PARTIAL_CONTENT,
+                slice,
+                Some(format!("bytes {start}-{end}/{total}")),
+            )
+        }
+        RangeResult::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Vec::new(),
+            Some(format!("bytes */{total}")),
+        ),
+    };
+    let mut response = (status, body).into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(mime_type.as_str()).expect("a mime type is printable ASCII"),
     );
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(cr) = content_range {
+        headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&cr).expect("a byte range is printable ASCII"),
+        );
+    }
     if download {
         let safe: String = name
             .chars()
@@ -103,6 +190,7 @@ pub(super) async fn get_blob(
     State(state): State<AppState>,
     AxumPath((id, sha256)): AxumPath<(String, String)>,
     Query(query): Query<BytesQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if !is_sha256_hex(&sha256) {
         return Err(err(
@@ -135,7 +223,13 @@ pub(super) async fn get_blob(
     let name = known
         .and_then(|b| b.name)
         .unwrap_or_else(|| sha256.chars().take(12).collect());
-    bytes_response(bytes, &mime_type, &name, query.download)
+    bytes_response(
+        bytes,
+        &mime_type,
+        &name,
+        query.download,
+        range_header(&headers),
+    )
 }
 
 /// `?path=` and `?download=` on the raw file route.
@@ -153,6 +247,7 @@ pub(super) async fn raw_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RawFileQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let meta = runstate::read_meta(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
@@ -195,7 +290,13 @@ pub(super) async fn raw_file(
         .unwrap_or_default();
     let registry = state.current_config().mime_registry_or_defaults();
     let mime_type = registry.resolve(None, Some(&name), &bytes);
-    bytes_response(bytes, &mime_type, &name, query.download)
+    bytes_response(
+        bytes,
+        &mime_type,
+        &name,
+        query.download,
+        range_header(&headers),
+    )
 }
 
 /// One row of the effective mime registry.
@@ -398,8 +499,23 @@ mod tests {
             let (status, headers, body) = call(&format!("/api/agents/{run_id}/blobs/{sha}")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+            assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
             assert!(headers.get(header::CONTENT_DISPOSITION).is_none());
             assert_eq!(body, b"\x89PNG\r\n\x1a\nhero");
+            // A Range header seeks into the blob: 206 with the slice and a
+            // Content-Range naming the whole.
+            let req = Request::builder()
+                .uri(format!("/api/agents/{run_id}/blobs/{sha}"))
+                .header(header::RANGE, "bytes=1-3")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 1-3/12");
+            let sliced = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(&sliced[..], b"PNG");
             let (_, headers, _) =
                 call(&format!("/api/agents/{run_id}/blobs/{sha}?download=1")).await;
             assert_eq!(
@@ -532,14 +648,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_range_reads_every_shape() {
+        use RangeResult::*;
+        // No header, or an unknown unit, or a list: serve the whole body.
+        assert_eq!(resolve_range(None, 10), Full);
+        assert_eq!(resolve_range(Some("lines=0-1"), 10), Full);
+        assert_eq!(resolve_range(Some("bytes=0-1,4-5"), 10), Full);
+        assert_eq!(resolve_range(Some("bytes=abc"), 10), Full);
+        assert_eq!(resolve_range(Some("bytes=x-1"), 10), Full);
+        assert_eq!(resolve_range(Some("bytes=0-z"), 10), Full);
+        assert_eq!(resolve_range(Some("bytes=-z"), 10), Full);
+        // A closed range, an open end (clamped), and a suffix.
+        assert_eq!(resolve_range(Some("bytes=2-5"), 10), Partial(2, 5));
+        assert_eq!(resolve_range(Some("bytes=2-"), 10), Partial(2, 9));
+        assert_eq!(resolve_range(Some("bytes=0-100"), 10), Partial(0, 9));
+        assert_eq!(resolve_range(Some("bytes=-3"), 10), Partial(7, 9));
+        assert_eq!(resolve_range(Some("bytes=-100"), 10), Partial(0, 9));
+        // Past the end, reversed, a zero-length suffix, and an empty body.
+        assert_eq!(resolve_range(Some("bytes=10-12"), 10), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=5-2"), 10), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=-0"), 10), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=0-0"), 0), Unsatisfiable);
+    }
+
+    #[test]
+    fn a_partial_and_an_unsatisfiable_range_shape_the_response() {
+        let png = MimeType::parse("image/png").unwrap();
+        // 206 with the slice, its Content-Range, and Accept-Ranges.
+        let r =
+            bytes_response(b"abcdef".to_vec(), &png, "x.png", false, Some("bytes=1-3")).unwrap();
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
+        assert_eq!(r.headers()[header::ACCEPT_RANGES], "bytes");
+        // 416 for a range past the end, with `*/total`.
+        let r =
+            bytes_response(b"abcdef".to_vec(), &png, "x.png", false, Some("bytes=9-10")).unwrap();
+        assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes */6");
+    }
+
+    #[test]
     fn a_name_the_header_cannot_carry_is_made_safe() {
         let response = bytes_response(
             vec![1],
             &MimeType::parse("image/png").unwrap(),
             "we ird/na\"me.png",
             true,
+            None,
         )
         .unwrap();
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
         assert_eq!(
             response.headers()[header::CONTENT_DISPOSITION],
             "attachment; filename=\"we_ird_na_me.png\""

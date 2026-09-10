@@ -968,7 +968,7 @@
           "agents"
         ],
         "summary": "A workdir file's bytes, under its own content type",
-        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. `download=1` adds a `Content-Disposition: attachment` naming the file.",
+        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body.",
         "parameters": [
           {
             "name": "path",
@@ -988,6 +988,15 @@
               "default": false
             },
             "description": "Ask the browser to save the file rather than show it."
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too), to fetch part of the body for seeking or resuming. A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
           }
         ],
         "responses": {
@@ -1001,6 +1010,20 @@
                 }
               }
             }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
           },
           "400": {
             "$ref": "#/components/responses/Error"
@@ -1081,7 +1104,7 @@
           "agents"
         ],
         "summary": "The bytes of one stored part",
-        "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404.",
+        "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body.",
         "parameters": [
           {
             "name": "download",
@@ -1092,6 +1115,15 @@
               "default": false
             },
             "description": "Ask the browser to save the file rather than show it."
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too), to fetch part of the body for seeking or resuming. A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
           }
         ],
         "responses": {
@@ -1105,6 +1137,20 @@
                 }
               }
             }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
           },
           "400": {
             "$ref": "#/components/responses/Error"
