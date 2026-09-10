@@ -502,9 +502,12 @@ fn new_run_sections() -> Vec<HelpSection> {
                 ("type", "filter the list by name"),
                 (
                     "space",
-                    "add or remove a file (a one-file region swaps instead)",
+                    "select or deselect the highlighted file (a one-file region swaps instead)",
                 ),
-                ("enter", "choose the file, or confirm a multi-file choice"),
+                (
+                    "enter",
+                    "confirm the selection (it never selects on its own, so a slot can be left empty)",
+                ),
                 ("esc", "cancel without changing the slot"),
             ],
         },

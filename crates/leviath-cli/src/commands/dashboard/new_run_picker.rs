@@ -181,16 +181,9 @@ impl Dashboard {
         match key.code {
             KeyCode::Esc => self.new_run_picker = None,
             KeyCode::Enter => {
-                // A one-file region has no toggling step: Enter takes the
-                // highlighted file. A multi-file region confirms what Space
-                // toggled.
-                if picker.max_stored <= 1
-                    && let Some(f) = picker.highlighted()
-                {
-                    let path = f.rel.clone();
-                    picker.chosen.clear();
-                    picker.chosen.insert(path);
-                }
+                // Enter only confirms what Space chose. It never selects the
+                // highlighted file on its own, so a file toggled on can be
+                // toggled back off and the choice left empty.
                 let row = picker.row;
                 let files = picker.chosen_paths();
                 self.new_run_picker = None;
@@ -314,7 +307,7 @@ impl Dashboard {
 
         let footer = match picker.max_stored > 1 {
             true => " Space add/remove · Enter done · Esc cancel · type to filter ",
-            false => " Enter choose · Space toggle · Esc cancel · type to filter ",
+            false => " Space choose (swaps) · Enter done · Esc cancel · type to filter ",
         };
         let footer_area = Rect {
             x: inner.x,
@@ -431,7 +424,9 @@ mod tests {
             !names.contains(&"readme.md".to_string()),
             "text is filtered out"
         );
-        // Enter on the highlighted file chooses it and closes.
+        // Space chooses the highlighted file; Enter alone chooses nothing, so
+        // a file can be left unselected.
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
         dash.handle_new_run_key(key(KeyCode::Enter));
         assert!(!dash.new_run_picker_open());
         assert_eq!(dash.new_run_inputs[0].files.len(), 1);
@@ -541,7 +536,8 @@ mod tests {
             .collect();
         assert!(text.contains("Choose files for cover"), "{text}");
         assert!(text.contains("hero.png"), "{text}");
-        assert!(text.contains("Enter choose"), "{text}");
+        assert!(text.contains("Space choose"), "{text}");
+        assert!(text.contains("Enter done"), "{text}");
         // Filtering narrows the list.
         dash.handle_new_run_key(key(KeyCode::Char('v')));
         assert_eq!(dash.new_run_picker.as_ref().unwrap().filtered.len(), 1);
@@ -651,6 +647,26 @@ mod tests {
             .find(|f| f.rel.to_string_lossy() == "scene.weird")
             .expect("the unknown-type file is offered");
         assert_eq!(weird.type_label, "?");
+    }
+
+    /// Enter never selects on its own: with nothing toggled the row stays
+    /// empty, and a file toggled on can be toggled back off.
+    #[test]
+    fn enter_does_not_auto_select() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        // Enter with nothing chosen leaves the row empty.
+        dash.open_new_run_picker(0);
+        dash.handle_new_run_key(key(KeyCode::Enter));
+        assert!(dash.new_run_inputs[0].files.is_empty());
+        // Toggle a file on, then off, then confirm: still empty.
+        dash.open_new_run_picker(0);
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
+        dash.handle_new_run_key(key(KeyCode::Enter));
+        assert!(dash.new_run_inputs[0].files.is_empty());
     }
 
     /// Opening on a row that is not there does nothing.
