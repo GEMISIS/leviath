@@ -33,6 +33,14 @@ pub(crate) fn mime_types_path() -> PathBuf {
 /// Why the registry could not be built from the config and the file.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum MimeTypesError {
+    /// A `@mime_type` row a Rhai provider ships would not load.
+    #[error("@mime_type from provider '{name}': {message}")]
+    Provider {
+        /// The provider whose script declared it.
+        name: String,
+        /// Why the registry refused it.
+        message: String,
+    },
     /// A row under `[mime_types]` in `config.toml`.
     #[error("[mime_types] in config.toml: {0}")]
     Config(RegistryError),
@@ -172,7 +180,8 @@ impl Default for MimeConfig {
 }
 
 impl super::Config {
-    /// The mime registry this install describes: the compiled defaults, a
+    /// The mime registry this install describes: the compiled defaults, the
+    /// rows every configured Rhai provider ships (`@mime_type`), a
     /// `[mime_types]` table in the config, then `mime_types.toml` beside
     /// it, later rows winning, with every check the rows name compiled and
     /// attached. A malformed row or a check that will not load is the
@@ -180,6 +189,16 @@ impl super::Config {
     /// mime` and the daemon say the same thing about it.
     pub fn mime_registry(&self) -> Result<MimeRegistry, MimeTypesError> {
         let mut reg = MimeRegistry::builtin();
+        // A Rhai provider ships the types its models are built for, under the
+        // built-in table so the operator's config and a blueprint still win.
+        for (name, rows) in self.provider_mime_rows() {
+            reg.layer(&rows, &format!("provider:{name}")).map_err(|e| {
+                MimeTypesError::Provider {
+                    name: name.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+        }
         reg.layer(&self.mime_types, "config")
             .map_err(MimeTypesError::Config)?;
         let path = mime_types_path();
@@ -195,6 +214,42 @@ impl super::Config {
         Ok(reg)
     }
 
+    /// The `@mime_type` rows every configured Rhai provider ships, each as a
+    /// registry table keyed by its provider name, in name order for a stable
+    /// layering. A provider whose script is absent or unreadable contributes
+    /// nothing here; the provider-load path is what reports a missing script.
+    pub fn provider_mime_rows(&self) -> Vec<(String, toml::Table)> {
+        let dir = crate::config::providers_dir();
+        let mut names: Vec<&String> = self
+            .model_providers
+            .iter()
+            .filter(|(_, c)| {
+                c.kind
+                    .map(|k| k == super::providers::ModelProviderKind::Script)
+                    .unwrap_or(true)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        let mut out = Vec::new();
+        for name in names {
+            let cfg = &self.model_providers[name];
+            let Some(path) = provider_script_path(name, cfg.script.as_deref(), dir.as_deref())
+            else {
+                continue;
+            };
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let table = leviath_providers::rhai_provider::parse_provider_annotations(&src)
+                .mime_rows_table();
+            if !table.is_empty() {
+                out.push((name.clone(), table));
+            }
+        }
+        out
+    }
+
     /// [`Self::mime_registry`] for a daemon that must keep running: a
     /// malformed row is logged and the defaults are used.
     pub fn mime_registry_or_defaults(&self) -> MimeRegistry {
@@ -205,9 +260,150 @@ impl super::Config {
     }
 }
 
+/// Resolve a script provider `name` (with an optional `script` override) to a
+/// path: an absolute override verbatim, else `<stem>.rhai` under the providers
+/// directory. A relative override with a `..` component, or no providers dir,
+/// resolves to `None` - the same confinement the provider loader applies.
+fn provider_script_path(name: &str, script: Option<&str>, dir: Option<&Path>) -> Option<PathBuf> {
+    let stem = script.unwrap_or(name);
+    let candidate = PathBuf::from(stem);
+    if candidate.is_absolute() {
+        return Some(candidate);
+    }
+    let filename = match stem.ends_with(".rhai") {
+        true => stem.to_string(),
+        false => format!("{stem}.rhai"),
+    };
+    let joined = PathBuf::from(&filename);
+    if joined
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    dir.map(|d| d.join(joined))
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::super::Config;
+
+    /// A Rhai provider's `@mime_type` rows layer under the built-in table, so a
+    /// run resolving onto it knows the type, and the operator's config still
+    /// wins over it. An openai-compatible entry, a script with no rows, and a
+    /// script whose path escapes the providers directory all add nothing.
+    #[test]
+    fn provider_rows_layer_under_the_config() {
+        crate::config::with_isolated_config_path("mime-provider-rows", |dir| {
+            let script = dir.join("acme.rhai");
+            std::fs::write(
+                &script,
+                "// @mime_type application/x-acme-scene family=model extensions=scene\n\
+                 // @mime_type model/obj family=binary\n\
+                 fn inference(s, r) { #{} }\n",
+            )
+            .unwrap();
+            // A script provider that ships no `@mime_type` rows: readable, but
+            // it contributes an empty table, so it is not layered.
+            let plain = dir.join("plain.rhai");
+            std::fs::write(&plain, "fn inference(s, r) { #{} }\n").unwrap();
+            let cfg = format!(
+                "[model_providers.acme]\nscript = {script:?}\n\
+                 [model_providers.plain]\nscript = {plain:?}\n\
+                 [model_providers.escapee]\nscript = \"../evil\"\n\
+                 [model_providers.endpoint]\nkind = \"openai-compatible\"\nbase_url = \"http://x\"\n\
+                 [mime_types.\"model/obj\"]\nfamily = \"custom\"\n",
+            );
+            let config: Config = toml::from_str(&cfg).unwrap();
+
+            let rows = config.provider_mime_rows();
+            assert_eq!(rows.len(), 1, "only the script provider with rows");
+            assert_eq!(rows[0].0, "acme");
+
+            let reg = config.mime_registry().unwrap();
+            // The provider's own type is known, sourced to the provider.
+            let scene = reg.info(&"application/x-acme-scene".parse().unwrap());
+            assert_eq!(scene.family, "model");
+            assert_eq!(scene.source, "provider:acme");
+            // The config's row for model/obj wins over the provider's.
+            let obj = reg.info(&"model/obj".parse().unwrap());
+            assert_eq!(obj.family, "custom");
+            assert_eq!(obj.source, "config");
+        });
+    }
+
+    /// A `@mime_type` row that will not load is named with its provider, and
+    /// the lenient path keeps the defaults.
+    #[test]
+    fn a_bad_provider_row_is_named_by_its_provider() {
+        crate::config::with_isolated_config_path("mime-provider-bad", |dir| {
+            let script = dir.join("acme.rhai");
+            std::fs::write(&script, "// @mime_type x/y family=model\n").unwrap();
+            let config: Config =
+                toml::from_str(&format!("[model_providers.acme]\nscript = {script:?}\n")).unwrap();
+            // A good row loads; sanity that the plumbing reaches the registry.
+            assert_eq!(
+                config
+                    .mime_registry()
+                    .unwrap()
+                    .info(&"x/y".parse().unwrap())
+                    .source,
+                "provider:acme"
+            );
+            // A row the registry refuses (a magic that is not hex) is the
+            // error, named by the provider that shipped it.
+            std::fs::write(&script, "// @mime_type x/y magic=nothex\n").unwrap();
+            let err = config.mime_registry().unwrap_err();
+            assert!(matches!(&err, super::MimeTypesError::Provider { name, .. } if name == "acme"));
+            assert!(err.to_string().contains("provider 'acme'"), "{err}");
+            // The lenient path keeps the defaults rather than failing the run.
+            assert_eq!(
+                config
+                    .mime_registry_or_defaults()
+                    .info(&"model/obj".parse().unwrap())
+                    .source,
+                "builtin"
+            );
+
+            // A provider naming a script that is not there simply adds nothing.
+            let gone: Config =
+                toml::from_str("[model_providers.ghost]\nscript = \"/no/such/ghost.rhai\"\n")
+                    .unwrap();
+            assert!(gone.provider_mime_rows().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_provider_script_path_is_confined() {
+        use super::provider_script_path;
+        use std::path::{Path, PathBuf};
+        let dir = Path::new("/home/u/.leviath/providers");
+        // A bare name becomes `<name>.rhai` under the providers dir.
+        assert_eq!(
+            provider_script_path("groq", None, Some(dir)),
+            Some(PathBuf::from("/home/u/.leviath/providers/groq.rhai"))
+        );
+        // A stem override, with or without the extension.
+        assert_eq!(
+            provider_script_path("groq", Some("fast"), Some(dir)),
+            Some(PathBuf::from("/home/u/.leviath/providers/fast.rhai"))
+        );
+        assert_eq!(
+            provider_script_path("groq", Some("fast.rhai"), Some(dir)),
+            Some(PathBuf::from("/home/u/.leviath/providers/fast.rhai"))
+        );
+        // An absolute override is honored verbatim.
+        assert_eq!(
+            provider_script_path("groq", Some("/elsewhere/x.rhai"), Some(dir)),
+            Some(PathBuf::from("/elsewhere/x.rhai"))
+        );
+        // A relative override that escapes, and a missing providers dir, refuse.
+        assert_eq!(
+            provider_script_path("groq", Some("../evil"), Some(dir)),
+            None
+        );
+        assert_eq!(provider_script_path("groq", None, None), None);
+    }
 
     #[test]
     // Isolated: the registry reads `mime_types.toml` beside whatever

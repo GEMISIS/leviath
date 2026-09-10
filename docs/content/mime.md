@@ -70,7 +70,7 @@ stand_in = "[{type} {size}] {name}"
 
 Rows layer. The compiled defaults come first, then a `[mime_types]` table in your config, then
 [`mime_types.toml`](/docs/configuration#mime_typestoml) beside it, then the
-[`[mime_types]` a blueprint carries](/docs/agents#mime-types-the-agent-brings), which reach
+[`[mime_types]` a blueprint carries](/docs/agents#mime-types-the-agent-brings), and the [rows a Rhai provider ships](/docs/rhai-providers) for the types its models are built for, which reach
 that agent's runs only. A row names only what it changes: adding an extension to `image/png`
 keeps its family and token rule. `lev mime add <type>` writes a row from the command line,
 `lev mime list` prints the effective table with the source of every row, and

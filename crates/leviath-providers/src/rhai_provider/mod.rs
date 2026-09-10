@@ -49,7 +49,7 @@ use convert::{map_rhai_err, parse_inference_dynamic};
 use engine::{ExecConfig, build_exec_engine, build_init_engine};
 use host::{BrokerJob, HostHttpError, HttpExecutor};
 
-pub use meta::{ProviderMeta, parse_provider_annotations};
+pub use meta::{ProviderMeta, ProviderMimeRow, parse_provider_annotations};
 
 /// The entry points every provider script must define, as the error messages
 /// spell them: the name, how many parameters it takes, and the parameter list
