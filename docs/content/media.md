@@ -128,6 +128,11 @@ and a later `context_export` or `submit_output` can hand it on as an artifact. A
 cannot keep (over `[media] max_part_bytes`, or a world with no store) becomes a line in the
 reply saying what was dropped. A plain URL in a reply is never fetched.
 
+Most models that draw cannot call tools (`lev models show` says `supports_tools = false`), and
+their providers refuse a request that carries a function call anywhere in it. A stage on such a
+model is offered no tool, whatever it grants, and sees what earlier stages' tools did as prose,
+so it can take a review stage's notes and draw again without the run dying on its second visit.
+
 ## Regions hold typed inputs
 
 A region can say what it accepts and how many stored parts it holds:

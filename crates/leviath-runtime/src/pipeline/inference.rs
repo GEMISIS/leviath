@@ -244,12 +244,32 @@ pub(crate) fn build_request(
         _ => serde_json::Value::Null,
     };
 
+    // A model that cannot call tools is refused by its provider for any
+    // function call in the request, the history included. Everything a tool
+    // did earlier in the run reaches it as prose instead, and nothing is
+    // advertised to it.
+    let (messages, filtered_tools) = if caps.supports_tools {
+        (assembled.messages, filtered_tools)
+    } else {
+        if !filtered_tools.is_empty() {
+            tracing::warn!(
+                model = %stage.model,
+                tools = filtered_tools.len(),
+                "the model cannot call tools; the stage's tools are not advertised to it"
+            );
+        }
+        (
+            leviath_providers::flatten_tool_turns(assembled.messages),
+            Vec::new(),
+        )
+    };
+
     let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
     system.extend(assembled.system_blocks);
 
     let request = InferenceRequest {
         system,
-        messages: assembled.messages,
+        messages,
         model: stage.model.clone(),
         max_tokens,
         temperature,
