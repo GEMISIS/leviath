@@ -150,10 +150,12 @@ what order, where it loops back. Between the graph and the task, when the bluepr
 `seed = "input"`, a `--diff`), an **Inputs** box with one slot per region. A slot for a region
 that takes files opens a picker of the working directory, filtered to the types the region
 accepts, so you choose a file from a list rather than typing its name (and never with an `@`); a
-slot for a text region takes a line of text. A region that holds several files (its `max_stored`)
-takes several, added and removed in the same picker. The slot names what the region takes, how
-many, its token budget (`≤117k tok`, the region's share of the entry model's context window), and
-whether it is required. It follows the selection, previews bundled blueprints that are not
+slot for a text region takes a line of text. A file region takes as many files as its token
+budget allows, added and removed in the same picker; the number is bound by the budget, not a
+fixed count, unless the blueprint sets a hard `max_stored` cap, which the picker then honours. The
+slot names what the region takes, its token budget (`≤117k tok`, the region's share of the entry
+model's context window), any hard count cap, and whether it is required. It follows the selection,
+previews bundled blueprints that are not
 installed yet from the copy inside the binary, and says so when a manifest cannot be read. It is
 the explorer's canvas showing the whole graph: drag to pan, wheel to zoom; on a screen too short to
 fit both, the task keeps its rows and the preview is skipped. Once
@@ -165,7 +167,7 @@ rather than back into the form.
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
 | `Tab` / `Enter` | Move from the agent list to the inputs, when the agent has any, else to the task |
 | `↑` / `↓` (in the inputs) | Choose a slot. A file slot opens the picker on `Enter` (or `Ctrl+O`); a text slot takes what you type, and `Enter` moves to the next slot and, after the last, to the task. `Tab` to the task; `Shift+Tab` or `Esc` back to the agent list |
-| picker (in a file slot) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file (a one-file region swaps instead), `Enter` confirms. `Enter` never selects on its own, so a slot can be left empty; `Esc` cancels. The list is the working directory only, so it never offers a file the run could not read. The title shows the tokens the choice costs against the region's budget (its share of the model's context window); a file that would overflow the budget is refused with the reason, and a run that would not fit is stopped before it starts |
+| picker (in a file slot) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file (a one-file region swaps instead), `Enter` confirms. `Enter` never selects on its own, so a slot can be left empty; `Esc` cancels. The list is the working directory only, so it never offers a file the run could not read, and each file shows its own token cost. The title shows the tokens the choice costs against the region's budget (its share of the model's context window); a file that would overflow the budget is refused with the reason, and a run that would not fit is stopped before it starts |
 | `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` also starts it, but only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and `Ctrl+S` or the Start button is the way to submit |
 | `Enter` / `Alt+Enter` | Newline |
 | `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |

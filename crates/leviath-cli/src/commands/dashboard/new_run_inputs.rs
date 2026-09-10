@@ -38,8 +38,9 @@ pub(super) struct NewRunInput {
     pub(super) accepts: Vec<String>,
     /// Whether the run refuses to start without it.
     pub(super) required: bool,
-    /// How many files the region holds; 1 unless the blueprint says more.
-    pub(super) max_stored: usize,
+    /// The most files the region holds, when the blueprint sets a hard count
+    /// cap. `None` means no count limit: the token budget is the only bound.
+    pub(super) max_stored: Option<usize>,
     /// The region's token budget, resolved against the entry model's context
     /// window. `0` means the region declares none, so no token limit applies.
     pub(super) max_tokens: usize,
@@ -81,8 +82,10 @@ impl NewRunInput {
         if !self.accepts.is_empty() {
             bits.push(self.accepts.join(" "));
         }
-        if self.max_stored > 1 {
-            bits.push(format!("up to {}", self.max_stored));
+        if let Some(n) = self.max_stored
+            && n > 1
+        {
+            bits.push(format!("up to {n}"));
         }
         if self.max_tokens > 0 {
             bits.push(format!("≤{} tok", compact_count(self.max_tokens)));
@@ -156,9 +159,11 @@ impl NewRunInput {
                     .unwrap_or_else(|| p.to_string_lossy().to_string())
             })
             .collect();
-        let count = match self.max_stored > 1 {
-            true => format!(" ({}/{})", self.files.len(), self.max_stored),
-            false => String::new(),
+        let count = match self.max_stored {
+            // A hard cap shows progress toward it; otherwise just how many.
+            Some(n) if n > 1 => format!(" ({}/{n})", self.files.len()),
+            _ if self.files.len() > 1 => format!(" ({})", self.files.len()),
+            _ => String::new(),
         };
         format!("{}{count}", names.join(", "))
     }
@@ -217,7 +222,7 @@ impl Dashboard {
                                 region: r.name.clone(),
                                 accepts: r.accepts.clone(),
                                 required: r.required,
-                                max_stored: r.max_stored.unwrap_or(1).max(1),
+                                max_stored: r.max_stored,
                                 max_tokens: r.max_tokens,
                                 edit: LineEdit::new(String::new(), false),
                                 files: Vec::new(),
@@ -426,7 +431,7 @@ fn focus_colour(focused: bool) -> ratatui::style::Color {
 
 /// A token count shortened for a label: `117000` reads `117k`, `1500` reads
 /// `1.5k`, and anything under a thousand stays exact.
-fn compact_count(n: usize) -> String {
+pub(super) fn compact_count(n: usize) -> String {
     match n {
         0..=999 => n.to_string(),
         _ => {
@@ -757,7 +762,7 @@ mod tests {
             region: "x".to_string(),
             accepts: Vec::new(),
             required: false,
-            max_stored: 1,
+            max_stored: None,
             max_tokens: 0,
             edit: LineEdit::new(String::new(), false),
             files: Vec::new(),
@@ -798,11 +803,15 @@ mod tests {
         dash.new_run_inputs[0].files = vec![PathBuf::from("out/hero.png")];
         let text = screen(&mut dash);
         assert!(text.contains("hero.png"), "{text}");
-        // Bumped to a many-file slot: the count against the cap shows.
-        dash.new_run_inputs[0].max_stored = 3;
+        // With a hard cap, the count shows progress toward it.
+        dash.new_run_inputs[0].max_stored = Some(3);
         dash.new_run_inputs[0].files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
         let text = screen(&mut dash);
         assert!(text.contains("(2/3)"), "{text}");
+        // With no cap, the chip shows just how many.
+        dash.new_run_inputs[0].max_stored = None;
+        let text = screen(&mut dash);
+        assert!(text.contains("(2)"), "{text}");
         // The notes slot takes anything, so text and a file chip sit together.
         dash.new_run_inputs[1].edit = LineEdit::new("look", false);
         dash.new_run_inputs[1].files = vec![PathBuf::from("c.png")];

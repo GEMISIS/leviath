@@ -203,12 +203,14 @@ same list.
   the task box as you type. The new-run screen's Inputs pane gives a file
   region a picker of the working directory, filtered to the types the region
   accepts, so a file reaches a region by being chosen rather than named and
-  never with an `@`; a region that holds several (`max_stored`) takes several,
-  added and removed in the picker. The picker shows the tokens the choice costs
-  against the region's budget (its share of the entry model's context window),
-  refuses a file that would overflow it, and the run is stopped with a named
-  error rather than started with a region that cannot hold what it was given
-  (#400).
+  never with an `@`; a region takes as many files as its token budget allows,
+  added and removed in the picker. How many that is comes from the budget, not a
+  fixed count: the row and the picker name the budget (`≤117k tok`, the region's
+  share of the entry model's context window), each candidate shows its own token
+  cost, and a file that would overflow the budget is refused with the reason.
+  The run is stopped with a named error rather than started with a region that
+  cannot hold what it was given. A blueprint may still set a hard `max_stored`
+  count cap, which the picker honours (#400).
 - The stage graph shows the mime a stage takes beyond text (`◧ image/*
   audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
   files it declares it hands back (`▤ video/mp4`), in the explorer, the
