@@ -77,13 +77,24 @@ impl Dashboard {
                 let editor = self.editor();
                 editor.problems_open = !editor.problems_open;
             }
-            // A window keeps the keys until it closes.
-            KeyCode::Tab if self.editor().modal.is_none() => {
-                let editor = self.editor();
-                editor.focus = match editor.focus {
-                    Focus::Canvas => Focus::Inspector,
-                    Focus::Inspector => Focus::Canvas,
+            // A window keeps the keys until it closes. From the canvas Tab
+            // moves the keys to the inspector; on a stage's inspector Tab and
+            // Shift-Tab walk its tabs (the arrows change a row there, as they
+            // do on every panel); on an inspector without tabs Tab goes back
+            // to the canvas, as Esc does everywhere.
+            KeyCode::Tab | KeyCode::BackTab if self.editor().modal.is_none() => {
+                let (focus, tab) = {
+                    let editor = self.editor();
+                    (editor.focus, editor.panel_tab())
                 };
+                match (focus, tab) {
+                    (Focus::Canvas, _) => self.editor().focus = Focus::Inspector,
+                    (Focus::Inspector, Some(tab)) => {
+                        let delta = if key.code == KeyCode::BackTab { -1 } else { 1 };
+                        self.editor_set_tab(tab.step(delta));
+                    }
+                    (Focus::Inspector, None) => self.editor().focus = Focus::Canvas,
+                }
             }
             _ => match self.editor().focus {
                 Focus::Canvas => self.editor_canvas_key(key.code),
@@ -147,14 +158,6 @@ impl Dashboard {
                 editor.cursor = editor.fields().len().saturating_sub(1);
             }
             KeyCode::Enter => self.editor_activate(),
-            // On a stage the arrows walk the tabs, as they do on every tabbed
-            // screen; `h` and `l` change a row in place. Elsewhere there are
-            // no tabs and the arrows change the row.
-            KeyCode::Left | KeyCode::Right if self.editor().panel_tab().is_some() => {
-                let tab = self.editor().panel_tab().expect("checked just above");
-                let delta = if code == KeyCode::Left { -1 } else { 1 };
-                self.editor_set_tab(tab.step(delta));
-            }
             KeyCode::Left | KeyCode::Char('h') => self.editor_adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => self.editor_adjust(1),
             KeyCode::Char(c @ '1'..='4') => {

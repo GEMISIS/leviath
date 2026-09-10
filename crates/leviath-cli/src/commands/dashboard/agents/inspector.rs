@@ -47,7 +47,7 @@ impl StageTab {
             StageTab::Behaviour => "Behaviour",
             StageTab::Io => "Inputs & outputs",
             StageTab::Model => "Models & tools",
-            StageTab::Context => "Context",
+            StageTab::Context => "Context & tools",
         }
     }
 

@@ -274,6 +274,7 @@ impl Picker {
         }
 
         let height = chunks[2].height as usize;
+        let value_w = self.value_column(&matches, chunks[2].width);
         // Keep the cursor in view without a stored offset: the list is rebuilt
         // every frame anyway, so the window into it is arithmetic, not state.
         let offset = self.cursor.saturating_sub(height.saturating_sub(1));
@@ -297,7 +298,7 @@ impl Picker {
                     ),
                     Span::styled(mark, Style::default().fg(C_ACCENT)),
                     Span::styled(
-                        format!("{:<38}", option.value),
+                        format!("{:<value_w$}", fit(&option.value, value_w - 2)),
                         if selected {
                             Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
                         } else {
@@ -310,6 +311,34 @@ impl Picker {
             .collect();
         frame.render_widget(Paragraph::new(rows), chunks[2]);
     }
+
+    /// The value column's width for the rows on offer: the widest value
+    /// plus a gap, so a long name never runs into the note beside it, and
+    /// no wider than leaves the note some room. Measured over every match
+    /// rather than the rows in view, so the column holds still while the
+    /// list scrolls.
+    fn value_column(&self, matches: &[usize], width: u16) -> usize {
+        let widest = matches
+            .iter()
+            .map(|index| self.options[*index].value.chars().count())
+            .max()
+            .unwrap_or(0);
+        let room = (width as usize).saturating_sub(30).max(VALUE_MIN);
+        (widest + 2).clamp(VALUE_MIN, room)
+    }
+}
+
+/// The narrowest the value column gets, gap included.
+const VALUE_MIN: usize = 20;
+
+/// `text` cut to `room` cells with an ellipsis.
+fn fit(text: &str, room: usize) -> String {
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]
@@ -352,6 +381,30 @@ mod tests {
             .iter()
             .map(|c| c.symbol().to_string())
             .collect()
+    }
+
+    /// A long value never runs into the note beside it: the column is as
+    /// wide as the widest value on offer plus a gap, and on a terminal too
+    /// narrow for that the value is cut with an ellipsis and the note still
+    /// starts after the gap.
+    #[test]
+    fn the_value_column_fits_the_widest_value() {
+        let long = "GitHub__add_reply_to_pull_request_comment";
+        let mut options = options();
+        options.push(PickerOption {
+            value: long.to_string(),
+            detail: "GitHub's tool, over MCP".to_string(),
+        });
+        let p = Picker::new("Tools", vec![], options, 0);
+        let roomy = rendered(&p, 120, 30);
+        assert!(
+            roomy.contains(&format!("{long}  GitHub's tool, over MCP")),
+            "{roomy}"
+        );
+        assert!(roomy.contains("alpha "), "{roomy}");
+        let tight = rendered(&p, 50, 30);
+        assert!(tight.contains("GitHub__add_reply…  GitHub's"), "{tight}");
+        assert!(!tight.contains(long), "{tight}");
     }
 
     #[test]

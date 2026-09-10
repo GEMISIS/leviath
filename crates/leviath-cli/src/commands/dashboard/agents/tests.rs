@@ -63,7 +63,7 @@ pub(super) fn draw(dash: &mut Dashboard, w: u16, h: u16) -> Terminal<TestBackend
 }
 
 pub(super) fn text(dash: &mut Dashboard) -> String {
-    rendered_buffer(&draw(dash, 160, 50))
+    rendered_buffer(&draw(dash, 200, 50))
 }
 
 pub(super) fn open_editor_on(dash: &mut Dashboard, name: &str) {
@@ -1570,7 +1570,7 @@ fn the_definition_overlay_scrolls_and_copies() {
 fn the_mouse_selects_connects_and_moves_on_the_editor_canvas() {
     let (mut dash, root) = dashboard("mouse");
     open_editor_on(&mut dash, "own");
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     // A click on the finish box selects it and the panel follows.
     let (x, y, _, _) = dash
         .agents()
@@ -1612,7 +1612,7 @@ fn the_mouse_selects_connects_and_moves_on_the_editor_canvas() {
         "moved and remembered"
     );
     // Drag from finish's source handle onto work: a new path.
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     let (fx, fy, fr, fb) = dash
         .agents()
         .editor
@@ -1696,7 +1696,7 @@ fn the_mouse_selects_connects_and_moves_on_the_editor_canvas() {
     dash.handle_key(key(KeyCode::Esc));
     dash.handle_key(key(KeyCode::Char('y')));
     assert!(dash.agent_builder.as_ref().unwrap().editor.is_none());
-    draw(&mut dash, 160, 50);
+    draw(&mut dash, 200, 50);
     let preview = dash
         .pane_rects
         .iter()

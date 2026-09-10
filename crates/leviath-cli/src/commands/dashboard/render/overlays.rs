@@ -166,7 +166,10 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "ctrl-s",
                     "save (checks first; errors block it and open the problems)",
                 ),
-                ("tab", "move the keys between the canvas and the inspector"),
+                (
+                    "tab",
+                    "from the canvas: the inspector; on a stage's inspector: the next tab (shift-tab the one before); elsewhere: the canvas",
+                ),
                 (
                     "ctrl-z / ctrl-y",
                     "undo / redo an edit (ctrl-shift-z redoes too)",
@@ -213,16 +216,12 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "edit the row: type, choose, flip, open, or press the button",
                 ),
                 (
-                    "← →",
-                    "on a stage: the previous / next tab; elsewhere, change the row in place",
-                ),
-                (
-                    "h / l",
-                    "change the row in place: cycle a choice, step a number, flip a toggle",
+                    "← → / h l",
+                    "change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain",
                 ),
                 (
                     "1 2 3 4",
-                    "a stage's tabs: behaviour, inputs & outputs, models & tools, context",
+                    "a stage's tabs: behaviour, inputs & outputs, models & tools, context & tools",
                 ),
                 (
                     "x / backspace",

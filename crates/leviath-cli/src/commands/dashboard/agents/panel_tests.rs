@@ -739,7 +739,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
         }
     );
     let screen = text(&mut dash);
-    assert!(screen.contains("2 In & out"), "{screen}");
+    assert!(screen.contains("2 Inputs & outputs"), "{screen}");
     let stage = |dash: &mut Dashboard| {
         dash.agents()
             .editor
@@ -2011,7 +2011,7 @@ fn the_external_edit_shape_is_plain_data() {
 fn a_click_on_the_inspector_picks_rows_and_tabs() {
     let (mut dash, root) = dashboard("inspector_mouse");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
-    let _ = draw(&mut dash, 160, 50);
+    let _ = draw(&mut dash, 200, 50);
     let hit = dash.agents().editor.as_ref().unwrap().hit.clone();
     assert!(!hit.rows.is_empty());
     let (tab_row, tabs) = hit.tabs.clone().expect("a stage panel has tabs");
@@ -2019,9 +2019,9 @@ fn a_click_on_the_inspector_picks_rows_and_tabs() {
     // where the map says: a wrapped strip once pushed every row down a line,
     // so a click landed on the row below the one under the pointer.
     let screen = text(&mut dash);
-    // The buffer is one string of cells, 160 to a row.
+    // The buffer is one string of cells, 200 to a row.
     let row_text =
-        |row: u16| -> String { screen.chars().skip(row as usize * 160).take(160).collect() };
+        |row: u16| -> String { screen.chars().skip(row as usize * 200).take(200).collect() };
     assert!(
         row_text(tab_row).contains("4 Context"),
         "{}",
@@ -2110,8 +2110,6 @@ fn a_click_on_the_inspector_picks_rows_and_tabs() {
     assert!(!dash.editor_inspector_mouse(press(hit.area.x + 4, hit.rows[own])));
     dash.agents().editor.as_mut().unwrap().line = None;
     // A tab click on a panel without tabs is a row click.
-    dash.handle_key(key(KeyCode::Tab));
-    dash.handle_key(key(KeyCode::Tab));
     dash.agents()
         .editor
         .as_mut()
@@ -2374,36 +2372,51 @@ fn a_bundled_agent_opened_for_editing_brings_its_scripts_and_takes_them_back() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The arrows walk a stage's tabs both ways and round the ends, on a
-/// stage panel only; the strip spells the tabs out when the inspector is
-/// wide enough and shortens them when it is not.
+/// Tab and Shift-Tab walk a stage's tabs both ways and round the ends, on
+/// a stage panel only (elsewhere Tab goes back to the canvas), Esc goes
+/// back to the graph and Tab from there returns to the inspector; the
+/// strip spells the tabs out when the inspector is wide enough and
+/// shortens them when it is not.
 #[test]
-fn the_arrows_walk_a_stages_tabs_and_the_strip_fits() {
-    let (mut dash, root) = dashboard("tab_arrows");
+fn tab_and_shift_tab_walk_a_stages_tabs_and_the_strip_fits() {
+    let (mut dash, root) = dashboard("tab_keys");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     let tab = |dash: &mut Dashboard| match &dash.agents().editor.as_ref().unwrap().panel {
         Panel::Stage { tab, .. } => *tab,
         other => panic!("not a stage: {other:?}"),
     };
-    dash.handle_key(key(KeyCode::Right));
+    let focus = |dash: &mut Dashboard| dash.agents().editor.as_ref().unwrap().focus;
+    dash.handle_key(key(KeyCode::Tab));
     assert_eq!(tab(&mut dash), StageTab::Io);
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::BackTab));
     assert_eq!(tab(&mut dash), StageTab::Behaviour);
-    dash.handle_key(key(KeyCode::Left));
+    dash.handle_key(key(KeyCode::BackTab));
     assert_eq!(tab(&mut dash), StageTab::Context, "round the end");
-    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Tab));
     assert_eq!(tab(&mut dash), StageTab::Behaviour);
+    assert_eq!(focus(&mut dash), Focus::Inspector);
     assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, 0);
-    // Wide inspector (a narrow terminal gives it the whole width): full
-    // titles. Side by side: the short ones, on one line.
-    let wide = rendered_buffer(&draw(&mut dash, 100, 40));
+    // Esc goes back to the graph; Tab (or Shift-Tab) from there returns to
+    // the inspector on the same tab.
+    dash.handle_key(key(KeyCode::Esc));
+    assert_eq!(focus(&mut dash), Focus::Canvas);
+    dash.handle_key(key(KeyCode::BackTab));
+    assert_eq!(focus(&mut dash), Focus::Inspector);
+    assert_eq!(tab(&mut dash), StageTab::Behaviour);
+    // Side by side the inspector is wide enough for the full titles and
+    // the hint names the keys; a small terminal hands the inspector the
+    // whole width and gets the short titles, on one line.
+    let wide = text(&mut dash);
     assert!(wide.contains("2 Inputs & outputs"), "{wide}");
     assert!(wide.contains("3 Models & tools"), "{wide}");
-    let narrow = text(&mut dash);
-    assert!(narrow.contains("2 In & out"), "{narrow}");
-    assert!(narrow.contains("3 Models "), "{narrow}");
-    assert!(narrow.contains("←→ 1-4 tab"), "{narrow}");
-    // Off a stage the hint says what the arrows do there.
+    assert!(wide.contains("4 Context & tools"), "{wide}");
+    assert!(wide.contains("1-4 tab"), "{wide}");
+    assert!(wide.contains("←→ change"), "{wide}");
+    let small = rendered_buffer(&draw(&mut dash, 60, 40));
+    assert!(small.contains("2 In & out"), "{small}");
+    assert!(small.contains("3 Models "), "{small}");
+    // Off a stage there are no tabs: the hint says so and Tab goes back to
+    // the canvas.
     dash.agents()
         .editor
         .as_mut()
@@ -2414,6 +2427,9 @@ fn the_arrows_walk_a_stages_tabs_and_the_strip_fits() {
     dash.agents().editor.as_mut().unwrap().focus = Focus::Inspector;
     let agent = text(&mut dash);
     assert!(agent.contains("←→ change"), "{agent}");
+    assert!(agent.contains("tab canvas"), "{agent}");
+    dash.handle_key(key(KeyCode::Tab));
+    assert_eq!(focus(&mut dash), Focus::Canvas);
     {
         let editor = dash.agents().editor.as_mut().unwrap();
         editor.view.select_stage("work");
@@ -2560,8 +2576,6 @@ fn a_stage_that_inherits_lists_the_shared_regions_and_a_table_seed_reads_as_such
     assert_eq!(options.len(), sorted.len(), "{options:?}");
     assert!(options.contains(&"conversation".to_string()), "{options:?}");
     // A region seeded from files says so, and the seed is not editable.
-    dash.handle_key(key(KeyCode::Tab));
-    dash.handle_key(key(KeyCode::Tab));
     dash.agents()
         .editor
         .as_mut()
