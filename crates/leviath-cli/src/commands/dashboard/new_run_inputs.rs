@@ -40,6 +40,9 @@ pub(super) struct NewRunInput {
     pub(super) required: bool,
     /// How many files the region holds; 1 unless the blueprint says more.
     pub(super) max_stored: usize,
+    /// The region's token budget, resolved against the entry model's context
+    /// window. `0` means the region declares none, so no token limit applies.
+    pub(super) max_tokens: usize,
     /// The text typed for it (for a region that takes text).
     pub(super) edit: LineEdit,
     /// The files chosen for it through the picker, workdir-relative. Filled
@@ -189,9 +192,14 @@ impl Dashboard {
             false => super::graph::load_blueprint(&path),
         };
         self.new_run_inputs_key = path;
+        let config_path = self.new_run_ctx.config_path.clone();
         self.new_run_inputs = blueprint
             .map(|bp| {
-                bp.context_layout
+                // Resolve each region's percentage budget against the entry
+                // model's window, so a slot knows the token room it really has.
+                let window = entry_stage_window(&bp, &config_path);
+                let layout = bp.context_layout.resolved(window);
+                layout
                     .regions
                     .iter()
                     .filter_map(|r| match &r.seed {
@@ -205,6 +213,7 @@ impl Dashboard {
                                 accepts: r.accepts.clone(),
                                 required: r.required,
                                 max_stored: r.max_stored.unwrap_or(1).max(1),
+                                max_tokens: r.max_tokens,
                                 edit: LineEdit::new(String::new(), false),
                                 files: Vec::new(),
                             })
@@ -288,33 +297,44 @@ impl Dashboard {
         let registry = cli_registry();
         let mut out = ResolvedInputs::default();
         for slot in &self.new_run_inputs {
+            // The token cost of everything this slot puts in its region, so a
+            // choice that would not fit the region's budget is refused here
+            // rather than at spawn.
+            let mut slot_tokens = 0usize;
             // Files chosen through the picker attach straight to the region,
             // no `@` and no typed name.
             for rel in &slot.files {
-                let rel = rel.to_string_lossy();
-                let part = crate::commands::run::attach::read_part(&rel, workdir)
+                let full = workdir.join(rel);
+                let part = crate::commands::run::attach::read_part(&rel.to_string_lossy(), workdir)
                     .map_err(|e| format!("{}: {e}", slot.key))?
                     .in_region(&slot.region);
                 out.parts.push(part);
+                slot_tokens += super::new_run_picker::estimate_file_tokens(&full, &registry);
             }
             let raw = slot.edit.value().trim().to_string();
-            if raw.is_empty() {
-                continue;
+            if !raw.is_empty() {
+                // A bare path that names a file is the file, as it is on the
+                // command line's `--<region> @file`; a slot is for one input, so
+                // the `@` is implied.
+                let value = match !raw.starts_with('@') && workdir.join(&raw).is_file() {
+                    true => format!("@{raw}"),
+                    false => raw,
+                };
+                let read = read_region_input(&slot.region, &value, workdir, &registry)
+                    .map_err(|e| format!("{}: {e}", slot.key))?;
+                if !read.text.is_empty() {
+                    slot_tokens += leviath_core::text::estimate_tokens(&read.text);
+                    out.regions.insert(slot.key.clone(), read.text);
+                }
+                out.parts.extend(read.parts);
+                out.unresolved.extend(read.unresolved);
             }
-            // A bare path that names a file is the file, as it is on the
-            // command line's `--<region> @file`; a slot is for one input, so
-            // the `@` is implied.
-            let value = match !raw.starts_with('@') && workdir.join(&raw).is_file() {
-                true => format!("@{raw}"),
-                false => raw,
-            };
-            let read = read_region_input(&slot.region, &value, workdir, &registry)
-                .map_err(|e| format!("{}: {e}", slot.key))?;
-            if !read.text.is_empty() {
-                out.regions.insert(slot.key.clone(), read.text);
+            if slot.max_tokens > 0 && slot_tokens > slot.max_tokens {
+                return Err(format!(
+                    "{}: what you chose needs about {} tokens, but region '{}' holds {}. Remove a file or choose a smaller one.",
+                    slot.key, slot_tokens, slot.region, slot.max_tokens
+                ));
             }
-            out.parts.extend(read.parts);
-            out.unresolved.extend(read.unresolved);
         }
         Ok(out)
     }
@@ -409,6 +429,41 @@ fn fit(text: &str, room: usize) -> String {
     cut
 }
 
+/// The context window of the blueprint's entry stage, resolved offline: a
+/// `[model_capabilities]` override wins, else the compiled catalog, else the
+/// same 8192-token default the runtime falls back to. Region percentage budgets
+/// resolve against this, so the picker's token room matches what a run will get.
+fn entry_stage_window(blueprint: &leviath_core::blueprint::Blueprint, config_path: &Path) -> usize {
+    const DEFAULT_WINDOW: usize = 8192;
+    let entry = blueprint.resolve_entry_stage_name();
+    let Some(model) = blueprint
+        .stages
+        .iter()
+        .find(|s| s.name == entry)
+        .and_then(|s| s.model.models.first())
+    else {
+        return DEFAULT_WINDOW;
+    };
+    // An override for this model, under either the `provider/model` or the bare
+    // `model` key, is the last word.
+    if let Ok(config) = crate::config::Config::load_from_path_public(config_path) {
+        let qualified = format!("{}/{}", model.provider, model.model);
+        for key in [qualified.as_str(), model.model.as_str()] {
+            if let Some(window) = config
+                .model_capabilities
+                .get(key)
+                .and_then(|o| o.max_context_tokens)
+            {
+                return window;
+            }
+        }
+    }
+    crate::commands::models::builtin_model_windows()
+        .get(&(model.provider.clone(), model.model.clone()))
+        .copied()
+        .unwrap_or(DEFAULT_WINDOW)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +484,7 @@ mod tests {
              [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
              [context.regions]\n\
              task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             pictures = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"], required = true }\n\
+             pictures = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], required = true }\n\
              notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\" }\n\
              conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
         )
@@ -786,6 +841,77 @@ mod tests {
             dash.new_run_input_selected, 1,
             "Enter on a non-last text slot advances"
         );
+    }
+
+    /// The entry model's window resolves offline: from the compiled catalog,
+    /// from a `[model_capabilities]` override, and from the default when the
+    /// model is unknown or the stage names none.
+    #[test]
+    fn the_entry_window_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agents").join("looker");
+        write_agent(&agent);
+        let agent_path = agent.to_str().unwrap();
+        let missing = dir.path().join("no-config.toml");
+
+        // A known model uses the compiled catalog window.
+        let builtin = crate::commands::models::builtin_model_windows()
+            .get(&("anthropic".to_string(), "claude-sonnet-5".to_string()))
+            .copied()
+            .expect("claude-sonnet-5 is in the catalog");
+        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        assert_eq!(entry_stage_window(&bp, &missing), builtin);
+
+        // A stage that names no model falls back to the default window.
+        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        bp.stages[0].model.models.clear();
+        assert_eq!(entry_stage_window(&bp, &missing), 8192);
+
+        // A `[model_capabilities]` override for this model wins.
+        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[model_capabilities.\"anthropic/claude-sonnet-5\"]\nmax_context_tokens = 4321\n",
+        )
+        .unwrap();
+        assert_eq!(entry_stage_window(&bp, &config), 4321);
+
+        // An unknown model, checked against a config that loads but has no entry
+        // for it, falls past the override lookup to the catalog and then to the
+        // default.
+        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        bp.stages[0].model.models[0].provider = "acme".to_string();
+        bp.stages[0].model.models[0].model = "mystery".to_string();
+        assert_eq!(entry_stage_window(&bp, &config), 8192);
+
+        // A config file that cannot be parsed is ignored, and the window comes
+        // from the catalog.
+        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "this is not [valid toml").unwrap();
+        assert_eq!(entry_stage_window(&bp, &bad), builtin);
+    }
+
+    /// A choice that would not fit the region's token budget stops the start
+    /// with an error naming the region, rather than a run that overflows.
+    #[test]
+    fn a_slot_over_budget_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        let work = dir.path().join("work");
+        std::fs::write(work.join("big.png"), b"\x89PNG\r\n\x1a\nbody").unwrap();
+        dash.open_new_run_screen();
+        // A tiny budget the ~1600-token image cannot fit.
+        dash.new_run_inputs[0].max_tokens = 500;
+        dash.new_run_inputs[0].files = vec![PathBuf::from("big.png")];
+        let err = dash.new_run_input_values().unwrap_err();
+        assert!(err.starts_with("pictures:"), "{err}");
+        assert!(err.contains("region 'pictures' holds 500"), "{err}");
+        // With room, it resolves.
+        dash.new_run_inputs[0].max_tokens = 100000;
+        assert!(dash.new_run_input_values().is_ok());
     }
 
     /// A chosen file that has gone missing stops the start with an error naming
