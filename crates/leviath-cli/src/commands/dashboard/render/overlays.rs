@@ -483,12 +483,29 @@ fn new_run_sections() -> Vec<HelpSection> {
                     "choose a slot: one per region the agent takes from the caller",
                 ),
                 (
-                    "type",
-                    "a file in the working directory (attached to that region), or text",
+                    "enter / ^O",
+                    "on a file slot, open the picker to choose files from the working directory",
                 ),
-                ("enter", "the next slot; after the last, the task"),
+                ("type", "text, on a slot that takes it"),
+                (
+                    "enter",
+                    "on a text slot, the next slot; after the last, the task",
+                ),
                 ("tab", "the task"),
                 ("shift-tab / esc", "back to the agent list"),
+            ],
+        },
+        HelpSection {
+            title: "New run: file picker",
+            entries: vec![
+                ("↑ ↓", "move through the files the region takes"),
+                ("type", "filter the list by name"),
+                (
+                    "space",
+                    "add or remove a file (a one-file region swaps instead)",
+                ),
+                ("enter", "choose the file, or confirm a multi-file choice"),
+                ("esc", "cancel without changing the slot"),
             ],
         },
         HelpSection {

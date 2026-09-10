@@ -192,6 +192,7 @@ impl Dashboard {
             new_run_file_ref: false,
             new_run_file_query: String::new(),
             new_run_file_selected: 0,
+            new_run_picker: None,
             pending_open_run: None,
             help_scroll: std::cell::Cell::new(0),
             new_run_yolo: false,

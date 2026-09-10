@@ -421,6 +421,12 @@ impl Dashboard {
     /// it is a menu over the text being typed, not a mode beside it - then the
     /// focused pane.
     pub(super) fn handle_new_run_key(&mut self, key: crossterm::event::KeyEvent) {
+        // The file picker is a modal over the Inputs pane; while it is up it
+        // owns every key.
+        if self.new_run_picker_open() {
+            self.handle_new_run_picker_key(key);
+            return;
+        }
         if self.new_run_file_ref {
             self.handle_file_ref_key(key);
             return;
@@ -632,7 +638,7 @@ fn yolo_warning() -> Confirm {
 /// `.venv`, editor state) and `target`. An unreadable directory is skipped
 /// rather than reported - this list is a convenience, and half of it beats an
 /// error message.
-fn collect_workdir_files(root: &Path, cap: usize) -> Vec<String> {
+pub(super) fn collect_workdir_files(root: &Path, cap: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {

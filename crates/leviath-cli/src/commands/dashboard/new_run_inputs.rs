@@ -10,9 +10,9 @@
 //! the region's text, with `@path` tokens inside it attached beside it.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use leviath_core::mime::InboundPart;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -38,17 +38,46 @@ pub(super) struct NewRunInput {
     pub(super) accepts: Vec<String>,
     /// Whether the run refuses to start without it.
     pub(super) required: bool,
-    /// The path or text typed for it.
+    /// How many files the region holds; 1 unless the blueprint says more.
+    pub(super) max_stored: usize,
+    /// The text typed for it (for a region that takes text).
     pub(super) edit: LineEdit,
+    /// The files chosen for it through the picker, workdir-relative. Filled
+    /// for a region that takes files, and the reason a file no longer needs an
+    /// `@` in front of a typed name to attach.
+    pub(super) files: Vec<PathBuf>,
 }
 
 impl NewRunInput {
-    /// The dim note beside the key: what the region takes, and whether it
-    /// is required.
+    /// Whether the region takes text a person would type: it says so, or it
+    /// takes anything.
+    pub(super) fn takes_text(&self) -> bool {
+        self.accepts.is_empty()
+            || self
+                .accepts
+                .iter()
+                .any(|p| p == "*/*" || p.starts_with("text/"))
+    }
+
+    /// Whether the region takes a file: it names a non-text type, or it takes
+    /// anything.
+    pub(super) fn takes_files(&self) -> bool {
+        self.accepts.is_empty()
+            || self
+                .accepts
+                .iter()
+                .any(|p| p == "*/*" || !p.starts_with("text/"))
+    }
+
+    /// The dim note beside the key: what the region takes, how many, and
+    /// whether it is required.
     fn note(&self) -> String {
         let mut bits: Vec<String> = Vec::new();
         if !self.accepts.is_empty() {
             bits.push(self.accepts.join(" "));
+        }
+        if self.max_stored > 1 {
+            bits.push(format!("up to {}", self.max_stored));
         }
         if self.required {
             bits.push("required".to_string());
@@ -57,6 +86,66 @@ impl NewRunInput {
             true => String::new(),
             false => format!(" ({})", bits.join(", ")),
         }
+    }
+
+    /// The spans shown for the row's value: the chosen files for a file
+    /// region, the typed text otherwise, or a prompt when it is empty.
+    fn value_spans(&self, on: bool) -> Vec<Span<'static>> {
+        // A file-only region shows the files it holds, never a text cursor.
+        if self.takes_files() && !self.takes_text() {
+            return self.file_spans(on);
+        }
+        let mut spans = self.edit.display_spans(true).spans;
+        if self.edit.value().is_empty() && !on {
+            spans = vec![Span::styled(
+                match self.takes_files() {
+                    true => "text, or Ctrl+O to choose files",
+                    false => "text",
+                },
+                Style::default().fg(C_DIM),
+            )];
+        }
+        // A region that takes both shows any chosen files after the text.
+        if self.takes_files() && !self.files.is_empty() {
+            spans.push(Span::styled(
+                format!("  +{}", self.file_summary()),
+                Style::default().fg(C_ACCENT),
+            ));
+        }
+        spans
+    }
+
+    /// The spans for a file region: the chosen names, or a prompt to choose.
+    fn file_spans(&self, on: bool) -> Vec<Span<'static>> {
+        if self.files.is_empty() {
+            let prompt = match on {
+                true => "Enter to choose files",
+                false => "no files chosen",
+            };
+            return vec![Span::styled(prompt, Style::default().fg(C_DIM))];
+        }
+        vec![Span::styled(
+            self.file_summary(),
+            Style::default().fg(C_ACTIVE),
+        )]
+    }
+
+    /// The chosen files as a short chip, e.g. `hero.png, villain.png (2/3)`.
+    fn file_summary(&self) -> String {
+        let names: Vec<String> = self
+            .files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string_lossy().to_string())
+            })
+            .collect();
+        let count = match self.max_stored > 1 {
+            true => format!(" ({}/{})", self.files.len(), self.max_stored),
+            false => String::new(),
+        };
+        format!("{}{count}", names.join(", "))
     }
 }
 
@@ -108,7 +197,9 @@ impl Dashboard {
                                 region: r.name.clone(),
                                 accepts: r.accepts.clone(),
                                 required: r.required,
+                                max_stored: r.max_stored.unwrap_or(1).max(1),
                                 edit: LineEdit::new(String::new(), false),
+                                files: Vec::new(),
                             })
                         }
                         _ => None,
@@ -139,11 +230,31 @@ impl Dashboard {
                 self.new_run_input_selected = (self.new_run_input_selected + 1).min(last);
             }
             _ => {
-                let Some(slot) = self.new_run_inputs.get_mut(self.new_run_input_selected) else {
+                let idx = self.new_run_input_selected;
+                let Some(slot) = self.new_run_inputs.get(idx) else {
                     return;
                 };
+                let takes_text = slot.takes_text();
+                let takes_files = slot.takes_files();
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                // A file region opens the picker: on Enter or Space when it is
+                // file-only (there is nothing to type), and always on Ctrl+O.
+                let open_picker = takes_files
+                    && ((ctrl && matches!(key.code, KeyCode::Char('o' | 'O')))
+                        || (!takes_text
+                            && matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))));
+                if open_picker {
+                    self.open_new_run_picker(idx);
+                    return;
+                }
+                if !takes_text {
+                    return;
+                }
+                // `idx` was just proven valid by the `get` above, and no key
+                // changes the rows here, so it still is.
+                let slot = &mut self.new_run_inputs[idx];
                 match slot.edit.handle_key(&key) {
-                    EditOutcome::Commit if self.new_run_input_selected >= last => {
+                    EditOutcome::Commit if idx >= last => {
                         self.new_run_focus = NewRunPane::Task;
                     }
                     EditOutcome::Commit => self.new_run_input_selected += 1,
@@ -170,6 +281,15 @@ impl Dashboard {
         let registry = cli_registry();
         let mut out = ResolvedInputs::default();
         for slot in &self.new_run_inputs {
+            // Files chosen through the picker attach straight to the region,
+            // no `@` and no typed name.
+            for rel in &slot.files {
+                let rel = rel.to_string_lossy();
+                let part = crate::commands::run::attach::read_part(&rel, workdir)
+                    .map_err(|e| format!("{}: {e}", slot.key))?
+                    .in_region(&slot.region);
+                out.parts.push(part);
+            }
             let raw = slot.edit.value().trim().to_string();
             if raw.is_empty() {
                 continue;
@@ -244,15 +364,7 @@ impl Dashboard {
                     },
                 ),
             ];
-            let value = slot.edit.display_spans(true);
-            if slot.edit.value().is_empty() && !on {
-                spans.push(Span::styled(
-                    "a file in the working directory, or text",
-                    Style::default().fg(C_DIM),
-                ));
-            } else {
-                spans.extend(value.spans);
-            }
+            spans.extend(slot.value_spans(on));
             lines.push(Line::from(spans));
             // The pane is sized to hold every slot (`new_run_inputs_height`),
             // and it is not drawn at all when the column cannot give it that
@@ -395,10 +507,17 @@ mod tests {
         assert_eq!(dash.new_run_input_selected, 1, "stops at the last");
         dash.handle_new_run_key(key(KeyCode::Up));
         assert_eq!(dash.new_run_input_selected, 0);
-        type_str(&mut dash, "hero.png");
+        // Row 0 (pictures) takes images only: Enter opens the picker, not text.
+        assert_eq!(dash.new_run_input_selected, 0);
         dash.handle_new_run_key(key(KeyCode::Enter));
-        assert_eq!(dash.new_run_input_selected, 1, "Enter moves down a slot");
-        assert_eq!(dash.new_run_inputs[0].edit.value(), "hero.png");
+        assert!(dash.new_run_picker_open(), "a file row opens the picker");
+        dash.handle_new_run_key(key(KeyCode::Esc));
+        assert!(!dash.new_run_picker_open());
+        // Row 1 (notes) takes text: typing lands there and Enter on the last
+        // slot moves on to the task.
+        dash.new_run_input_selected = 1;
+        type_str(&mut dash, "be brief");
+        assert_eq!(dash.new_run_inputs[1].edit.value(), "be brief");
         dash.handle_new_run_key(key(KeyCode::Enter));
         assert_eq!(dash.new_run_focus, NewRunPane::Task, "and on from the last");
         dash.handle_new_run_key(key(KeyCode::BackTab));
@@ -413,8 +532,8 @@ mod tests {
         assert_eq!(dash.new_run_focus, NewRunPane::Agents);
         // A slot's own Esc is the pane's Esc, never a cancel that eats text.
         dash.new_run_focus = NewRunPane::Inputs;
-        dash.new_run_input_selected = 0;
-        assert_eq!(dash.new_run_inputs[0].edit.value(), "hero.png");
+        dash.new_run_input_selected = 1;
+        assert_eq!(dash.new_run_inputs[1].edit.value(), "be brief");
         // With no slots the pane is skipped both ways.
         dash.new_run_agents.clear();
         dash.sync_new_run_inputs();
@@ -516,10 +635,9 @@ mod tests {
         let text = screen(&mut dash);
         assert!(text.contains("Inputs for looker"), "{text}");
         assert!(text.contains("pictures (image/*, required)"), "{text}");
-        assert!(
-            text.contains("a file in the working directory, or text"),
-            "{text}"
-        );
+        // The pictures row takes images only, so it prompts for a file rather
+        // than a line of text.
+        assert!(text.contains("no files chosen"), "{text}");
         let rect = dash
             .click_targets
             .iter()
@@ -539,5 +657,124 @@ mod tests {
         let text = screen(&mut dash);
         assert!(text.contains("be brief"), "{text}");
         assert_eq!(fit("abcdef", 4), "abc…");
+    }
+
+    /// A file slot shows the files it holds: the names, the count against the
+    /// cap for a many-file slot, and a chip of extra files beside typed text on
+    /// a slot that takes both.
+    #[test]
+    fn a_file_row_shows_its_chosen_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        // Focused and empty, the file slot prompts to choose.
+        dash.new_run_focus = NewRunPane::Inputs;
+        dash.new_run_input_selected = 0;
+        let text = screen(&mut dash);
+        assert!(text.contains("Enter to choose files"), "{text}");
+        // A chosen path with no final component still renders its name.
+        dash.new_run_inputs[0].files = vec![PathBuf::from("..")];
+        let text = screen(&mut dash);
+        assert!(text.contains("pictures"), "{text}");
+        // The pictures slot (image/*) holds one file: the name shows, no count.
+        dash.new_run_inputs[0].files = vec![PathBuf::from("out/hero.png")];
+        let text = screen(&mut dash);
+        assert!(text.contains("hero.png"), "{text}");
+        // Bumped to a many-file slot: the count against the cap shows.
+        dash.new_run_inputs[0].max_stored = 3;
+        dash.new_run_inputs[0].files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let text = screen(&mut dash);
+        assert!(text.contains("(2/3)"), "{text}");
+        // The notes slot takes anything, so text and a file chip sit together.
+        dash.new_run_inputs[1].edit = LineEdit::new("look", false);
+        dash.new_run_inputs[1].files = vec![PathBuf::from("c.png")];
+        let text = screen(&mut dash);
+        assert!(text.contains("look"), "{text}");
+        assert!(text.contains("+c.png"), "{text}");
+    }
+
+    /// A file slot opens the picker by key: Space (or Enter) on a file-only
+    /// slot, and Ctrl+O on one that also takes text, which still types
+    /// otherwise.
+    #[test]
+    fn a_file_row_opens_the_picker_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_focus = NewRunPane::Inputs;
+        // Space on the file-only pictures slot opens the picker.
+        dash.new_run_input_selected = 0;
+        dash.handle_new_run_key(key(KeyCode::Char(' ')));
+        assert!(dash.new_run_picker_open());
+        dash.handle_new_run_key(key(KeyCode::Esc));
+        // Ctrl+O on the notes slot (which takes anything) opens it too.
+        dash.new_run_input_selected = 1;
+        dash.handle_new_run_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(dash.new_run_picker_open());
+        dash.handle_new_run_key(key(KeyCode::Esc));
+        // A plain letter on that slot still types.
+        dash.handle_new_run_key(key(KeyCode::Char('h')));
+        assert!(!dash.new_run_picker_open());
+        assert_eq!(dash.new_run_inputs[1].edit.value(), "h");
+        // On the file-only slot, a control chord that is not Ctrl+O, and a
+        // plain letter, both do nothing: no picker, no text.
+        dash.new_run_input_selected = 0;
+        dash.handle_new_run_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(!dash.new_run_picker_open());
+        dash.handle_new_run_key(key(KeyCode::Char('z')));
+        assert!(!dash.new_run_picker_open());
+        assert!(dash.new_run_inputs[0].edit.value().is_empty());
+    }
+
+    /// Enter on a text slot that is not the last moves to the next slot.
+    #[test]
+    fn enter_advances_between_text_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agents").join("noter");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            agent.join("agent.leviath"),
+            "[agent]\nname = \"noter\"\nversion = \"0.1.0\"\ndescription = \"notes\"\n\n\
+             [stages.main]\nmode = \"autonomous\"\n\n\
+             [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
+             [context.regions]\n\
+             task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
+             one = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
+             two = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n",
+        )
+        .unwrap();
+        let mut dash = make_test_dashboard();
+        dash.new_run_ctx = NewRunContext {
+            agents_dir: dir.path().join("agents"),
+            config_path: dir.path().join("config.toml"),
+            workdir: dir.path().join("work"),
+        };
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        dash.last_launched_agent = Some("noter".to_string());
+        dash.open_new_run_screen();
+        assert_eq!(dash.new_run_inputs.len(), 2);
+        dash.new_run_focus = NewRunPane::Inputs;
+        dash.new_run_input_selected = 0;
+        dash.handle_new_run_key(key(KeyCode::Char('a')));
+        dash.handle_new_run_key(key(KeyCode::Enter));
+        assert_eq!(
+            dash.new_run_input_selected, 1,
+            "Enter on a non-last text slot advances"
+        );
+    }
+
+    /// A chosen file that has gone missing stops the start with an error naming
+    /// the slot, rather than a run that began without it.
+    #[test]
+    fn a_missing_file_slot_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("looker"));
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_inputs[0].files = vec![PathBuf::from("gone.png")];
+        let err = dash.new_run_input_values().unwrap_err();
+        assert!(err.starts_with("pictures:"), "{err}");
     }
 }

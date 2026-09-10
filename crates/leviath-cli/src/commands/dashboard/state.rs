@@ -224,6 +224,9 @@ pub(crate) struct Dashboard {
     pub(super) new_run_file_query: String,
     /// Highlighted row of the completion popup.
     pub(super) new_run_file_selected: usize,
+    /// The file picker modal over the Inputs pane, when one is open, so a file
+    /// reaches a region by being chosen rather than by a typed name.
+    pub(super) new_run_picker: Option<super::new_run_picker::FilePicker>,
     /// A run started from the new-run screen whose page to open once the
     /// daemon reports it, with the ticks left to wait for that.
     pub(super) pending_open_run: Option<(String, u32)>,
