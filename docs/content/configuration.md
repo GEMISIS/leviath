@@ -825,31 +825,6 @@ lets an image model sit in a graph beside stages that use tools.
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied, and says whether they came from the provider's own listing or this build's table.
 
-## `[mime]`
-
-Ceilings on typed mime parts: the images, audio, video, documents and models that
-[typed mime](/docs/mime) moves through regions, tools and outputs. Defaults shown.
-
-```toml
-[mime]
-max_part_bytes = 33554432        # one part, at every ingress (32 MiB)
-inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
-max_stored_per_request = 100     # stored parts one model request carries
-```
-
-A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
-result or a model reply. Text longer than `inline_text_bytes` is stored by hash like any other
-part and read back as text when a request is built. Beyond `max_stored_per_request` the oldest
-stored parts are left out of a request, with a warning in the run's log.
-
-<a id="mime_typestypesubtype"></a>
-
-## `[mime_types."type/subtype"]`
-
-Rows added to the mime registry. They belong in [`mime_types.toml`](#mime_typestoml) beside
-this file, which is where `lev mime init` puts them; a table here still loads, and the file's
-rows layer over it. The row keys are the same in both places.
-
 `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
 `override`, so a client can tell a figure the provider reported from one this build matched off the
 model's name. The two are not worth the same and they look identical once printed.
@@ -909,6 +884,31 @@ the line that fixes it.
 > of the 314 572 a 1M-token model would give it. OpenRouter fronts far more models than any built-in
 > table names, so Leviath warns once per model when it falls back to a conservative window and tells
 > you the line to add here.
+
+## `[mime]`
+
+Ceilings on typed mime parts: the images, audio, video, documents and models that
+[typed mime](/docs/mime) moves through regions, tools and outputs. Defaults shown.
+
+```toml
+[mime]
+max_part_bytes = 33554432        # one part, at every ingress (32 MiB)
+inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
+max_stored_per_request = 100     # stored parts one model request carries
+```
+
+A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
+result or a model reply. Text longer than `inline_text_bytes` is stored by hash like any other
+part and read back as text when a request is built. Beyond `max_stored_per_request` the oldest
+stored parts are left out of a request, with a warning in the run's log.
+
+<a id="mime_typestypesubtype"></a>
+
+## `[mime_types."type/subtype"]`
+
+Rows added to the mime registry. They belong in [`mime_types.toml`](#mime_typestoml) beside
+this file, which is where `lev mime init` puts them; a table here still loads, and the file's
+rows layer over it. The row keys are the same in both places.
 
 <a id="model_providersname"></a>
 

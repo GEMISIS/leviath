@@ -98,7 +98,8 @@ carrying `tool_calls` or `tool_results`).
 script that only ever reads `content` keeps working when images arrive. `parts` is there for a
 render that wants to count them, group them, or drop the bulky ones from what it emits. What a
 script emits is text; a stored part reaches the model through the region's own entries, not through
-`render`'s output.
+`render`'s output. See [Typed mime](/docs/mime) for what a part is and how a stored one reaches a
+model.
 
 Providers reject a request where a tool call has no matching result, or the other way round. Leviath
 strips any unpaired tool block before sending, so a script with a bug in it cannot produce a request

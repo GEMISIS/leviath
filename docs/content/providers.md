@@ -26,6 +26,11 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
+Which providers can take an image, audio or a document in a request, and which can hand an image
+back, is a per-model capability rather than a provider-wide one. [Typed mime](/docs/mime) covers
+what a model sees and what a model hands back, and `lev models list --accepts image/*` names the
+models on your keys that take a given type.
+
 Every provider here is opt-in, Ollama included. It needs no key and answers on a well-known local
 port, which used to be reason enough to register it on every machine - and that made a bare model
 name in a blueprint resolvable against whatever happened to be running locally, which is a
