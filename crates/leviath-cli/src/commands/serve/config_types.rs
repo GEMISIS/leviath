@@ -183,6 +183,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.parent",
     "runs.files.listing",
     "runs.files.workdir",
+    // `mime_type` on every file-listing entry, typed by the run's registry from
+    // the file's name. A console can decide whether to render a row, or whether
+    // to offer it to a region that `accepts` a type, without a request per file
+    // or a hardcoded extension table of its own.
+    "runs.files.mime_type",
     // `input_types` and `output_types` on every `GET /api/models` entry: the
     // mime type patterns a model takes and hands back. Announced so a
     // console can offer "models that can see this image" without inferring

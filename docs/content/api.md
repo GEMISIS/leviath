@@ -707,6 +707,13 @@ enumerated in one response, so walk it the way a file tree does.
 > times records three. Do not subtract it from the entry count to get "how many more files";
 > that number is meaningless. Use `modified_files_truncated`, or `source=workdir` for ground truth.
 
+Every listing entry carries `name`, `path`, `is_dir`, `size`, `exists`, `outside_workdir`, and
+`mime_type`. The last is what the run's registry makes of the file from its name, so a client can
+decide whether to render an image, or offer a file to a region that `accepts` a type, without a
+request per row or a guess of its own. It is typed by extension only, not sniffed, and is empty for
+a directory. `GET .../files/raw` types the same bytes, sniffing them, when an exact answer is
+needed.
+
 With `?path=<file>` the response is the file's contents, unchanged from earlier versions. A listing
 carries `"kind": "listing"`, so check that field rather than guessing from the shape.
 
@@ -1457,6 +1464,7 @@ than that feature, not broken.
 | `runs.parent` | `parent=none` / `parent=<run_id>`. See [listing by place in the tree](#listing-by-place-in-the-tree) |
 | `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
+| `runs.files.mime_type` | `mime_type` on every file-listing entry, typed by the run's registry from the file's name |
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
 | `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`, and `@path` tokens in `task` and region text resolved inside the working directory. See [attaching files](#attaching-files) |
 | `messages.parts` | The same on `POST /api/agents/{id}/message` |

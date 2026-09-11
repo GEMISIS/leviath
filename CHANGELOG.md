@@ -51,6 +51,13 @@ same list.
 
 ### Added
 
+- A run's file listing types each entry. `GET /api/agents/{id}/files` entries
+  carry a `mime_type`, resolved by the run's registry from the file's name, so
+  a console can decide whether to render a file, or offer it to a region that
+  `accepts` a type, without a request per row or a guess of its own. Typed by
+  extension only (not sniffed) and empty for a directory; `.../files/raw` still
+  sniffs the bytes when an exact answer is needed. Announced as
+  `runs.files.mime_type` (#812).
 - Named yolo profiles. `lev run --yolo=<name>` runs under a profile from
   `yolo.toml` beside `config.toml`, which says which tool calls run unprompted,
   which still go through the ordinary approval prompt, and which are refused,
