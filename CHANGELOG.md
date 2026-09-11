@@ -99,9 +99,14 @@ same list.
   that from its `architecture` block and Ollama's `/api/show` from its
   `capabilities`; `[model_capabilities.<id>] input_types / output_types`
   correct both, and a Rhai provider declares `// @input_types` and
-  `// @output_types`. `lev models` shows a `MIME` column and takes
-  `--accepts image/png`, `lev models show` prints both lists, and
-  `GET /api/models` carries `input_types` and `output_types` (#400).
+  `// @output_types`. For the vendors whose APIs report nothing per model,
+  the precise lists live in a compiled table refreshed from OpenRouter's
+  catalogue by `cargo xtask modalities`, as `cargo xtask prices` refreshes
+  list prices, so a model that takes images but not PDFs is described as
+  such rather than by a whole-vendor guess. `lev models` shows a `MIME`
+  column and takes `--accepts image/png`, `lev models show` prints both
+  lists, and `GET /api/models` carries `input_types` and `output_types`
+  (#400).
 - A stored part reaches the model. Assembly emits a mime block per stored
   part beside a one-line stand-in that names it, and the inference lane
   fills the bytes in right before the request goes out: as the vendor's own

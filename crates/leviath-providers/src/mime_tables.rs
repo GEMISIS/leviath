@@ -6,6 +6,18 @@
 //! these answers rather than a type name. A listing that says more (as
 //! OpenRouter's does) corrects a row here, and an operator's
 //! `[model_capabilities]` entry corrects both.
+//!
+//! Two layers answer for a vendor whose API stays quiet. The precise one is
+//! `mime/modalities.toml`, a table refreshed from OpenRouter's catalogue by
+//! `cargo xtask modalities`, so a specific model's real lists (`claude-3-haiku`
+//! takes images but not PDFs, say) are used when the catalogue names it. Under
+//! it is the name heuristic below, the floor for a model the catalogue does not
+//! carry - a model published nowhere, or one shaped so differently (a
+//! text-to-speech or image model) that its name is the only signal.
+
+use std::sync::LazyLock;
+
+use serde::Deserialize;
 
 use crate::capabilities::ModelMime;
 
@@ -24,14 +36,19 @@ fn lower(model: &str) -> String {
     model.to_ascii_lowercase()
 }
 
-/// Every Claude model in the current line-up reads images and PDFs and
-/// writes text.
-pub(crate) fn anthropic(_model: &str) -> ModelMime {
-    ModelMime::new(VISION_DOC, TEXT)
+/// Every Claude model reads images and PDFs and writes text, unless the
+/// catalogue names one that takes less (`claude-3-haiku` has no PDF).
+pub(crate) fn anthropic(model: &str) -> ModelMime {
+    published_modality("anthropic", model).unwrap_or_else(|| ModelMime::new(VISION_DOC, TEXT))
 }
 
 /// OpenAI: the chat and reasoning models read images and PDFs; the audio
 /// models also take and return audio; the image models return images.
+///
+/// The name decides the structurally distinct classes - image, audio, speech,
+/// transcription - because the catalogue does not serve them and their name is
+/// the only signal. A chat or reasoning model takes the catalogue's published
+/// lists when it names this one, and the vision-family default otherwise.
 pub(crate) fn openai(model: &str) -> ModelMime {
     let m = lower(model);
     if m.starts_with("gpt-image") || m.starts_with("dall-e") {
@@ -46,6 +63,9 @@ pub(crate) fn openai(model: &str) -> ModelMime {
     if m.contains("transcribe") || m.starts_with("whisper") {
         return ModelMime::new(&["audio/*"], TEXT);
     }
+    if let Some(mime) = published_modality("openai", model) {
+        return mime;
+    }
     let vision = ["gpt-4.1", "gpt-4o", "gpt-5", "o3", "o4", "o1", "chatgpt"];
     if vision.iter().any(|p| m.starts_with(p)) {
         return ModelMime::new(VISION_DOC, TEXT);
@@ -55,6 +75,9 @@ pub(crate) fn openai(model: &str) -> ModelMime {
 
 /// Gemini: the chat models take text, images, audio, video and PDFs; the
 /// image models return images; Imagen and Veo are generators.
+///
+/// As with OpenAI, the name settles the generator and speech models, and the
+/// catalogue's lists refine a chat model the refresh has named.
 pub(crate) fn gemini(model: &str) -> ModelMime {
     let m = lower(model);
     if m.starts_with("imagen") {
@@ -72,7 +95,7 @@ pub(crate) fn gemini(model: &str) -> ModelMime {
     if m.contains("embedding") {
         return ModelMime::text_only();
     }
-    ModelMime::new(GEMINI_INPUT, TEXT)
+    published_modality("google", model).unwrap_or_else(|| ModelMime::new(GEMINI_INPUT, TEXT))
 }
 
 /// Codex: the Responses API takes images beside text.
@@ -140,6 +163,67 @@ pub(crate) fn modality_pattern(word: &str) -> Option<&'static str> {
     }
 }
 
+/// The rows of `mime/modalities.toml`, parsed once.
+///
+/// A parse failure is a panic on first use rather than an error: the file is
+/// compiled in, so a malformed one is a build of this crate that cannot type
+/// any model, and the tests below catch it before it ships.
+static MODALITY_TABLE: LazyLock<ModalityTable> = LazyLock::new(|| {
+    toml::from_str(include_str!("../mime/modalities.toml"))
+        .expect("mime/modalities.toml is well-formed; `cargo xtask modalities` writes it")
+});
+
+/// The shape of `mime/modalities.toml`.
+#[derive(Debug, Deserialize)]
+struct ModalityTable {
+    /// The day the rows were last refreshed, `YYYY-MM-DD`.
+    read_on: String,
+    /// Every row, in file order.
+    #[serde(default)]
+    modality: Vec<PublishedModality>,
+}
+
+/// One row of the shipped modality table: what a family of models takes and
+/// produces, and where the lists came from.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PublishedModality {
+    /// The provider the row applies to: `anthropic`, `openai` or `google`.
+    pub provider: String,
+    /// The model-id prefix the row covers; the longest matching prefix wins.
+    pub prefix: String,
+    /// Mime patterns the model accepts in a request.
+    pub input: Vec<String>,
+    /// Mime patterns the model can hand back.
+    pub output: Vec<String>,
+    /// Where the row came from: `openrouter` for a row the refresh wrote,
+    /// `manual` for a row a person wrote, which `cargo xtask modalities` never
+    /// overwrites.
+    pub source: String,
+}
+
+/// The day the modality rows in the shipped table were last refreshed.
+///
+/// Shipped with the lists so staleness is visible: a build months old may be
+/// naming an older model's modalities, and the honest thing is to say when.
+pub fn modalities_read_on() -> &'static str {
+    &MODALITY_TABLE.read_on
+}
+
+/// The published modalities for `model` at `provider`, or `None` when no row's
+/// prefix matches and the name heuristic answers instead. The longest matching
+/// prefix wins, so `gpt-5.5` does not swallow a `gpt-5.5-turbo` row.
+pub(crate) fn published_modality(provider: &str, model: &str) -> Option<ModelMime> {
+    MODALITY_TABLE
+        .modality
+        .iter()
+        .filter(|row| row.provider == provider && model.starts_with(&row.prefix))
+        .max_by_key(|row| row.prefix.len())
+        .map(|row| ModelMime {
+            input: row.input.clone(),
+            output: row.output.clone(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +241,45 @@ mod tests {
         assert!(!m.accepts(&mt("audio/wav")));
         assert!(m.produces(&mt("text/plain")));
         assert!(!m.produces(&mt("image/png")));
+    }
+
+    #[test]
+    fn the_catalogue_table_refines_the_name_heuristic() {
+        // The catalogue names claude-3-haiku with a narrower list than the
+        // family default: images, but no PDF. The precise row wins.
+        let haiku = anthropic("claude-3-haiku");
+        assert!(haiku.accepts(&mt("image/png")));
+        assert!(
+            !haiku.accepts(&mt("application/pdf")),
+            "the table drops the PDF the family default would add"
+        );
+
+        // A model no row names falls to the family default, PDF included.
+        let unlisted = anthropic("claude-nonexistent-zzz");
+        assert!(unlisted.accepts(&mt("application/pdf")));
+
+        // The same fallback for the two vendors whose chat models take more:
+        // a vision-family OpenAI model the catalogue does not name still gets
+        // the vision default, an old completion model falls to text only, and
+        // an unnamed Gemini chat model gets the full Gemini input set.
+        assert!(openai("chatgpt-4o-latest").accepts(&mt("image/png")));
+        assert!(!openai("babbage-002").accepts(&mt("image/png")));
+        assert!(gemini("gemini-9.9-ultra-zzz").accepts(&mt("video/mp4")));
+
+        // The lookup is provider-scoped, and the shipped date reads back.
+        assert!(published_modality("openai", "gpt-3.5-turbo").is_some());
+        assert!(published_modality("openai", "totally-unknown-zzz").is_none());
+        assert!(published_modality("nonprovider", "gpt-5.5").is_none());
+        assert_eq!(modalities_read_on().len(), "YYYY-MM-DD".len());
+
+        // Every shipped row is well-formed: real patterns, real source words.
+        for row in &MODALITY_TABLE.modality {
+            assert!(!row.input.is_empty() && !row.output.is_empty());
+            assert!(matches!(row.source.as_str(), "openrouter" | "manual"));
+            let clone = row.clone();
+            assert_eq!(&clone, row);
+            assert!(format!("{row:?}").contains(&row.prefix));
+        }
     }
 
     #[test]

@@ -12,9 +12,12 @@
 //!   `structure --list`          Print every file's production-line count, longest first.
 //!   `prices`                    Refresh the vendor list prices from OpenRouter and LiteLLM.
 //!   `prices --check`            Print the diff and fail if the price table would change.
+//!   `modalities`                Refresh which mime types each model takes, from OpenRouter.
+//!   `modalities --check`        Print the diff and fail if the modality table would change.
 
 mod coverage;
 mod docs;
+mod modalities;
 mod prices;
 mod structure;
 mod version;
@@ -37,6 +40,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         docs::run,
         structure::run,
         prices::run,
+        modalities::run,
     )
 }
 
@@ -51,6 +55,7 @@ pub fn dispatch_with(
     run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
     run_struct: impl FnOnce(structure::StructureMode) -> Result<()>,
     run_prices: impl FnOnce(prices::PricesMode) -> Result<()>,
+    run_mod: impl FnOnce(modalities::ModalitiesMode) -> Result<()>,
 ) -> Result<()> {
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -74,6 +79,10 @@ pub fn dispatch_with(
             let mode = prices::PricesMode::parse(&args[1..])?;
             run_prices(mode)
         }
+        "modalities" => {
+            let mode = modalities::ModalitiesMode::parse(&args[1..])?;
+            run_mod(mode)
+        }
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -87,6 +96,10 @@ pub fn dispatch_with(
             println!("  docs                      Check docs/content for dead links + frontmatter");
             println!("  prices                    Refresh the vendor list prices (network)");
             println!("  prices --check            Fail if the price table would change (network)");
+            println!("  modalities                Refresh model input/output mime types (network)");
+            println!(
+                "  modalities --check        Fail if the modality table would change (network)"
+            );
             Ok(())
         }
         other => anyhow::bail!("Unknown subcommand: '{other}'. Run `cargo xtask help` for usage."),
@@ -130,6 +143,11 @@ mod tests {
         Ok(())
     }
 
+    /// A `run_mod` stub matching `impl FnOnce(ModalitiesMode) -> Result<()>`.
+    fn mod_ok(_mode: modalities::ModalitiesMode) -> Result<()> {
+        Ok(())
+    }
+
     /// Covers the stub body so tests that pass it without calling it still get
     /// this single coverage hit.
     #[test]
@@ -139,6 +157,7 @@ mod tests {
         assert!(docs_ok(docs::DocsMode::Check).is_ok());
         assert!(struct_ok(structure::StructureMode::Check).is_ok());
         assert!(prices_ok(prices::PricesMode::Check).is_ok());
+        assert!(mod_ok(modalities::ModalitiesMode::Check).is_ok());
     }
 
     /// Build an owned-args slice from string literals (dispatch takes `&[String]`).
@@ -201,6 +220,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
@@ -219,6 +239,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
@@ -233,6 +254,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(
             result.is_err(),
@@ -249,6 +271,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(result.is_err());
         assert!(
@@ -274,6 +297,7 @@ mod tests {
             },
             struct_ok,
             prices_ok,
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(docs::DocsMode::Check));
@@ -288,6 +312,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(
             result.is_err(),
@@ -310,9 +335,43 @@ mod tests {
                 got = Some(mode);
                 Ok(())
             },
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(prices::PricesMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_modalities_parses_check() {
+        let mut got = None;
+        dispatch_with(
+            &args(&["modalities", "--check"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            prices_ok,
+            |mode| {
+                got = Some(mode);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(got, Some(modalities::ModalitiesMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_modalities_bad_arg_returns_err() {
+        let result = dispatch_with(
+            &args(&["modalities", "--write"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            prices_ok,
+            mod_ok,
+        );
+        assert!(result.is_err(), "an unknown modalities flag must error");
     }
 
     #[test]
@@ -324,6 +383,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(
             result.is_err(),
@@ -346,6 +406,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Set("1.2.3".to_owned())));
@@ -364,6 +425,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Check));
@@ -378,6 +440,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(
             result.is_err(),
@@ -394,6 +457,7 @@ mod tests {
             docs_ok,
             struct_ok,
             prices_ok,
+            mod_ok,
         );
         assert!(
             result
