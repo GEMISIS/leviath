@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use leviath_core::mime::MimeRegistry;
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
@@ -452,6 +453,7 @@ pub(super) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
 /// Purely a filesystem read: it works with the daemon down, like the other
 /// read endpoints.
 pub(super) async fn agent_file(
+    State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileOrListing>, ApiError> {
@@ -462,9 +464,13 @@ pub(super) async fn agent_file(
         .file_source()
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
 
+    // A listing types each row by name with the same registry `/files/raw`
+    // types the bytes with, so a console gets the run's answer, not its own.
+    let registry = state.current_config().mime_registry_or_defaults();
+
     // No path means "what is there", which is a listing rather than a read.
     let Some(ref requested_path) = query.path else {
-        return list_run_files(&meta, source, None, query.hidden).map(Json);
+        return list_run_files(&meta, source, None, query.hidden, &registry).map(Json);
     };
 
     let workdir = PathBuf::from(&meta.workdir);
@@ -485,8 +491,14 @@ pub(super) async fn agent_file(
         // folder picker already answers that shape, so it lists instead of
         // refusing.
         Ok(m) if m.is_dir() => {
-            return list_run_files(&meta, FileSource::Workdir, Some(&resolved), query.hidden)
-                .map(Json);
+            return list_run_files(
+                &meta,
+                FileSource::Workdir,
+                Some(&resolved),
+                query.hidden,
+                &registry,
+            )
+            .map(Json);
         }
         Ok(m) => m.len(),
         Err(_) => {
@@ -601,17 +613,31 @@ fn list_run_files(
     source: FileSource,
     dir: Option<&std::path::Path>,
     hidden: bool,
+    registry: &MimeRegistry,
 ) -> Result<FileOrListing, ApiError> {
     let workdir = PathBuf::from(&meta.workdir);
     let listing = match source {
-        FileSource::Modified => modified_listing(meta, &workdir),
-        FileSource::Workdir => workdir_listing(meta, &workdir, dir, hidden)?,
+        FileSource::Modified => modified_listing(meta, &workdir, registry),
+        FileSource::Workdir => workdir_listing(meta, &workdir, dir, hidden, registry)?,
     };
     Ok(FileOrListing::Listing(Box::new(listing)))
 }
 
+/// The type the registry gives a listing row from its name alone, empty for a
+/// directory. By extension, not sniffed - a listing must not read every file.
+fn entry_mime(name: &str, is_dir: bool, registry: &MimeRegistry) -> String {
+    match is_dir {
+        true => String::new(),
+        false => registry.resolve(None, Some(name), &[]).to_string(),
+    }
+}
+
 /// The paths the run recorded modifying, stat-ed against the workdir.
-fn modified_listing(meta: &RunMeta, workdir: &std::path::Path) -> RunFileListing {
+fn modified_listing(
+    meta: &RunMeta,
+    workdir: &std::path::Path,
+    registry: &MimeRegistry,
+) -> RunFileListing {
     let entries = meta
         .flags
         .modified_files
@@ -623,13 +649,16 @@ fn modified_listing(meta: &RunMeta, workdir: &std::path::Path) -> RunFileListing
                 workdir.join(rel)
             };
             let stat = std::fs::metadata(&resolved).ok();
+            let name = std::path::Path::new(rel)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.clone());
+            let is_dir = stat.as_ref().is_some_and(|m| m.is_dir());
             RunFileEntry {
-                name: std::path::Path::new(rel)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| rel.clone()),
+                mime_type: entry_mime(&name, is_dir, registry),
+                name,
                 path: rel.clone(),
-                is_dir: stat.as_ref().is_some_and(|m| m.is_dir()),
+                is_dir,
                 size: stat.as_ref().map(|m| m.len()),
                 // A recorded path can name a file since deleted, or - for a
                 // tool given an absolute path - one outside the workdir.
@@ -663,6 +692,7 @@ fn workdir_listing(
     workdir: &std::path::Path,
     dir: Option<&std::path::Path>,
     hidden: bool,
+    registry: &MimeRegistry,
 ) -> Result<RunFileListing, ApiError> {
     let target = dir
         .map(PathBuf::from)
@@ -698,14 +728,16 @@ fn workdir_listing(
             continue;
         }
         let stat = child.metadata().ok();
+        let is_dir = stat.as_ref().is_some_and(|m| m.is_dir());
         entries.push(RunFileEntry {
             path: path
                 .strip_prefix(workdir)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned(),
+            mime_type: entry_mime(&name, is_dir, registry),
             name,
-            is_dir: stat.as_ref().is_some_and(|m| m.is_dir()),
+            is_dir,
             size: stat.as_ref().map(|m| m.len()),
             exists: true,
             outside_workdir: false,
@@ -2517,6 +2549,35 @@ system_prompt = "Plan the work"
 
             let (_, listing) = list_files(&run_id, "").await;
             assert_eq!(listing["modified_files_truncated"], true);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// Every listing entry is typed by the registry from its name: a file gets
+    /// its mime type, a directory gets none.
+    #[tokio::test]
+    async fn a_listing_types_each_entry_by_name() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_mime", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("hero.png"), "x").unwrap();
+            std::fs::create_dir(workdir.path().join("assets")).unwrap();
+            let run_id = unique_run_id("files-mime");
+            create_run_in(&run_id, workdir.path());
+
+            let (status, listing) = list_files(&run_id, "?source=workdir").await;
+            assert_eq!(status, StatusCode::OK);
+            let by_name: std::collections::HashMap<&str, &serde_json::Value> = listing["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (e["name"].as_str().unwrap(), e))
+                .collect();
+            // Typed by extension, not sniffed: the bytes above are not a PNG.
+            assert_eq!(by_name["hero.png"]["mime_type"], "image/png");
+            // A directory carries no type.
+            assert_eq!(by_name["assets"]["mime_type"], "");
 
             let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
         })

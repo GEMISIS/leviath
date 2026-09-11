@@ -960,6 +960,11 @@ pub(super) struct RunFileEntry {
     /// True for a recorded path that resolves outside the workdir - possible
     /// when a tool was handed an absolute path. Reported rather than hidden.
     pub(super) outside_workdir: bool,
+    /// What the run's mime registry makes of the file from its name, so a
+    /// console can decide whether to render it without a request per row or a
+    /// guess of its own. Typed by extension only (not sniffed), and empty for
+    /// a directory. `GET .../files/raw` types the same bytes, sniffing them.
+    pub(super) mime_type: String,
 }
 
 /// Response of `GET /api/agents/{id}/files`: one file the run wrote, as text.
