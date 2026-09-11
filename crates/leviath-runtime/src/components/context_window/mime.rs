@@ -42,6 +42,17 @@ pub(super) fn mime_blocks(content: &EntryContent) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// [`content_blocks`] with the mime blocks left out: inline text and the
+/// stand-in for each stored part, but not the bytes. For an assistant turn,
+/// whose media is lifted into a following user turn because a provider rejects
+/// an image inside an assistant turn.
+pub(super) fn text_blocks(content: &EntryContent) -> Vec<ContentBlock> {
+    content_blocks(content)
+        .into_iter()
+        .filter(|b| !matches!(b, ContentBlock::Mime { .. }))
+        .collect()
+}
+
 /// A message's content for `content`: plain text when every part is text,
 /// which is the shape every provider has always seen, and blocks otherwise.
 pub(super) fn message_content(content: &EntryContent) -> MessageContent {
@@ -117,6 +128,12 @@ mod tests {
             message_content(&content),
             MessageContent::Blocks(blocks.clone())
         );
+        // `text_blocks` keeps the inline text and the stand-in pointer but not
+        // the mime block, for an assistant turn whose media is lifted away.
+        let text = text_blocks(&content);
+        assert_eq!(text.len(), 2);
+        assert!(text.iter().all(|b| !matches!(b, ContentBlock::Mime { .. })));
+        assert_eq!(text[0], ContentBlock::Text { text: "see".into() });
     }
 
     #[test]
@@ -197,17 +214,25 @@ mod tests {
         // The user turn carries its text, the stand-in and the mime block.
         let user = blocks_of(&messages[1].content);
         assert_eq!(user.len(), 3);
-        // The assistant turn keeps its mime before the tool call.
+        // The assistant turn that also called a tool keeps its text and the
+        // stand-in naming any media it made, but not the media block: that turn
+        // cannot carry bytes, and a user turn between its tool_use and the
+        // tool_result would break the pairing a provider requires, so the rare
+        // tool-and-media turn keeps only the stand-in.
         let assistant = blocks_of(&messages[2].content);
-        assert!(assistant[2].stand_in().is_some());
+        assert!(
+            assistant
+                .iter()
+                .all(|b| !matches!(b, ContentBlock::Mime { .. }))
+        );
         assert_eq!(
-            assistant[3],
-            ContentBlock::ToolUse {
+            assistant.last(),
+            Some(&ContentBlock::ToolUse {
                 id: "c1".into(),
                 name: "render".into(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }
+            })
         );
         // The tool result's mime follows the result block in the same turn.
         let result = blocks_of(&messages[3].content);
@@ -233,6 +258,51 @@ mod tests {
                 .flat_map(|m| blocks_of(&m.content))
                 .all(|b| !b.is_hydrated_mime())
         );
+    }
+
+    #[test]
+    fn a_produced_image_is_lifted_off_the_assistant_turn_into_a_user_turn() {
+        use crate::components::ContextWindow;
+        use leviath_core::EntryKind;
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".into(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            50_000,
+        ));
+        let conv = window.get_region_mut("conversation").unwrap();
+        // The draw stage's reply: some text and the image it drew, no tool call.
+        conv.add_typed_entry(
+            EntryContent::from_parts(vec![Part::text("here it is"), stored("image-1.png")]),
+            5,
+            EntryKind::AssistantTurn { tool_calls: vec![] },
+        )
+        .unwrap();
+
+        let messages = window.assemble().messages;
+        let blocks_of = |content: &MessageContent| -> Vec<ContentBlock> {
+            match content {
+                MessageContent::Blocks(b) => b.clone(),
+                MessageContent::Text(_) => Vec::new(),
+            }
+        };
+        // The assistant turn keeps its text and the stand-in, no bytes.
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(
+            messages[0].content,
+            MessageContent::Text("here it is\n[image/png, 3 B] image-1.png".to_string())
+        );
+        assert!(blocks_of(&messages[0].content).is_empty());
+        // The image follows in a user turn, where a provider will actually
+        // show it - an image inside the assistant turn is refused (Anthropic
+        // 400s) or ignored, so the next stage would never see it.
+        assert_eq!(messages[1].role, "user");
+        let lifted = blocks_of(&messages[1].content);
+        assert_eq!(lifted.len(), 1);
+        assert!(lifted[0].stand_in().is_some() && !lifted[0].is_hydrated_mime());
     }
 
     #[test]
