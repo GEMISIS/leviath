@@ -3971,6 +3971,238 @@ mode = "autonomous"
 }
 
 #[test]
+fn parse_stage_output_routing_maps_mime_patterns_to_regions() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+notes = { kind = "pinned" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/*" = "artwork"
+"application/pdf" = "notes"
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let draw = bp.find_stage("draw").unwrap();
+    assert_eq!(draw.output_routing.get("image/*").unwrap(), "artwork");
+    assert_eq!(draw.output_routing.get("application/pdf").unwrap(), "notes");
+}
+
+#[test]
+fn parse_stage_output_routing_rejects_a_key_that_is_not_a_mime_pattern() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"not a mime" = "artwork"
+"#;
+    let err = parse_manifest(toml).expect_err("the key is not a mime type");
+    assert!(err.to_string().contains("output_routing"), "{err}");
+}
+
+#[test]
+fn parse_stage_output_routing_rejects_a_non_string_region() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/*" = 7
+"#;
+    let err = parse_manifest(toml).expect_err("the region must be a string");
+    assert!(err.to_string().contains("must be a region name"), "{err}");
+}
+
+#[test]
+fn output_routing_to_a_region_no_layout_declares_is_refused() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+conversation = { kind = "sliding_window" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/*" = "artwork"
+"#;
+    let err = parse_manifest(toml)
+        .expect("shape is fine")
+        .validate()
+        .expect_err("artwork is not declared anywhere");
+    let msg = err.to_string();
+    assert!(msg.contains("artwork"), "{msg}");
+    assert!(msg.contains("output_routing"), "{msg}");
+}
+
+#[test]
+fn output_routing_to_a_declared_region_validates() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/*" = "artwork"
+"#;
+    parse_manifest(toml)
+        .expect("shape is fine")
+        .validate()
+        .expect("artwork is declared, so the route is valid");
+}
+
+#[test]
+fn context_reset_must_be_a_list() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[stages.describe]
+mode = "autonomous"
+
+[stages.describe.context]
+reset = "conversation"
+"#;
+    let err = parse_manifest(toml).expect_err("reset must be a list, not a string");
+    assert!(
+        err.to_string().contains("context.reset must be a list"),
+        "{err}"
+    );
+}
+
+#[test]
+fn route_for_mime_picks_the_most_specific_pattern() {
+    use crate::mime::MimeType;
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+pngs = { kind = "pinned" }
+images = { kind = "pinned" }
+anything = { kind = "pinned" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/png" = "pngs"
+"image/*" = "images"
+"*/*" = "anything"
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let draw = bp.find_stage("draw").unwrap();
+    let png = MimeType::parse("image/png").unwrap();
+    let jpeg = MimeType::parse("image/jpeg").unwrap();
+    let pdf = MimeType::parse("application/pdf").unwrap();
+    assert_eq!(draw.route_for_mime(&png), Some("pngs"));
+    assert_eq!(draw.route_for_mime(&jpeg), Some("images"));
+    assert_eq!(draw.route_for_mime(&pdf), Some("anything"));
+}
+
+#[test]
+fn route_for_mime_is_none_when_nothing_matches() {
+    use crate::mime::MimeType;
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.draw.output_routing]
+"image/*" = "artwork"
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let draw = bp.find_stage("draw").unwrap();
+    let text = MimeType::parse("text/plain").unwrap();
+    assert_eq!(draw.route_for_mime(&text), None);
+}
+
+#[test]
+fn parse_stage_context_reset_lists_the_regions_to_empty() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+
+[stages.describe]
+mode = "autonomous"
+
+[stages.describe.context]
+reset = ["conversation", "artwork"]
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let describe = bp.find_stage("describe").unwrap();
+    assert_eq!(describe.context_reset, vec!["conversation", "artwork"]);
+}
+
+#[test]
+fn context_reset_may_name_the_conversation() {
+    // Unlike hide, reset is allowed on the always-visible regions.
+    let toml = r#"
+[agent]
+name = "draw"
+
+[stages.describe]
+mode = "autonomous"
+
+[stages.describe.context]
+reset = ["conversation"]
+"#;
+    parse_manifest(toml)
+        .expect("shape is fine")
+        .validate()
+        .expect("resetting the conversation is allowed");
+}
+
+#[test]
+fn context_reset_of_an_unknown_region_is_refused() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[stages.describe]
+mode = "autonomous"
+
+[stages.describe.context]
+reset = ["ghost"]
+"#;
+    let err = parse_manifest(toml)
+        .expect("shape is fine")
+        .validate()
+        .expect_err("ghost is not declared");
+    assert!(err.to_string().contains("context.reset"), "{err}");
+}
+
+#[test]
 fn parse_stage_tool_routing_with_overrides_only() {
     let toml = r#"
 [agent]

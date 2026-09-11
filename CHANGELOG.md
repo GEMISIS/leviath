@@ -51,6 +51,26 @@ same list.
 
 ### Added
 
+- A stage can route the parts a model produces to regions of their own, by mime
+  type. `[stages.<name>.output_routing]` maps a mime pattern to a region
+  (`"image/*" = "artwork"`); a reply that mixes text and other parts is split
+  part by part, each part going to the most specific matching pattern's region,
+  and the text and any unmatched part staying in `conversation`. The point is to
+  hand a produced file (a picture from an image model, a document a generator
+  returns) to a later stage or the user instead of leaving it in the transcript,
+  so unlike `tool_routing` the target need only be a region the blueprint
+  declares. It is mime types throughout, so the same table routes audio, video
+  or any registered type (#400).
+- A stage can empty regions when it is entered, for a clean slate.
+  `[stages.<name>.context] reset = ["conversation"]` clears the named regions on
+  entry (the content is gone, not merely hidden), so a stage starts with only
+  what its visible regions hold. Unlike `hide`, `reset` may name `conversation`
+  (#400).
+- `submit_output` can name a file the run produced but never wrote to disk (a
+  picture from an image model, which lives in the run's store) as an artifact.
+  When the path is not a workdir file, the name, then a sha256 prefix, is
+  resolved against the run's produced parts, and a match is written to that path
+  before it is recorded, so the user and any later stage get a real file (#400).
 - A run's file listing types each entry. `GET /api/agents/{id}/files` entries
   carry a `mime_type`, resolved by the run's registry from the file's name, so
   a console can decide whether to render a file, or offer it to a region that

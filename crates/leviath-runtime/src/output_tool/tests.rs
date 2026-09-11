@@ -1041,3 +1041,296 @@ fn stored_artifacts_are_mirrored_beside_the_answer() {
             .starts_with("artifact 'final':")
     );
 }
+
+/// An image a model produced lives in the store, not the workdir. Naming it as
+/// an artifact writes it to the named path (a real file for the user and any
+/// later stage) and records it beside the answer.
+#[test]
+fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = MemoryBlobStore::new();
+    let registry = MimeRegistry::builtin();
+    // A produced image, stored but never written to disk.
+    let bytes = b"\x89PNG\r\n\x1a\n produced pixels".to_vec();
+    let blob = Blob::new(MimeType::parse("image/png").unwrap(), bytes).named("image-1.png");
+    let reference = store.put("run-1", &blob, &registry).expect("stored");
+    let part = Part::stored(reference).named("image-1.png");
+
+    let mut w = win();
+    w.add_region(Region::new(
+        "artwork".to_string(),
+        RegionKind::Pinned,
+        100_000,
+    ));
+    let content = leviath_core::region::EntryContent::from_parts(vec![part]);
+    let tokens = content.tokens_hint();
+    w.add_assistant_turn_content(
+        "artwork",
+        leviath_core::EntryKind::Text,
+        content,
+        tokens,
+        None,
+    )
+    .expect("stored in artwork");
+
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    assert!(
+        !dir.path().join("image-1.png").exists(),
+        "precondition: the file is not on disk"
+    );
+    let (ack, output) = handle_output_tool(
+        &json!({
+            "content": "a pelican on a bike",
+            "artifacts": [{"name": "image", "path": "image-1.png"}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    let output = output.expect("accepted");
+    assert!(
+        dir.path().join("image-1.png").exists(),
+        "the produced part was written to the workdir"
+    );
+    assert_eq!(output.artifacts.len(), 1);
+    assert_eq!(output.artifacts[0].name, "image");
+    assert!(ack.contains("image"), "{ack}");
+}
+
+/// Naming an artifact that is neither on disk nor a produced part is refused
+/// with a message that says both places were checked.
+#[test]
+fn an_artifact_that_is_neither_a_file_nor_a_produced_part_is_refused() {
+    use leviath_core::mime::{MemoryBlobStore, MimeRegistry};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = MemoryBlobStore::new();
+    let registry = MimeRegistry::builtin();
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({
+            "content": "done",
+            "artifacts": [{"name": "image", "path": "ghost.png"}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    assert!(output.is_none());
+    assert!(message.contains("neither a file"), "{message}");
+    assert!(message.contains("ghost.png"), "{message}");
+}
+
+/// A produced part in the window with a store behind it, for the resolution
+/// tests below. Returns the window (with the part in `artwork`), the store and
+/// the registry so the caller can build a sink.
+fn window_with_produced_png(
+    name: &str,
+) -> (
+    ContextWindow,
+    leviath_core::mime::MemoryBlobStore,
+    leviath_core::mime::MimeRegistry,
+    leviath_core::mime::BlobRef,
+) {
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let store = MemoryBlobStore::new();
+    let registry = MimeRegistry::builtin();
+    let bytes = b"\x89PNG\r\n\x1a\n produced pixels".to_vec();
+    let blob = Blob::new(MimeType::parse("image/png").unwrap(), bytes).named(name);
+    let reference = store.put("run-1", &blob, &registry).expect("stored");
+    let mut w = win();
+    w.add_region(Region::new(
+        "artwork".to_string(),
+        RegionKind::Pinned,
+        100_000,
+    ));
+    let content = leviath_core::region::EntryContent::from_parts(vec![
+        Part::stored(reference.clone()).named(name),
+    ]);
+    let tokens = content.tokens_hint();
+    w.add_assistant_turn_content(
+        "artwork",
+        leviath_core::EntryKind::Text,
+        content,
+        tokens,
+        None,
+    )
+    .expect("stored in artwork");
+    (w, store, registry, reference)
+}
+
+/// The part name need not match the artifact path exactly: the path's file name
+/// resolves it, so `./image-1.png` finds the part named `image-1.png`.
+#[test]
+fn a_produced_part_resolves_by_its_file_name() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, _) = window_with_produced_png("image-1.png");
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    let (_, output) = handle_output_tool(
+        &json!({
+            "content": "described",
+            "artifacts": [{"name": "image", "path": "./image-1.png"}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    assert!(output.is_some(), "the file name resolved the part");
+    assert!(dir.path().join("image-1.png").exists());
+}
+
+/// A part can also be named by a prefix of its sha256, for when the model was
+/// shown the hash rather than a file name.
+#[test]
+fn a_produced_part_resolves_by_sha_prefix() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, reference) = window_with_produced_png("unnamed.png");
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    let prefix = reference
+        .sha256
+        .get(..16)
+        .expect("a sha256 is 64 hex chars");
+    let (_, output) = handle_output_tool(
+        &json!({
+            "content": "described",
+            "artifacts": [{"name": "image", "path": prefix}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    assert!(output.is_some(), "the sha prefix resolved the part");
+    assert!(dir.path().join(prefix).exists());
+}
+
+/// A store that cannot read the part's bytes refuses the submission, saying so.
+#[test]
+fn a_produced_part_whose_store_read_fails_is_refused() {
+    use leviath_core::mime::{Blob, BlobRef, BlobStore, MimeRegistry};
+    struct Broken;
+    impl BlobStore for Broken {
+        fn put(&self, _: &str, _: &Blob, _: &MimeRegistry) -> std::io::Result<BlobRef> {
+            Err(std::io::Error::other("no"))
+        }
+        fn read(&self, _: &str, _: &str) -> std::io::Result<std::sync::Arc<[u8]>> {
+            Err(std::io::Error::other("disk gone"))
+        }
+        fn copy(&self, _: &str, _: &str, _: &str) -> std::io::Result<()> {
+            Err(std::io::Error::other("no"))
+        }
+        fn list(&self, _: &str) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, _store, registry, _) = window_with_produced_png("image-1.png");
+    let broken = Broken;
+    let sink = crate::context_setup::PartSink {
+        store: &broken,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    let (message, output) = handle_output_tool(
+        &json!({
+            "content": "described",
+            "artifacts": [{"name": "image", "path": "image-1.png"}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    assert!(output.is_none());
+    assert!(
+        message.contains("could not be read from the run's store"),
+        "{message}"
+    );
+}
+
+/// Writing a resolved part to a path whose directory does not exist fails with
+/// the reason rather than making the tree.
+#[test]
+fn a_produced_part_written_to_a_missing_directory_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, _) = window_with_produced_png("image-1.png");
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+    };
+    let (message, output) = handle_output_tool(
+        &json!({
+            "content": "described",
+            "artifacts": [{"name": "image", "path": "nope/image-1.png"}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+            sink: Some(&sink),
+        },
+        0,
+        &mut w,
+    );
+    assert!(output.is_none());
+    assert!(message.contains("could not be written"), "{message}");
+}

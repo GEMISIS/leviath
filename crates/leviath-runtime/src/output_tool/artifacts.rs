@@ -81,11 +81,54 @@ fn listed(args: &serde_json::Value) -> Result<Vec<Named>, String> {
     Ok(out)
 }
 
+/// Resolve `name_or_sha` against the parts the run has already produced and,
+/// when it names one, write that part's bytes to `dest` so the submission has a
+/// real file to record. Matches the part's name (exact, then its file name),
+/// then a sha256 prefix. Returns the bytes written, or the same shape of error
+/// the caller gives for a missing workdir file.
+fn materialize_produced(
+    name_or_sha: &str,
+    dest: &std::path::Path,
+    produced: &[Part],
+    sink: Option<&PartSink<'_>>,
+) -> Result<Vec<u8>, String> {
+    let missing = || {
+        format!(
+            "[error] artifact '{name_or_sha}' is neither a file in the working directory nor a \
+             part this run produced. Write the file before naming it, or name a produced part."
+        )
+    };
+    let basename = std::path::Path::new(name_or_sha)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+    let is_match = |p: &&Part| {
+        let by_name = p.name.as_deref() == Some(name_or_sha)
+            || (basename.is_some() && p.name.as_deref() == basename.as_deref());
+        let by_sha =
+            name_or_sha.len() >= 8 && p.blob().is_some_and(|b| b.sha256.starts_with(name_or_sha));
+        by_name || by_sha
+    };
+    let blob = produced.iter().find(is_match).and_then(Part::blob);
+    let (Some(blob), Some(sink)) = (blob, sink) else {
+        return Err(missing());
+    };
+    let bytes = sink.store.read(sink.run_id, &blob.sha256).map_err(|e| {
+        format!("[error] artifact '{name_or_sha}' could not be read from the run's store: {e}")
+    })?;
+    // Written to the path as given, whose directory must exist - the same as a
+    // regular artifact, which is a file already on disk. A name with a missing
+    // parent fails here with the reason, rather than silently making the tree.
+    std::fs::write(dest, bytes.as_ref())
+        .map_err(|e| format!("[error] artifact '{name_or_sha}' could not be written: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
 /// Check, type, hash and store the artifacts a submission names.
 pub(super) fn resolve(
     args: &serde_json::Value,
     workdir: Option<&std::path::Path>,
     declared: &[ArtifactSpec],
+    produced: &[Part],
     sink: Option<&PartSink<'_>>,
 ) -> Result<Ingested, String> {
     let named = listed(args)?;
@@ -137,6 +180,13 @@ pub(super) fn resolve(
         }
         let bytes = match std::fs::read(&full) {
             Ok(b) => b,
+            // Not a file in the workdir. It may still be a part the run
+            // produced (an image a model drew) that never touched disk: name,
+            // then sha, resolves it, and it is written to the named path so
+            // the user and any later stage get a real file.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                materialize_produced(&item.path, &full, produced, sink)?
+            }
             Err(e) => {
                 return Err(format!(
                     "[error] artifact '{}' could not be read: {e}. Write the file before \
@@ -238,7 +288,7 @@ mod tests {
             "big.bin",
             "",
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), Some(&sink)).unwrap();
+        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink)).unwrap();
         let names: Vec<&str> = out.records.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["final", "notes.md", "notes", "big.bin"]);
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
@@ -259,10 +309,10 @@ mod tests {
         let args = json!({"artifacts": [
             {"name": "final", "path": "cut.mp4"}, {"name": "final", "path": "cut.mp4"}
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), Some(&sink)).unwrap();
+        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink)).unwrap();
         assert_eq!(out.records.len(), 1);
         // Without a sink: typed by the built-in registry, nothing stored.
-        let out = resolve(&args, Some(dir.path()), &[], None).unwrap();
+        let out = resolve(&args, Some(dir.path()), &[], &[], None).unwrap();
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert!(out.parts.is_empty());
     }
@@ -271,8 +321,13 @@ mod tests {
     fn every_refusal_names_the_artifact() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.md"), "# shots").unwrap();
+        // A directory reads with an error that is not NotFound, so it does not
+        // fall through to the produced-part resolution: it is a plain read
+        // failure with the original wording.
+        std::fs::create_dir(dir.path().join("adir")).unwrap();
         let cases = [
             (json!({}), "must submit these artifacts: final"),
+            (json!({"artifacts": ["adir"]}), "could not be read"),
             (
                 json!({"artifacts": ["notes.md"]}),
                 "missing these required artifacts: final",
@@ -291,17 +346,17 @@ mod tests {
                 json!({"artifacts": ["../etc/passwd"]}),
                 "does not resolve inside",
             ),
-            (json!({"artifacts": ["missing.mp4"]}), "could not be read"),
+            (json!({"artifacts": ["missing.mp4"]}), "neither a file"),
         ];
         for (args, expect) in cases {
-            let err = resolve(&args, Some(dir.path()), &specs(), None).unwrap_err();
+            let err = resolve(&args, Some(dir.path()), &specs(), &[], None).unwrap_err();
             assert!(err.contains(expect), "{args}: {err}");
         }
-        let err = resolve(&json!({"artifacts": ["notes.md"]}), None, &[], None).unwrap_err();
+        let err = resolve(&json!({"artifacts": ["notes.md"]}), None, &[], &[], None).unwrap_err();
         assert!(err.contains("working directory"), "{err}");
         // Nothing declared, nothing named: nothing to check.
         assert!(
-            resolve(&json!({}), None, &[], None)
+            resolve(&json!({}), None, &[], &[], None)
                 .unwrap()
                 .records
                 .is_empty()
@@ -340,6 +395,7 @@ mod tests {
         let out = resolve(
             &json!({"artifacts": ["notes.md"]}),
             Some(dir.path()),
+            &[],
             &[],
             Some(&sink),
         )

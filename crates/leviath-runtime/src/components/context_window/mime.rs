@@ -7,9 +7,25 @@
 //! so the assembled request stays small and every lane that skips hydration
 //! still sends a correct, text-only version of the same turn.
 
-use leviath_core::mime::PartBody;
+use leviath_core::mime::{Part, PartBody};
 use leviath_core::region::{EntryContent, Region};
 use leviath_providers::{ContentBlock, MessageContent};
+
+impl super::ContextWindow {
+    /// Every stored part anywhere in the window, cloned. What `submit_output`
+    /// searches to let a stage name a part the run produced (a picture from an
+    /// image model, which lives in the store, not on disk) as an artifact to
+    /// emit. Lives here, beside the other mime assembly, to keep the parent
+    /// file under its production-line cap.
+    pub(crate) fn stored_parts(&self) -> Vec<Part> {
+        self.regions
+            .iter()
+            .flat_map(|r| &r.content)
+            .flat_map(|e| e.content.stored())
+            .cloned()
+            .collect()
+    }
+}
 
 /// Every part of `content` as blocks, in order.
 pub(super) fn content_blocks(content: &EntryContent) -> Vec<ContentBlock> {

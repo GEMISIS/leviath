@@ -844,7 +844,7 @@ pub(crate) fn handle_empty_response(
             && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
         {
             progress.cut_off_nudges += 1;
-            store_reply(&mut window, infer, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
             inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
             commands
                 .entity(entity)
@@ -861,14 +861,14 @@ pub(crate) fn handle_empty_response(
             // told "you have not written the file yet" with its own unwritten
             // draft in front of it can split it; one with nothing in front of
             // it drafts the whole thing again.
-            store_reply(&mut window, infer, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            store_reply(&mut window, infer, infer.reasoning.clone());
+            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
                 .and_then(|s| s.context_layout.as_ref())
@@ -923,18 +923,24 @@ fn store_reply(
     window: &mut ContextWindow,
     infer: &crate::components::InferenceResult,
     reasoning: Option<String>,
+    stage: Option<&leviath_core::blueprint::Stage>,
 ) {
-    let Some(content) = reply_content(&infer.response, &infer.parts) else {
-        return;
-    };
-    let tokens = content.tokens_hint();
-    let _ = window.add_assistant_turn_content(
-        "conversation",
-        leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-        content,
-        tokens,
-        reasoning,
-    );
+    // The stage may send some produced parts to regions of their own
+    // (`output_routing`). The reply's text and any unrouted part stay in the
+    // conversation as the assistant turn; the routed parts land in their
+    // regions as separate entries.
+    let routed = super::part_routing::split(stage, &infer.parts);
+    if let Some(content) = reply_content(&infer.response, &routed.kept) {
+        let tokens = content.tokens_hint();
+        let _ = window.add_assistant_turn_content(
+            "conversation",
+            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+            content,
+            tokens,
+            reasoning,
+        );
+    }
+    super::part_routing::store_routed(window, &routed);
 }
 
 /// A reply's text and produced parts as one entry's content, or `None` when

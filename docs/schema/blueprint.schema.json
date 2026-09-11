@@ -534,6 +534,13 @@
             }
           }
         },
+        "output_routing": {
+          "type": "object",
+          "description": "Where the model's produced parts go, by mime type: a mime pattern (image/png, image/*, */*) to a region name. A reply that mixes text and media is split part by part; each part goes to the most specific matching pattern's region, and text and unmatched parts stay in conversation. The target need only be a region some layout declares, so a stage can hand a produced file to a later stage or to the user.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "context": {
           "type": "object",
           "additionalProperties": false,
@@ -547,6 +554,13 @@
             "hide": {
               "type": "array",
               "description": "Regions this stage leaves out of its prompt. Hidden, not destroyed: the content is kept and every other stage sees it. Names must be declared by a layout in this blueprint, and the always-visible regions (conversation, tool_results, final_output, stage_instructions) cannot be hidden.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "reset": {
+              "type": "array",
+              "description": "Regions emptied when this stage is entered, so it starts on a clean slate. Unlike hide, this clears the content (gone, not hidden); a re-entered stage clears it each visit. conversation can be reset. Names must be declared by a layout in this blueprint.",
               "items": {
                 "type": "string"
               }

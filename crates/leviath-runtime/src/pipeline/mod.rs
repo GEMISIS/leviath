@@ -119,6 +119,7 @@ pub(crate) use tools::{
 pub use tools::{DynamicTools, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]
 pub(crate) use tools::{barrier_then, cut_off_arguments_refusal, invalid_args_refusal};
+mod part_routing;
 mod response;
 pub use response::StageLedger;
 #[cfg(test)]

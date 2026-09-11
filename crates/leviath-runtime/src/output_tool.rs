@@ -229,7 +229,11 @@ pub(crate) fn handle_output_tool(
     // quietly lost an entry sends the caller looking for a file that was named
     // and then forgotten.
     let declared = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
-    let ingested = match artifacts::resolve(args, workdir, declared, sink) {
+    // The parts the run has already produced, so a submission can name one (an
+    // image a model drew) as an artifact even though it never touched the
+    // workdir: `resolve` writes it to the named path before recording it.
+    let produced = window.stored_parts();
+    let ingested = match artifacts::resolve(args, workdir, declared, &produced, sink) {
         Ok(ingested) => ingested,
         Err(message) => return (message, None),
     };

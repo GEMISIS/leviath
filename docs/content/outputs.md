@@ -364,6 +364,14 @@ hashed, and stored as a part of the run when it fits `[mime] max_part_bytes`, so
 sees it in the `final_output` region the way it sees any other part. The answer records
 `name`, `path`, `mime_type`, `size` and `sha256` per file.
 
+A file the run **produced** but never wrote to disk - a picture from an image model, say, which
+lives in the run's store - can be named the same way. When the path is not a file in the working
+directory, the name (then a sha256 prefix) is resolved against the parts the run has produced, and a
+match is written to that path before it is recorded. So a describe-the-image stage can attach the
+picture it was handed with `artifacts: [{ name: "image", path: "image-1.png" }]` (the file name is
+shown beside the part in its region), and the user gets a real file. A name that is neither a file
+nor a produced part is refused, saying both places were checked.
+
 A stage can say up front which files it hands back:
 
 ```toml

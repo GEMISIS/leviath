@@ -7546,6 +7546,7 @@ fn setup() -> StageSetup {
         accepts_messages: true,
         context_layout: None,
         context_hide: Vec::new(),
+        context_reset: Vec::new(),
         system_prompt: None,
     }
 }
@@ -16391,6 +16392,44 @@ fn setup_carrying_prompt(prompt: &str) -> StageSetup {
     }
 }
 
+/// `context.reset` empties the named regions on entry, so a stage starts on a
+/// clean slate; a region left out of the list keeps its content.
+#[test]
+fn context_reset_empties_the_named_region_on_entry() {
+    let mut window = instructions_window(&["conversation", "task"]);
+    window
+        .add_to_region("conversation", "a turn from the last stage".to_string(), 5)
+        .expect("fits");
+    window
+        .add_to_region("task", "the task".to_string(), 2)
+        .expect("fits");
+
+    let setup = StageSetup {
+        // `ghost` is not in this window: a reset name the window does not carry
+        // is skipped, not an error.
+        context_reset: vec!["conversation".to_string(), "ghost".to_string()],
+        ..setup()
+    };
+    apply_stage_context(&setup, &mut window).expect("fits");
+
+    assert!(
+        window
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .is_empty(),
+        "the reset region is emptied"
+    );
+    assert!(
+        window.get_region("ghost").is_none(),
+        "a reset name the window lacks is simply skipped"
+    );
+    assert!(
+        !window.get_region("task").unwrap().content.is_empty(),
+        "a region not named in reset keeps its content"
+    );
+}
+
 /// Without a declared region the prompt still lands in the first pinned one, so
 /// every blueprint written before this keeps working unchanged.
 #[test]
@@ -18047,6 +18086,7 @@ fn a_stage_hides_what_it_names_and_the_next_stage_starts_clean() {
     let _ = window.add_to_region("sources", "a page".to_string(), 2);
     let hiding = StageSetup {
         context_hide: vec!["sources".to_string(), "conversation".to_string()],
+        context_reset: Vec::new(),
         ..setup_carrying_prompt("polish")
     };
     apply_stage_context(&hiding, &mut window).expect("fits");
@@ -18731,6 +18771,7 @@ mod model_parts {
             Reply {
                 text: "drawn",
                 parts: std::slice::from_ref(&stored),
+                stage: None,
             },
             &[tc("c1", "render")],
             &[("c1".to_string(), "ok".to_string().into())],
@@ -18746,5 +18787,42 @@ mod model_parts {
             conv.content[0].kind,
             leviath_core::EntryKind::AssistantTurn { .. }
         ));
+    }
+
+    #[test]
+    fn output_routing_sends_a_produced_image_to_its_region_not_the_conversation() {
+        let stored =
+            Part::stored(png("hero.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
+                .named("hero.png");
+        let mut stage = leviath_core::blueprint::Stage::new(
+            "draw".to_string(),
+            leviath_core::blueprint::ModelConfig::new("openrouter".to_string(), "m".to_string()),
+        );
+        stage
+            .output_routing
+            .insert("image/*".to_string(), "artwork".to_string());
+
+        let mut w = ctx(&[("conversation", 100_000), ("artwork", 100_000)]);
+        apply_tool_results_with_parts(
+            &mut w,
+            Reply {
+                text: "drawn",
+                parts: std::slice::from_ref(&stored),
+                stage: Some(&stage),
+            },
+            &[tc("c1", "render")],
+            &[("c1".to_string(), "ok".to_string().into())],
+            None,
+            None,
+            None,
+        );
+        // The conversation keeps the text and the tool call, but not the image.
+        let conv = w.get_region("conversation").unwrap();
+        assert_eq!(conv.content[0].content.stored_count(), 0);
+        assert!(conv.content[0].content.as_str().starts_with("drawn"));
+        // The image lands in artwork instead.
+        let artwork = w.get_region("artwork").unwrap();
+        assert_eq!(artwork.content.len(), 1);
+        assert_eq!(artwork.content[0].content.stored_count(), 1);
     }
 }

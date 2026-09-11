@@ -35,6 +35,7 @@ pub(super) const STAGE_KEYS: &[&str] = &[
     "nudge",
     "on_worker_failure",
     "output",
+    "output_routing",
     "require_output",
     "required_tools",
     "requires_children",
@@ -60,7 +61,7 @@ pub(super) const STAGE_KEYS: &[&str] = &[
 /// regions from an otherwise inherited one. Either way what is left out is
 /// hidden rather than destroyed. An author who guesses any other key hears
 /// about it instead of quietly carrying the region they meant to drop.
-pub(super) const CONTEXT_KEYS: &[&str] = &["regions", "hide"];
+pub(super) const CONTEXT_KEYS: &[&str] = &["regions", "hide", "reset"];
 
 /// The hooks this build implements, in the order the refusal names them.
 /// `parse_stage_hooks` matches on each, and the schema guard in `tests.rs`
@@ -380,6 +381,30 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         stage.tool_result_routing = Some(routing);
     }
 
+    // `[stages.<name>.output_routing]`: where the model's produced parts go by
+    // mime type. Each key is a mime pattern and each value a region name. The
+    // pattern is validated here (shape only); that the region exists is checked
+    // in `Blueprint::validate`, once every layout is known.
+    if let Some(routing_table) = table_of(stage_value, "output_routing") {
+        for (pattern, region_val) in routing_table {
+            crate::mime::MimeType::parse(pattern).map_err(|_| {
+                Error::Other(format!(
+                    "stage '{stage_name}': output_routing key '{pattern}' is not a mime type \
+                     or pattern, e.g. \"image/*\" or \"application/pdf\""
+                ))
+            })?;
+            let region = region_val.as_str().ok_or_else(|| {
+                Error::Other(format!(
+                    "stage '{stage_name}': output_routing.\"{pattern}\" must be a region name, \
+                     e.g. \"{pattern}\" = \"artwork\""
+                ))
+            })?;
+            stage
+                .output_routing
+                .insert(pattern.clone(), region.to_string());
+        }
+    }
+
     // Parse requires_children flag
     if let Some(rc) = bool_of(stage_value, "requires_children") {
         stage.requires_children = rc;
@@ -603,6 +628,26 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
                     ))
                 })?;
             stage.context_hide = names;
+        }
+        // `reset = ["conversation"]`: the regions this stage empties on entry.
+        // Names are checked against the blueprint in `Blueprint::validate`;
+        // here only the shape is.
+        if let Some(reset) = context_table.get("reset") {
+            let names = reset
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "stage '{stage_name}': context.reset must be a list of region names, \
+                         e.g. reset = [\"conversation\"]"
+                    ))
+                })?;
+            stage.context_reset = names;
         }
     }
 

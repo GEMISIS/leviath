@@ -544,6 +544,17 @@ pub struct Stage {
     #[serde(default)]
     pub context_hide: Vec<String>,
 
+    /// Regions emptied when this stage is entered
+    /// (`[stages.<name>.context] reset = ["conversation"]`). Unlike
+    /// [`Self::context_hide`], which only stops a region being shown here, this
+    /// clears it, so the stage starts with a clean slate where a previous
+    /// stage's turns would otherwise carry forward - an image-describe stage
+    /// reading its picture from a region of its own, say, with none of the
+    /// drawing stage's scaffolding in the conversation. The content is gone,
+    /// not hidden, so a re-entered stage clears it again each visit.
+    #[serde(default)]
+    pub context_reset: Vec<String>,
+
     /// Custom configuration for this stage
     pub config: HashMap<String, serde_json::Value>,
 
@@ -644,6 +655,21 @@ pub struct Stage {
     #[serde(default)]
     pub tool_result_routing: Option<ToolResultRouting>,
 
+    /// Where the model's produced parts go, by mime type
+    /// (`[stages.<name>.output_routing]`: `"image/*" = "artwork"`). Keys are
+    /// mime patterns (`image/png`, `image/*`, `*/*`), values are region names.
+    ///
+    /// A reply that carries more than text is split part by part: each part
+    /// (an image the model drew, a `submit_output` artifact) whose mime type
+    /// matches goes to the region of the *most specific* matching pattern
+    /// (`image/png` beats `image/*` beats `*/*`), and text and any unmatched
+    /// part stay in `conversation` as before. The whole point is to hand a
+    /// produced file to a *later* stage or to the user, so unlike
+    /// [`Self::tool_result_routing`] the target need not be a region this
+    /// stage reads back - only one some layout in the blueprint declares.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_routing: BTreeMap<String, String>,
+
     /// What shape this stage's final output should take, narrowing the
     /// agent-level `[agent.output]`. Whoever starts the run overrides both.
     ///
@@ -696,6 +722,17 @@ pub struct Stage {
     pub hooks: StageHooks,
 }
 
+/// How specific a mime routing pattern is, so the most specific match wins:
+/// an exact `type/subtype` (2) beats a family `type/*` (1) beats the catch-all
+/// `*/*` (0). Mirrors the resolution order the mime registry itself uses.
+fn mime_pattern_specificity(pattern: &str) -> u8 {
+    match pattern {
+        "*/*" => 0,
+        p if p.ends_with("/*") => 1,
+        _ => 2,
+    }
+}
+
 impl Stage {
     /// Create a new stage with the specified configuration.
     pub fn new(name: String, model: ModelConfig) -> Self {
@@ -710,6 +747,7 @@ impl Stage {
             mode: StageMode::Autonomous,
             context_layout: None,
             context_hide: Vec::new(),
+            context_reset: Vec::new(),
             config: HashMap::new(),
             tool_permissions: HashMap::new(),
             requires_children: false,
@@ -726,6 +764,7 @@ impl Stage {
             nudge: None,
             sandbox: None,
             tool_result_routing: None,
+            output_routing: BTreeMap::new(),
             output: None,
             input_accepts: Vec::new(),
             input_as_text: Vec::new(),
@@ -733,6 +772,20 @@ impl Stage {
             require_output: false,
             hooks: StageHooks::default(),
         }
+    }
+
+    /// The region a produced part of `mime_type` routes to under
+    /// [`Self::output_routing`], or `None` to leave it in `conversation`.
+    ///
+    /// The most specific matching pattern wins, so a table with both
+    /// `image/png` and `image/*` sends a PNG to the first and every other
+    /// image to the second, whatever order they appear in.
+    pub fn route_for_mime(&self, mime_type: &crate::mime::MimeType) -> Option<&str> {
+        self.output_routing
+            .iter()
+            .filter(|(pattern, _)| mime_type.matches(pattern))
+            .max_by_key(|(pattern, _)| mime_pattern_specificity(pattern))
+            .map(|(_, region)| region.as_str())
     }
 
     /// Add tools to this stage.
