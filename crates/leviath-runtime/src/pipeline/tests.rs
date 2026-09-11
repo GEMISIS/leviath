@@ -18711,7 +18711,13 @@ mod model_parts {
         let entity = world.spawn(()).id();
         let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
         let mime = state.get(&world).expect("the parameter validates");
-        let mut unnamed = png("x");
+        // Byte-distinct from `hero.png` so the dedup does not fold them
+        // together: this row is here to prove the unnamed-blob naming, not
+        // duplicate handling (which has its own test).
+        let mut unnamed = Blob::new(
+            MimeType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nother".to_vec(),
+        );
         unnamed.name = None;
         let big = Blob::new(MimeType::parse("image/png").unwrap(), vec![0; 64]);
         let parts = store_model_parts(vec![png("hero.png"), unnamed, big], entity, "run-m", &mime);
@@ -18729,6 +18735,36 @@ mod model_parts {
             parts[2]
         );
         assert!(store_model_parts(Vec::new(), entity, "run-m", &mime).is_empty());
+    }
+
+    /// A model that hands back the same bytes twice in one reply (the
+    /// gemini image gateway does this) stores one part, not two - the store
+    /// is content-addressed, so the second is the same file.
+    #[test]
+    fn byte_identical_produced_mime_is_stored_once() {
+        let mut world = World::new();
+        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
+        world.insert_resource(MimeRegistryHandle::default());
+        world.insert_resource(MimeLimits::default());
+        let entity = world.spawn(()).id();
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        let mime = state.get(&world).expect("the parameter validates");
+        // `png` gives the same bytes whatever the name, so these two are
+        // byte-identical; a third, distinct blob is kept.
+        let other = Blob::new(
+            MimeType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\ndifferent".to_vec(),
+        )
+        .named("other.png");
+        let parts = store_model_parts(
+            vec![png("first.png"), png("second.png"), other],
+            entity,
+            "run-m",
+            &mime,
+        );
+        assert_eq!(parts.len(), 2, "the byte-identical repeat is dropped");
+        assert_eq!(parts[0].name.as_deref(), Some("first.png"));
+        assert_eq!(parts[1].name.as_deref(), Some("other.png"));
     }
 
     #[test]

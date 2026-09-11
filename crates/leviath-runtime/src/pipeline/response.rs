@@ -52,6 +52,14 @@ pub(crate) fn store_model_parts(
     if blobs.is_empty() {
         return Vec::new();
     }
+    // Drop byte-identical duplicates a model returned in one reply. Some
+    // gateways echo the same file more than once - a streamed image resent on a
+    // later delta, an `images` array with a repeat - and the store is
+    // content-addressed, so two identical blobs are one file on disk anyway;
+    // keeping both parts would only send the model its own output back twice.
+    // Exact bytes only: a model that returns two genuinely different files,
+    // even near-identical ones, keeps both.
+    let blobs = dedupe_identical_blobs(blobs);
     let (sources, _) = mime.hydration_inputs(entity);
     let Some((store, registry)) = sources else {
         return blobs
@@ -85,6 +93,17 @@ pub(crate) fn store_model_parts(
                 leviath_core::mime::Part::text(format!("[model output dropped: {e}]"))
             })
         })
+        .collect()
+}
+
+/// Keep the first of each byte-identical blob, in the order they arrived.
+/// Identity is the sha256 of the bytes, the same key the blob store uses, so
+/// this drops exactly what the store would have collapsed to one file.
+fn dedupe_identical_blobs(blobs: Vec<leviath_core::mime::Blob>) -> Vec<leviath_core::mime::Blob> {
+    let mut seen = std::collections::HashSet::new();
+    blobs
+        .into_iter()
+        .filter(|b| seen.insert(leviath_core::mime::sha256_hex(&b.bytes)))
         .collect()
 }
 
