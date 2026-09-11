@@ -169,7 +169,6 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `volatility` | `"rewritten"` | How much the region's contents move between requests, which decides where it sits in the prompt. See [what caching costs](#what-caching-costs) |
 | `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. Unset takes anything. A write carrying another type is refused with this list. See [typed mime](/docs/mime) |
-| `max_stored` | unset | The most stored (non-text) parts the region holds. Past it the oldest entry carrying one is evicted, or refused under `admission = "reject"` |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage

@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.5"
+version = "0.2.6"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -351,7 +351,7 @@ review_criteria = { kind = "pinned", budget = "2%", seed = "criteria", volatilit
 # `--attach before.png:screenshots --attach after.png:screenshots`, or a
 # `@path` in `--criteria`. Typed `image/*`, so a model that can see them does, and
 # one that cannot gets a stand-in naming each. Six at most; older ones go.
-screenshots     = { kind = "pinned", budget = "6%", seed = "screenshots", accepts = ["image/*"], max_stored = 6, volatility = "stable" }
+screenshots     = { kind = "pinned", budget = "6%", seed = "screenshots", accepts = ["image/*"], volatility = "stable" }
 # Pre-loaded on startup: architecture / conventions (missing files skipped).
 project_context = { kind = "pinned", budget = "4%", seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] }, volatility = "stable" }
 # Deterministic repo scan, run once at spawn (issue #108) - the discover stage

@@ -7,9 +7,8 @@
 //! tools are confined to, so the picker can never offer a file the run could
 //! not read. It is filtered to the region's `accepts`: a `pictures` region of
 //! `image/*` shows images, not the run's `notes.md`. Files are toggled on and
-//! off and each one's token cost is shown, so the limit is the region's token
-//! budget (its share of the model's context window), not an arbitrary count; a
-//! blueprint may still set a hard `max_stored` cap, which the picker honours.
+//! off and each one's token cost is shown, so the only limit is the region's
+//! token budget (its share of the model's context window), never a file count.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,9 +51,6 @@ pub(super) struct FilePicker {
     row: usize,
     /// The region's name, for the title.
     region: String,
-    /// A hard count cap the region declares, when it does; `None` means the
-    /// only limit is the token budget.
-    max_stored: Option<usize>,
     /// The region's token budget, resolved against the entry model's window.
     /// `0` means the region declares none, so no token limit is enforced.
     budget: usize,
@@ -99,10 +95,9 @@ impl FilePicker {
         self.chosen.values().sum()
     }
 
-    /// Toggle the highlighted file in or out of the choice. A one-file region
-    /// (`max_stored = 1`) swaps rather than adds. Otherwise the only limit is
-    /// the token budget, plus any hard count cap the region declares; a pick
-    /// that would exceed either is refused with the reason.
+    /// Toggle the highlighted file in or out of the choice. The only limit is
+    /// the region's token budget; a pick that would exceed it is refused with
+    /// the reason.
     fn toggle_highlighted(&mut self) {
         self.warn = None;
         let Some((path, tokens)) = self.highlighted().map(|f| (f.rel.clone(), f.tokens)) else {
@@ -110,17 +105,6 @@ impl FilePicker {
         };
         if self.chosen.remove(&path).is_some() {
             return;
-        }
-        match self.max_stored {
-            // A single-file region swaps the one it holds.
-            Some(1) => self.chosen.clear(),
-            // A region with a hard cap refuses past it.
-            Some(n) if self.chosen.len() >= n => {
-                self.warn = Some(format!("holds at most {n} files"));
-                return;
-            }
-            // Room under a cap, or no cap at all.
-            _ => {}
         }
         if self.budget > 0 && self.chosen_tokens() + tokens > self.budget {
             let left = self.budget.saturating_sub(self.chosen_tokens());
@@ -208,7 +192,6 @@ impl Dashboard {
         };
         let region = slot.region.clone();
         let accepts = slot.accepts.clone();
-        let max_stored = slot.max_stored;
         let budget = slot.max_tokens;
         let workdir = self.new_run_ctx.workdir.clone();
         let registry = cli_registry();
@@ -234,7 +217,6 @@ impl Dashboard {
         let mut picker = FilePicker {
             row,
             region,
-            max_stored,
             budget,
             files,
             filtered: Vec::new(),
@@ -307,13 +289,6 @@ impl Dashboard {
             width: popup.width.saturating_sub(2),
             height: popup.height.saturating_sub(2),
         };
-        // The count cap is named only when the region declares one; otherwise
-        // the token budget is the only limit and the title says so by omission.
-        let cap_note = match picker.max_stored {
-            Some(1) => "one file, ".to_string(),
-            Some(n) => format!("up to {n}, "),
-            None => String::new(),
-        };
         // The token line is the honest answer to "how many files fit": the
         // budget is the region's share of the model's context window.
         let budget_note = match picker.budget > 0 {
@@ -321,9 +296,8 @@ impl Dashboard {
             false => String::new(),
         };
         let title = format!(
-            " Choose files for {} ({}{} chosen{}) ",
+            " Choose files for {} ({} chosen{}) ",
             picker.region,
-            cap_note,
             picker.chosen.len(),
             budget_note,
         );
@@ -414,10 +388,7 @@ impl Dashboard {
                 Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
             )),
             None => Line::from(Span::styled(
-                match picker.max_stored {
-                    Some(1) => " Space choose (swaps) · Enter done · Esc cancel · type to filter ",
-                    _ => " Space add/remove · Enter done · Esc cancel · type to filter ",
-                },
+                " Space add/remove · Enter done · Esc cancel · type to filter ",
                 Style::default().fg(C_MUTED),
             )),
         };
@@ -463,10 +434,10 @@ mod tests {
              [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
              [context.regions]\n\
              task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             cover = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], max_stored = 1 }\n\
-             gallery = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], max_stored = 3 }\n\
+             cover = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
+             gallery = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
              notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
-             tight = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"], max_stored = 4 }\n\
+             tight = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"] }\n\
              stream = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
              conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
         )
@@ -545,10 +516,10 @@ mod tests {
         assert_eq!(resolved.parts[0].region.as_deref(), Some("cover"));
     }
 
-    /// A many-file row toggles files with Space up to its cap, and Enter keeps
-    /// what was toggled.
+    /// A file row toggles several files with Space, Enter keeps them, and
+    /// re-opening pre-checks them so one can be toggled back off.
     #[test]
-    fn a_multi_file_row_toggles_up_to_the_cap() {
+    fn a_file_row_toggles_several() {
         let dir = tempfile::tempdir().unwrap();
         write_agent(&dir.path().join("agents").join("looker"));
         let mut dash = dash_at(dir.path());
@@ -562,7 +533,6 @@ mod tests {
         dash.new_run_input_selected = gallery;
         dash.handle_new_run_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(dash.new_run_picker_open(), "Ctrl+O opens it");
-        assert_eq!(dash.new_run_picker.as_ref().unwrap().max_stored, Some(3));
         // Toggle both files on, then confirm.
         dash.handle_new_run_key(key(KeyCode::Char(' ')));
         dash.handle_new_run_key(key(KeyCode::Down));
@@ -577,52 +547,6 @@ mod tests {
         dash.handle_new_run_key(key(KeyCode::Char(' ')));
         dash.handle_new_run_key(key(KeyCode::Enter));
         assert_eq!(dash.new_run_inputs[gallery].files.len(), 1);
-    }
-
-    /// The cap holds: a fourth pick on a three-file region is ignored, and a
-    /// one-file region swaps rather than stacks.
-    #[test]
-    fn the_cap_and_the_single_swap_hold() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        std::fs::write(
-            dir.path().join("work").join("extra.png"),
-            b"\x89PNG\r\n\x1a\nc",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("work").join("more.png"),
-            b"\x89PNG\r\n\x1a\nd",
-        )
-        .unwrap();
-        dash.open_new_run_screen();
-        // Single region: two picks leave one.
-        let cover = dash
-            .new_run_inputs
-            .iter()
-            .position(|s| s.region == "cover")
-            .unwrap();
-        dash.open_new_run_picker(cover);
-        let p = dash.new_run_picker.as_mut().unwrap();
-        p.toggle_highlighted();
-        p.selected = 1;
-        p.toggle_highlighted();
-        assert_eq!(p.chosen.len(), 1, "one-file region swaps");
-
-        // Many region caps at three however many are toggled.
-        let gallery = dash
-            .new_run_inputs
-            .iter()
-            .position(|s| s.region == "gallery")
-            .unwrap();
-        dash.open_new_run_picker(gallery);
-        let p = dash.new_run_picker.as_mut().unwrap();
-        for i in 0..p.filtered.len() {
-            p.selected = i;
-            p.toggle_highlighted();
-        }
-        assert_eq!(p.chosen.len(), 3, "capped at max_stored");
     }
 
     /// The modal draws its title, the tick boxes and the footer.
@@ -644,7 +568,7 @@ mod tests {
             .collect();
         assert!(text.contains("Choose files for cover"), "{text}");
         assert!(text.contains("hero.png"), "{text}");
-        assert!(text.contains("Space choose"), "{text}");
+        assert!(text.contains("Space add/remove"), "{text}");
         assert!(text.contains("Enter done"), "{text}");
         // Filtering narrows the list.
         dash.handle_new_run_key(key(KeyCode::Char('v')));
@@ -703,8 +627,8 @@ mod tests {
         assert!(dash.new_run_picker.as_ref().unwrap().chosen.is_empty());
     }
 
-    /// A multi-file picker draws its tick boxes, its cap in the title, the
-    /// active filter, and its footer; an empty match says so.
+    /// A multi-file picker draws its tick boxes, the active filter, and its
+    /// footer; an empty match says so.
     #[test]
     fn the_multi_picker_draws_every_part() {
         let dir = tempfile::tempdir().unwrap();
@@ -718,11 +642,10 @@ mod tests {
             .unwrap();
         dash.open_new_run_picker(gallery);
         // Choose one, leave one, and render: [x] and [ ] both appear, with the
-        // cap in the title and the multi-file footer.
+        // multi-file footer.
         dash.handle_new_run_key(key(KeyCode::Char(' ')));
         let text = draw(&mut dash);
         assert!(text.contains("Choose files for gallery"), "{text}");
-        assert!(text.contains("up to 3"), "{text}");
         assert!(text.contains("[x]"), "{text}");
         assert!(text.contains("[ ]"), "{text}");
         assert!(text.contains("Space add/remove"), "{text}");
@@ -852,7 +775,6 @@ mod tests {
             .iter()
             .position(|s| s.region == "stream")
             .unwrap();
-        assert_eq!(dash.new_run_inputs[stream].max_stored, None);
         dash.open_new_run_picker(stream);
         // Toggle both images on: no count cap stops them.
         dash.handle_new_run_key(key(KeyCode::Char(' ')));

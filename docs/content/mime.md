@@ -140,14 +140,14 @@ A region can say what it accepts and how many stored parts it holds:
 ```toml
 [context.regions]
 brief         = { kind = "pinned", seed = "task_input", accepts = ["text/*"] }
-voice_samples = { kind = "pinned", seed = "input", accepts = ["audio/*"], max_stored = 4 }
-storyboard    = { kind = "pinned", seed = "input", accepts = ["image/*"], max_stored = 12 }
+voice_samples = { kind = "pinned", seed = "input", accepts = ["audio/*"] }
+storyboard    = { kind = "pinned", seed = "input", accepts = ["image/*"] }
 ```
 
 A stage's inputs are the regions it can see, so a stage that reads those three has three typed
 inputs and nothing new to declare. A write that does not match `accepts` is refused and says
-what the region does take. `max_stored` evicts the oldest entry carrying a stored part, or
-refuses the write under `admission = "reject"`.
+what the region does take. A region is bounded by its token budget: past it the oldest entry
+is evicted, or the write is refused under `admission = "reject"`.
 
 When a stage lists several models, the one that takes what the stage's regions accept goes
 first, so a stage reading a storyboard lands on the model that can see it. `lev validate` says

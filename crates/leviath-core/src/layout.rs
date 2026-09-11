@@ -679,11 +679,6 @@ pub struct RegionDefinition {
     /// [`crate::region::Region::accepts`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepts: Vec<String>,
-
-    /// The most stored parts the region holds. See
-    /// [`crate::region::Region::max_stored`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_stored: Option<usize>,
 }
 
 impl RegionDefinition {
@@ -709,7 +704,6 @@ impl RegionDefinition {
             volatility: crate::region::Volatility::default(),
             seed: None,
             accepts: Vec::new(),
-            max_stored: None,
         }
     }
 

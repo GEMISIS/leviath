@@ -223,7 +223,6 @@ pub(super) fn parse_region_layout(
         // here so a typo is a load error and not a region that refuses every
         // write at runtime.
         let accepts = parse_accepts(region_name, region_value.get("accepts"))?;
-        let max_stored = count("max_stored")?;
 
         // Percentage regions contribute their (unknown) size at resolution, so
         // only absolute budgets add to the summed total here.
@@ -240,7 +239,6 @@ pub(super) fn parse_region_layout(
         def.describe_in_prompt = describe_in_prompt;
         def.volatility = volatility;
         def.accepts = accepts;
-        def.max_stored = max_stored;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }
@@ -463,7 +461,6 @@ pub(super) const REGION_KEYS: &[&str] = &[
     "kind",
     "max_entries",
     "max_items",
-    "max_stored",
     "max_tokens",
     "min_tokens",
     "overflow",

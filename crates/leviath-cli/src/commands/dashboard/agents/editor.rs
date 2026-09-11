@@ -1054,8 +1054,7 @@ impl Dashboard {
             | FieldId::RegionMaxTokens
             | FieldId::RegionMinTokens
             | FieldId::RegionMaxItems
-            | FieldId::RegionOverflow
-            | FieldId::RegionMaxStored => {
+            | FieldId::RegionOverflow => {
                 let value = match text.parse::<u64>() {
                     Ok(n) => Some(n),
                     Err(_) if text.is_empty() => None,

@@ -37,7 +37,6 @@ pub(crate) fn init_window_seeded(
         region.admission = region_def.admission;
         region.volatility = region_def.volatility;
         region.accepts = region_def.accepts.clone();
-        region.max_stored = region_def.max_stored;
         region.description = region_def.description.clone();
         region.describe_in_prompt = region_def.describe_in_prompt;
         window.add_region(region);
@@ -174,7 +173,6 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
         new_region.admission = region_def.admission;
         new_region.volatility = region_def.volatility;
         new_region.accepts = region_def.accepts.clone();
-        new_region.max_stored = region_def.max_stored;
         new_region.description = region_def.description.clone();
         new_region.describe_in_prompt = region_def.describe_in_prompt;
 

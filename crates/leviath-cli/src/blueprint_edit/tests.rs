@@ -1251,16 +1251,8 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         RegionValue::Text("Image/*, audio/wav image/*".into()),
     )
     .unwrap();
-    doc.set_region_field(
-        &s,
-        "shots",
-        RegionField::MaxStored,
-        RegionValue::Number(Some(0)),
-    )
-    .unwrap();
     let r = doc.region(None, "shots").unwrap();
     assert_eq!(r.accepts, ["image/*", "audio/wav"]);
-    assert_eq!(r.max_stored, Some(1));
     runtime_ok(&doc);
     doc.set_region_field(
         &s,
@@ -1269,15 +1261,8 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         RegionValue::Text(" ".into()),
     )
     .unwrap();
-    doc.set_region_field(
-        &s,
-        "shots",
-        RegionField::MaxStored,
-        RegionValue::Number(None),
-    )
-    .unwrap();
     let r = doc.region(None, "shots").unwrap();
-    assert!(r.accepts.is_empty() && r.max_stored.is_none());
+    assert!(r.accepts.is_empty());
     assert!(!doc.to_toml().contains("accepts"), "{}", doc.to_toml());
     // The stage's input lists come and go with their table.
     assert_eq!(

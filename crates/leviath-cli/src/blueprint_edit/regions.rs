@@ -60,8 +60,6 @@ pub(crate) enum RegionField {
     Description,
     /// `accepts`, typed as a list: commas or spaces between patterns.
     Accepts,
-    /// `max_stored`, at least 1.
-    MaxStored,
 }
 
 /// A value for a [`RegionField`].
@@ -213,9 +211,6 @@ impl ManifestDoc {
                 } else {
                     set_strings(table, "accepts", &list);
                 }
-            }
-            (RegionField::MaxStored, RegionValue::Number(n)) => {
-                set_or_remove_int(table, "max_stored", n.map(|n| n.max(1)));
             }
             (RegionField::Seed, RegionValue::Text(t)) => {
                 let is_table = table

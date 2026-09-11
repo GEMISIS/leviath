@@ -403,8 +403,6 @@ pub(crate) struct RegionView {
     /// `accepts`: the mime type patterns the region takes; empty is
     /// anything.
     pub accepts: Vec<String>,
-    /// `max_stored`: the most stored parts it keeps across its entries.
-    pub max_stored: Option<u64>,
 }
 
 /// The layout a stage runs with.
@@ -811,7 +809,6 @@ fn region_view(name: &str, table: &dyn TableLike) -> RegionView {
             .unwrap_or_default()
             .to_string(),
         accepts: get_strings(table, "accepts"),
-        max_stored: get_int(table, "max_stored").and_then(|n| u64::try_from(n).ok()),
     }
 }
 

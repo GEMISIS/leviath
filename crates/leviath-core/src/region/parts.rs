@@ -429,59 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn max_stored_evicts_the_oldest_stored_entry_or_refuses() {
-        use crate::region::{Admission, Region, RegionKind};
-        let mut region = Region::new("sprites".into(), RegionKind::Temporary, 10_000);
-        region.max_stored = Some(2);
-        region
-            .add_entry(EntryContent::text("just text"), 1)
-            .unwrap();
-        region
-            .add_entry(EntryContent::from_parts(vec![stored("a.png")]), 5)
-            .unwrap();
-        region
-            .add_entry(EntryContent::from_parts(vec![stored("b.png")]), 5)
-            .unwrap();
-        assert_eq!(region.stored_count(), 2);
-        region
-            .add_entry(EntryContent::from_parts(vec![stored("c.png")]), 5)
-            .unwrap();
-        assert_eq!(region.stored_count(), 2);
-        assert_eq!(region.content.len(), 3, "the text entry stays; a.png went");
-        assert_eq!(region.current_tokens, 11);
-        let names: Vec<_> = region
-            .content
-            .iter()
-            .flat_map(|e| e.content.parts().iter().filter_map(|p| p.name.clone()))
-            .collect();
-        assert_eq!(names, vec!["b.png", "c.png"]);
-        let too_many = region
-            .add_entry(
-                EntryContent::from_parts(vec![stored("d.png"), stored("e.png"), stored("f.png")]),
-                5,
-            )
-            .unwrap_err();
-        assert!(too_many.to_string().contains("at most 2"), "{too_many}");
-        region.admission = Admission::Reject;
-        let refused = region
-            .add_entry(EntryContent::from_parts(vec![stored("g.png")]), 5)
-            .unwrap_err();
-        assert!(
-            refused.to_string().contains("release one first"),
-            "{refused}"
-        );
-        assert_eq!(region.stored_count(), 2);
-        region
-            .add_entry(EntryContent::text("text still lands"), 1)
-            .unwrap();
-        // Asked to shed more than it holds, the eviction stops at the last
-        // stored entry rather than looping.
-        region.evict_oldest_stored(10);
-        assert_eq!(region.stored_count(), 0);
-        assert_eq!(region.content.len(), 2, "text entries stay");
-    }
-
-    #[test]
     fn a_region_with_a_schema_takes_text_only() {
         use crate::region::schema::{ContentFormat, RegionSchema};
         use crate::region::{Region, RegionKind};
