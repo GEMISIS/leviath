@@ -1004,13 +1004,6 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     dash.handle_key(key(KeyCode::Char(' ')));
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(region(&mut dash).accepts, ["image/png"]);
-    goto(&mut dash, FieldId::RegionMaxStored);
-    dash.handle_key(key(KeyCode::Right));
-    assert_eq!(region(&mut dash).max_stored, Some(1));
-    dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "2");
-    dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(region(&mut dash).max_stored, Some(12));
     goto(&mut dash, FieldId::RegionAccepts);
     dash.handle_key(key(KeyCode::Char('x')));
     assert!(region(&mut dash).accepts.is_empty());

@@ -4,7 +4,7 @@
 //! crossing happens here, once per run: the bytes are typed by the registry,
 //! written to the run's blob store, and the reference is written into the
 //! region beside whatever caption came with it. A region that refuses the
-//! type (`accepts`) or is full (`max_stored` under `admission = "reject"`)
+//! type (`accepts`) or is full (its token budget under `admission = "reject"`)
 //! refuses the spawn or the message, naming the part, rather than dropping
 //! it where nobody would notice.
 

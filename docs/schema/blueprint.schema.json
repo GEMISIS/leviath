@@ -803,11 +803,6 @@
             "type": "string"
           },
           "description": "Mime types this region takes, each type/subtype or type/*. Absent means anything. A write carrying a part outside the list is refused with the list."
-        },
-        "max_stored": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "The most stored (non-text) parts the region holds across its entries. Past it the oldest entry carrying one is evicted, or the write is refused under admission = \"reject\"."
         }
       }
     },

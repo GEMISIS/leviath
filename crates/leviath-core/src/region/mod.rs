@@ -453,12 +453,6 @@ pub struct Region {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepts: Vec<String>,
 
-    /// The most stored parts this region holds across its entries. Past it,
-    /// the oldest entry carrying one is evicted, or the write is refused
-    /// under [`Admission::Reject`]. `None` is unbounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_stored: Option<usize>,
-
     /// One line on what this region is for.
     ///
     /// Documentation first: it is what `GET /api/blueprints/{name}` reports and
@@ -501,7 +495,6 @@ impl Region {
             admission: Admission::default(),
             volatility: Volatility::default(),
             accepts: Vec::new(),
-            max_stored: None,
             description: None,
             describe_in_prompt: false,
         }
@@ -526,18 +519,6 @@ impl Region {
     /// How many stored parts the region holds across every entry.
     pub fn stored_count(&self) -> usize {
         self.content.iter().map(|e| e.content.stored_count()).sum()
-    }
-
-    /// Drop the oldest entries carrying stored parts until `excess` stored
-    /// parts are gone. Tokens and taint follow the entries out.
-    fn evict_oldest_stored(&mut self, mut excess: usize) {
-        while excess > 0 {
-            let Some(idx) = self.content.iter().position(|e| e.content.has_stored()) else {
-                return;
-            };
-            excess = excess.saturating_sub(self.content[idx].content.stored_count());
-            self.remove_at(idx);
-        }
     }
 
     /// Enable taint tracking for this region.
@@ -599,30 +580,6 @@ impl Region {
                 ),
             });
         }
-        if let Some(max) = self.max_stored
-            && content.has_stored()
-        {
-            let incoming = content.stored_count();
-            if incoming > max {
-                return Err(crate::error::Error::RegionRefusedWrite {
-                    region: self.name.clone(),
-                    reason: format!(
-                        "it holds at most {max} stored parts and this write carries {incoming}"
-                    ),
-                });
-            }
-            let over = (self.stored_count() + incoming).saturating_sub(max);
-            if over > 0 {
-                if self.admission == Admission::Reject {
-                    return Err(crate::error::Error::RegionRefusedWrite {
-                        region: self.name.clone(),
-                        reason: format!("it already holds {max} stored parts; release one first"),
-                    });
-                }
-                self.evict_oldest_stored(over);
-            }
-        }
-
         if self.current_tokens + tokens > self.max_tokens {
             // Which failure this is depends on whether anything would have been
             // dropped to fit. A region that never evicts reports being full,

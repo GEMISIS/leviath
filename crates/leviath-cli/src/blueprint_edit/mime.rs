@@ -2,8 +2,7 @@
 //! `[stages.<name>.input]` lists, the `[stages.<name>.output]` format and
 //! `[[artifacts]]` declarations, and the `[stages.<name>.tool_accepts]`
 //! table that says what each tool may be handed. What a region takes
-//! (`accepts`, `max_stored`) is a region key like any other and lives in
-//! `regions.rs`.
+//! (`accepts`) is a region key like any other and lives in `regions.rs`.
 
 use toml_edit::{Array, ArrayOfTables, InlineTable, Item, Table, TableLike, Value};
 

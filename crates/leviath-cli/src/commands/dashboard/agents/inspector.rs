@@ -151,8 +151,6 @@ pub(in crate::commands::dashboard) enum FieldId {
     RegionDescription,
     /// The mime type patterns the region takes (a chooser).
     RegionAccepts,
-    /// The most stored parts the region keeps.
-    RegionMaxStored,
     DeleteRegion,
     /// A region the stage reads, on its inputs tab; opens the region.
     IoRegionRow(String),
@@ -849,13 +847,6 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
             FieldValue::Row(list_or(&region.accepts, "any type")),
             "Mime type patterns the region takes: image/*, audio/wav. A write outside them \
              is refused with the list. Enter picks the types, x takes anything again.",
-        ),
-        Field::new(
-            FieldId::RegionMaxStored,
-            "Stored parts: keeps at most",
-            FieldValue::Number(region.max_stored),
-            "How many stored parts the region holds across its entries; past it the \
-             oldest goes. Empty is unbounded.",
         ),
         Field::new(
             FieldId::RegionRequired,

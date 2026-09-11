@@ -113,7 +113,6 @@ impl Dashboard {
             FieldId::RegionMinTokens => RegionField::MinTokens,
             FieldId::RegionMaxItems => RegionField::MaxItems,
             FieldId::RegionOverflow => RegionField::Overflow,
-            FieldId::RegionMaxStored => RegionField::MaxStored,
             _ => return false,
         };
         if let Some((scope, name)) = self.panel_region() {

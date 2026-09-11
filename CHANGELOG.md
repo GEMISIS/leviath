@@ -88,8 +88,8 @@ same list.
   each row naming a family, whether the bytes are text, a token rule,
   extensions, a magic prefix and a stand-in template. `[mime]` sets the size ceilings. `lev doctor`
   reports a row that will not load. A region says what it takes with
-  `accepts = ["text/*", "image/png"]` and how many stored parts it holds with
-  `max_stored`; a region with a `schema` takes text only. A snapshot or
+  `accepts = ["text/*", "image/png"]` and is bounded by its token budget; a
+  region with a `schema` takes text only. A snapshot or
   journal written before this reads back unchanged, since a plain string is
   still how a text-only entry is written (#400).
 - Every model says what it takes and what it can hand back, as mime type
@@ -216,8 +216,7 @@ same list.
   share of the entry model's context window), each candidate shows its own token
   cost, and a file that would overflow the budget is refused with the reason.
   The run is stopped with a named error rather than started with a region that
-  cannot hold what it was given. A blueprint may still set a hard `max_stored`
-  count cap, which the picker honours (#400).
+  cannot hold what it was given (#400).
 - The stage graph shows the mime a stage takes beyond text (`◧ image/*
   audio/wav`, from its regions' `accepts` or its `[input] accepts`) and the
   files it declares it hands back (`▤ video/mp4`), in the explorer, the
