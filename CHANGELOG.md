@@ -179,6 +179,13 @@ same list.
   reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
   `runs.blobs`, `runs.files.raw`, `runs.result.artifacts` and
   `mime.registry` (#400).
+- The mime registry can be written over HTTP, not only read. `PUT /api/mime`
+  adds a row to `mime_types.toml` beside the config, or sets the fields sent
+  on the one already there, and `DELETE /api/mime?mime_type=` takes one out -
+  the same file and the same validation `lev mime add` and `lev mime remove`
+  use, so a console can create the custom type a region, a stage input or a
+  declared artifact names without handing the operator a block of TOML to
+  paste. Both need `--allow-admin` and are announced as `mime.write` (#814).
 - Files reach a run from the command line. `lev run --attach
   path[:region][:type][:text]` puts a file in a region as a typed part, a
   `--<region> @file` whose bytes are not text attaches instead of seeding,
