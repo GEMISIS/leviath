@@ -892,15 +892,18 @@ Ceilings on typed mime parts: the images, audio, video, documents and models tha
 
 ```toml
 [mime]
-max_part_bytes = 33554432        # one part, at every ingress (32 MiB)
-inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
-max_stored_per_request = 100     # stored parts one model request carries
+max_part_bytes = 33554432               # one part, at every ingress (32 MiB)
+inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
+max_media_bytes_per_request = 67108864  # bytes of stored media one model request carries (64 MiB)
 ```
 
 A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
 result or a model reply. Text longer than `inline_text_bytes` is stored by hash like any other
-part and read back as text when a request is built. Beyond `max_stored_per_request` the oldest
-stored parts are left out of a request, with a warning in the run's log.
+part and read back as text when a request is built. `max_media_bytes_per_request` is a backstop
+for the vendor request-size limits a token budget cannot see: an image's token estimate is the
+same whatever its byte size, so a request can sit inside its context window and still be
+megabytes of media on the wire. Past it, the oldest stored parts are sent as their stand-ins
+instead, with a warning in the run's log.
 
 <a id="mime_typestypesubtype"></a>
 

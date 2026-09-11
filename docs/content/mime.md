@@ -219,10 +219,15 @@ with any number of file parts, or a JSON `parts` list naming files already insid
 
 ```toml
 [mime]
-max_part_bytes = 33554432        # one part, at every ingress
-inline_text_bytes = 1048576      # text kept inside the entry before it is stored by hash
-max_stored_per_request = 100     # stored parts one model request carries
+max_part_bytes = 33554432               # one part, at every ingress
+inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
+max_media_bytes_per_request = 67108864  # bytes of stored media one model request carries
 ```
+
+`max_media_bytes_per_request` is a backstop for the vendor request-size limits a token budget
+cannot see: an image costs the same few thousand tokens whatever its byte size, so a request
+can sit inside its context window and still be megabytes of media. Past it, the oldest stored
+parts are sent as their stand-ins.
 
 `lev doctor` reports a `[mime_types]` row that will not load, or a `check` it cannot compile;
 the daemon keeps the built-in table until it is fixed.

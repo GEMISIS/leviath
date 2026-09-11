@@ -115,8 +115,9 @@ same list.
   `input_file`, and a Rhai provider the neutral `mime` block with the
   base64 in `data`; the Claude Code transport and every lane that does not
   hydrate send the stand-in. The journal and `context.json` never hold
-  base64. `[mime] max_stored_per_request` caps how many parts one request
-  carries, oldest dropped first (#400).
+  base64. `[mime] max_media_bytes_per_request` caps the bytes of stored media
+  one request carries, oldest sent as stand-ins first, a backstop for the
+  vendor request-size limits a token budget cannot see (#400).
 - Stages declare typed inputs and outputs. `[stages.<name>.input] accepts`
   states what a stage takes as parts (else the union of its visible regions'
   `accepts`), and `as_text` names types whose parts reach the model as text

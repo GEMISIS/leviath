@@ -159,7 +159,7 @@ impl Default for RetryPolicy {
 
 /// A unit of inference work the dispatch system hands to the worker pool.
 /// What a job needs to fill its mime blocks with bytes right before sending:
-/// where the bytes are, what the model takes, and how many to send.
+/// where the bytes are, what the model takes, and how much to send.
 #[derive(Clone)]
 pub(crate) struct JobHydration {
     /// The run's blob store.
@@ -170,8 +170,9 @@ pub(crate) struct JobHydration {
     pub registry: Arc<leviath_core::mime::MimeRegistry>,
     /// What the model takes and hands back.
     pub mime: leviath_providers::ModelMime,
-    /// The most stored parts one request carries with their bytes.
-    pub max_stored: usize,
+    /// The bytes of stored media one request carries before the oldest parts
+    /// become stand-ins.
+    pub max_media_bytes: u64,
     /// Mime type patterns the stage sends as text whatever the model takes.
     pub as_text: Vec<String>,
 }
@@ -204,7 +205,7 @@ impl JobHydration {
             &leviath_providers::mime::Hydration {
                 mime: &self.mime,
                 registry: &self.registry,
-                max_stored: self.max_stored,
+                max_media_bytes: self.max_media_bytes,
                 fetch: &fetch,
             },
         );
@@ -1645,7 +1646,7 @@ mod tests {
             run_id: "run-1".to_string(),
             registry,
             mime: ModelMime::new(&["text/*", "image/*"], &["text/*"]),
-            max_stored: 10,
+            max_media_bytes: 64 * 1024 * 1024,
             as_text: Vec::new(),
         };
         hydration.apply(&mut request);

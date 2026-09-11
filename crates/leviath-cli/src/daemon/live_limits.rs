@@ -146,7 +146,7 @@ impl LiveLimits {
         ecs.insert_resource(leviath_runtime::blob_store::MimeLimits {
             max_part_bytes: config.mime.max_part_bytes,
             inline_text_bytes: config.mime.inline_text_bytes,
-            max_stored_per_request: config.mime.max_stored_per_request,
+            max_media_bytes_per_request: config.mime.max_media_bytes_per_request,
         });
 
         // Read when a prompt opens, so a prompt already waiting keeps the

@@ -55,15 +55,19 @@ pub fn data_uri(mime_type: &MimeType, data: &str) -> String {
     format!("data:{mime_type};base64,{data}")
 }
 
-/// How many stored parts a request may carry, and what fetches their bytes.
+/// How much stored media a request may carry, and what fetches its bytes.
 pub struct Hydration<'a> {
     /// What the model takes.
     pub mime: &'a ModelMime,
     /// The registry, for the text flag.
     pub registry: &'a MimeRegistry,
-    /// The most mime blocks kept with bytes; the oldest beyond it become
-    /// stand-ins.
-    pub max_stored: usize,
+    /// The bytes of stored media the request may carry before the oldest parts
+    /// become stand-ins. This is the raw part size, not the base64 on the wire,
+    /// and it is a backstop for vendor request-size limits a token budget
+    /// cannot see: an image's token estimate is the same whatever its byte
+    /// size, so a request can sit inside its context window and still be
+    /// megabytes of media.
+    pub max_media_bytes: u64,
     /// The bytes for a reference, or `None` when they are missing.
     pub fetch: &'a dyn Fn(&BlobRef) -> Option<Arc<[u8]>>,
 }
@@ -77,7 +81,8 @@ pub struct HydrationReport {
     pub as_text: usize,
     /// Blocks sent as their stand-in because the model does not take them.
     pub stand_ins: usize,
-    /// Blocks sent as their stand-in because the request was over its cap.
+    /// Blocks sent as their stand-in because the request was over its
+    /// media-byte cap.
     pub capped: usize,
     /// Hashes whose bytes could not be read.
     pub missing: Vec<String>,
@@ -112,19 +117,23 @@ fn fate(block: &ContentBlock, h: &Hydration<'_>) -> Fate {
 /// Fill every mime block in `request` with what the model should get.
 pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> HydrationReport {
     let mut report = HydrationReport::default();
-    // Count what will be sent natively, so the cap can drop the oldest
-    // first: messages are in conversation order, so the first blocks seen are
-    // the oldest.
-    let total_native = request
+    // Sum the raw bytes that would be sent natively, so the cap can shed the
+    // oldest first: messages are in conversation order, so the first blocks
+    // seen are the oldest. The newest media is the media a stage most likely
+    // still needs, so it is what the cap keeps.
+    let total_bytes: u64 = request
         .messages
         .iter()
         .flat_map(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks.iter().collect::<Vec<_>>(),
             MessageContent::Text(_) => Vec::new(),
         })
-        .filter(|b| matches!(fate(b, h), Fate::Bytes))
-        .count();
-    let mut to_cap = total_native.saturating_sub(h.max_stored);
+        .filter_map(|b| match b {
+            ContentBlock::Mime { part, .. } if matches!(fate(b, h), Fate::Bytes) => Some(part.size),
+            _ => None,
+        })
+        .sum();
+    let mut to_shed = total_bytes.saturating_sub(h.max_media_bytes);
     for message in &mut request.messages {
         let MessageContent::Blocks(blocks) = &mut message.content else {
             continue;
@@ -141,8 +150,8 @@ pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> Hyd
             };
             let (part, name, deliver) = (part.clone(), name.clone(), *deliver);
             let outcome = match fate(block, h) {
-                Fate::Bytes if to_cap > 0 => {
-                    to_cap -= 1;
+                Fate::Bytes if to_shed > 0 => {
+                    to_shed = to_shed.saturating_sub(part.size);
                     report.capped += 1;
                     Fate::StandIn
                 }
@@ -493,7 +502,7 @@ mod tests {
             &Hydration {
                 mime: &vision,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -512,7 +521,7 @@ mod tests {
             &Hydration {
                 mime: &text_only,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -536,7 +545,7 @@ mod tests {
             &Hydration {
                 mime: &text_only,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -551,7 +560,7 @@ mod tests {
             &Hydration {
                 mime: &text_only,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -566,7 +575,7 @@ mod tests {
             &Hydration {
                 mime: &vision,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -580,7 +589,7 @@ mod tests {
             &Hydration {
                 mime: &vision,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &fetch,
             },
         );
@@ -601,7 +610,7 @@ mod tests {
             &Hydration {
                 mime: &vision,
                 registry: &reg(),
-                max_stored: 10,
+                max_media_bytes: 1024,
                 fetch: &none,
             },
         );
@@ -619,7 +628,7 @@ mod tests {
             &Hydration {
                 mime: &vision,
                 registry: &reg(),
-                max_stored: 1,
+                max_media_bytes: 12,
                 fetch: &fetch,
             },
         );
@@ -627,6 +636,63 @@ mod tests {
         assert_eq!(report.sent, 1);
         let blocks = blocks_of(&req.messages[1].content);
         assert!(!blocks[0].is_hydrated_mime() && blocks[2].is_hydrated_mime());
+    }
+
+    #[test]
+    fn the_cap_sheds_by_bytes_not_by_count() {
+        use leviath_core::mime::Blob;
+        // An accepted part of a chosen byte size, so the byte cap can be tested
+        // against real sizes rather than a count.
+        let sized = |n: usize| {
+            let blob =
+                Blob::new(MimeType::parse("image/png").unwrap(), vec![7u8; n]).named("m.png");
+            Part::stored(blob.describe(&reg())).named("m.png")
+        };
+        let fetch = |r: &BlobRef| -> Option<Arc<[u8]>> {
+            Some(Arc::from(vec![7u8; r.size as usize].as_slice()))
+        };
+        let vision = ModelMime::new(&["text/*", "image/*"], &["text/*"]);
+        let small = sized(12);
+        let big = sized(1000);
+
+        // A cap below the large part: the small old part is shed to make room,
+        // the large new part still does not fit, so both go as stand-ins. A
+        // count cap of one would have kept the newest; the byte cap keeps none.
+        let mut req = request(vec![
+            ContentBlock::mime(&small).unwrap(),
+            ContentBlock::mime(&big).unwrap(),
+        ]);
+        let report = hydrate_request(
+            &mut req,
+            &Hydration {
+                mime: &vision,
+                registry: &reg(),
+                max_media_bytes: 500,
+                fetch: &fetch,
+            },
+        );
+        assert_eq!(report.capped, 2);
+        assert_eq!(report.sent, 0);
+
+        // A cap above the large part but below the sum: the small old part is
+        // shed and the large new part is kept - oldest first, by bytes.
+        let mut req = request(vec![
+            ContentBlock::mime(&small).unwrap(),
+            ContentBlock::mime(&big).unwrap(),
+        ]);
+        let report = hydrate_request(
+            &mut req,
+            &Hydration {
+                mime: &vision,
+                registry: &reg(),
+                max_media_bytes: 1000,
+                fetch: &fetch,
+            },
+        );
+        assert_eq!(report.capped, 1);
+        assert_eq!(report.sent, 1);
+        let blocks = blocks_of(&req.messages[1].content);
+        assert!(!blocks[0].is_hydrated_mime() && blocks[1].is_hydrated_mime());
     }
 
     #[test]

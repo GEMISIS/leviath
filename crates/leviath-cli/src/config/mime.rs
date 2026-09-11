@@ -130,17 +130,20 @@ pub(crate) const DEFAULT_MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
 /// Bytes of text a part may carry inline before it is stored like a blob.
 pub(crate) const DEFAULT_INLINE_TEXT_BYTES: u64 = 1024 * 1024;
 
-/// Stored parts one model request may carry before the oldest are dropped.
-pub(crate) const DEFAULT_MAX_STORED_PER_REQUEST: usize = 100;
+/// Bytes of stored media one model request may carry before the oldest are
+/// sent as stand-ins instead.
+pub(crate) const DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST: u64 = 64 * 1024 * 1024;
 
 /// `[mime]` in `~/.leviath/config.toml`.
 ///
 /// Three ceilings on typed content. `max_part_bytes` is applied wherever a
 /// part arrives: an upload, a tool result, a `read_file`, a model reply.
 /// `inline_text_bytes` is where a text part stops travelling inside the entry
-/// and is stored by hash like any other. `max_stored_per_request` bounds how
-/// many stored parts one request carries, because every vendor has a cap of
-/// its own and the oldest are the ones to drop.
+/// and is stored by hash like any other. `max_media_bytes_per_request` bounds
+/// the bytes of stored media one request carries, a backstop for the vendor
+/// request-size limits that a token budget cannot see: a token estimate for an
+/// image is a few thousand tokens whatever its byte size, so a request can sit
+/// inside its context window and still be megabytes of media on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MimeConfig {
     /// Bytes one part may be. Larger is refused where it arrives.
@@ -151,10 +154,10 @@ pub struct MimeConfig {
     #[serde(default = "default_inline_text_bytes")]
     pub inline_text_bytes: u64,
 
-    /// Stored parts one model request carries; the oldest beyond it are
-    /// dropped with a warning.
-    #[serde(default = "default_max_stored_per_request")]
-    pub max_stored_per_request: usize,
+    /// Bytes of stored media one request carries; past it the oldest parts are
+    /// sent as their stand-ins with a warning.
+    #[serde(default = "default_max_media_bytes_per_request")]
+    pub max_media_bytes_per_request: u64,
 }
 
 fn default_max_part_bytes() -> u64 {
@@ -165,8 +168,8 @@ fn default_inline_text_bytes() -> u64 {
     DEFAULT_INLINE_TEXT_BYTES
 }
 
-fn default_max_stored_per_request() -> usize {
-    DEFAULT_MAX_STORED_PER_REQUEST
+fn default_max_media_bytes_per_request() -> u64 {
+    DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST
 }
 
 impl Default for MimeConfig {
@@ -174,7 +177,7 @@ impl Default for MimeConfig {
         Self {
             max_part_bytes: DEFAULT_MAX_PART_BYTES,
             inline_text_bytes: DEFAULT_INLINE_TEXT_BYTES,
-            max_stored_per_request: DEFAULT_MAX_STORED_PER_REQUEST,
+            max_media_bytes_per_request: DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST,
         }
     }
 }
@@ -594,7 +597,7 @@ mod tests {
         assert_eq!(parsed, MimeConfig::default());
         assert_eq!(parsed.max_part_bytes, 32 * 1024 * 1024);
         assert_eq!(parsed.inline_text_bytes, 1024 * 1024);
-        assert_eq!(parsed.max_stored_per_request, 100);
+        assert_eq!(parsed.max_media_bytes_per_request, 64 * 1024 * 1024);
     }
 
     #[test]
@@ -603,10 +606,10 @@ mod tests {
         assert_eq!(parsed.max_part_bytes, 5);
         assert_eq!(parsed.inline_text_bytes, DEFAULT_INLINE_TEXT_BYTES);
         let parsed: MimeConfig =
-            toml::from_str("inline_text_bytes = 7\nmax_stored_per_request = 2\n").unwrap();
+            toml::from_str("inline_text_bytes = 7\nmax_media_bytes_per_request = 2\n").unwrap();
         assert_eq!(parsed.inline_text_bytes, 7);
-        assert_eq!(parsed.max_stored_per_request, 2);
+        assert_eq!(parsed.max_media_bytes_per_request, 2);
         let back = toml::to_string(&parsed).unwrap();
-        assert!(back.contains("max_stored_per_request = 2"));
+        assert!(back.contains("max_media_bytes_per_request = 2"));
     }
 }

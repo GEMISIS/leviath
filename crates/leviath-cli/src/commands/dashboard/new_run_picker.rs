@@ -762,6 +762,37 @@ mod tests {
         assert!(tokens <= 1, "a missing file costs about nothing: {tokens}");
     }
 
+    /// The picker's pre-flight token estimate and what the daemon charges a
+    /// part at ingest are one calculation - `TokenRule::estimate` over the
+    /// type's rule with the probed dimensions - so the budget the picker shows,
+    /// the tokens the HTTP blob listing serves and what the region accounts for
+    /// all agree. This pins the TUI path to the ingest path on a real PNG,
+    /// whose dimensions both read from the header.
+    #[test]
+    fn the_picker_estimate_matches_the_ingest_charge() {
+        use leviath_core::mime::{Blob, MimeType};
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::commands::run::attach::cli_registry();
+        // A valid PNG header carrying 640x480 in its IHDR, then some body.
+        let mut png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&480u32.to_be_bytes());
+        png.extend_from_slice(b"the rest of the file bytes");
+        let path = dir.path().join("hero.png");
+        std::fs::write(&path, &png).unwrap();
+
+        // The picker's estimate, read from the file on disk.
+        let picker = estimate_file_tokens(&path, &reg);
+        // What the daemon charges the same bytes at ingest, which is the value
+        // the HTTP blob listing (`blob.tokens`) and the region budget then use.
+        let ingest = Blob::new(MimeType::parse("image/png").unwrap(), png)
+            .describe(&reg)
+            .tokens;
+        assert_eq!(picker, ingest, "picker {picker} vs ingest {ingest}");
+        // The real per-pixel estimate, not the cap an unprobed image falls to.
+        assert!(picker > 1 && picker < 1600, "probed, not the cap: {picker}");
+    }
+
     /// A region with no count cap takes as many files as the budget allows, and
     /// its title names no count, only the token line. Each row shows its tokens.
     #[test]
