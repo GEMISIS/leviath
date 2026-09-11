@@ -266,7 +266,7 @@
           "blueprints"
         ],
         "summary": "Fetch one blueprint",
-        "description": "The catalog entry plus the manifest text, the context regions, and fan_outs: one entry per fan-out stage with its worker source, merge stage and both caps (max_workers, max_items) resolved as the daemon applies them, null meaning unlimited.",
+        "description": "The catalog entry plus the manifest text, the context regions, fan_outs (one entry per fan-out stage with its worker source, merge stage and both caps resolved as the daemon applies them, null meaning unlimited), and stage_routing (one entry per stage that routes the model's produced parts by mime type via output_routing, or empties a region on entry via context.reset).",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"

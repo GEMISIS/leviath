@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 
+use super::blueprint_types::{RoutePair, StageRoutingInfo};
 use super::types::*;
 use leviath_core::manifest::parse_manifest;
 
@@ -325,12 +326,37 @@ pub(super) async fn get_blueprint(
         })
         .unwrap_or_default();
     let fan_outs = parsed.as_ref().map(fan_out_infos).unwrap_or_default();
+    let stage_routing = parsed.as_ref().map(stage_routing_infos).unwrap_or_default();
     Ok(Json(BlueprintDetail {
         info,
         regions,
         fan_outs,
+        stage_routing,
         manifest,
     }))
+}
+
+/// The stages that route produced parts (`output_routing`) or empty a region
+/// on entry (`context.reset`), so the detail route carries them structured. A
+/// stage that does neither is left out, the way `fan_out_infos` lists only
+/// fan-out stages.
+fn stage_routing_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<StageRoutingInfo> {
+    bp.stages
+        .iter()
+        .filter(|stage| !stage.output_routing.is_empty() || !stage.context_reset.is_empty())
+        .map(|stage| StageRoutingInfo {
+            stage: stage.name.clone(),
+            output_routing: stage
+                .output_routing
+                .iter()
+                .map(|(pattern, region)| RoutePair {
+                    pattern: pattern.clone(),
+                    region: region.clone(),
+                })
+                .collect(),
+            context_reset: stage.context_reset.clone(),
+        })
+        .collect()
 }
 
 /// The fan-out stages of a blueprint, with their limits resolved.
@@ -1106,6 +1132,66 @@ findings = { kind = "clearable", max_tokens = 4000 }
                     "max_workers": leviath_core::blueprint::DEFAULT_MAX_WORKERS,
                     "max_items": null,
                     "on_worker_failure": "continue",
+                },
+            ])
+        );
+    }
+
+    /// The detail route reports each stage's produced-part routing and its
+    /// entry resets, so a console shows them without parsing the manifest. A
+    /// stage that does neither (here, none of the fan-out blueprint's) is left
+    /// out.
+    #[tokio::test]
+    async fn the_detail_route_reports_stage_routing() {
+        let manifest = r#"
+[agent]
+name = "drawer"
+
+[context.regions]
+artwork = { kind = "pinned" }
+conversation = { kind = "sliding_window" }
+
+[stages.draw]
+system_prompt = "Draw"
+
+[stages.draw.output_routing]
+"image/*" = "artwork"
+
+[stages.describe]
+system_prompt = "Describe"
+
+[stages.describe.context]
+reset = ["conversation"]
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("drawer");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/drawer")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            bp["stage_routing"],
+            serde_json::json!([
+                {
+                    "stage": "draw",
+                    "output_routing": [{ "pattern": "image/*", "region": "artwork" }],
+                },
+                {
+                    "stage": "describe",
+                    "context_reset": ["conversation"],
                 },
             ])
         );

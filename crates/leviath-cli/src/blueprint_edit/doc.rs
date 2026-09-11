@@ -189,6 +189,12 @@ pub(crate) struct StageView {
     /// `[stages.<name>.tool_accepts]`: each tool and what it may be handed,
     /// in document order.
     pub tool_accepts: Vec<(String, Vec<String>)>,
+    /// `[stages.<name>.output_routing]`: the mime patterns the model's
+    /// produced parts are routed by, each to a region, in document order.
+    pub output_routing: Vec<(String, String)>,
+    /// `[stages.<name>.context] reset`: the regions emptied when the stage is
+    /// entered, in the order written.
+    pub context_reset: Vec<String>,
 }
 
 /// When a path is taken.
@@ -570,8 +576,29 @@ fn stage_view(name: &str, item: &Item) -> StageView {
             artifacts: super::mime::artifacts_of(item),
             output_format: super::mime::output_format_of(item),
             tool_accepts: super::mime::tool_limits_of(item),
+            output_routing: output_routing_of(item),
+            context_reset: child(item, "context")
+                .map(|c| get_strings(c, "reset"))
+                .unwrap_or_default(),
         }
     }
+}
+
+/// `[stages.<name>.output_routing]`: mime pattern to region, in document
+/// order. An entry whose value is not a string is left out (and left alone).
+fn output_routing_of(item: &Item) -> Vec<(String, String)> {
+    child(item, "output_routing")
+        .map(|routing| {
+            routing
+                .iter()
+                .filter_map(|(pattern, region)| {
+                    region
+                        .as_str()
+                        .map(|r| (pattern.to_string(), r.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl ManifestDoc {

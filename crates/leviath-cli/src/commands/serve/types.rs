@@ -544,6 +544,9 @@ pub(super) struct BlueprintDetail {
     /// The blueprint's fan-out stages, with their limits as the daemon will
     /// apply them. Empty for a blueprint that never fans out.
     pub(super) fan_outs: Vec<FanOutInfo>,
+    /// The stages that route produced parts (`output_routing`) or reset a
+    /// region on entry (`context.reset`); empty when the blueprint does neither.
+    pub(super) stage_routing: Vec<super::blueprint_types::StageRoutingInfo>,
     /// The manifest exactly as it is on disk.
     ///
     /// Without this a console has no way to read what it is editing: naming

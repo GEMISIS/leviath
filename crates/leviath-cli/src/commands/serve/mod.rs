@@ -7,6 +7,7 @@ mod agents;
 mod artifact_types;
 mod auth;
 mod blobs;
+mod blueprint_types;
 mod blueprints;
 mod config;
 mod config_health;

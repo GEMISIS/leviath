@@ -2816,3 +2816,89 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
     assert_eq!(rest, sorted);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn output_routing_and_context_reset_edit_in_the_stage_panel() {
+    let (mut dash, root) = dashboard("routing_panel");
+    let routing = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .stage("work")
+            .unwrap()
+            .output_routing
+    };
+    let reset = |dash: &mut Dashboard| {
+        dash.agents()
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .stage("work")
+            .unwrap()
+            .context_reset
+    };
+    // The I/O tab routes the model's produced parts, edited as pattern =
+    // region pairs. It starts empty (join of nothing is nothing).
+    open_stage(&mut dash, "own", "work", StageTab::Io);
+    let screen = text(&mut dash);
+    assert!(screen.contains("Route parts"), "{screen}");
+    goto(&mut dash, FieldId::OutputRouting);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().line.is_some());
+    type_str(
+        &mut dash,
+        "image/* = conversation, application/pdf = conversation",
+    );
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        routing(&mut dash),
+        [
+            ("image/*".to_string(), "conversation".to_string()),
+            ("application/pdf".to_string(), "conversation".to_string()),
+        ]
+    );
+    // Reopened, the row shows the joined map.
+    let screen = text(&mut dash);
+    assert!(screen.contains("image/* = conversation"), "{screen}");
+
+    // The Context tab empties regions on entry, edited as a list of names.
+    // Switch tabs in place so the in-memory edit above is not reloaded away.
+    {
+        let editor = dash.agents().editor.as_mut().unwrap();
+        editor.panel = Panel::Stage {
+            name: "work".to_string(),
+            tab: StageTab::Context,
+        };
+        editor.cursor = 0;
+        editor.focus = Focus::Inspector;
+    }
+    goto(&mut dash, FieldId::ContextReset);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().line.is_some());
+    type_str(&mut dash, "conversation");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(reset(&mut dash), ["conversation"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn routing_edit_lines_parse_leniently() {
+    use super::inspector::{parse_region_list, parse_routing};
+    // Pairs split on the first `=`; blanks, a missing `=`, an empty side and a
+    // duplicate pattern are dropped; the pattern lowercases, the region keeps
+    // its case.
+    assert_eq!(
+        parse_routing("Image/* = Art, , bad, = nope, text/* =, image/* = other"),
+        [("image/*".to_string(), "Art".to_string())]
+    );
+    assert!(parse_routing("").is_empty());
+    // Region lists split on commas and spaces, keep case, and drop repeats.
+    assert_eq!(
+        parse_region_list("conversation, Notes  conversation"),
+        ["conversation".to_string(), "Notes".to_string()]
+    );
+    assert!(parse_region_list("  ").is_empty());
+}

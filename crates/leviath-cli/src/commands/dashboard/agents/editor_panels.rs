@@ -366,6 +366,16 @@ impl Dashboard {
                 let stage = self.editor().panel_stage().expect("a stage field");
                 self.editor_mutate(|d| d.set_output_format(&stage, &text));
             }
+            FieldId::OutputRouting => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let entries = super::inspector::parse_routing(&text);
+                self.editor_mutate(|d| d.set_output_routing(&stage, &entries));
+            }
+            FieldId::ContextReset => {
+                let stage = self.editor().panel_stage().expect("a stage field");
+                let regions = super::inspector::parse_region_list(&text);
+                self.editor_mutate(|d| d.set_context_reset(&stage, &regions));
+            }
             FieldId::ArtifactName | FieldId::ArtifactDescription => {
                 let Some((stage, i)) = self.panel_artifact() else {
                     return;
