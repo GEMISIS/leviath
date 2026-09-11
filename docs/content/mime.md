@@ -98,8 +98,14 @@ what they claim. Without one, a declared type is taken at its word, as every pro
 
 A model declares what it takes, as mime types. Anthropic and OpenAI models list `image/*` and
 `application/pdf`; Gemini adds `audio/*` and `video/*`; a local model you describe in
-`[model_capabilities]` lists whatever it can do. When a request is built, each stored part goes
-one of three ways:
+`[model_capabilities]` lists whatever it can do. Where a provider publishes this per model,
+Leviath reads it: OpenRouter's catalogue carries each model's input and output modalities and
+Ollama's `/api/show` reports vision, and both win over the built-in tables. The vendors whose
+APIs stay quiet (Anthropic, OpenAI, Google direct) are carried in a compiled table refreshed
+from OpenRouter's catalogue by `cargo xtask modalities`, the way `cargo xtask prices` refreshes
+list prices, so `claude-3-haiku`, which takes images but not PDFs, is described precisely rather
+than by a whole-vendor guess. `lev models show` names a model's input and output types.
+When a request is built, each stored part goes one of three ways:
 
 | Delivery | When | What is sent |
 |---|---|---|

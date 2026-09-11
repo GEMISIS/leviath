@@ -1,0 +1,740 @@
+# Published input and output modalities for the providers whose APIs do not
+# report them per model. Read by `leviath_providers::mime_tables` (longest
+# matching `prefix` wins) and rewritten by `cargo xtask modalities`, which takes
+# the lists from OpenRouter's catalogue architecture block.
+#
+# `source` records where a row came from: `openrouter` for a row the refresh
+# wrote, and `manual` for a row a person wrote, which the refresh never
+# overwrites. A model no row matches falls to the name heuristic in
+# `mime_tables`, which is the floor these rows lift.
+
+read_on = "2026-09-11"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-3-haiku"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-fable-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-fable-5-1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-haiku-4-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4-1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4-6"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4-7"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-4-8"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-opus-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-sonnet-4"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-sonnet-4-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-sonnet-4-6"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-sonnet-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-flash"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-flash-image"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-flash-lite"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-pro"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-pro-preview"
+input = ["text/*", "image/*", "audio/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-2.5-pro-preview-05-06"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3-flash-preview"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3-pro-image"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3-pro-image-preview"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-flash-image"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-flash-image-preview"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-flash-lite"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-flash-lite-image"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-flash-lite-preview"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-pro-preview"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.1-pro-preview-customtools"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.5-flash"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.5-flash-lite"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.6-flash"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.7-flash"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-3.8-flash"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-2-27b-it"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-3-12b-it"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-3-27b-it"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-3-4b-it"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-4-26b-a4b-it"
+input = ["text/*", "image/*", "video/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemma-4-31b-it"
+input = ["text/*", "image/*", "video/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "lyria-3-clip-preview"
+input = ["text/*", "image/*"]
+output = ["text/*", "audio/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "lyria-3-pro-preview"
+input = ["text/*", "image/*"]
+output = ["text/*", "audio/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-3.5-turbo"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-0613"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-16k"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-instruct"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4-turbo"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4-turbo-preview"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4.1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4.1-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4.1-nano"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o-2024-05-13"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o-2024-08-06"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o-2024-11-20"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-4o-mini-2024-07-18"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5-image"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5-image-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5-nano"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.1-codex"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.1-codex-max"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.1-codex-mini"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.2"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.2-chat"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.2-codex"
+input = ["text/*", "image/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.2-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.3-codex"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.4"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.4-image-2"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*", "image/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.4-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.4-nano"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.4-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.5-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-luna"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-luna-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-sol"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-sol-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-terra"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-5.6-terra-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6-astra"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6-astra-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-audio"
+input = ["text/*", "audio/*"]
+output = ["text/*", "audio/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-audio-mini"
+input = ["text/*", "audio/*"]
+output = ["text/*", "audio/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-chat-latest"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-oss-120b"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-oss-20b"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-oss-safeguard-20b"
+input = ["text/*"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o1-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o3"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o3-mini"
+input = ["text/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o3-mini-high"
+input = ["text/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o3-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o4-mini"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "o4-mini-high"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
