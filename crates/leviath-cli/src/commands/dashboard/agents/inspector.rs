@@ -177,6 +177,14 @@ pub(in crate::commands::dashboard) enum FieldId {
     /// What one of the stage's tools may be handed (a chooser); `x` lifts
     /// the limit.
     ToolLimitRow(String),
+    /// `[stages.<name>.output_routing]`: where the model's produced parts go
+    /// by mime type, edited as `pattern = region` pairs. Enter opens the
+    /// editor; an empty box clears the map.
+    OutputRouting,
+    /// `[stages.<name>.context] reset`: the regions emptied on entry, edited
+    /// as a list of region names. Enter opens the editor; an empty box clears
+    /// the list.
+    ContextReset,
 }
 
 /// What a field holds and how it edits.
@@ -610,6 +618,14 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 FieldValue::Button,
                 "Send one tool's results to a region of their own.",
             ));
+            out.push(Field::new(
+                FieldId::ContextReset,
+                "Clear on entry",
+                FieldValue::Text(stage.context_reset.join(", ")),
+                "Regions emptied when this stage is entered, comma separated, so it starts on a \
+                 clean slate. conversation may be named here (unlike hiding). Enter edits, an \
+                 empty box clears.",
+            ));
             out
         }
         StageTab::Io => io_fields(doc, name, &stage),
@@ -702,6 +718,58 @@ fn io_fields(
         "A named file the stage must hand back (asks its name); the run checks it is there \
          and of the type.",
     ));
+    out.push(Field::new(
+        FieldId::OutputRouting,
+        "Route parts",
+        FieldValue::Text(join_routing(&stage.output_routing)),
+        "Where the parts the model produces go, by mime type: `image/* = artwork`, comma \
+         separated. Each goes to the most specific match's region; text stays in the \
+         conversation. Enter edits, an empty box clears.",
+    ));
+    out
+}
+
+/// The `output_routing` map as one editable line: `pattern = region` pairs,
+/// comma separated. Empty when there is no routing.
+fn join_routing(entries: &[(String, String)]) -> String {
+    entries
+        .iter()
+        .map(|(pattern, region)| format!("{pattern} = {region}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Parse the `output_routing` edit line back into `pattern = region` pairs.
+/// Commas or newlines separate entries; the first `=` splits each; blank
+/// entries and those with no `=` or an empty side are dropped, so a
+/// half-typed line never writes a broken row.
+pub(in crate::commands::dashboard) fn parse_routing(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in text.split([',', '\n']) {
+        let Some((pattern, region)) = entry.split_once('=') else {
+            continue;
+        };
+        let pattern = pattern.trim().to_ascii_lowercase();
+        let region = region.trim().to_string();
+        if pattern.is_empty() || region.is_empty() || out.iter().any(|(p, _)| p == &pattern) {
+            continue;
+        }
+        out.push((pattern, region));
+    }
+    out
+}
+
+/// Parse a `context.reset` edit line into region names. Commas, spaces or
+/// newlines separate them; blanks and repeats are dropped. Case is kept,
+/// since a region name is an identifier the author chose, not a mime type.
+pub(in crate::commands::dashboard) fn parse_region_list(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in text.split([',', ' ', '\t', '\n']) {
+        let name = name.trim();
+        if !name.is_empty() && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
     out
 }
 

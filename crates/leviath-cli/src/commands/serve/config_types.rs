@@ -302,6 +302,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `max_items`. A console that has this can show and edit the caps without
     // re-implementing the parser's defaults.
     "blueprints.fan_outs",
+    // `stage_routing` on the detail route: the stages that route the model's
+    // produced parts by mime type (`output_routing`) or empty a region on
+    // entry (`context.reset`), so a console shows or checks them without
+    // parsing the manifest.
+    "blueprints.stage_routing",
     "tools.list",
     // `GET /api/update`: how this copy was installed, and the command that
     // upgrades it. Announced because the fallback is guessing, and the console

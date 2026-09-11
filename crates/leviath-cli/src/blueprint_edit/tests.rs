@@ -2082,3 +2082,123 @@ fn renaming_an_agent_moves_its_directory_and_the_name_in_its_manifest() {
     assert!(moved.contains("name = \"mine\""), "{moved}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn output_routing_and_context_reset_round_trip_through_the_manifest() {
+    let toml = r#"
+[agent]
+name = "draw"
+
+[context.regions]
+artwork = { kind = "pinned" }
+conversation = { kind = "sliding_window" }
+
+[stages.draw]
+mode = "autonomous"
+
+[stages.describe]
+mode = "autonomous"
+"#;
+    let mut doc = ManifestDoc::parse(toml).unwrap();
+
+    // A ghost stage is refused for both setters.
+    assert_eq!(
+        doc.set_output_routing("ghost", &[("image/*".into(), "artwork".into())]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    assert_eq!(
+        doc.set_context_reset("ghost", &["conversation".into()]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+
+    // output_routing: written in the given order, read back, then rewritten.
+    doc.set_output_routing(
+        "draw",
+        &[
+            ("image/*".into(), "artwork".into()),
+            ("application/pdf".into(), "artwork".into()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        doc.stage("draw").unwrap().output_routing,
+        [
+            ("image/*".to_string(), "artwork".to_string()),
+            ("application/pdf".to_string(), "artwork".to_string()),
+        ]
+    );
+    assert!(
+        doc.to_toml().contains("[stages.draw.output_routing]"),
+        "{}",
+        doc.to_toml()
+    );
+    runtime_ok(&doc);
+    // Rewriting replaces the whole table.
+    doc.set_output_routing("draw", &[("image/*".into(), "artwork".into())])
+        .unwrap();
+    assert_eq!(
+        doc.stage("draw").unwrap().output_routing,
+        [("image/*".to_string(), "artwork".to_string())]
+    );
+    // Empty clears the table entirely.
+    doc.set_output_routing("draw", &[]).unwrap();
+    assert!(doc.stage("draw").unwrap().output_routing.is_empty());
+    assert!(
+        !doc.to_toml().contains("output_routing"),
+        "{}",
+        doc.to_toml()
+    );
+
+    // context.reset: set, read back, then cleared.
+    doc.set_context_reset("describe", &["conversation".into()])
+        .unwrap();
+    assert_eq!(
+        doc.stage("describe").unwrap().context_reset,
+        ["conversation"]
+    );
+    assert!(doc.to_toml().contains("reset"), "{}", doc.to_toml());
+    runtime_ok(&doc);
+    doc.set_context_reset("describe", &[]).unwrap();
+    assert!(doc.stage("describe").unwrap().context_reset.is_empty());
+    // With nothing else in the context table, clearing reset takes the table
+    // with it.
+    assert!(
+        !doc.to_toml().contains("[stages.describe.context]"),
+        "{}",
+        doc.to_toml()
+    );
+}
+
+#[test]
+fn output_routing_and_context_reset_refuse_odd_content_and_keep_a_shared_table() {
+    // A non-table `output_routing` or `context` is refused, not clobbered.
+    let mut odd = ManifestDoc::parse(
+        "[agent]\nname = \"o\"\n[stages.a]\noutput_routing = 3\ncontext = \"nope\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        odd.set_output_routing("a", &[("image/*".into(), "art".into())]),
+        Err(EditError::NotATable("output_routing".into()))
+    );
+    assert_eq!(
+        odd.set_context_reset("a", &["conversation".into()]),
+        Err(EditError::NotATable("context".into()))
+    );
+
+    // Clearing reset leaves a context table that still holds a layout: the
+    // table stays, only `reset` goes.
+    let mut doc = ManifestDoc::parse(
+        "[agent]\nname = \"k\"\n\n[stages.work]\nmode = \"autonomous\"\n\n\
+         [stages.work.context]\nreset = [\"conversation\"]\n\n\
+         [stages.work.context.regions]\nnotes = { kind = \"pinned\" }\n",
+    )
+    .unwrap();
+    assert_eq!(doc.stage("work").unwrap().context_reset, ["conversation"]);
+    doc.set_context_reset("work", &[]).unwrap();
+    assert!(doc.stage("work").unwrap().context_reset.is_empty());
+    assert!(
+        doc.to_toml().contains("[stages.work.context.regions]"),
+        "the layout keeps the context table: {}",
+        doc.to_toml()
+    );
+}

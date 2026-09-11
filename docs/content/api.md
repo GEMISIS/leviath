@@ -776,6 +776,33 @@ which are errors rather than quiet fallbacks. The workers still share the daemon
 (`[limits] max_concurrent_inferences`, 8 by default), so an unlimited fan-out queues at the model
 rather than running away.
 
+### Stage routing
+
+`GET /api/blueprints/{name}` also carries `stage_routing`: one entry per stage that routes the
+model's produced parts to a region by mime type (`output_routing`), or empties a region when it is
+entered (`context.reset`), so a console shows or checks them without parsing the manifest.
+
+```json
+{
+  "stage_routing": [
+    {
+      "stage": "draw",
+      "output_routing": [{ "pattern": "image/*", "region": "artwork" }]
+    },
+    {
+      "stage": "describe",
+      "context_reset": ["conversation"]
+    }
+  ]
+}
+```
+
+`output_routing` is ordered by pattern, and a part goes to the most specific match's region. Only
+stages that do one or the other appear; a stage that does neither is left out, and a blueprint that
+does neither has an empty list. Changing either is a manifest write through `PUT
+/api/blueprints/{name}`. `blueprints.stage_routing` in the `capabilities` list on `GET /api/config`
+says the daemon reports this.
+
 ## Yolo profiles
 
 The profiles a run can be launched under with `--yolo=<name>` live in
@@ -1495,6 +1522,7 @@ than that feature, not broken.
 | `blueprints.manifest` | The manifest itself on the blueprint detail route |
 | `blueprints.validate.name` | `POST /api/blueprints/validate` accepting an installed name, not only a body |
 | `blueprints.fan_outs` | `fan_outs` on the detail route. See [fan-out limits](#fan-out-limits) |
+| `blueprints.stage_routing` | `stage_routing` on the detail route: `output_routing` and `context.reset` per stage. See [stage routing](#stage-routing) |
 | `tools.list` | `GET /api/tools?agent=`, what an agent here can actually call |
 | `update.plan` | `GET /api/update`, how this copy was installed and the command that upgrades it. See [asking how to upgrade](#asking-how-to-upgrade) |
 | `update.apply` | `POST /api/update` and `GET /api/update/jobs/{id}`, carrying that plan out. Says this build serves them; whether *this* daemon mounts them is `--allow-admin`, which you find out by calling one. See [pressing the button](#pressing-the-button) |
