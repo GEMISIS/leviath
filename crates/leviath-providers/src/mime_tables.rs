@@ -272,10 +272,12 @@ mod tests {
         assert!(published_modality("nonprovider", "gpt-5.5").is_none());
         assert_eq!(modalities_read_on().len(), "YYYY-MM-DD".len());
 
-        // Every shipped row is well-formed: real patterns, real source words.
+        // Every shipped row is well-formed: real patterns, and a source the
+        // refresh wrote (a hand-added `manual` row would say so, but the
+        // shipped file carries none, so this pins that).
         for row in &MODALITY_TABLE.modality {
             assert!(!row.input.is_empty() && !row.output.is_empty());
-            assert!(matches!(row.source.as_str(), "openrouter" | "manual"));
+            assert_eq!(row.source, "openrouter");
             let clone = row.clone();
             assert_eq!(&clone, row);
             assert!(format!("{row:?}").contains(&row.prefix));
