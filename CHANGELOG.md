@@ -366,6 +366,18 @@ same list.
 
 ### Fixed
 
+- A run's `modified_files` missed a file a `shell` command created. Only a
+  modifying tool that names a `path` (`write_file`, `edit_file`) was recorded,
+  so an agent whose whole job was to draw a chart or build an artifact with a
+  script left "what it changed" empty or naming only the scaffolding, while
+  "browse the folder" found the file plainly. Now a batch that ran a `shell`
+  call that landed scans the working directory for files modified since the run
+  began (hidden entries skipped, bounded in breadth and depth) and folds them
+  into the list. The scan adds to the list without touching
+  `modified_file_count`, which counts modifying tool *calls* - a shell is not
+  one - so a run that only shelled still reports its outputs on
+  `GET /api/agents/{id}/files?source=modified` without double-counting a file a
+  second shell call re-touched (#816).
 - The agent editor's inspector wrapped its tab strip at its usual width,
   which cut the last tab in two and drew every row one line below where
   the mouse map had it, so a click landed on the row under the pointer.

@@ -753,6 +753,22 @@ impl RunFlags {
             self.modified_files.push(path.to_string());
         }
     }
+
+    /// Note a path that changed on disk without a modifying tool naming it -
+    /// a file a `shell` command created or rewrote, found by scanning the
+    /// working directory. It joins the list (deduped, capped) but does not
+    /// touch `modified_file_count`, which counts modifying *tool calls*: a
+    /// shell call is not one, and a scan that ran twice must not double-count
+    /// the same file. Returns whether the path was newly added.
+    pub fn note_modified_path(&mut self, path: &str) -> bool {
+        if self.modified_files.len() >= MAX_TRACKED_MODIFIED_FILES
+            || self.modified_files.iter().any(|p| p == path)
+        {
+            return false;
+        }
+        self.modified_files.push(path.to_string());
+        true
+    }
 }
 
 impl RunMeta {
@@ -1665,6 +1681,29 @@ mod tests {
         }
         assert_eq!(flags.modified_files.len(), MAX_TRACKED_MODIFIED_FILES);
         assert_eq!(flags.modified_file_count, 3 + MAX_TRACKED_MODIFIED_FILES);
+    }
+
+    #[test]
+    fn note_modified_path_joins_the_list_without_touching_the_call_count() {
+        let mut flags = RunFlags::default();
+        // A modifying tool call: counts and lists.
+        flags.record_modification("plot_chart.py");
+        // A shell creation, noted from a workdir scan: lists, but is not a
+        // modifying tool call, so the count stays 1 - and a second scan that
+        // finds it again neither re-adds nor re-counts.
+        assert!(flags.note_modified_path("chart.png"));
+        assert!(!flags.note_modified_path("chart.png"));
+        assert_eq!(flags.modified_file_count, 1);
+        assert_eq!(flags.modified_files, vec!["plot_chart.py", "chart.png"]);
+
+        // Past the cap it stops adding and says so.
+        let mut full = RunFlags::default();
+        for i in 0..MAX_TRACKED_MODIFIED_FILES {
+            assert!(full.note_modified_path(&format!("f{i}.png")));
+        }
+        assert!(!full.note_modified_path("one-too-many.png"));
+        assert_eq!(full.modified_files.len(), MAX_TRACKED_MODIFIED_FILES);
+        assert_eq!(full.modified_file_count, 0);
     }
 
     #[test]

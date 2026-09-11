@@ -596,6 +596,7 @@ pub(crate) fn record_modifications(
     modifying: &[String],
     progress: Option<bevy_ecs::prelude::Mut<'_, StageProgress>>,
     flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
+    workdir: Option<(&str, i64)>,
 ) {
     let mut progress = progress;
     let mut flags = flags;
@@ -625,6 +626,121 @@ pub(crate) fn record_modifications(
             flags.0.record_modification(path);
         }
     }
+    // A `shell` command names no path and is not a modifying tool, so the loop
+    // above never sees the files it wrote. When the batch ran one that landed,
+    // scan the working directory for files modified since the run began and
+    // fold them into the list, so "what it changed" names the chart the run was
+    // for, not only the script that drew it.
+    if let (Some(flags), Some((workdir, started_at))) = (flags.as_mut(), workdir) {
+        fold_shell_modifications(&mut flags.0, tool_calls, merged, workdir, started_at);
+    }
+}
+
+/// Fold the files a successful `shell` call left in `workdir` into `flags`, so a
+/// creation no modifying tool named is still counted as a change. A no-op when
+/// the batch ran no shell that landed. Split out from [`record_modifications`],
+/// which holds its state behind ECS `Mut` handles, so the scan is testable on a
+/// plain [`RunFlags`](leviath_core::run_meta::RunFlags) and a temp directory.
+fn fold_shell_modifications(
+    flags: &mut leviath_core::run_meta::RunFlags,
+    tool_calls: &[crate::components::ToolCall],
+    merged: &[crate::tool_bridge::ToolResult],
+    workdir: &str,
+    started_at: i64,
+) {
+    if !batch_ran_shell(tool_calls, merged) {
+        return;
+    }
+    for rel in workdir_modifications_since(
+        std::path::Path::new(workdir),
+        started_at,
+        MAX_SCANNED_MODIFICATIONS,
+        MAX_SCAN_DEPTH,
+    ) {
+        flags.note_modified_path(&rel);
+    }
+}
+
+/// The most workdir paths one scan folds into `modified_files`; the record cap,
+/// so a shell cannot push a run past what a modifying tool could.
+const MAX_SCANNED_MODIFICATIONS: usize = leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES;
+
+/// The deepest a modification scan descends. A shell's output is almost always
+/// shallow; this bounds a pathological tree.
+const MAX_SCAN_DEPTH: usize = 8;
+
+/// Whether the batch ran a `shell` call that landed (not refused, not an error).
+/// Emptiness is not "no effect" here: a silent `python plot.py` writes a file
+/// and prints nothing, so any successful shell run earns a scan.
+fn batch_ran_shell(
+    calls: &[crate::components::ToolCall],
+    merged: &[crate::tool_bridge::ToolResult],
+) -> bool {
+    calls
+        .iter()
+        .zip(merged.iter())
+        .any(|(call, (_id, result))| {
+            leviath_tools::canonical_tool_name(&call.name) == "shell"
+                && !result.starts_with("[denied]")
+                && !result.starts_with("[error]")
+        })
+}
+
+/// A file's mtime as unix seconds, or 0 when the platform will not say.
+fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Working-directory files modified at or after `since` (unix seconds), as
+/// paths relative to `workdir`, hidden entries skipped, bounded by `cap`
+/// results and `max_depth` levels of recursion. How a `shell` command's
+/// creations reach `modified_files`, which the modifying-tool path - keyed on a
+/// `path` argument no shell call carries - cannot see.
+fn workdir_modifications_since(
+    workdir: &std::path::Path,
+    since: i64,
+    cap: usize,
+    max_depth: usize,
+) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![(workdir.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if found.len() >= cap {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if found.len() >= cap {
+                break;
+            }
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue; // hidden files and dirs (.git, .cache) are noise
+            }
+            let path = entry.path();
+            // A metadata failure, a symlink, a socket: contributes nothing and
+            // no child, which is the right thing, and folds into the last arm.
+            match entry.metadata() {
+                Ok(meta) if meta.is_dir() => {
+                    if depth < max_depth {
+                        stack.push((path, depth + 1));
+                    }
+                }
+                Ok(meta) if meta.is_file() && mtime_secs(&meta) >= since => {
+                    let rel = path.strip_prefix(workdir).unwrap_or(&path);
+                    found.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+                _ => {}
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// What `collect_tools` selects.
@@ -751,6 +867,7 @@ pub(crate) fn collect_tools(
             &stage_modifying_tools(blueprint, cursor),
             progress,
             flags,
+            metadata.map(|m| (m.workdir.as_str(), m.started_at)),
         );
         // Record each call for the telemetry observer before file tracking
         // rewrites successful results; success is the `[error] ` result-text
@@ -816,5 +933,124 @@ pub(crate) fn collect_tools(
             .remove::<ContextToolResults>()
             .remove::<InFlightWork>()
             .insert(ReadyToInfer);
+    }
+}
+
+#[cfg(test)]
+mod modification_scan_tests {
+    use super::*;
+    use crate::components::ToolCall;
+    use leviath_core::region::EntryContent;
+    use leviath_core::run_meta::RunFlags;
+
+    /// A tool call with a name and no arguments.
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            tool_id: format!("id-{name}"),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            thought_signature: None,
+        }
+    }
+
+    /// A result whose text is `body`.
+    fn result(body: &str) -> crate::tool_bridge::ToolResult {
+        ("id".to_string(), EntryContent::text(body))
+    }
+
+    /// Force a file's mtime to `secs` since the epoch.
+    fn set_mtime(path: &std::path::Path, secs: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_scan_finds_new_files_skips_old_and_hidden_and_recurses() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // An old input, a new output, a hidden file, and a nested output.
+        std::fs::write(root.join("input.csv"), b"old").unwrap();
+        set_mtime(&root.join("input.csv"), 1_000);
+        std::fs::write(root.join("chart.png"), b"new").unwrap();
+        set_mtime(&root.join("chart.png"), 10_000);
+        std::fs::write(root.join(".hidden"), b"noise").unwrap();
+        set_mtime(&root.join(".hidden"), 10_000);
+        std::fs::create_dir(root.join("out")).unwrap();
+        std::fs::write(root.join("out/nested.png"), b"new").unwrap();
+        set_mtime(&root.join("out/nested.png"), 10_000);
+
+        // Recursing, everything at or after `since` that is not hidden.
+        let found = workdir_modifications_since(root, 5_000, 100, 8);
+        assert_eq!(found, vec!["chart.png", "out/nested.png"]);
+
+        // Depth 0 does not descend, so the nested output is not found.
+        let shallow = workdir_modifications_since(root, 5_000, 100, 0);
+        assert_eq!(shallow, vec!["chart.png"]);
+
+        // A missing directory scans to nothing rather than erroring.
+        let gone = workdir_modifications_since(&root.join("nope"), 0, 100, 8);
+        assert!(gone.is_empty());
+    }
+
+    #[test]
+    fn the_scan_stops_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..3 {
+            let p = root.join(format!("f{i}.png"));
+            std::fs::write(&p, b"x").unwrap();
+            set_mtime(&p, 10_000);
+        }
+        // A positive cap stops the inner loop once it is full.
+        assert_eq!(workdir_modifications_since(root, 0, 1, 8).len(), 1);
+        // A zero cap stops before reading anything.
+        assert!(workdir_modifications_since(root, 0, 0, 8).is_empty());
+    }
+
+    #[test]
+    fn a_shell_that_landed_earns_a_scan_and_nothing_else_does() {
+        assert!(batch_ran_shell(&[call("shell")], &[result("ok")]));
+        assert!(!batch_ran_shell(
+            &[call("shell")],
+            &[result("[denied] refused")]
+        ));
+        assert!(!batch_ran_shell(
+            &[call("shell")],
+            &[result("[error] boom")]
+        ));
+        assert!(!batch_ran_shell(&[call("write_file")], &[result("ok")]));
+        assert!(!batch_ran_shell(&[], &[]));
+    }
+
+    #[test]
+    fn folding_adds_shell_outputs_only_when_a_shell_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let wd = root.to_string_lossy().into_owned();
+        std::fs::write(root.join("chart.png"), b"x").unwrap();
+        set_mtime(&root.join("chart.png"), 10_000);
+
+        // No shell in the batch: the scan does not run, the list stays empty.
+        let mut flags = RunFlags::default();
+        fold_shell_modifications(
+            &mut flags,
+            &[call("write_file")],
+            &[result("ok")],
+            &wd,
+            5_000,
+        );
+        assert!(flags.modified_files.is_empty());
+
+        // A shell that landed: the created file joins the list, without bumping
+        // the modifying-tool-call count.
+        let mut flags = RunFlags::default();
+        fold_shell_modifications(&mut flags, &[call("shell")], &[result("")], &wd, 5_000);
+        assert_eq!(flags.modified_files, vec!["chart.png"]);
+        assert_eq!(flags.modified_file_count, 0);
     }
 }
