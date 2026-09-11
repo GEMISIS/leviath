@@ -157,6 +157,23 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
     .collect()
 }
 
+/// Models that ignore the system prompt, so a request built for one folds its
+/// system blocks into the user turn instead of losing them.
+///
+/// No provider reports this - OpenRouter's catalogue does not distinguish a
+/// model that reads the system prompt from one that ignores it (measured:
+/// `gemini-2.5-flash-image` and `gemini-3-pro-image` carry identical
+/// `architecture` and `supported_parameters`, yet the first ignores a system
+/// prompt outright and the second honours it). So it is a hand-maintained
+/// one-off. Matched on the id's last segment, so `gemini-2.5-flash-image`
+/// reached through any route (`openrouter/google/…`, `google/…`, the bare id)
+/// is recognised. An operator can also declare it for any model with
+/// `[model_capabilities."<id>"] supports_system_prompt = false`.
+pub fn ignores_system_prompt(model: &str) -> bool {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    name == "gemini-2.5-flash-image"
+}
+
 /// Capabilities supported by a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -281,14 +298,6 @@ impl ModelMime {
     /// Whether the model may hand back a part of `mime_type`.
     pub fn produces(&self, mime_type: &leviath_core::mime::MimeType) -> bool {
         mime_type.matches_any(&self.output)
-    }
-
-    /// Whether the model emits images, so its request is built for image
-    /// generation (the prompt in the user turn) rather than for a text reply.
-    pub fn produces_images(&self) -> bool {
-        self.output
-            .iter()
-            .any(|p| p == "image/*" || p.starts_with("image/"))
     }
 
     /// Whether every pattern in `wanted` is covered by an input pattern.
@@ -455,11 +464,19 @@ mod mime_tests {
         assert!(!m.produces(&mt("image/png")));
         assert!(!m.takes_mime());
         assert!(ModelMime::new(&["text/*", "image/*"], &["text/*"]).takes_mime());
-        // An image generator is known by its output, so its request is built
-        // for drawing (prompt in the user turn) rather than for a text reply.
-        assert!(!m.produces_images());
-        assert!(ModelMime::new(&["text/*"], &["text/*", "image/*"]).produces_images());
-        assert!(ModelMime::new(&["text/*", "image/*"], &["image/png"]).produces_images());
+    }
+
+    #[test]
+    fn the_system_prompt_one_off_is_matched_by_the_id_last_segment() {
+        // Reached through any route, and the bare id.
+        assert!(ignores_system_prompt("gemini-2.5-flash-image"));
+        assert!(ignores_system_prompt("google/gemini-2.5-flash-image"));
+        assert!(ignores_system_prompt(
+            "openrouter/google/gemini-2.5-flash-image"
+        ));
+        // A model not on the list, and a near miss, are not folded.
+        assert!(!ignores_system_prompt("google/gemini-3-pro-image"));
+        assert!(!ignores_system_prompt("claude-sonnet-5"));
     }
 
     #[test]
