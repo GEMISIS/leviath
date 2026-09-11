@@ -540,14 +540,14 @@ pub(crate) fn dispatch_inference(
                 // by this run's registry. Every `PipelineWorld` installs the
                 // store; a world assembled by hand in a test may not, and
                 // then stored parts go out as their stand-ins.
-                let (mime_resources, max_stored) = mime.hydration_inputs(entity);
+                let (mime_resources, max_media_bytes) = mime.hydration_inputs(entity);
                 let hydration =
                     mime_resources.map(|(store, registry)| crate::inference_bridge::JobHydration {
                         store,
                         run_id: state.agent_id.clone(),
                         registry,
                         mime: provider.mime(&si.model),
-                        max_stored,
+                        max_media_bytes,
                         as_text: config.map(|c| c.as_text.clone()).unwrap_or_default(),
                     });
                 let job = InferenceJob {

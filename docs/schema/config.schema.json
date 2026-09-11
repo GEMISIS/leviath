@@ -846,10 +846,10 @@
           "minimum": 0,
           "description": "Bytes of text kept inline in an entry before the part is stored by hash. Default 1048576."
         },
-        "max_stored_per_request": {
+        "max_media_bytes_per_request": {
           "type": "integer",
           "minimum": 1,
-          "description": "Stored parts one model request carries; the oldest beyond it are dropped. Default 100."
+          "description": "Bytes of stored media one model request carries before the oldest parts are sent as stand-ins; a backstop for vendor request-size limits a token budget cannot see. Default 67108864 (64 MiB)."
         }
       }
     },

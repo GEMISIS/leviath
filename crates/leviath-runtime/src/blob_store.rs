@@ -154,20 +154,20 @@ impl MimeParams<'_, '_> {
     }
 
     /// The store and the registry `entity`'s run reads, together when both
-    /// are there, and the per-request cap either way.
-    pub fn hydration_inputs(&self, entity: Entity) -> (HydrationSources, usize) {
+    /// are there, and the per-request media-byte cap either way.
+    pub fn hydration_inputs(&self, entity: Entity) -> (HydrationSources, u64) {
         let both = self
             .store
             .as_deref()
             .map(|s| s.0.clone())
             .zip(self.registry_for(entity));
-        let max_stored = self
+        let max_media_bytes = self
             .limits
             .as_deref()
-            .map_or(MimeLimits::default().max_stored_per_request, |l| {
-                l.max_stored_per_request
+            .map_or(MimeLimits::default().max_media_bytes_per_request, |l| {
+                l.max_media_bytes_per_request
             });
-        (both, max_stored)
+        (both, max_media_bytes)
     }
 
     /// The largest part any ingress accepts.
@@ -185,8 +185,9 @@ pub struct MimeLimits {
     pub max_part_bytes: u64,
     /// Bytes of text kept inline in an entry before the part is stored.
     pub inline_text_bytes: u64,
-    /// Stored parts one model request carries before the oldest are dropped.
-    pub max_stored_per_request: usize,
+    /// Bytes of stored media one request carries before the oldest are sent as
+    /// stand-ins.
+    pub max_media_bytes_per_request: u64,
 }
 
 impl Default for MimeLimits {
@@ -194,7 +195,7 @@ impl Default for MimeLimits {
         Self {
             max_part_bytes: 32 * 1024 * 1024,
             inline_text_bytes: 1024 * 1024,
-            max_stored_per_request: 100,
+            max_media_bytes_per_request: 64 * 1024 * 1024,
         }
     }
 }
@@ -478,7 +479,7 @@ mod tests {
         assert_eq!(mime.registry_for(bare).unwrap().info(&obj).family, "model");
         let (sources, max) = mime.hydration_inputs(own);
         assert_eq!(sources.unwrap().1.info(&obj).family, "scene");
-        assert_eq!(max, MimeLimits::default().max_stored_per_request);
+        assert_eq!(max, MimeLimits::default().max_media_bytes_per_request);
     }
 
     #[test]
@@ -586,11 +587,11 @@ mod tests {
             .expect("the parameter validates")
             .hydration_inputs(entity);
         assert!(none.is_none());
-        assert_eq!(cap, 100);
+        assert_eq!(cap, 64 * 1024 * 1024);
         world.insert_resource(BlobStoreHandle(mem.clone()));
         world.insert_resource(MimeRegistryHandle::default());
         world.insert_resource(MimeLimits {
-            max_stored_per_request: 3,
+            max_media_bytes_per_request: 3,
             ..MimeLimits::default()
         });
         let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
@@ -602,7 +603,7 @@ mod tests {
         assert_eq!(cap, 3);
         assert_eq!(limits.max_part_bytes, 32 * 1024 * 1024);
         assert_eq!(limits.inline_text_bytes, 1024 * 1024);
-        assert_eq!(limits.max_stored_per_request, 100);
+        assert_eq!(limits.max_media_bytes_per_request, 64 * 1024 * 1024);
         assert_eq!(limits, limits);
         assert!(format!("{limits:?}").contains("MimeLimits"));
     }
