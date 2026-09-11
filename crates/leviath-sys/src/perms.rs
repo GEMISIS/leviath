@@ -64,6 +64,42 @@ fn persist(staged: tempfile::TempPath, target: &Path) -> io::Result<()> {
     staged.persist(target).map_err(|e| e.error)
 }
 
+/// How many times [`write_atomic_with`] re-stages and retries after a
+/// transient failure before giving up. Five short attempts outlast a scanner
+/// that grabbed the file for a few milliseconds without stalling a genuine
+/// refusal for long.
+const WRITE_ATTEMPTS: u32 = 5;
+
+/// Whether an atomic write's failure is the kind that clears on its own, so
+/// retrying is worth it.
+///
+/// On Windows a virus scanner or the search indexer opens a file the instant
+/// it appears and holds it for a few milliseconds, and the rename that
+/// replaces the target then returns `ERROR_ACCESS_DENIED` (5) or
+/// `ERROR_SHARING_VIOLATION` (32) until it lets go. Nothing on the other
+/// platforms is transient this way, so the write runs exactly once there. A
+/// constructed error (the read-only refusal, a missing parent) carries no OS
+/// code and is never treated as transient.
+fn is_transient_write_error(err: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(err.raw_os_error(), Some(5) | Some(32))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+/// The pause before the `attempt`-th retry: short and doubling, so the first
+/// retry is quick and a stubborn scanner still gets progressively longer to
+/// let go. The shift is capped so the exponent cannot run away.
+fn write_backoff(attempt: u32) {
+    let ms = 10u64 << attempt.min(6);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
 /// [`write_atomic`] with the rename injected, so the arm where the old file
 /// has to survive a failed replacement is provable without a filesystem
 /// that refuses renames.
@@ -73,10 +109,34 @@ pub fn write_atomic_with(
     mode: Option<u32>,
     persist: fn(tempfile::TempPath, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    write_atomic_retrying(
+        path,
+        contents,
+        mode,
+        persist,
+        is_transient_write_error,
+        write_backoff,
+        WRITE_ATTEMPTS,
+    )
+}
+
+/// [`write_atomic_with`] with the transient-error test, the backoff and the
+/// attempt count injected, so the retry is provable without a filesystem that
+/// fails a rename on cue.
+fn write_atomic_retrying(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+    persist: fn(tempfile::TempPath, &Path) -> io::Result<()>,
+    transient: fn(&io::Error) -> bool,
+    backoff: fn(u32),
+    attempts: u32,
+) -> io::Result<()> {
     let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     // A file the owner marked read-only stays that way. Replacing it by
     // rename would succeed where a write into it fails, and "cannot be
-    // written" is the answer a read-only secrets file is there to give.
+    // written" is the answer a read-only secrets file is there to give. A
+    // precondition, checked once and never retried.
     if let Ok(existing) = std::fs::metadata(&target)
         && existing.permissions().readonly()
     {
@@ -89,6 +149,32 @@ pub fn write_atomic_with(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| io::Error::other(format!("'{}' has no parent directory", path.display())))?;
+    let mut attempt = 0;
+    loop {
+        match stage_and_persist(&target, dir, contents, mode, persist) {
+            Ok(()) => return Ok(()),
+            // A transient failure - a scanner holding the file mid-replace on
+            // Windows - clears on its own: pause, then re-stage and try again.
+            // The staging file from the failed try is already gone, so each
+            // attempt writes a fresh one.
+            Err(e) if attempt + 1 < attempts && transient(&e) => {
+                backoff(attempt);
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Stage `contents` into a fresh temp beside `target` and rename it over the
+/// top: one attempt of [`write_atomic_retrying`].
+fn stage_and_persist(
+    target: &Path,
+    dir: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+    persist: fn(tempfile::TempPath, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let staged = tempfile::Builder::new()
         .prefix(".lev-write-")
         .tempfile_in(dir)?
@@ -98,7 +184,7 @@ pub fn write_atomic_with(
     // the existing file's permissions are carried over when it has any.
     let written = match mode {
         Some(mode) => crate::platform::write_with_mode(&staged, contents, mode),
-        None => std::fs::write(&staged, contents).and_then(|()| match std::fs::metadata(&target) {
+        None => std::fs::write(&staged, contents).and_then(|()| match std::fs::metadata(target) {
             Ok(existing) => std::fs::set_permissions(&staged, existing.permissions()),
             Err(_) => Ok(()),
         }),
@@ -106,7 +192,7 @@ pub fn write_atomic_with(
     // Chained rather than `?`: a write into a file just created for writing
     // has no reachable failure, and the chain keeps the short-circuit
     // without a branch nothing can exercise.
-    written.and_then(|()| persist(staged, &target))
+    written.and_then(|()| persist(staged, target))
 }
 
 /// Open `path` for appending, owner-only (`0o600` on Unix, an owner-only ACL on
@@ -369,6 +455,115 @@ mod tests {
         assert!(err.to_string().contains("rename refused"));
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(alone.path()).unwrap().count(), 1);
+    }
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A backoff that does not pause, for the retry tests. Named (not a closure
+    /// per call) so its body is covered by the tests that do retry.
+    fn noop_backoff(_attempt: u32) {}
+
+    /// A transient rename failure (the Windows scanner race) is retried: the
+    /// first persist fails, the second re-staged one lands the file.
+    #[test]
+    fn a_transient_rename_failure_is_retried_and_then_succeeds() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        fn fail_first_then_persist(staged: tempfile::TempPath, target: &Path) -> io::Result<()> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(io::Error::from_raw_os_error(5))
+            } else {
+                staged.persist(target).map_err(|e| e.error)
+            }
+        }
+        CALLS.store(0, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        write_atomic_retrying(
+            &path,
+            b"new",
+            None,
+            fail_first_then_persist,
+            |_| true,
+            noop_backoff,
+            5,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "one failure, then a success"
+        );
+        // No staging file left behind by the failed try.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A transient failure that never clears gives up after the last attempt
+    /// and returns the underlying error rather than looping forever.
+    #[test]
+    fn a_transient_failure_that_never_clears_gives_up() {
+        fn always_fail(_staged: tempfile::TempPath, _target: &Path) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(5))
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        let err = write_atomic_retrying(&path, b"x", None, always_fail, |_| true, noop_backoff, 3)
+            .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(5));
+    }
+
+    /// A failure that is not transient is returned at once, with no retry.
+    #[test]
+    fn a_permanent_failure_is_not_retried() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        fn count_and_fail(_staged: tempfile::TempPath, _target: &Path) -> io::Result<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("nope"))
+        }
+        CALLS.store(0, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        let err = write_atomic_retrying(
+            &path,
+            b"x",
+            None,
+            count_and_fail,
+            |_| false,
+            noop_backoff,
+            5,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nope"));
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "no retry for a permanent error"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn no_write_error_is_transient_off_windows() {
+        assert!(!is_transient_write_error(&io::Error::from_raw_os_error(5)));
+        assert!(!is_transient_write_error(&io::Error::other("x")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_scanner_codes_are_transient_on_windows() {
+        assert!(is_transient_write_error(&io::Error::from_raw_os_error(5)));
+        assert!(is_transient_write_error(&io::Error::from_raw_os_error(32)));
+        assert!(!is_transient_write_error(&io::Error::from_raw_os_error(2)));
+        assert!(!is_transient_write_error(&io::Error::other("x")));
+    }
+
+    /// The backoff sleeps a little; called directly because a real retry only
+    /// happens on a transient failure, which no test filesystem produces.
+    #[test]
+    fn the_backoff_pauses() {
+        let start = std::time::Instant::now();
+        write_backoff(0);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(5));
     }
 
     #[test]
