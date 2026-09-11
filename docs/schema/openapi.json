@@ -1972,6 +1972,153 @@
             "$ref": "#/components/responses/Overloaded"
           }
         }
+      },
+      "put": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Add or update a mime row",
+        "description": "Write a row into `mime_types.toml` beside the config, or set the given fields on the row already there. Admin-only (needs `--allow-admin`; otherwise 405). Every field but `mime_type` is optional, and only the fields sent are changed. Validated the way `lev mime add` is: a type that is not `type/subtype`, a token rule that names none or more than one of `per_byte`/`per_pixel`/`per_second`/`fixed`, a `magic` that is not hex, or a `check` script that will not compile is a 400 and nothing is written. Announced as `mime.write`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mime_type"
+                ],
+                "properties": {
+                  "mime_type": {
+                    "type": "string",
+                    "description": "`type/subtype`, or `type/*` for a whole family."
+                  },
+                  "family": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "boolean"
+                  },
+                  "tokens": {
+                    "type": "object",
+                    "description": "One of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }` or `{ fixed }`.",
+                    "properties": {
+                      "per_byte": {
+                        "type": "number"
+                      },
+                      "per_pixel": {
+                        "type": "integer"
+                      },
+                      "per_second": {
+                        "type": "integer"
+                      },
+                      "fixed": {
+                        "type": "integer"
+                      },
+                      "max": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "extensions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "magic": {
+                    "type": "string",
+                    "description": "A hex prefix that identifies the bytes."
+                  },
+                  "stand_in": {
+                    "type": "string"
+                  },
+                  "check": {
+                    "type": "string",
+                    "description": "A Rhai check script path; an empty string lifts a broader row's check."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The row was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "boolean",
+                      "description": "True when the row was new, false when it updated one already there."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Remove a mime row",
+        "description": "Take a row out of `mime_types.toml` beside the config. Admin-only (needs `--allow-admin`; otherwise 405). A type with no row there is a 404. Announced as `mime.write`.",
+        "parameters": [
+          {
+            "name": "mime_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`type/subtype` or `type/*`."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed. No body."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
       }
     },
     "/api/doctor/live": {

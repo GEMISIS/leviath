@@ -17,6 +17,7 @@ mod events;
 mod fs;
 mod interactions;
 mod mcp;
+mod mime;
 mod polling;
 mod providers;
 mod request_limits;
@@ -505,6 +506,14 @@ async fn execute_with_shutdown(
             // A yolo profile is a grant of permissions, so writing the file is
             // the same category of act as writing the config.
             .route("/api/yolo", put(yolo::put_profiles))
+            // Writing a mime row rewrites `mime_types.toml` beside the config,
+            // the same category of act, and gated the same way: the read half
+            // (`GET /api/mime`) is always mounted, these writes need
+            // `--allow-admin`, and a client learns that from the capability.
+            .route(
+                "/api/mime",
+                put(mime::put_mime_row).delete(mime::delete_mime_row),
+            )
             // The probe makes this host open a connection to any address the
             // caller names, the same act as testing an MCP server, and it
             // exists to precede the write above. Gated with it; there is no
@@ -852,6 +861,7 @@ mod tests {
         ("fs", include_str!("fs.rs")),
         ("interactions", include_str!("interactions.rs")),
         ("mcp", include_str!("mcp.rs")),
+        ("mime", include_str!("mime.rs")),
         ("providers", include_str!("providers.rs")),
         ("runs", include_str!("runs.rs")),
         ("scripts", include_str!("scripts.rs")),

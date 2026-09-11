@@ -212,6 +212,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `GET /api/mime`: the effective mime registry and where each row
     // came from.
     "mime.registry",
+    // `PUT /api/mime` and `DELETE /api/mime`: write a row into
+    // `mime_types.toml` or take one out. Admin-gated, so announced whether or
+    // not `--allow-admin` was passed - the same narrower promise as the other
+    // admin routes, that this build has them, not that this daemon mounts
+    // them. A console offers "New type..." where it will land, and knows
+    // to fall back to handing over the TOML where it will not.
+    "mime.write",
     "runs.stages",
     // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
     // the `visits` split beneath them. Without the price a console drawing a

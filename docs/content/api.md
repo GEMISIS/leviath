@@ -47,6 +47,7 @@ a test, so a client generator or an agent can consume the contract directly.
   | Without `--allow-admin` | Response |
   |---|---|
   | `PUT /api/config` | 405, because `GET /api/config` is mounted |
+  | `PUT /api/mime` · `DELETE /api/mime` | 405, because `GET /api/mime` is mounted |
   | `POST /api/mcp/servers` | 405, because `GET /api/mcp/servers` is mounted |
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
   | `POST /api/update` | 405, because `GET /api/update` is mounted |
@@ -225,7 +226,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
-| `GET /api/mime` | The effective [mime registry](/docs/mime#the-registry): every type row and where it came from |
+| `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it: `PUT` adds or updates a row in `mime_types.toml` (`{"mime_type", "family"?, "text"?, "tokens"?, "extensions"?, "magic"?, "stand_in"?, "check"?}`, only the fields sent are changed, a bad type or rule is a 400), `DELETE ?mime_type=` takes one out (404 if there is no such row). The writes need admin. See [below](#writing-a-mime-row) |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks, validators and mime checks, and the global model providers and mime checks. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
 | `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
@@ -1472,6 +1473,7 @@ than that feature, not broken.
 | `runs.files.raw` | `GET /api/agents/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
 | `runs.result.artifacts` | `artifacts` on a run's answer as `{ name, path, mime_type, size, sha256 }` objects rather than paths |
 | `mime.registry` | `GET /api/mime`, the effective mime registry with each row's source |
+| `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
 | `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them. Without it a stage record carries tokens and no price, and the missing field is not a zero |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
@@ -1508,6 +1510,43 @@ than that feature, not broken.
 | `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
 | `providers.signin` | `GET /api/providers` and the three admin routes under it: the browser sign-in for a provider that has no API key. Without it a console can write `codex_enabled` and has no way to complete the sign-in, which leaves the user enabled and unable to run anything. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. Without it a missing `config_error` means nothing, so a console cannot tell a file that loads from a daemon that would not say. See [when the config file will not load](#when-the-config-file-will-not-load) |
+
+## Writing a mime row
+
+A [custom mime type](/docs/mime#the-registry) is where the registry earns its keep: a family, a
+token rule, extensions, a magic prefix and a byte check turn a format Leviath has never heard of
+into one it types, sizes and validates rather than one that behaves like
+`application/octet-stream`. `GET /api/mime` shows what is there; these two writes change it,
+without leaving the browser for the config file.
+
+`PUT /api/mime` adds a row or updates the one already there, writing `mime_types.toml` beside the
+config, the same file `lev mime add` writes and the operator's own rows live in:
+
+```jsonc
+PUT /api/mime
+{
+  "mime_type": "application/x-acme-scene",
+  "family": "model",
+  "text": false,
+  "tokens": { "per_pixel": 750, "max": 1600 },
+  "extensions": ["scene"],
+  "magic": "41434D45",
+  "stand_in": "[{type} {size}] {name}",
+  "check": "checks/scene.rhai"
+}
+```
+
+Every field but `mime_type` is optional, and only the fields sent are changed, so a later `PUT`
+that carries just `{"mime_type": "...", "extensions": [...]}` adds an extension and leaves the
+rest. `tokens` is one of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }` or `{ fixed }`.
+The answer is `{"mime_type", "created"}`, where `created` is false when the row was already there.
+The row is validated the way `lev mime add` validates it before anything is written: a type that
+is not `type/subtype`, a token rule that names none or more than one rate, a `magic` that is not
+hex, or a `check` script that will not compile is a 400, and the file is untouched.
+
+`DELETE /api/mime?mime_type=<type>` takes a row out; a type with no row of its own there is a 404.
+Both need `--allow-admin`, and both are announced as `mime.write`, so a console offers "New
+type…" where it will land and hands over the TOML to paste where it will not.
 
 ## Live updates over WebSocket
 
