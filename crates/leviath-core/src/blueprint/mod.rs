@@ -445,6 +445,19 @@ impl Blueprint {
                 }
             }
 
+            // `reset` empties a region on entry. `conversation` and the other
+            // always-visible regions can be reset (that is the point - a stage
+            // starting on a clean conversation), but a name no layout declares
+            // is the same silent typo `hide` guards against.
+            for name in &stage.context_reset {
+                if !known.contains(name.as_str()) {
+                    return Err(bad(format!(
+                        "context.reset names region '{name}', which no layout in this \
+                         blueprint declares"
+                    )));
+                }
+            }
+
             if let Some(routing) = &stage.tool_result_routing {
                 // Routing is checked against what *this* stage can see, not
                 // against every name in the blueprint. A stage that omits a
@@ -472,6 +485,24 @@ impl Blueprint {
                     if !visible.contains(region.as_str()) {
                         return Err(dead_drop(&format!("overrides.{tool}"), region));
                     }
+                }
+            }
+
+            // `output_routing` sends the model's produced parts to a region a
+            // *later* stage usually reads, so unlike `tool_routing` above it is
+            // checked against every region the blueprint declares, not only the
+            // ones this stage can see. A target no layout declares is still a
+            // dead drop - the part would land nowhere - so it is refused.
+            for (pattern, region) in &stage.output_routing {
+                if !known.contains(region.as_str()) {
+                    return Err(ValidationError::Stage {
+                        stage: stage.name.clone(),
+                        message: format!(
+                            "output_routing.\"{pattern}\" sends produced parts to region \
+                             '{region}', which no layout in this blueprint declares. Add it to a \
+                             [context.regions] table, or route to a region that exists."
+                        ),
+                    });
                 }
             }
 

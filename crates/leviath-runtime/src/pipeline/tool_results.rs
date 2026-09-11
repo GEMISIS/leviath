@@ -138,6 +138,8 @@ pub(crate) fn apply_tool_results(
         Reply {
             text: response_content,
             parts: &[],
+            // No produced parts here, so there is nothing to route.
+            stage: None,
         },
         tool_calls,
         tool_results,
@@ -154,6 +156,10 @@ pub(crate) struct Reply<'a> {
     pub(crate) text: &'a str,
     /// The mime it produced, already stored.
     pub(crate) parts: &'a [leviath_core::mime::Part],
+    /// The stage this reply came from, when its `output_routing` should send
+    /// some produced parts to regions of their own. `None` keeps every part
+    /// in the conversation.
+    pub(crate) stage: Option<&'a leviath_core::blueprint::Stage>,
 }
 
 /// [`apply_tool_results`] for a reply that produced mime beside its tool
@@ -167,7 +173,13 @@ pub(crate) fn apply_tool_results_with_parts(
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
-    let content = super::response::reply_content(reply.text, reply.parts)
+    // The stage may route some produced parts to regions of their own
+    // (`output_routing`). The assistant turn keeps the reply's text, its
+    // unrouted parts and its tool calls; the routed parts land in their
+    // regions as separate entries (written after the turn, since they go
+    // elsewhere than the conversation).
+    let routed = super::part_routing::split(reply.stage, reply.parts);
+    let content = super::response::reply_content(reply.text, &routed.kept)
         .unwrap_or_else(|| leviath_core::region::EntryContent::text(reply.text));
     let response_tokens = content.tokens_hint();
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
@@ -188,6 +200,7 @@ pub(crate) fn apply_tool_results_with_parts(
         response_tokens,
         reasoning,
     );
+    super::part_routing::store_routed(window, &routed);
 
     for (tool_call_id, result) in tool_results {
         let tool_name = tool_calls

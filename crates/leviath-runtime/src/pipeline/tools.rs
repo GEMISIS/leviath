@@ -418,6 +418,13 @@ pub(crate) fn dispatch_tools(
             continue; // paused / waiting / cancelled - don't start new work
         }
 
+        // This stage, for routing the parts a reply produces to regions of
+        // their own (`output_routing`). Computed once so both apply paths below
+        // share it.
+        let routing_stage = blueprint
+            .zip(cursor)
+            .and_then(|(bp, cur)| bp.0.stages.get(cur.index));
+
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
         // over-cleared data (and isn't allowlisted) is blocked - either returned
@@ -758,6 +765,7 @@ pub(crate) fn dispatch_tools(
                 super::tool_results::Reply {
                     text: &result.response,
                     parts: &result.parts,
+                    stage: routing_stage,
                 },
                 &result.tool_calls,
                 &merged,
@@ -798,6 +806,7 @@ pub(crate) fn dispatch_tools(
                 super::tool_results::Reply {
                     text: &result.response,
                     parts: &result.parts,
+                    stage: routing_stage,
                 },
                 &result.tool_calls,
                 &merged,

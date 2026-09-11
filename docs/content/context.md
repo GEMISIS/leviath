@@ -670,6 +670,56 @@ result when it applies. Without one, a large file went into its region whole and
 truncated or dropped as `[result omitted]` depending on how full the region already was. That is a
 cliff rather than a limit.
 
+## Routing produced parts
+
+`tool_routing` moves *tool results*. A model can also **produce parts of its own** - a picture from
+an image model, audio from a speech model, a document a generator returns - and those default to the
+conversation, riding the assistant turn like its text. `output_routing` sends them somewhere else,
+**by mime type**, so a produced file lands in a region a later stage reads instead of in the running
+transcript:
+
+```toml
+[context.regions]
+artwork      = { kind = "pinned", accepts = ["image/*"], max_stored = 4 }
+conversation = { kind = "sliding_window", budget = "50%" }
+
+[stages.draw.output_routing]
+"image/*"         = "artwork"
+"application/pdf" = "handouts"
+```
+
+Each key is a mime pattern (`image/png`, `image/*`, `*/*`) and each value a region. A reply that
+mixes text and other parts is split part by part: every part goes to the region of the **most
+specific** matching pattern (`image/png` beats `image/*` beats `*/*`), and the reply's text, plus
+any part no rule matched, stays in `conversation` as before. Nothing here names a family in code -
+it is mime types all the way down, so the same table routes audio, video, 3D models or any type you
+register the same way it routes images.
+
+Unlike `tool_routing`, the target need not be a region *this* stage reads back - the whole point is
+usually to hand a produced file forward - so it is checked against every region the blueprint
+declares, not just the ones the producing stage can see. A target no layout declares is refused by
+`lev validate`.
+
+A pinned target lifts its stored parts into the leading user turn, and a sliding window renders them
+as a user message, so the next stage's model sees the bytes either way (subject to that model taking
+the type; otherwise it sees the stand-in, as anywhere else).
+
+### A clean slate for the next stage
+
+Routing the produced part out of the conversation is half of handing it on; the other half is the
+receiving stage not inheriting the producing stage's transcript. `conversation` cannot be hidden -
+the model's own turns live there - but a stage can **empty** a region as it is entered:
+
+```toml
+[stages.describe.context]
+reset = ["conversation"]
+```
+
+`reset` clears the named regions on entry (the content is gone, not merely hidden from this stage),
+so the stage starts on a clean conversation with only what its visible regions hold - the routed
+image in `artwork`, say. A re-entered stage clears them again each visit. Unlike `hide`, `reset` may
+name `conversation`; like `hide`, a name no layout declares is refused.
+
 ## Requests are measured before they are sent
 
 The window sizes what it holds with a byte estimate, corrected by what earlier calls in the run

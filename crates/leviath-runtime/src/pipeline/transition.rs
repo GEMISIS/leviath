@@ -44,6 +44,8 @@ pub(crate) struct StageSetup {
     pub context_layout: Option<leviath_core::ContextLayout>,
     /// Regions this stage leaves out of its prompt (`[stages.<name>.context] hide`).
     pub context_hide: Vec<String>,
+    /// Regions this stage empties on entry (`[stages.<name>.context] reset`).
+    pub context_reset: Vec<String>,
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
 }
@@ -780,6 +782,15 @@ pub(crate) fn apply_stage_context(
     for name in &setup.context_hide {
         if !leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
             window.hidden.insert(name.clone());
+        }
+    }
+    // `reset` empties a region as the stage is entered, so it starts on a clean
+    // slate - a describe stage reading its image from a region of its own with
+    // none of the drawing stage's conversation carried in. Emptied, not
+    // hidden: a later stage sees the fresh region, not the old turns.
+    for name in &setup.context_reset {
+        if let Some(region) = window.regions.iter_mut().find(|r| &r.name == name) {
+            region.clear();
         }
     }
 

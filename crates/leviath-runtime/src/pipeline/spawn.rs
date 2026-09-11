@@ -160,6 +160,7 @@ pub(crate) fn stage_setup_from(
         accepts_messages: stage.accepts_messages,
         context_layout: stage.context_layout.clone(),
         context_hide: stage.context_hide.clone(),
+        context_reset: stage.context_reset.clone(),
         system_prompt,
     }
 }
@@ -565,6 +566,7 @@ mod stage_instructions_fit_tests {
             accepts_messages: true,
             context_layout: None,
             context_hide: Vec::new(),
+            context_reset: Vec::new(),
             system_prompt: Some(prompt),
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
@@ -634,6 +636,7 @@ mod stage_instructions_fit_tests {
             accepts_messages: true,
             context_layout: None,
             context_hide: Vec::new(),
+            context_reset: Vec::new(),
             system_prompt: Some(prompt),
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
@@ -721,6 +724,7 @@ mod stage_instructions_fit_tests {
             accepts_messages: true,
             context_layout: None,
             context_hide: Vec::new(),
+            context_reset: Vec::new(),
             system_prompt: Some(prompt),
         };
         let err = crate::pipeline::transition::apply_stage_context(&setup, &mut window)
@@ -801,6 +805,7 @@ mod stage_instructions_fit_tests {
             accepts_messages: true,
             context_layout: Some(scoped),
             context_hide: Vec::new(),
+            context_reset: Vec::new(),
             system_prompt: Some(prompt),
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
