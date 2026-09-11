@@ -128,9 +128,9 @@ pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> Hyd
             MessageContent::Blocks(blocks) => blocks.iter().collect::<Vec<_>>(),
             MessageContent::Text(_) => Vec::new(),
         })
-        .filter_map(|b| match b {
-            ContentBlock::Mime { part, .. } if matches!(fate(b, h), Fate::Bytes) => Some(part.size),
-            _ => None,
+        .map(|b| match (fate(b, h), b) {
+            (Fate::Bytes, ContentBlock::Mime { part, .. }) => part.size,
+            _ => 0,
         })
         .sum();
     let mut to_shed = total_bytes.saturating_sub(h.max_media_bytes);
