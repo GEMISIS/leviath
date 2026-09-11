@@ -267,41 +267,19 @@ pub(crate) fn build_request(
     let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
     system.extend(assembled.system_blocks);
 
-    // An image-output model draws whatever is in its user turn. A stage's
-    // prompt lands in the system blocks with a bare "Begin." user nudge (the
-    // convention that makes a text model act), and an image model draws the
-    // nudge - "Begin." becomes generic "start of a journey" scenery, never the
-    // subject. Move the prompt into the user turn so the model draws it. The
-    // system blocks stay: the model may ignore them, and a text-capable image
-    // model still reads them.
+    // A model that does not read a system prompt has the stage's instruction
+    // folded into the user turn instead, or it is lost. It lands in the system
+    // blocks with a bare "Begin." user nudge (the convention that makes a text
+    // model act); a model that ignores the system prompt generates from the
+    // nudge - an image model's "Begin." becomes generic "start of a journey"
+    // scenery, never the asked subject. The capability says whether the model
+    // reads the system prompt; `ignores_system_prompt` is the one-off for a
+    // model no catalogue distinguishes (`gemini-2.5-flash-image`).
     let mut messages = messages;
-    if provider.mime(&stage.model).produces_images() {
-        let prompt: String = system
-            .iter()
-            .map(|block| block.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !prompt.is_empty() {
-            let nudge = messages.iter().position(|m| {
-                m.role == "user"
-                    && matches!(&m.content, leviath_providers::MessageContent::Text(text) if text.trim() == "Begin.")
-            });
-            match nudge {
-                // The bare "Begin." nudge becomes the prompt.
-                Some(index) => {
-                    messages[index].content = leviath_providers::MessageContent::Text(prompt);
-                }
-                // No nudge to replace (an image-edit stage carries an input
-                // image in the conversation): the prompt follows as its own
-                // user turn, which an image model reads as its instruction.
-                None => messages.push(leviath_providers::Message {
-                    role: "user".to_string(),
-                    content: leviath_providers::MessageContent::Text(prompt),
-                    cache_breakpoint: false,
-                    reasoning: None,
-                }),
-            }
-        }
+    let reads_system = caps.supports_system_prompt
+        && !leviath_providers::capabilities::ignores_system_prompt(&stage.model);
+    if !reads_system {
+        fold_system_into_user(&mut system, &mut messages);
     }
 
     let request = InferenceRequest {
@@ -315,6 +293,46 @@ pub(crate) fn build_request(
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     };
     (request, system_hash, block_hashes)
+}
+
+/// Fold the system blocks into the first user turn and clear them, for a model
+/// that does not read a system prompt. Done into the *first* user message, once,
+/// so a multi-turn conversation keeps its shape: the bare "Begin." nudge is
+/// replaced outright, a real text turn is prefixed, and a turn that carries
+/// blocks (an input image) gains the text ahead of them. With no user turn at
+/// all the folded system becomes one.
+pub(crate) fn fold_system_into_user(
+    system: &mut Vec<leviath_providers::SystemBlock>,
+    messages: &mut Vec<leviath_providers::Message>,
+) {
+    let text = system
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        return;
+    }
+    system.clear();
+    match messages.iter_mut().find(|m| m.role == "user") {
+        Some(first) => match &mut first.content {
+            leviath_providers::MessageContent::Text(existing) => {
+                *existing = match existing.trim() == "Begin." {
+                    true => text,
+                    false => format!("{text}\n\n{existing}"),
+                };
+            }
+            leviath_providers::MessageContent::Blocks(blocks) => {
+                blocks.insert(0, leviath_providers::ContentBlock::Text { text });
+            }
+        },
+        None => messages.push(leviath_providers::Message {
+            role: "user".to_string(),
+            content: leviath_providers::MessageContent::Text(text),
+            cache_breakpoint: false,
+            reasoning: None,
+        }),
+    }
 }
 
 /// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry

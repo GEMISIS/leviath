@@ -370,12 +370,16 @@ same list.
   the subject it was asked for. Two faults in how typed media crossed a stage
   boundary made an image agent draw the wrong picture and then describe a
   different one:
-  - An image-output model (`google/gemini-2.5-flash-image` and the like) draws
-    whatever is in its user turn, but a stage's prompt lands in the system
-    blocks with a bare `Begin.` user nudge - the convention that makes a text
-    model act - so the model drew the nudge: "draw a rabbit" came back as a
-    generic "start of a journey" landscape. A model that emits images now gets
-    its prompt in the user turn, so it draws the subject.
+  - `google/gemini-2.5-flash-image` ignores the system prompt and generates
+    from its user turn, but a stage's prompt lands in the system blocks with a
+    bare `Begin.` user nudge - the convention that makes a text model act - so
+    the model drew the nudge: "draw a rabbit" came back as a generic "start of
+    a journey" landscape. A model that does not read the system prompt now has
+    it folded into the first user turn, so the model generates the asked
+    subject. Whether a model reads the system prompt is the existing
+    `supports_system_prompt` capability (settable per model in
+    `[model_capabilities]`); no catalogue distinguishes the image model that
+    ignores it from the one that honours it, so that one is a compiled one-off.
   - A model-produced image rode the assistant turn that made it, and a provider
     refuses or ignores an image inside an assistant turn (Anthropic answers
     `400: 'image' blocks are not permitted within assistant turns`), so the
