@@ -386,6 +386,13 @@ same list.
 
 ### Fixed
 
+- A model that hands back the same file twice in one reply is stored once. Some
+  image gateways (gemini-3-pro-image) return several byte-identical copies of a
+  picture in a single call; the store is content-addressed, so the copies were
+  already one file on disk, but each was kept as its own part and sent back to
+  the next stage. Byte-identical produced parts are now de-duplicated, keeping
+  the first. Parts that merely look alike but differ in any byte are untouched
+  (#400).
 - An image a stage drew reached the next stage, and an image-output model drew
   the subject it was asked for. Two faults in how typed media crossed a stage
   boundary made an image agent draw the wrong picture and then describe a
