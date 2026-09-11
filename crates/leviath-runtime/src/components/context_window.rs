@@ -741,15 +741,25 @@ impl ContextWindow {
                                 });
                             }
                             EntryKind::AssistantTurn { tool_calls } => {
+                                // Media a stage produced (an image a model drew)
+                                // cannot ride the assistant turn that made it: a
+                                // provider rejects an image inside an assistant
+                                // turn (Anthropic answers 400), so a later stage
+                                // that should see it never would. The assistant
+                                // turn keeps its text and the stand-ins that name
+                                // the media; the bytes follow in a user turn.
+                                let lifted_media = mime::mime_blocks(&entry.content);
                                 if tool_calls.is_empty() {
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
-                                        content: mime::message_content(&entry.content),
+                                        content: leviath_providers::MessageContent::Text(
+                                            entry.content.to_string(),
+                                        ),
                                         cache_breakpoint: false,
                                         reasoning: entry.reasoning.clone(),
                                     });
                                 } else {
-                                    let mut blocks = mime::content_blocks(&entry.content);
+                                    let mut blocks = mime::text_blocks(&entry.content);
                                     for tc in tool_calls {
                                         blocks.push(leviath_providers::ContentBlock::ToolUse {
                                             id: tc.id.clone(),
@@ -763,6 +773,21 @@ impl ContextWindow {
                                         content: leviath_providers::MessageContent::Blocks(blocks),
                                         cache_breakpoint: false,
                                         reasoning: entry.reasoning.clone(),
+                                    });
+                                }
+                                // Only when the turn has no tool calls: inserting
+                                // a user turn between a tool_use and its
+                                // tool_result would break the pairing a provider
+                                // requires, and that rare turn's media stays a
+                                // stand-in rather than risk it.
+                                if tool_calls.is_empty() && !lifted_media.is_empty() {
+                                    messages.push(leviath_providers::Message {
+                                        role: "user".to_string(),
+                                        content: leviath_providers::MessageContent::Blocks(
+                                            lifted_media,
+                                        ),
+                                        cache_breakpoint: false,
+                                        reasoning: None,
                                     });
                                 }
                             }

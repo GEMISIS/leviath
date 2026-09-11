@@ -55,6 +55,16 @@ impl Provider for Cfg {
             ..Default::default()
         }
     }
+    fn mime(&self, model: &str) -> leviath_providers::ModelMime {
+        // A model named for image output draws; everything else is text, the
+        // default. Keyed on the name so only the test that wants it triggers
+        // the image-request shaping.
+        if model.contains("image-out") {
+            leviath_providers::ModelMime::new(&["text/*"], &["text/*", "image/*"])
+        } else {
+            leviath_providers::ModelMime::text_only()
+        }
+    }
 }
 
 fn window() -> ContextWindow {
@@ -201,6 +211,138 @@ fn a_model_without_tools_gets_its_history_as_prose_and_no_tools() {
     .0;
     assert!(req.tools.is_empty());
     assert!(!format!("{:?}", req.messages).contains("ToolUse"));
+}
+
+/// An image-output model draws its user turn, so the prompt (which a text
+/// stage leaves in the system blocks with a bare "Begin." nudge) is moved into
+/// the user turn - otherwise the model draws the nudge, "Begin." becoming
+/// generic scenery rather than the subject.
+#[test]
+fn an_image_model_gets_its_prompt_in_the_user_turn() {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new("task".to_string(), RegionKind::Pinned, 1000));
+    w.add_typed_entry(
+        "task",
+        leviath_core::EntryKind::Text,
+        "draw a picture of a rabbit".to_string(),
+        5,
+    )
+    .unwrap();
+    let prov = Arc::new(Cfg {
+        supports_temperature: true,
+        max_output: 1000,
+        supports_tools: false,
+    }) as Arc<dyn Provider>;
+
+    // An image model: the prompt is in a user turn, the "Begin." nudge gone.
+    let req = build_request(
+        &w,
+        None,
+        &stage("image-out-drawer", vec![], None),
+        &prov,
+        "draw",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    let user_text = req
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_text())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        user_text.contains("draw a picture of a rabbit"),
+        "prompt in the user turn: {user_text}"
+    );
+    assert!(!user_text.contains("Begin."), "nudge replaced: {user_text}");
+
+    // A text model on the same window keeps the prompt in system and the nudge.
+    let text = build_request(
+        &w,
+        None,
+        &stage("plain-text-model", vec![], None),
+        &prov,
+        "draw",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    let text_user = text
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_text())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        text_user.contains("Begin."),
+        "text model nudged: {text_user}"
+    );
+    assert!(
+        format!("{:?}", text.system).contains("draw a picture of a rabbit"),
+        "text model keeps the prompt in system"
+    );
+
+    // An image-edit stage: the conversation already holds a user turn (the
+    // input image), so there is no "Begin." nudge to replace and the prompt is
+    // appended as its own user turn.
+    let mut edit = ContextWindow::new(10_000);
+    edit.add_region(Region::new("task".to_string(), RegionKind::Pinned, 1000));
+    edit.add_typed_entry(
+        "task",
+        leviath_core::EntryKind::Text,
+        "add a hat".to_string(),
+        5,
+    )
+    .unwrap();
+    edit.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 20,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        5000,
+    ));
+    edit.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::UserMessage,
+        "the source photo".to_string(),
+        5,
+    )
+    .unwrap();
+    let req = build_request(
+        &edit,
+        None,
+        &stage("image-out-editor", vec![], None),
+        &prov,
+        "edit",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert_eq!(req.messages.last().unwrap().role, "user");
+    assert_eq!(
+        req.messages.last().unwrap().content.as_text(),
+        "## task\nadd a hat"
+    );
+
+    // An image model with an empty window has no prompt to move, and builds a
+    // request without incident.
+    let empty = ContextWindow::new(10_000);
+    let req = build_request(
+        &empty,
+        None,
+        &stage("image-out-drawer", vec![], None),
+        &prov,
+        "draw",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert!(req.system.is_empty());
+    assert_eq!(req.messages.last().unwrap().content.as_text(), "Begin.");
 }
 
 // ── build_request branch coverage ──

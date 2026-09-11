@@ -267,6 +267,43 @@ pub(crate) fn build_request(
     let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
     system.extend(assembled.system_blocks);
 
+    // An image-output model draws whatever is in its user turn. A stage's
+    // prompt lands in the system blocks with a bare "Begin." user nudge (the
+    // convention that makes a text model act), and an image model draws the
+    // nudge - "Begin." becomes generic "start of a journey" scenery, never the
+    // subject. Move the prompt into the user turn so the model draws it. The
+    // system blocks stay: the model may ignore them, and a text-capable image
+    // model still reads them.
+    let mut messages = messages;
+    if provider.mime(&stage.model).produces_images() {
+        let prompt: String = system
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !prompt.is_empty() {
+            let nudge = messages.iter().position(|m| {
+                m.role == "user"
+                    && matches!(&m.content, leviath_providers::MessageContent::Text(text) if text.trim() == "Begin.")
+            });
+            match nudge {
+                // The bare "Begin." nudge becomes the prompt.
+                Some(index) => {
+                    messages[index].content = leviath_providers::MessageContent::Text(prompt);
+                }
+                // No nudge to replace (an image-edit stage carries an input
+                // image in the conversation): the prompt follows as its own
+                // user turn, which an image model reads as its instruction.
+                None => messages.push(leviath_providers::Message {
+                    role: "user".to_string(),
+                    content: leviath_providers::MessageContent::Text(prompt),
+                    cache_breakpoint: false,
+                    reasoning: None,
+                }),
+            }
+        }
+    }
+
     let request = InferenceRequest {
         system,
         messages,

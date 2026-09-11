@@ -283,6 +283,14 @@ impl ModelMime {
         mime_type.matches_any(&self.output)
     }
 
+    /// Whether the model emits images, so its request is built for image
+    /// generation (the prompt in the user turn) rather than for a text reply.
+    pub fn produces_images(&self) -> bool {
+        self.output
+            .iter()
+            .any(|p| p == "image/*" || p.starts_with("image/"))
+    }
+
     /// Whether every pattern in `wanted` is covered by an input pattern.
     ///
     /// `image/png` is covered by `image/png`, `image/*` or `*/*`; `image/*`
@@ -447,6 +455,11 @@ mod mime_tests {
         assert!(!m.produces(&mt("image/png")));
         assert!(!m.takes_mime());
         assert!(ModelMime::new(&["text/*", "image/*"], &["text/*"]).takes_mime());
+        // An image generator is known by its output, so its request is built
+        // for drawing (prompt in the user turn) rather than for a text reply.
+        assert!(!m.produces_images());
+        assert!(ModelMime::new(&["text/*"], &["text/*", "image/*"]).produces_images());
+        assert!(ModelMime::new(&["text/*", "image/*"], &["image/png"]).produces_images());
     }
 
     #[test]
