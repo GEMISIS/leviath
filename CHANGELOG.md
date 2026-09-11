@@ -86,12 +86,12 @@ same list.
   grow by a file's size. What a type *is* comes from a mime registry rather
   than from code: the compiled defaults, then `[mime_types]` in the config,
   each row naming a family, whether the bytes are text, a token rule,
-  extensions, a magic prefix and a stand-in template. `[mime]` sets the size ceilings. `lev doctor`
-  reports a row that will not load. A region says what it takes with
-  `accepts = ["text/*", "image/png"]` and is bounded by its token budget; a
-  region with a `schema` takes text only. A snapshot or
-  journal written before this reads back unchanged, since a plain string is
-  still how a text-only entry is written (#400).
+  extensions, a magic prefix and a stand-in template, and `[mime]` sets the
+  size ceilings. `lev doctor` reports a row that will not load. A region says
+  what it takes with `accepts = ["text/*", "image/png"]` and is bounded by its
+  token budget; a region with a `schema` takes text only. A snapshot or journal
+  written before this reads back unchanged, since a plain string is still how a
+  text-only entry is written (#400).
 - Every model says what it takes and what it can hand back, as mime type
   patterns. The built-in tables know that Claude reads images and PDFs, that
   Gemini also takes audio and video, which OpenAI models see, hear or draw,
@@ -174,9 +174,8 @@ same list.
   `GET /api/mime` lists the effective mime registry. Both byte routes
   advertise `Accept-Ranges: bytes` and answer a single `Range` request with
   `206 Partial Content` and a `Content-Range`, so a client can scrub or
-  resume. `[serve]
-  max_upload_bytes` (32 MiB by default) bounds a request body and is
-  reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
+  resume. `[serve] max_upload_bytes` (32 MiB by default) bounds a request
+  body and is reported under `limits`. Announced as `spawn.parts`, `messages.parts`,
   `runs.blobs`, `runs.files.raw`, `runs.result.artifacts` and
   `mime.registry` (#400).
 - The mime registry can be written over HTTP, not only read. `PUT /api/mime`
