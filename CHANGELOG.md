@@ -34,6 +34,16 @@ same list.
 
 ### Changed
 
+- An image a model draws is now named after its own content,
+  `image-<sha>.png`, rather than its position in the reply. Two images drawn in
+  different turns no longer collide on `image-1.png`, so a later stage can point
+  at one exactly to keep it or drop it, and byte-identical images share the one
+  name the run's blob store already dedupes them to (#400).
+- The bundled `sprite-to-3d` agent now draws a front T-pose and matching back
+  and side views, keeps the best of each and drops the rest, builds one model
+  from all the views with Meshy (symmetry off, so an arm cannon survives), and
+  checks the result against the views before finishing, rebuilding a bounded
+  number of times if it drifted (#400).
 - The dashboard stage graph reads more clearly. A stage that can end the run
   shows a `⏹` in its box's top-right corner instead of a `can end` badge on the
   crowded detail row; the row now names what the stage takes and hands back as

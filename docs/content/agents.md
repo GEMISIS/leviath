@@ -386,6 +386,13 @@ The bundled `sprite-to-3d` agent declares the Meshy dependency above: it turns a
 character image into a rigged, game-ready model, and a run refuses to start until Meshy is set up.
 Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite-to-3d`.
 
+It works in stages. First it renders a clean front T-pose from the sprite, then back and side views
+that match it, drawing more than one where it is unsure. A review stage keeps the best view of each
+angle and deletes the rest, so no rejected render is left to confuse the model builder. Meshy then
+builds one model from all the chosen views, with symmetry turned off so a one-sided detail like an
+arm cannon survives instead of being mirrored away. A final stage compares the model against the
+views and, if it drifted, sends it back to be rebuilt a bounded number of times before finishing.
+
 ## How the coding agent verifies its work
 
 The bundled `coder` agent decides what "done" means before it starts, rather than judging it at
