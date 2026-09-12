@@ -189,7 +189,14 @@ impl ProviderRegistry {
     /// a successful prime so short-lived processes read the same numbers. A
     /// provider that keeps no learned store (a script provider) contributes
     /// nothing; a cache that could not be written is a warning, never fatal.
-    pub fn save_capability_cache(&self, path: &std::path::Path, now: i64) {
+    ///
+    /// `path` is an `Option` so a caller whose home did not resolve (the cache
+    /// path is unknown) passes `None` and this no-ops, keeping the caller
+    /// branch-free rather than each guarding an untestable `None`.
+    pub fn save_capability_cache(&self, path: Option<&std::path::Path>, now: i64) {
+        let Some(path) = path else {
+            return;
+        };
         let mut cache = leviath_providers::CapabilityCache::new(now);
         for (name, provider) in &self.providers {
             if let Some(learned) = provider.learned_models() {
@@ -1103,7 +1110,7 @@ mod tests {
         );
         // and one with no store at all (a script provider; skipped).
         primed.register("storeless".to_string(), Arc::new(StubProvider::storeless()));
-        primed.save_capability_cache(&path, 1_000);
+        primed.save_capability_cache(Some(&path), 1_000);
 
         // A fresh registry reads it back.
         let mut fresh = ProviderRegistry::new();
@@ -1167,6 +1174,8 @@ mod tests {
             Arc::new(StubProvider::with_learned(&[("m", 1)])),
         );
         // The failure is logged, not propagated: a cache is a convenience.
-        reg.save_capability_cache(&unwritable, 1);
+        reg.save_capability_cache(Some(&unwritable), 1);
+        // No path (home did not resolve) is a silent no-op, not a panic.
+        reg.save_capability_cache(None, 1);
     }
 }

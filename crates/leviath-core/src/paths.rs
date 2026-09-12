@@ -54,6 +54,17 @@ pub fn agents_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("agents"))
 }
 
+/// The shared on-disk model-capability cache: `<home>/.leviath/model_capabilities.json`.
+///
+/// One path so every surface reads and writes the same file - the daemon writes
+/// it after priming, and a short-lived `lev models`, `lev validate` or serve
+/// handler fills a freshly built registry from it instead of each re-priming to
+/// its own conservative default. Read and written through
+/// `leviath_providers::CapabilityCache`.
+pub fn capability_cache_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("model_capabilities.json"))
+}
+
 /// Whether `name` is safe to use as a single path component.
 ///
 /// Accepts `[A-Za-z0-9._-]+` and nothing else. Everything a caller supplies as
@@ -170,6 +181,10 @@ mod tests {
             assert_eq!(tools_dir(), Some(data.join("tools")));
             assert_eq!(providers_dir(), Some(data.join("providers")));
             assert_eq!(agents_dir(), Some(data.join("agents")));
+            assert_eq!(
+                capability_cache_path(),
+                Some(data.join("model_capabilities.json"))
+            );
         });
     }
 

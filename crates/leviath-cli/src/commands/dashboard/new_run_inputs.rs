@@ -197,8 +197,10 @@ impl Dashboard {
         self.new_run_inputs = blueprint
             .map(|bp| {
                 // Resolve each region's percentage budget against the entry
-                // model's window, so a slot knows the token room it really has.
-                let window = entry_stage_window(&bp, &config_path);
+                // stage's effective (smallest) model window, so a slot knows the
+                // token room it really has.
+                let cache_path = leviath_core::paths::capability_cache_path();
+                let window = entry_stage_window(&bp, &config_path, cache_path.as_deref());
                 let layout = bp.context_layout.resolved(window);
                 layout
                     .regions
@@ -444,26 +446,53 @@ fn fit(text: &str, room: usize) -> String {
     cut
 }
 
-/// The context window of the blueprint's entry stage, resolved offline: a
-/// `[model_capabilities]` override wins, else the compiled catalog, else the
-/// same 8192-token default the runtime falls back to. Region percentage budgets
-/// resolve against this, so the picker's token room matches what a run will get.
-fn entry_stage_window(blueprint: &leviath_core::blueprint::Blueprint, config_path: &Path) -> usize {
+/// The effective context window of the blueprint's entry stage, resolved
+/// offline: the **smallest** window across the stage's declared models, since a
+/// region's percentage budget must fit the tightest of them. Each model
+/// resolves through [`offline_model_window`]. Region percentage budgets resolve
+/// against this, so the picker's token room matches the tightest a run will get.
+fn entry_stage_window(
+    blueprint: &leviath_core::blueprint::Blueprint,
+    config_path: &Path,
+    cache_path: Option<&Path>,
+) -> usize {
     const DEFAULT_WINDOW: usize = 8192;
     let entry = blueprint.resolve_entry_stage_name();
-    let Some(model) = blueprint
+    let config = crate::config::Config::load_from_path_public(config_path).ok();
+    let cache = cache_path.and_then(leviath_providers::CapabilityCache::load);
+    // A missing entry stage and a stage that names no models both fold into an
+    // empty iterator, so both take the `unwrap_or` default without a dead arm.
+    blueprint
         .stages
         .iter()
         .find(|s| s.name == entry)
-        .and_then(|s| s.model.models.first())
-    else {
-        return DEFAULT_WINDOW;
-    };
-    // An override for this model, under either the `provider/model` or the bare
-    // `model` key, is the last word.
-    if let Ok(config) = crate::config::Config::load_from_path_public(config_path) {
-        let qualified = format!("{}/{}", model.provider, model.model);
-        for key in [qualified.as_str(), model.model.as_str()] {
+        .map(|s| &s.model.models)
+        .into_iter()
+        .flatten()
+        .map(|m| offline_model_window(&m.provider, &m.model, config.as_ref(), cache.as_ref()))
+        .min()
+        .unwrap_or(DEFAULT_WINDOW)
+}
+
+/// One model's context window, resolved without a network call, preferring the
+/// most authoritative source available:
+/// 1. a `[model_capabilities]` override in config (under `provider/model` or the
+///    bare `model` key),
+/// 2. the shared capability cache the daemon wrote from live listings (this is
+///    how an OpenRouter model absent from the compiled table gets its real
+///    window offline),
+/// 3. the compiled catalogue,
+/// 4. the same 8192-token default the runtime falls back to.
+fn offline_model_window(
+    provider: &str,
+    model: &str,
+    config: Option<&crate::config::Config>,
+    cache: Option<&leviath_providers::CapabilityCache>,
+) -> usize {
+    const DEFAULT_WINDOW: usize = 8192;
+    if let Some(config) = config {
+        let qualified = format!("{provider}/{model}");
+        for key in [qualified.as_str(), model] {
             if let Some(window) = config
                 .model_capabilities
                 .get(key)
@@ -473,8 +502,11 @@ fn entry_stage_window(blueprint: &leviath_core::blueprint::Blueprint, config_pat
             }
         }
     }
+    if let Some(window) = cache.and_then(|c| c.context_window(provider, model)) {
+        return window;
+    }
     crate::commands::models::builtin_model_windows()
-        .get(&(model.provider.clone(), model.model.clone()))
+        .get(&(provider.to_string(), model.to_string()))
         .copied()
         .unwrap_or(DEFAULT_WINDOW)
 }
@@ -908,12 +940,12 @@ mod tests {
             .copied()
             .expect("claude-sonnet-5 is in the catalog");
         let bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        assert_eq!(entry_stage_window(&bp, &missing), builtin);
+        assert_eq!(entry_stage_window(&bp, &missing, None), builtin);
 
         // A stage that names no model falls back to the default window.
         let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
         bp.stages[0].model.models.clear();
-        assert_eq!(entry_stage_window(&bp, &missing), 8192);
+        assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
 
         // A `[model_capabilities]` override for this model wins.
         let bp = super::super::graph::load_blueprint(agent_path).unwrap();
@@ -923,7 +955,7 @@ mod tests {
             "[model_capabilities.\"anthropic/claude-sonnet-5\"]\nmax_context_tokens = 4321\n",
         )
         .unwrap();
-        assert_eq!(entry_stage_window(&bp, &config), 4321);
+        assert_eq!(entry_stage_window(&bp, &config, None), 4321);
 
         // An unknown model, checked against a config that loads but has no entry
         // for it, falls past the override lookup to the catalog and then to the
@@ -931,14 +963,60 @@ mod tests {
         let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
         bp.stages[0].model.models[0].provider = "acme".to_string();
         bp.stages[0].model.models[0].model = "mystery".to_string();
-        assert_eq!(entry_stage_window(&bp, &config), 8192);
+        assert_eq!(entry_stage_window(&bp, &config, None), 8192);
 
         // A config file that cannot be parsed is ignored, and the window comes
         // from the catalog.
         let bp = super::super::graph::load_blueprint(agent_path).unwrap();
         let bad = dir.path().join("bad.toml");
         std::fs::write(&bad, "this is not [valid toml").unwrap();
-        assert_eq!(entry_stage_window(&bp, &bad), builtin);
+        assert_eq!(entry_stage_window(&bp, &bad, None), builtin);
+
+        // The shared capability cache supplies a window for a model absent from
+        // the compiled table - the offline OpenRouter case #810 is about.
+        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        bp.stages[0].model.models[0].provider = "openrouter".to_string();
+        bp.stages[0].model.models[0].model = "x-ai/grok-4".to_string();
+        let cache_file = dir.path().join("model_capabilities.json");
+        let cache = {
+            let mut c = leviath_providers::CapabilityCache::new(1);
+            c.set(
+                "openrouter",
+                std::collections::BTreeMap::from([(
+                    "x-ai/grok-4".to_string(),
+                    leviath_providers::LearnedModel {
+                        max_context_tokens: Some(256_000),
+                        ..Default::default()
+                    },
+                )]),
+            );
+            c
+        };
+        cache.save(&cache_file).unwrap();
+        assert_eq!(
+            entry_stage_window(&bp, &missing, Some(&cache_file)),
+            256_000
+        );
+        // A cache path that does not exist loads nothing and falls to the
+        // default.
+        let no_cache = dir.path().join("absent.json");
+        assert_eq!(entry_stage_window(&bp, &missing, Some(&no_cache)), 8192);
+
+        // The smallest window across several models wins: a second, narrower
+        // model pulls the effective window down.
+        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
+        bp.stages[0].model.models[0].provider = "anthropic".to_string();
+        bp.stages[0].model.models[0].model = "claude-sonnet-5".to_string();
+        bp.stages[0]
+            .model
+            .models
+            .push(leviath_core::blueprint::ModelEntry::new(
+                "acme".to_string(),
+                "tiny".to_string(),
+            ));
+        // acme/tiny is unknown everywhere → 8192, smaller than the sonnet
+        // window, so it is the effective window.
+        assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
     }
 
     /// A choice that would not fit the region's token budget stops the start
