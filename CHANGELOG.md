@@ -22,8 +22,10 @@ same list.
   billed. `lev deps list` shows what an agent needs, `lev deps check` says
   whether this machine has it and exits non-zero when it does not, and
   `lev deps install` sets it up after asking: it writes an MCP server's
-  non-secret settings into your config and tells you to set the secret in your
-  own environment, or runs a declared shell command or Rhai install script.
+  non-secret settings into your config and allowlists the secret it needs, so a
+  `${VAR}` in the server's headers or a stdio server's env is filled from your
+  environment at connect time rather than written to a file; or it runs a
+  declared shell command or Rhai install script.
   `lev validate` lists each declared dependency and whether this machine has it,
   and `GET /api/blueprints/{name}` carries them as `dependencies` (announced by
   the `blueprints.dependencies` capability). A bundled `sprite-to-3d` agent

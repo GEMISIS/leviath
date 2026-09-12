@@ -328,10 +328,16 @@ pub struct McpServerTemplate {
     /// Arguments passed to `command`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    /// Non-secret headers. A value may reference a secret with `${VAR}`, where
-    /// `VAR` is named in the dependency's `env` and filled in at install.
+    /// Non-secret headers, for an http server. A value may reference a secret
+    /// with `${VAR}`, where `VAR` is named in the dependency's `env`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// Environment for a stdio server's child process. A value may reference a
+    /// secret with `${VAR}` (expanded from the environment at connect time, so
+    /// the secret stays out of the config file), where `VAR` is named in the
+    /// dependency's `env`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Blueprint {

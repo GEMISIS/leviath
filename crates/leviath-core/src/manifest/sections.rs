@@ -397,25 +397,28 @@ fn parse_dependency_install(
                     })
                     .collect::<Result<Vec<_>>>()?,
             };
-            let headers = match st.get("headers").and_then(|v| v.as_table()) {
-                None => std::collections::BTreeMap::new(),
-                Some(h) => h
-                    .iter()
-                    .map(|(k, v)| {
-                        v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| {
-                            Error::Other(format!(
-                                "dependency '{dep}': install.server.headers values must be strings"
-                            ))
+            let str_table = |key: &str| -> Result<std::collections::BTreeMap<String, String>> {
+                match st.get(key).and_then(|v| v.as_table()) {
+                    None => Ok(std::collections::BTreeMap::new()),
+                    Some(h) => h
+                        .iter()
+                        .map(|(k, v)| {
+                            v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| {
+                                Error::Other(format!(
+                                    "dependency '{dep}': install.server.{key} values must be strings"
+                                ))
+                            })
                         })
-                    })
-                    .collect::<Result<std::collections::BTreeMap<_, _>>>()?,
+                        .collect(),
+                }
             };
             Some(McpServerTemplate {
                 transport: stext("transport"),
                 command: stext("command"),
                 url: stext("url"),
                 args,
-                headers,
+                headers: str_table("headers")?,
+                env: str_table("env")?,
             })
         }
     };

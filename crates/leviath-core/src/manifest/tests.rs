@@ -6404,6 +6404,9 @@ args = ["--flag"]
 
 [dependencies.install.server.headers]
 Authorization = "Bearer ${MESHY_API_KEY}"
+
+[dependencies.install.server.env]
+MESHY_API_KEY = "${MESHY_API_KEY}"
 "#,
     )
     .unwrap();
@@ -6424,6 +6427,10 @@ Authorization = "Bearer ${MESHY_API_KEY}"
     assert_eq!(
         server.headers.get("Authorization").map(String::as_str),
         Some("Bearer ${MESHY_API_KEY}")
+    );
+    assert_eq!(
+        server.env.get("MESHY_API_KEY").map(String::as_str),
+        Some("${MESHY_API_KEY}")
     );
     bp.validate().unwrap();
 }
@@ -6523,6 +6530,10 @@ fn dependency_parse_errors() {
         (
             "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ncommand=\"x\"\n[dependencies.install.server.headers]\nA = 1",
             "install.server.headers values must be strings",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ncommand=\"x\"\n[dependencies.install.server.env]\nK = 1",
+            "install.server.env values must be strings",
         ),
         (
             "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.commands]\nmacos = 1",
