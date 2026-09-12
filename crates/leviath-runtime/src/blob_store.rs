@@ -195,7 +195,9 @@ impl Default for MimeLimits {
         Self {
             max_part_bytes: 32 * 1024 * 1024,
             inline_text_bytes: 1024 * 1024,
-            max_media_bytes_per_request: 64 * 1024 * 1024,
+            // Under the ~30 MB image-content limit several vendors enforce, once
+            // base64 inflation is allowed for; see the config default's note.
+            max_media_bytes_per_request: 20 * 1024 * 1024,
         }
     }
 }
@@ -587,7 +589,7 @@ mod tests {
             .expect("the parameter validates")
             .hydration_inputs(entity);
         assert!(none.is_none());
-        assert_eq!(cap, 64 * 1024 * 1024);
+        assert_eq!(cap, 20 * 1024 * 1024);
         world.insert_resource(BlobStoreHandle(mem.clone()));
         world.insert_resource(MimeRegistryHandle::default());
         world.insert_resource(MimeLimits {
@@ -603,7 +605,7 @@ mod tests {
         assert_eq!(cap, 3);
         assert_eq!(limits.max_part_bytes, 32 * 1024 * 1024);
         assert_eq!(limits.inline_text_bytes, 1024 * 1024);
-        assert_eq!(limits.max_media_bytes_per_request, 64 * 1024 * 1024);
+        assert_eq!(limits.max_media_bytes_per_request, 20 * 1024 * 1024);
         assert_eq!(limits, limits);
         assert!(format!("{limits:?}").contains("MimeLimits"));
     }

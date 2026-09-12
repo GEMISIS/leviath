@@ -894,7 +894,7 @@ Ceilings on typed mime parts: the images, audio, video, documents and models tha
 [mime]
 max_part_bytes = 33554432               # one part, at every ingress (32 MiB)
 inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
-max_media_bytes_per_request = 67108864  # bytes of stored media one model request carries (64 MiB)
+max_media_bytes_per_request = 20971520  # bytes of stored media one model request carries (20 MiB)
 ```
 
 A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
