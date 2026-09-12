@@ -487,6 +487,59 @@ impl OpenRouterProvider {
         self.temperature_unsupported.insert(model);
     }
 
+    /// Send a chat request, retrying without temperature if the model refuses
+    /// it, for both the buffered and the streaming paths so they cannot drift.
+    ///
+    /// A fresh refusal - the gateway passes the backend's through verbatim, and
+    /// OpenRouter's `supported_parameters` advertises temperature for a model
+    /// whose backend rejects it - is remembered, temperature is dropped, and
+    /// the request is sent once more. The refusal is the initial HTTP response
+    /// in both paths (before any stream bytes), so the streaming caller catches
+    /// it the same way. A model already remembered never gets here with a
+    /// temperature to begin with: [`Self::capabilities`] reads the memo and
+    /// [`Self::build_request_body`] leaves temperature out up front.
+    async fn send_with_temperature_retry(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+        body: &mut serde_json::Value,
+        request: &InferenceRequest,
+    ) -> Result<reqwest::Response> {
+        let mut sent = send_chat_request(
+            &self.client,
+            "openrouter",
+            url,
+            headers,
+            body,
+            self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
+        )
+        .await;
+        if let Err(crate::ProviderError::ApiError(detail)) = &sent
+            && temperature_refused(detail)
+        {
+            tracing::debug!(
+                model = %request.model,
+                "the API refused the temperature we sent; retrying without it"
+            );
+            self.remember_temperature_unsupported(&request.model);
+            body.as_object_mut()
+                .expect("an OpenAI request body is always a JSON object")
+                .remove("temperature");
+            sent = send_chat_request(
+                &self.client,
+                "openrouter",
+                url,
+                headers,
+                body,
+                self.rate_limiter.as_ref(),
+                request.request_timeout_secs,
+            )
+            .await;
+        }
+        sent
+    }
+
     /// GET `/models`, shared by [`Provider::list_models`] and
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
@@ -563,54 +616,15 @@ impl Provider for OpenRouterProvider {
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
+        // The retry/omit itself lives on the inherent impl below, shared by the
+        // streaming path so the two cannot drift.
 
         let mut body = self.build_request_body(request);
         let url = format!("{}/chat/completions", self.base_url);
-        // A model this gateway has already refused a temperature for: send it
-        // without one rather than spend a round trip learning the same thing.
-        if self.temperature_is_unsupported(&request.model)
-            && let Some(fields) = body.as_object_mut()
-        {
-            fields.remove("temperature");
-        }
         let headers = self.chat_headers();
-
-        let mut sent = send_chat_request(
-            &self.client,
-            "openrouter",
-            &url,
-            &headers,
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await;
-        // The gateway passes the upstream refusal through verbatim, so the
-        // same answer works here as on the direct provider: drop the
-        // temperature and ask again.
-        if let Err(crate::ProviderError::ApiError(detail)) = &sent
-            && temperature_refused(detail)
-        {
-            tracing::debug!(
-                model = %request.model,
-                "the API refused the temperature we sent; retrying without it"
-            );
-            self.remember_temperature_unsupported(&request.model);
-            if let Some(fields) = body.as_object_mut() {
-                fields.remove("temperature");
-            }
-            sent = send_chat_request(
-                &self.client,
-                "openrouter",
-                &url,
-                &headers,
-                &body,
-                self.rate_limiter.as_ref(),
-                request.request_timeout_secs,
-            )
-            .await;
-        }
-        let response = sent?;
+        let response = self
+            .send_with_temperature_retry(&url, &headers, &mut body, request)
+            .await?;
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -636,17 +650,15 @@ impl Provider for OpenRouterProvider {
         let mut body = self.build_request_body(request);
         crate::openai_compat::make_streaming(&mut body);
         let url = format!("{}/chat/completions", self.base_url);
-
-        let response = send_chat_request(
-            &self.client,
-            "openrouter",
-            &url,
-            &self.chat_headers(),
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await?;
+        let headers = self.chat_headers();
+        // The same temperature-refusal handling as the buffered path: the
+        // refusal is the initial HTTP response, before any stream bytes, so it
+        // is caught and retried here too. Streaming used to skip this, and an
+        // image model reached by streaming failed the run over a temperature it
+        // never needed.
+        let response = self
+            .send_with_temperature_retry(&url, &headers, &mut body, request)
+            .await?;
 
         // Reuse OpenAI SSE parser since the format is identical
         let peer = leviath_net::read_caps::peer_of(&response);
@@ -1769,6 +1781,60 @@ mod tests {
         // And it is remembered, so the next call to this model never spends
         // the refused round trip again.
         assert!(provider.temperature_is_unsupported("openai/gpt-5.5"));
+    }
+
+    /// The streaming path retries the same way: an image or reasoning model is
+    /// reached by `infer_stream`, and the refusal used to sail past it and fail
+    /// the run. The refusal is the initial HTTP response, before any SSE bytes,
+    /// so it is caught and the stream resent without temperature.
+    #[tokio::test]
+    async fn a_streamed_request_retries_a_refused_temperature_too() {
+        let refusal = br#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature","code":null}}"#;
+        let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", refusal.to_vec()),
+            (200, "OK", sse.to_vec()),
+        ])
+        .await;
+
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        )
+        .with_base_url(Some(url));
+
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+                reasoning: None,
+            }],
+            model: "openai/gpt-5-image-mini".to_string(),
+            max_tokens: 16,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let mut stream = provider
+            .infer_stream(&request)
+            .await
+            .expect("the retry rescues the stream");
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.expect("a chunk").expect("no error");
+        assert_eq!(chunk.delta, "hi");
+
+        let sent = leviath_core::sync::lock(&bodies).clone();
+        let carried: Vec<bool> = sent.iter().map(|b| b.contains("temperature")).collect();
+        assert_eq!(
+            carried,
+            vec![true, false],
+            "the first stream request carries temperature and the retry drops it: {sent:?}"
+        );
+        assert!(provider.temperature_is_unsupported("openai/gpt-5-image-mini"));
     }
 
     #[tokio::test]
