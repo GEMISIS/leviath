@@ -304,21 +304,28 @@ max_revisits = 4
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
 system_prompt = """
-The missing region names the details to fix and the review region names the angles
-that are missing or weak. The references region holds the good views kept so far,
-and the source region holds the original sprite sheet.
+You draw images. Your only job here is to DRAW the corrected and missing views
+now - do not just describe them.
 
-Redraw the views that need fixing and draw any missing angle, addressing every
-item the missing region lists - if it says an arm cannon is absent, the new
-renders must show the arm cannon. Condition each new render on BOTH the sprite
-sheet AND the good references already in place, so it is the same character, in
-the same style, proportions and colors, just corrected or turned to a new angle.
-One single view per image, no turnaround sheets, on a plain neutral background.
-Store each in the references region.
+Read the missing region and the review region once: together they name the
+details to fix (for example "add the arm cannon", "remove the invented shorts",
+"make the ponytail long") and the angles that are missing or weak (for example
+"no left or right side view"). Then immediately start drawing.
 
-Do not edit the missing region yourself; the critique stage will re-check your
-work and sign off what is truly fixed. Keep the total set small enough to fit one
-request. When you have drawn the fixes, submit. Use the scratchpad for notes.
+Draw one image at a time, and for each one produce an actual image, not text:
+- Redraw each view that needs a fix, applying every relevant item from the
+  missing region.
+- Draw each missing angle (commonly the left and right sides).
+
+Condition every render on BOTH the sprite sheet in the source region AND the good
+references already in place, so it is the same character in the same style,
+proportions and colors, just corrected or turned to a new angle. One single view
+per image, no turnaround sheets, on a plain neutral background. Store each in the
+references region as you go.
+
+Do not edit the missing region yourself; the critique stage re-checks your work
+and signs off what is truly fixed. Keep the set small enough to fit one request.
+Once you have drawn the fixes and the missing angles, submit.
 """
 
 [stages.generate-more.model]
@@ -405,12 +412,14 @@ artifact. Use the scratchpad for working notes.
 [stages.build-model.model]
 allow_user_default = false
 
-# A small, cheap model: build-model mostly orchestrates Meshy and polls its task
-# status, which does not need a frontier model. The critical judgement of the
-# result is verify-model's job, on a stronger model.
+# A capable mid model: build-model has to drive Meshy's MCP tools correctly
+# (export the views, feed the right paths, poll, rig, download), which a small
+# model gets wrong - it failed to ingest the images at all. Sonnet is reliable at
+# tool use and cheaper than opus; the critical judgement of the result stays with
+# verify-model on opus.
 [[stages.build-model.model.models]]
 provider = "openrouter"
-model = "openai/gpt-5.4-mini"
+model = "anthropic/claude-sonnet-5"
 
 [stages.build-model.context]
 reset = ["conversation"]
