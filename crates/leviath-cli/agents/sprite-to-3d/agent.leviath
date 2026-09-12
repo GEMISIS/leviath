@@ -150,6 +150,8 @@ format = "image/*"
 [stages.prep-references.transitions.filter-references]
 hint = "Once the references region holds view renders of the character to filter."
 transform = "direct"
+# Do not leave until at least one render has actually been drawn and stored.
+gate = { require_region_updated = "references", message = "You have not stored any reference render yet. Draw the front T-pose (and the other views) and let them land in the references region before moving on." }
 
 # ── 2. Filter: drop the bad renders, keep the good single views ──────────────
 
@@ -350,6 +352,8 @@ reset = ["conversation"]
 [stages.generate-more.transitions.filter-references]
 hint = "Once the requested views are in the references region."
 transform = "direct"
+# Do not leave until the fixes have actually been drawn.
+gate = { require_region_updated = "references", message = "You have not drawn any new render yet. Draw the corrected and missing views the missing region asks for, and let them land in the references region before moving on." }
 
 # ── 6. Build the rigged, game-ready model with Meshy ─────────────────────────
 
@@ -434,6 +438,11 @@ reset = ["conversation"]
 [stages.build-model.transitions.verify-model]
 hint = "Once a rigged, game-ready model is in the model region."
 transform = "direct"
+# Do not leave until a model has actually been built and attached: without this
+# the stage can hand an empty model region to verify and finalize, and the run
+# ends owing an artifact it never made. Meshy builds take minutes, so allow
+# several passes.
+gate = { require_region_updated = "model", message = "The model region is still empty. Build the model with Meshy (image-to-3D, poll until done, rig, download), then attach the downloaded file to the model region with context_attach before moving on.", max_attempts = 8 }
 
 # ── 7. Check the model against the references, and rebuild if it is off ───────
 
