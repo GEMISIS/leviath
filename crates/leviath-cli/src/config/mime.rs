@@ -132,7 +132,13 @@ pub(crate) const DEFAULT_INLINE_TEXT_BYTES: u64 = 1024 * 1024;
 
 /// Bytes of stored media one model request may carry before the oldest are
 /// sent as stand-ins instead.
-pub(crate) const DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST: u64 = 64 * 1024 * 1024;
+///
+/// This is the raw part size, not the base64 on the wire. Several vendors reject
+/// a request whose image content exceeds about 30 MB (OpenRouter says so
+/// outright), and base64 inflates bytes by roughly a third, so the ceiling sits
+/// at 20 MiB raw (about 27 MB encoded) to stay under that with margin. An
+/// operator whose provider allows more can raise it in `[mime]`.
+pub(crate) const DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST: u64 = 20 * 1024 * 1024;
 
 /// `[mime]` in `~/.leviath/config.toml`.
 ///
@@ -597,7 +603,7 @@ mod tests {
         assert_eq!(parsed, MimeConfig::default());
         assert_eq!(parsed.max_part_bytes, 32 * 1024 * 1024);
         assert_eq!(parsed.inline_text_bytes, 1024 * 1024);
-        assert_eq!(parsed.max_media_bytes_per_request, 64 * 1024 * 1024);
+        assert_eq!(parsed.max_media_bytes_per_request, 20 * 1024 * 1024);
     }
 
     #[test]

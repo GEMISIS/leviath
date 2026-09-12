@@ -34,6 +34,12 @@ same list.
 
 ### Changed
 
+- The default ceiling on stored media carried in one model request is now 20 MiB
+  rather than 64 MiB. Several vendors reject a request whose image content
+  exceeds about 30 MB, and 64 MiB sat above that, so a request heavy with images
+  hit the vendor's hard error instead of the runtime's own backstop; at 20 MiB
+  the oldest media becomes stand-ins before the vendor limit is reached. Raise it
+  in `[mime]` for a provider that allows more (#400).
 - A stage that produces an image now notices when the model replies with text
   and no image, which usually means the image generation failed or was refused.
   It sends the model's own words back so the retry is informed, and after a few
