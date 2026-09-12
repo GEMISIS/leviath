@@ -1733,7 +1733,11 @@ mod tests {
         assert_eq!(response.content, "here it is");
         assert_eq!(response.parts.len(), 1);
         assert_eq!(response.parts[0].bytes, vec![1, 2, 3]);
-        assert_eq!(response.parts[0].name.as_deref(), Some("image-1.png"));
+        // Named by content sha, not by position.
+        assert_eq!(
+            response.parts[0].name.as_deref(),
+            Some("image-039058c6f2c0.png")
+        );
     }
 
     #[test]
