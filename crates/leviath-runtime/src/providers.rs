@@ -184,6 +184,50 @@ impl ProviderRegistry {
         }
     }
 
+    /// Write every native provider's primed catalogue to the shared capability
+    /// cache at `path`, stamped `now` (Unix seconds). Called by the daemon after
+    /// a successful prime so short-lived processes read the same numbers. A
+    /// provider that keeps no learned store (a script provider) contributes
+    /// nothing; a cache that could not be written is a warning, never fatal.
+    pub fn save_capability_cache(&self, path: &std::path::Path, now: i64) {
+        let mut cache = leviath_providers::CapabilityCache::new(now);
+        for (name, provider) in &self.providers {
+            if let Some(learned) = provider.learned_models() {
+                let snapshot = learned.snapshot();
+                if !snapshot.is_empty() {
+                    cache.set(name, snapshot);
+                }
+            }
+        }
+        if let Err(e) = cache.save(path) {
+            tracing::warn!(error = %e, "could not write the model-capability cache");
+        }
+    }
+
+    /// Fill each native provider's learned store from the cache at `path`, for
+    /// the providers it holds an entry for, and report whether anything loaded.
+    ///
+    /// Lets a freshly built registry answer a model's real limits without its own
+    /// network prime, as long as some process (the daemon) has primed and written
+    /// the cache. A missing or stale-versioned file loads nothing and returns
+    /// false, which is the pre-cache behaviour: fall back to priming or the table.
+    pub fn load_capability_cache(&self, path: &std::path::Path) -> bool {
+        let Some(cache) = leviath_providers::CapabilityCache::load(path) else {
+            return false;
+        };
+        let mut loaded = false;
+        for (name, provider) in &self.providers {
+            let Some(learned) = provider.learned_models() else {
+                continue;
+            };
+            if let Some(models) = cache.get(name) {
+                learned.replace(models.clone().into_iter().collect());
+                loaded = true;
+            }
+        }
+        loaded
+    }
+
     /// Get every model a run is about to use ready, before it starts.
     ///
     /// `models` is what the blueprint names, bare and deduplicated. Every
@@ -375,6 +419,11 @@ mod tests {
         catalog: Option<Vec<String>>,
         /// What it says about refusing anything outside that catalogue.
         refusal: Option<String>,
+        /// The learned store the capability cache reads and fills.
+        learned: leviath_providers::LearnedModels,
+        /// When true, [`Provider::learned_models`] returns `None`, standing in
+        /// for a provider (a script provider) that keeps no learned store.
+        no_store: bool,
     }
 
     impl StubProvider {
@@ -385,7 +434,38 @@ mod tests {
                 warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
                 catalog: None,
                 refusal: None,
+                learned: leviath_providers::LearnedModels::default(),
+                no_store: false,
             }
+        }
+
+        /// A stub that keeps no learned store, like a script provider.
+        fn storeless() -> Self {
+            Self {
+                no_store: true,
+                ..Self::new(PrimeOutcome::Ok)
+            }
+        }
+
+        /// A stub whose learned store already holds `models` (id → context
+        /// window), as if it had primed.
+        fn with_learned(models: &[(&str, usize)]) -> Self {
+            let stub = Self::new(PrimeOutcome::Ok);
+            stub.learned.replace(
+                models
+                    .iter()
+                    .map(|(id, ctx)| {
+                        (
+                            (*id).to_string(),
+                            leviath_providers::LearnedModel {
+                                max_context_tokens: Some(*ctx),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            stub
         }
 
         /// The same stub, publishing a complete catalogue.
@@ -459,6 +539,10 @@ mod tests {
         }
         fn served_catalog(&self) -> Option<Vec<String>> {
             self.catalog.clone()
+        }
+
+        fn learned_models(&self) -> Option<&leviath_providers::LearnedModels> {
+            (!self.no_store).then_some(&self.learned)
         }
 
         fn refusal_reason(&self, _model_key: &str) -> Option<String> {
@@ -998,5 +1082,91 @@ mod tests {
             request_timeout_secs: None,
         };
         assert!(p.infer(&request).await.is_err());
+    }
+
+    #[test]
+    fn the_capability_cache_round_trips_and_skips_every_other_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("caps").join("model_capabilities.json");
+
+        // A primed registry with all three provider shapes:
+        let mut primed = ProviderRegistry::new();
+        // one that learned a real window (cached),
+        primed.register(
+            "learned".to_string(),
+            Arc::new(StubProvider::with_learned(&[("big-model", 200_000)])),
+        );
+        // one with a store that primed nothing (empty snapshot, not cached),
+        primed.register(
+            "empty".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        // and one with no store at all (a script provider; skipped).
+        primed.register("storeless".to_string(), Arc::new(StubProvider::storeless()));
+        primed.save_capability_cache(&path, 1_000);
+
+        // A fresh registry reads it back.
+        let mut fresh = ProviderRegistry::new();
+        // this one is in the cache, so it is filled,
+        fresh.register(
+            "learned".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        // this one has a store but no cache entry, so it is left alone,
+        fresh.register(
+            "unknown".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        // and this one has no store, so it is skipped.
+        fresh.register("storeless".to_string(), Arc::new(StubProvider::storeless()));
+        assert!(
+            fresh
+                .get("learned")
+                .unwrap()
+                .learned_models()
+                .unwrap()
+                .is_empty(),
+            "nothing learned before the cache is loaded"
+        );
+        assert!(fresh.load_capability_cache(&path));
+        assert_eq!(
+            fresh
+                .get("learned")
+                .unwrap()
+                .learned_models()
+                .unwrap()
+                .get("big-model")
+                .unwrap()
+                .max_context_tokens,
+            Some(200_000),
+        );
+        assert!(
+            fresh
+                .get("unknown")
+                .unwrap()
+                .learned_models()
+                .unwrap()
+                .is_empty(),
+            "a provider with no cache entry is left as it was"
+        );
+
+        // A missing (or stale-versioned) cache loads nothing and says so.
+        assert!(!fresh.load_capability_cache(&dir.path().join("nope.json")));
+    }
+
+    #[test]
+    fn saving_the_cache_where_it_cannot_be_written_warns_but_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A file where a directory would have to be makes the write fail.
+        let file = dir.path().join("in-the-way");
+        std::fs::write(&file, "x").expect("write the blocker");
+        let unwritable = file.join("sub").join("model_capabilities.json");
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "stub".to_string(),
+            Arc::new(StubProvider::with_learned(&[("m", 1)])),
+        );
+        // The failure is logged, not propagated: a cache is a convenience.
+        reg.save_capability_cache(&unwritable, 1);
     }
 }
