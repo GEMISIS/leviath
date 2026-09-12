@@ -550,7 +550,7 @@ fn build_agent_inner(
         &deps.config.mcp_servers,
         Path::new(&args.blueprint_path)
             .parent()
-            .unwrap_or_else(|| Path::new(".")),
+            .unwrap_or(Path::new(".")),
         &crate::dependencies::SystemProbe,
     )
     .blocking_message()
