@@ -67,6 +67,15 @@ impl DependencyState {
     pub fn is_satisfied(&self) -> bool {
         matches!(self, DependencyState::Satisfied)
     }
+
+    /// The remedy or reason to show, empty when satisfied.
+    pub fn detail(&self) -> &str {
+        match self {
+            DependencyState::Satisfied => "",
+            DependencyState::Unmet(remedy) => remedy,
+            DependencyState::Unusable(reason) => reason,
+        }
+    }
 }
 
 /// One dependency's evaluated status.
@@ -107,12 +116,12 @@ impl DependencyReport {
         }
         let mut msg = String::from("this agent's dependencies are not satisfied:");
         for s in blocking {
-            let detail = match &s.state {
-                DependencyState::Unmet(remedy) => remedy.clone(),
-                DependencyState::Unusable(reason) => reason.clone(),
-                DependencyState::Satisfied => unreachable!("blocking is never satisfied"),
-            };
-            msg.push_str(&format!("\n  - {} ({}): {detail}", s.name, s.kind));
+            msg.push_str(&format!(
+                "\n  - {} ({}): {}",
+                s.name,
+                s.kind,
+                s.state.detail()
+            ));
         }
         msg.push_str("\n\nRun `lev deps check <agent>` to see them, or `lev deps install <agent>` to set them up.");
         Some(msg)
@@ -307,10 +316,7 @@ mod tests {
             env: HashMap::from([("MESHY_API_KEY".into(), "  ".into())]),
             bins: vec![],
         };
-        assert!(matches!(
-            eval_one(&d, &[server("meshy")], &blank),
-            DependencyState::Unmet(_)
-        ));
+        assert!(!eval_one(&d, &[server("meshy")], &blank).is_satisfied());
     }
 
     #[test]
@@ -439,6 +445,13 @@ mod tests {
             !msg.contains("opt"),
             "optional deps are not blocking: {msg}"
         );
+    }
+
+    #[test]
+    fn dependency_state_detail_covers_every_variant() {
+        assert_eq!(DependencyState::Satisfied.detail(), "");
+        assert_eq!(DependencyState::Unmet("fix it".into()).detail(), "fix it");
+        assert_eq!(DependencyState::Unusable("broke".into()).detail(), "broke");
     }
 
     #[test]

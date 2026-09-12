@@ -86,6 +86,9 @@ pub enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// Inspect and install an agent's declared dependencies
+    Deps(commands::deps::DepsArgs),
+
     /// Run blueprint tests
     Test(commands::test::TestArgs),
 
@@ -190,6 +193,7 @@ Blueprints:
   add           Install a blueprint
   remove        Remove an installed blueprint
   validate      Validate an agent blueprint
+  deps          Inspect and install an agent's dependencies
   test          Run blueprint tests
   pack          Bundle a blueprint for distribution
   tools         List and validate the global Rhai script tools
@@ -307,6 +311,12 @@ pub trait RiskyExecutors {
         &self,
         args: commands::mcp::McpArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+    /// `lev deps` - reads env and PATH, and (on install) runs commands and
+    /// rewrites config.
+    fn deps(
+        &self,
+        args: commands::deps::DepsArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev providers` - reads the config file and may rewrite `provider_order`.
     fn providers(
         &self,
@@ -376,6 +386,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Timeline(args) => commands::timeline::execute(args).await,
         Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
+        Commands::Deps(args) => ex.deps(args).await,
         Commands::Providers(args) => ex.providers(args).await,
         Commands::Auth(args) => ex.auth(args).await,
         Commands::Update(args) => ex.update(args).await,
@@ -470,6 +481,10 @@ mod tests {
         }
 
         async fn mcp(&self, _args: commands::mcp::McpArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn deps(&self, _args: commands::deps::DepsArgs) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -798,6 +813,19 @@ mod tests {
             assert!(result.is_err());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_deps_variant_is_routed() {
+        // `deps` is a risky executor (install writes config / runs commands);
+        // MockRisky answers Ok, so this exercises only the routing.
+        let args = commands::deps::DepsArgs {
+            command: commands::deps::DepsCommand::List(commands::deps::AgentRef {
+                agent: "x".to_string(),
+            }),
+        };
+        let result = dispatch(Commands::Deps(args), &MockRisky).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
