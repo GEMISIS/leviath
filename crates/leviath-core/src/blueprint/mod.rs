@@ -377,11 +377,18 @@ impl Blueprint {
     ///
     /// Its own `[context.regions]` when it declares one, the blueprint's
     /// otherwise, plus the regions the runtime carries visible whatever a stage
-    /// says. Narrower than [`known_region_names`](Self::known_region_names),
-    /// which asks only whether a name exists somewhere - the difference being
+    /// says. Narrower than `known_region_names`, which asks only whether a name
+    /// exists somewhere - the difference being
     /// that a region another stage declares exists, and is still not readable
     /// from here.
-    fn regions_visible_to<'a>(&'a self, stage: &'a Stage) -> std::collections::HashSet<&'a str> {
+    ///
+    /// Public so the runtime can size each region's percentage budget against
+    /// the smallest window among the stages that actually see it - a region a
+    /// narrow-window stage never reads must not be shrunk to fit that stage.
+    pub fn regions_visible_to<'a>(
+        &'a self,
+        stage: &'a Stage,
+    ) -> std::collections::HashSet<&'a str> {
         let layout = stage
             .context_layout
             .as_ref()

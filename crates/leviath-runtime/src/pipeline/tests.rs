@@ -3788,6 +3788,171 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
     assert!(err.contains("working tokens"), "{err}");
 }
 
+/// A provider that reports a fixed context window, so a test can register two
+/// stages with different windows and exercise the per-region sizing.
+struct FixedWindow(usize);
+#[async_trait::async_trait]
+impl Provider for FixedWindow {
+    async fn infer(
+        &self,
+        _r: &InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Ok(leviath_providers::InferenceResponse {
+            content: "ok".to_string(),
+            tool_calls: vec![],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                reported_cost_usd: None,
+            },
+            finish_reason: leviath_providers::FinishReason::Complete,
+            reasoning: None,
+            parts: Vec::new(),
+        })
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        self.0
+    }
+    fn name(&self) -> &str {
+        "fixed"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+}
+
+/// Two stages, a wide entry model and a narrow later one, sharing the global
+/// layout. This is the world the two footgun tests below spawn into.
+fn world_with_wide_and_narrow() -> World {
+    let mut world = World::new();
+    let mut reg = ProviderRegistry::new();
+    reg.register("wide".to_string(), Arc::new(FixedWindow(100_000)));
+    reg.register("narrow".to_string(), Arc::new(FixedWindow(20_000)));
+    world.insert_resource(Providers(reg));
+    world
+}
+
+fn pct_region(name: &str, percent: f64) -> leviath_core::layout::RegionDefinition {
+    leviath_core::layout::RegionDefinition::new(name.to_string(), RegionKind::Pinned, 0)
+        .with_budget(leviath_core::BudgetSpec::Percent {
+            percent,
+            min: None,
+            max: None,
+        })
+}
+
+fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
+    vec![
+        ResolvedStage {
+            provider_name: "wide".to_string(),
+            model: "m".to_string(),
+            tools: vec![],
+            fallbacks: Vec::new(),
+            output: None,
+            notes: Vec::new(),
+        },
+        ResolvedStage {
+            provider_name: "narrow".to_string(),
+            model: "m".to_string(),
+            tools: vec![],
+            fallbacks: Vec::new(),
+            output: None,
+            notes: Vec::new(),
+        },
+    ]
+}
+
+#[test]
+fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
+    // The footgun fix. A region only the wide stage reads (the narrow stage
+    // hides it) is sized against the wide window - not shrunk to the narrow
+    // stage that never sees it - and the narrow stage's working-room floor is
+    // judged over just the regions it does see, so the spawn succeeds.
+    let mut world = world_with_wide_and_narrow();
+    let layout = leviath_core::layout::ContextLayout::new(
+        vec![pct_region("big", 0.80), pct_region("small", 0.05)],
+        0,
+    );
+    let mk = |name: &str, provider: &str| {
+        leviath_core::Stage::new(
+            name.to_string(),
+            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
+        )
+    };
+    let mut narrow = mk("b", "narrow");
+    // The narrow stage never reads the big region.
+    narrow.context_hide = vec!["big".to_string()];
+    let bp = leviath_core::Blueprint::new(
+        "t".to_string(),
+        "d".to_string(),
+        vec![mk("a", "wide"), narrow],
+        layout,
+    );
+    let e = spawn_agent(
+        &mut world,
+        "run".to_string(),
+        bp,
+        "task",
+        wide_then_narrow_stages(),
+        hints(true),
+    )
+    .expect("the narrow stage does not see the big region, so it fits");
+    let w = world.get::<ContextWindow>(e).expect("window");
+    // big: 80% of the wide window (100k), because only the wide stage sees it.
+    assert_eq!(w.get_region("big").unwrap().max_tokens, 80_000);
+    // small: 5% of the narrow window (20k), the smallest of the two stages that
+    // both see it.
+    assert_eq!(w.get_region("small").unwrap().max_tokens, 1_000);
+}
+
+#[test]
+fn spawn_fails_when_a_shared_region_starves_the_narrow_stage() {
+    // Now the narrow stage also sees a shared region sized at 80%. Against the
+    // narrow window (80% of 20k = 16k) that leaves the narrow stage only 4k
+    // working tokens. A wide-only region keeps the resolved total budget large
+    // enough that the single-window global validate() passes - so it is the
+    // per-stage floor, judged over just the narrow stage's visible regions,
+    // that catches the starvation. This is the branch the single-window check
+    // cannot make.
+    let mut world = world_with_wide_and_narrow();
+    let layout = leviath_core::layout::ContextLayout::new(
+        vec![pct_region("shared", 0.80), pct_region("wideonly", 0.10)],
+        0,
+    );
+    let mk = |name: &str, provider: &str| {
+        leviath_core::Stage::new(
+            name.to_string(),
+            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
+        )
+    };
+    let mut narrow = mk("b", "narrow");
+    // The narrow stage never sees the wide-only region, so it does not count
+    // against its floor - only the shared region does.
+    narrow.context_hide = vec!["wideonly".to_string()];
+    let bp = leviath_core::Blueprint::new(
+        "t".to_string(),
+        "d".to_string(),
+        vec![mk("a", "wide"), narrow],
+        layout,
+    );
+    let err = spawn_agent(
+        &mut world,
+        "run".to_string(),
+        bp,
+        "task",
+        wide_then_narrow_stages(),
+        hints(true),
+    )
+    .expect_err("the narrow stage is starved by the shared region");
+    assert!(err.contains("working tokens"), "{err}");
+}
+
 #[test]
 fn collect_drops_outcome_for_non_awaiting_agent() {
     let (mut world, tx) = world_with_results();

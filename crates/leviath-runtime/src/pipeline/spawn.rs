@@ -310,23 +310,50 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             blueprint.stages.len()
         ));
     }
-    // Resolve any percentage region budgets against each stage's model context
-    // window (the only place the model - and hence the window - is known). The
-    // global layout resolves against the entry stage (stage 0); each per-stage
-    // layout resolves against that stage's own model. Absolute layouts resolve to
-    // themselves, so this is a no-op for legacy blueprints.
+    // Resolve any percentage region budgets against a real model context window
+    // (the only place the model - and hence the window - is known). Absolute
+    // layouts resolve to themselves, so this is a no-op for legacy blueprints.
+    //
+    // The subtlety is *which* window sizes each region. A region's percentage
+    // budget is sized against the smallest context window among the stages that
+    // actually see it - not the entry stage's window, and not a stage that never
+    // reads the region. So the GLOBAL layout is resolved per region: for each
+    // region, the smallest window over the stages that use the global layout
+    // (declare no layout of their own) and can see the region. A per-stage
+    // layout's regions are private to that stage, so its own window is the only
+    // one that uses them.
     let stage_windows: Vec<usize> = stages
         .iter()
         .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
         .collect();
-    blueprint.context_layout = blueprint.context_layout.resolved(stage_windows[0]);
+    let resolved_global = {
+        let smallest_window_seeing = |region: &str| -> usize {
+            blueprint
+                .stages
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    s.context_layout.is_none() && blueprint.regions_visible_to(s).contains(region)
+                })
+                .map(|(i, _)| stage_windows[i])
+                .min()
+                // No stage uses the global layout for this region (every stage
+                // has its own, or all hide it); the entry window is a harmless
+                // default for a budget nothing at runtime consults.
+                .unwrap_or(stage_windows[0])
+        };
+        blueprint
+            .context_layout
+            .resolved_per_region(&smallest_window_seeing)
+    };
+    blueprint.context_layout = resolved_global;
     for (i, stage) in blueprint.stages.iter_mut().enumerate() {
         if let Some(layout) = &stage.context_layout {
             stage.context_layout = Some(layout.resolved(stage_windows[i]));
         }
     }
-    // Validate the resolved (fully-absolute) layouts, now that percentages are
-    // concrete numbers judged against the real model window.
+    // Structural validation (duplicate names, eviction order, custom scripts)
+    // once per distinct layout, now that percentages are concrete numbers.
     blueprint
         .context_layout
         .validate()
@@ -335,6 +362,24 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         if let Some(layout) = &stage.context_layout {
             layout.validate().map_err(|e| e.to_string())?;
         }
+    }
+    // Then the working-room floor, per stage: each stage must keep enough
+    // evictable room after its fixed regions, judged against *its* model window
+    // over just the regions *it* sees. A region budgeted generously for a
+    // wide-window stage must not be counted against a narrow-window stage that
+    // never reads it - the check a single-window `validate()` cannot make, and
+    // the footgun that let a small entry-stage image model cap every later
+    // stage.
+    for (i, stage) in blueprint.stages.iter().enumerate() {
+        let layout = stage
+            .context_layout
+            .as_ref()
+            .unwrap_or(&blueprint.context_layout);
+        let visible = blueprint.regions_visible_to(stage);
+        layout
+            .retaining(|name| visible.contains(name))
+            .validate_working_room(stage_windows[i])
+            .map_err(|e| e.to_string())?;
     }
 
     // Kept before `stages` is consumed, so each stage's setup can fold the same
