@@ -1338,6 +1338,13 @@
             "type": "string"
           },
           "description": "Non-secret headers; a value may reference a secret with ${VAR} named in env."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment for a stdio server's child; a value may reference a secret with ${VAR} named in env."
         }
       }
     }

@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-reference"
 
-# Meshy does the actual image-to-3D work over its MCP server, which needs an API
-# key. The run refuses to start until the server is configured and the key is
-# set, and lev deps install writes the non-secret server settings for you.
+# Meshy does the actual image-to-3D work over its MCP server (run with npx),
+# which needs an API key. The run refuses to start until the server is
+# configured and the key is set. lev deps install writes the non-secret server
+# settings and allowlists the key so its ${MESHY_API_KEY} stays in your
+# environment rather than the config file.
 [[dependencies]]
 name = "meshy"
 kind = "mcp_server"
@@ -16,11 +18,23 @@ description = "Meshy image-to-3D, reached over its MCP server"
 remedy = "Run: lev deps install sprite-to-3d, then set MESHY_API_KEY in your environment"
 
 [dependencies.install.server]
-transport = "http"
-url = "https://www.meshy.ai/mcp"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@meshy-ai/meshy-mcp-server"]
 
-[dependencies.install.server.headers]
-Authorization = "Bearer ${MESHY_API_KEY}"
+[dependencies.install.server.env]
+MESHY_API_KEY = "${MESHY_API_KEY}"
+
+# The Meshy MCP server runs with npx, which Node.js provides.
+[[dependencies]]
+name = "npx"
+kind = "binary"
+command = "npx"
+remedy = "Install Node.js (it provides npx), for example from https://nodejs.org"
+
+[dependencies.install.commands]
+macos = "brew install node"
+linux = "sudo apt-get install -y nodejs npm"
 
 # ── Regions ────────────────────────────────────────────────────────────────
 

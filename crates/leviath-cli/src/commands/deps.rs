@@ -352,7 +352,7 @@ fn mcp_from_template(
         command: tpl.command.clone(),
         url: tpl.url.clone(),
         args: tpl.args.clone(),
-        env: std::collections::HashMap::new(),
+        env: tpl.env.clone().into_iter().collect(),
         headers: tpl.headers.clone().into_iter().collect(),
     }
 }
@@ -365,7 +365,7 @@ fn run_plan(
     config: &mut crate::config::Config,
 ) -> anyhow::Result<()> {
     if let Some((server, secrets)) = &plan.server {
-        add_server(config, server, &env.config_path)?;
+        add_server(config, server, secrets, &env.config_path)?;
         for var in secrets {
             if env
                 .probe
@@ -401,19 +401,35 @@ fn run_plan(
 fn add_server(
     config: &mut crate::config::Config,
     server: &MCPServerConfig,
+    env_secrets: &[String],
     path: &Path,
 ) -> anyhow::Result<()> {
     server
         .clone()
         .resolve()
         .map_err(|e| anyhow::anyhow!("the server template is not valid: {e}"))?;
+    let mut changed = false;
     if config.mcp_servers.iter().any(|s| s.name == server.name) {
         println!("  MCP server '{}' is already configured.", server.name);
-        return Ok(());
+    } else {
+        config.mcp_servers.push(server.clone());
+        println!("  added MCP server '{}' to your config.", server.name);
+        changed = true;
     }
-    config.mcp_servers.push(server.clone());
-    config.save_to_path_public(path)?;
-    println!("  added MCP server '{}' to your config.", server.name);
+    // Allowlist the secrets the server's `${VAR}` headers interpolate. Without
+    // this the header is refused even when the variable is set, so the server
+    // connects unauthenticated - the exact gap that makes an install look done
+    // but fail at the first call.
+    for var in env_secrets {
+        if !config.security.allow_env_vars.iter().any(|v| v == var) {
+            config.security.allow_env_vars.push(var.clone());
+            println!("  allowed {var} for the server's headers ([security] allow_env_vars).");
+            changed = true;
+        }
+    }
+    if changed {
+        config.save_to_path_public(path)?;
+    }
     Ok(())
 }
 
@@ -710,9 +726,17 @@ mod tests {
             &env,
         )
         .unwrap_err(); // still blocking because the secret is not set
-        // The server was written to config.
+        // The server was written to config, and its secret was allowlisted so
+        // the `${MESHY_API_KEY}` header will interpolate.
         let config = crate::config::Config::load_from_path_public(&env.config_path).unwrap();
         assert!(config.mcp_servers.iter().any(|s| s.name == "meshy"));
+        assert!(
+            config
+                .security
+                .allow_env_vars
+                .iter()
+                .any(|v| v == "MESHY_API_KEY")
+        );
         // With the secret set and --all, re-installing is idempotent: the
         // server is already configured and the secret is already set.
         let env2 = env_with(
