@@ -388,13 +388,17 @@ Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite
 
 It works in stages. First it renders a clean front T-pose from the sprite, then back and side views
 that match it, drawing more than one where it is unsure. A filter stage deletes the bad renders
-(off-model, pixel-art, or a multi-angle turnaround sheet) and keeps the good single views, so no
-rejected render is left to confuse the model builder. A coverage stage then checks whether the kept
-views cover enough angles; if a view is missing or weak it draws more, conditioning each on both the
-sprite sheet and the good views already in hand, and this loop is bounded. Meshy builds one model
-from the chosen views, with symmetry turned off so a one-sided detail like an arm cannon survives
-instead of being mirrored away. A final stage compares the model against the views and, if it
-drifted, sends it back to be rebuilt a bounded number of times before finishing.
+(off-model, pixel-art, or a multi-angle turnaround sheet) and keeps the good single views. A critique
+stage, on a second model chosen for a sharp eye, then compares each kept view against the source part
+by part and records anything missing or wrong - an absent arm cannon, a shoulder pad on the wrong
+side - into a dedicated region; it is the only stage that clears an item, and only after confirming
+on the images that the detail is now there. A coverage stage decides whether the angles are covered
+and that list is clear; if not, a generation pass redraws the views to fix exactly those items,
+conditioned on both the sprite sheet and the good views already in hand, and the whole filter to
+critique to generate loop is bounded. Meshy then builds one model from the chosen views, with
+symmetry turned off so a one-sided detail like an arm cannon survives instead of being mirrored away.
+A final stage compares the model against the views and, if it drifted, sends it back to be rebuilt a
+bounded number of times before finishing.
 
 ## How the coding agent verifies its work
 

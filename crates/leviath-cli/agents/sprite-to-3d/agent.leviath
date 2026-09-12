@@ -56,8 +56,8 @@ accepts = ["image/*"]
 # Every view render the prep and generate stages draw lands here, one entry
 # each. Because a produced image is named after its own bytes (image-<sha>.png),
 # the candidates never collide and the filter stage can point at one exactly to
-# keep or drop. The filter stage prunes this down to the good views before the
-# model is built, so no rejected render lingers to distract Meshy.
+# keep or drop. The filter stage prunes this down to the good views, and the
+# generate stage refills it, so no rejected render lingers to distract Meshy.
 [context.regions.references]
 kind = "pinned"
 budget = "20%"
@@ -65,12 +65,22 @@ accepts = ["image/*"]
 
 [context.regions.review]
 kind = "pinned"
-budget = "10%"
+budget = "8%"
+accepts = ["text/*"]
+
+# The running list of details that are absent or wrong in the reference renders
+# compared with the source: a missing arm cannon, a shoulder pad, a color that
+# drifted. The critique stage owns this region - it is the only stage that adds
+# or clears an item, and it clears one only after confirming, on the images, that
+# the detail is now present. Every generation pass reads it to know what to fix.
+[context.regions.missing]
+kind = "pinned"
+budget = "6%"
 accepts = ["text/*"]
 
 [context.regions.model]
 kind = "pinned"
-budget = "20%"
+budget = "18%"
 accepts = ["model/*"]
 
 [context.regions.scratchpad]
@@ -94,29 +104,29 @@ will be built from, all in the same style and all on-model.
 If the task names a specific character on a busy sheet, render only that one and
 ignore the other characters, animation frames, and palette swatches.
 
+Render the character's CANONICAL design, drawn from the whole sheet, not from one
+frame. Look across every frame for the signature parts - a weapon, an arm cannon,
+a shoulder pad, a tail, a hat - and include them, even when a particular idle
+frame happens to omit one (an arm that is a cannon in most frames must be the
+cannon here, not a plain hand). Keep asymmetric parts on the correct side.
+
 Work in this order:
 
 1. FRONT FIRST. Draw ONE polished, high-quality render of the character standing
    in a full-body, front-facing T-pose on a plain neutral background. This is the
    anchor every other view must match. It must look like a clean 3D character
    render, NOT pixel art: smooth surfaces, rounded volumes, soft studio lighting
-   and clear depth, the way a modern stylized game character looks. Translate the
-   sprite's design faithfully: same silhouette, proportions, colors, and
-   accessories, including one-sided details like an arm cannon or a shoulder pad,
-   rendered as a solid 3D figure rather than pixels.
+   and clear depth, the way a modern stylized game character looks.
 
 2. THEN THE OTHER VIEWS. Using BOTH the sprite sheet in the source region AND the
    front render you just made as reference, draw the same character, in the same
-   T-pose, style, proportions and colors, from three more angles: the back, the
-   left side, and the right side. Consistency with the front render matters more
-   than anything: it is the same character turning around, not a re-imagining.
-   Keep every asymmetric accessory on the correct side in every view.
+   T-pose, style, proportions, colors and accessories, from three more angles:
+   the back, the left side, and the right side. Consistency with the front render
+   matters more than anything: it is the same character turning around.
 
 Draw ONE single view per image. Do not pack several angles into one turnaround
 sheet: the later stages need each view on its own. Draw one at a time and store
-each in the references region. If a view comes out off-model or inconsistent with
-the front, draw it again; a second candidate for a view you are unsure about is
-fine, since the next stage filters them.
+each in the references region.
 
 Keep the set small: at most two candidates for any one angle, and no more than
 EIGHT renders in all. A larger set will not fit in a single request downstream,
@@ -140,7 +150,6 @@ format = "image/*"
 
 [stages.prep-references.transitions.filter-references]
 hint = "Once the references region holds view renders of the character to filter."
-# Carry the renders forward; the next stage prunes them.
 transform = "direct"
 
 # ── 2. Filter: drop the bad renders, keep the good single views ──────────────
@@ -149,7 +158,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Delete off-model, malformed, or multi-view renders; keep the good single views"
 max_iterations = 10
-max_revisits = 3
+max_revisits = 4
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete", "submit_output"]
 system_prompt = """
@@ -158,19 +167,20 @@ the source and against each other, and remove the ones that would hurt the model
 
 Delete a render (context_delete, by the index or key from context_list, one at a
 time) when it is any of these:
-- off-model: wrong silhouette, proportions, colors, or a missing or invented
-  accessory;
+- off-model: wrong silhouette, proportions, or colors;
 - not a clean 3D render: pixel art, flat, or malformed;
 - a multi-angle turnaround SHEET rather than a single view - Meshy needs one view
   per image, and a composite sheet builds a relief of the sheet;
 - a duplicate or clearly weaker version of a view you are already keeping.
 
-Keep the good single views: ideally a clean front, back, left and right. It is
-fine to keep more than one good render of an angle. When you finish, the
-references region should hold only good, single-character views.
+Do NOT delete a render only because it is missing a detail like an arm cannon:
+that is the critique stage's call to make and record, not a reason to throw the
+view away here. Never delete the last remaining render of an angle. When in
+doubt, keep it.
 
-Write into the review region which views you kept, for which angles, and note any
-weakness the later stages should know about. Then hand off to assess-coverage.
+Keep the good single views: ideally a clean front, back, left and right. Write
+into the review region which views you kept, for which angles. Then hand off to
+critique-references.
 """
 
 [stages.filter-references.model]
@@ -183,36 +193,87 @@ model = "anthropic/claude-opus-5"
 [stages.filter-references.context]
 reset = ["conversation"]
 
-[stages.filter-references.transitions.assess-coverage]
+[stages.filter-references.transitions.critique-references]
 hint = "Once only good single views remain and the review region records what was kept."
 transform = "direct"
 
-# ── 3. Assess coverage: enough good views to build, or generate more? ────────
+# ── 3. Critique: compare each view to the source and log what is missing ─────
+
+[stages.critique-references]
+mode = "autonomous"
+description = "Critically compare the views to the source and maintain the missing-details list"
+max_iterations = 8
+max_revisits = 4
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete", "submit_output"]
+system_prompt = """
+You are the critical reviewer. Compare the reference views in the references
+region against the source sprite carefully and skeptically. Your job is to catch
+details the renders dropped or got wrong - the mistakes a friendlier reviewer
+would let slide.
+
+Go part by part over the character's canonical design as the source shows it
+across all its frames: silhouette, proportions, colors, and every accessory or
+weapon - an arm cannon, a shoulder pad, a tail, a hat, a belt. For each view,
+note anything missing, on the wrong side, or wrong.
+
+The missing region is yours alone to maintain, and it is the record the next
+generation pass fixes from:
+- Read what it already lists (context_read). For each item, look at the current
+  views and decide whether it is now genuinely fixed. Only when you can confirm,
+  on the images, that the detail is present and correct do you remove that item
+  (context_delete). This sign-off is the whole point: an item leaves the list
+  only because you verified the fix, never on anyone's say-so.
+- Add an item (context_write/context_append) for every missing or wrong detail
+  you find that is not already listed, naming the detail, the view, and what it
+  should be (for example: "front and left views: right arm is a plain hand, but
+  the source's Mega Buster arm cannon should be there").
+
+When the missing region reflects the true state of the views, hand off to
+assess-coverage. Do not generate or delete images here.
+"""
+
+[stages.critique-references.model]
+allow_user_default = false
+
+[[stages.critique-references.model.models]]
+provider = "openrouter"
+model = "google/gemini-2.5-pro"
+
+[stages.critique-references.context]
+reset = ["conversation"]
+
+[stages.critique-references.transitions.assess-coverage]
+hint = "Once the missing region reflects the true state of the reference views."
+transform = "direct"
+
+# ── 4. Assess: enough good, complete views to build, or generate more? ───────
 
 [stages.assess-coverage]
 mode = "autonomous"
-description = "Decide whether the kept views cover enough angles to build, or more are needed"
+description = "Decide whether the views are complete enough to build, or more are needed"
 max_iterations = 8
-max_revisits = 3
+max_revisits = 4
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "submit_output"]
 system_prompt = """
-Look at the good views that survived filtering, in the references region, against
-the source and the review notes.
+Look at the good views in the references region, the missing region's list, and
+the review notes.
 
-Decide whether they cover enough of the character to build a solid model. A good
-set has a clear front, a back, and both sides, all consistent and on-model. A
-front alone leaves Meshy guessing the back and sides.
+Decide whether the views are ready to build into a model. They are ready when two
+things hold: the angles are covered (a clear front, a back, and both sides), and
+the missing region lists no serious detail still absent or wrong. A front alone,
+or a set that still drops the arm cannon, is not ready.
 
 Then choose one path:
-- If the coverage is good enough, transition to build-model.
-- If an angle is missing or the only render of it is weak, transition to
-  generate-more. First write into the review region EXACTLY which angles are
-  missing or weak and what to fix, because that is all the generator acts on.
+- If ready, transition to build-model.
+- If an angle is missing or the missing region still lists a serious detail,
+  transition to generate-more. The missing region already says what to fix; add
+  to the review region anything else the generator should know.
 
-Do not generate or delete images here; your job is to judge coverage and route.
-Angles cannot be added forever, so if coverage is merely imperfect rather than
-missing, prefer to build with what you have.
+Do not generate or delete images here. Angles and fixes cannot be chased forever,
+so once the missing list holds only minor cosmetic notes and the angles are
+covered, prefer to build.
 """
 
 [stages.assess-coverage.model]
@@ -226,37 +287,38 @@ model = "anthropic/claude-opus-5"
 reset = ["conversation"]
 
 [stages.assess-coverage.transitions.build-model]
-hint = "If the kept views cover enough angles to build a solid model."
+hint = "If the angles are covered and the missing region lists no serious detail."
 transform = "direct"
 
 [stages.assess-coverage.transitions.generate-more]
-hint = "If an angle is missing or weak and you have written what to generate into the review region."
+hint = "If an angle is missing or the missing region still lists a serious detail to fix."
 transform = "direct"
 
-# ── 4. Generate more: fill the missing angles from the sheet and good views ──
+# ── 5. Generate more: fix the missing details and fill the missing angles ────
 
 [stages.generate-more]
 mode = "autonomous"
-description = "Draw the missing or weak views, matching the sheet and the good references"
+description = "Draw views that fix the missing details and fill the missing angles"
 max_iterations = 10
-max_revisits = 3
+max_revisits = 4
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
 system_prompt = """
-The review region names the angles that are missing or too weak. The references
-region holds the good views kept so far, and the source region holds the original
-sprite sheet.
+The missing region names the details to fix and the review region names the angles
+that are missing or weak. The references region holds the good views kept so far,
+and the source region holds the original sprite sheet.
 
-Draw only the views the review region asks for, at most one or two, and no more.
-Condition each new render on BOTH the sprite sheet AND the good references
-already in place, so the new view is the same character, in the same style,
-proportions and colors, just turned to the angle that is missing. One single view
-per image, no turnaround sheets, on a plain neutral background. Store each in the
-references region.
+Redraw the views that need fixing and draw any missing angle, addressing every
+item the missing region lists - if it says an arm cannon is absent, the new
+renders must show the arm cannon. Condition each new render on BOTH the sprite
+sheet AND the good references already in place, so it is the same character, in
+the same style, proportions and colors, just corrected or turned to a new angle.
+One single view per image, no turnaround sheets, on a plain neutral background.
+Store each in the references region.
 
-Keep the total set of references small enough to fit one request: if it is
-already large, draw only what is truly missing. When you have drawn the requested
-views, submit. The filter stage will check them next. Use the scratchpad for notes.
+Do not edit the missing region yourself; the critique stage will re-check your
+work and sign off what is truly fixed. Keep the total set small enough to fit one
+request. When you have drawn the fixes, submit. Use the scratchpad for notes.
 """
 
 [stages.generate-more.model]
@@ -279,7 +341,7 @@ reset = ["conversation"]
 hint = "Once the requested views are in the references region."
 transform = "direct"
 
-# ── 5. Build the rigged, game-ready model with Meshy ─────────────────────────
+# ── 6. Build the rigged, game-ready model with Meshy ─────────────────────────
 
 [stages.build-model]
 mode = "autonomous"
@@ -307,8 +369,9 @@ build a relief of the whole sheet instead of the character. Then use only Meshy'
   several views (front, back, sides) and produces ONE model, which gives a far
   better back and sides than a single front view can. Pass all the chosen views.
 - If only single-image image-to-3D is available, use the front view.
-- Poll the task status until it is done. Wait between polls rather than checking
-  in a tight loop; the job takes minutes.
+- Poll the task status until it is done, but WAIT between polls rather than
+  checking in a tight loop; the job takes minutes, and each check costs an
+  inference.
 - Rig the model when the character is humanoid.
 - Download the finished file.
 
@@ -342,9 +405,12 @@ artifact. Use the scratchpad for working notes.
 [stages.build-model.model]
 allow_user_default = false
 
+# A small, cheap model: build-model mostly orchestrates Meshy and polls its task
+# status, which does not need a frontier model. The critical judgement of the
+# result is verify-model's job, on a stronger model.
 [[stages.build-model.model.models]]
 provider = "openrouter"
-model = "anthropic/claude-opus-5"
+model = "openai/gpt-5.4-mini"
 
 [stages.build-model.context]
 reset = ["conversation"]
@@ -354,10 +420,9 @@ reset = ["conversation"]
 
 [stages.build-model.transitions.verify-model]
 hint = "Once a rigged, game-ready model is in the model region."
-# Carry the model and references forward so verify-model can compare them.
 transform = "direct"
 
-# ── 6. Check the model against the references, and rebuild if it is off ───────
+# ── 7. Check the model against the references, and rebuild if it is off ───────
 
 [stages.verify-model]
 mode = "autonomous"
@@ -367,18 +432,18 @@ max_revisits = 2
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir", "submit_output"]
 system_prompt = """
-Look at the finished model in the model region against the reference views and
-the source. Judge it honestly: are the proportions right, the colors faithful,
-the accessories all present and on the correct side, the back and sides complete
-rather than flat or guessed, the topology clean?
+Look at the finished model in the model region against the reference views, the
+source, and the missing region. Judge it honestly: are the proportions right, the
+colors faithful, the accessories all present and on the correct side (including
+anything the missing region flagged), the back and sides complete rather than
+flat, the topology clean?
 
 Then choose one path:
 - If the model has a serious, fixable gap - a missing accessory, a flattened
   back, colors that drifted badly - write exactly what is wrong and how to fix it
   into the review region, then transition back to build-model to rebuild. Be
   specific; the builder acts only on what you write. Only loop back for problems a
-  rebuild can realistically fix, and remember rebuilds are limited, so do not send
-  it back for small cosmetic things.
+  rebuild can realistically fix, and remember rebuilds are limited.
 - If the model faithfully matches the references, transition to finalize.
 
 Do not try to rebuild the model yourself here; your job is to judge and route.
@@ -402,7 +467,7 @@ transform = "direct"
 hint = "If the model faithfully matches the reference views."
 transform = "direct"
 
-# ── 7. Finalize: submit the model as the run's artifact ──────────────────────
+# ── 8. Finalize: submit the model as the run's artifact ──────────────────────
 
 [stages.finalize]
 mode = "output"
@@ -413,8 +478,8 @@ available_tools = ["context_read", "context_list", "read_file", "list_dir", "sub
 system_prompt = """
 The model region holds the finished, rigged model and the review region holds the
 verifier's assessment. Submit the model as the run's final output. In your answer,
-summarize briefly what the model is and note any minor caveats the verifier
-raised, so the operator knows what they are getting.
+summarize briefly what the model is and note any caveats the verifier or the
+missing region raised, so the operator knows what they are getting.
 """
 
 [stages.finalize.model]
