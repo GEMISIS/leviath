@@ -379,8 +379,12 @@ mode = "autonomous"
 description = "Use Meshy to turn the chosen views into one rigged, game-ready model"
 max_iterations = 20
 max_revisits = 2
-available_connectors = ["meshy"]
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir"]
+# Grant only the five Meshy tools this stage needs, by name, rather than
+# available_connectors = ["meshy"], which pulls in all ~24 of Meshy's tools. The
+# full toolset's schemas are ~37k tokens - on their own larger than the context
+# window the entry stage's image model sets for the shared layout - which left no
+# room for a reply and stalled the stage in empty turns. Five tools fit easily.
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "meshy__meshy_image_to_3d", "meshy__meshy_multi_image_to_3d", "meshy__meshy_get_task_status", "meshy__meshy_rig", "meshy__meshy_download_model"]
 system_prompt = """
 The references region holds the good views of the character - a front, and
 usually a back and sides. Those renders are your 3D input, not the source sprite
@@ -425,15 +429,9 @@ path in the review region. Do not end the run here; when the model is in the mod
 region the run moves on to verify it. Use the scratchpad for working notes.
 """
 
-# Meshy is for 3D only. Its image-generation and text tools are denied here, so
-# the model cannot spend credits regenerating a reference - the image work is
-# the reference stages' job, done with an image model.
-[stages.build-model.tool_permissions]
-"meshy__meshy_image_to_image" = "deny"
-"meshy__meshy_text_to_image" = "deny"
-"meshy__meshy_text_to_3d" = "deny"
-"meshy__meshy_creative_lab" = "deny"
-
+# Meshy is for 3D only. The five tools granted above are the only ones this stage
+# can reach, so its image-generation and text tools are simply absent - no
+# deny-list needed, and the credits cannot be spent regenerating a reference.
 [stages.build-model.model]
 allow_user_default = false
 
