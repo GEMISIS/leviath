@@ -737,6 +737,10 @@ impl Provider for OllamaProvider {
         Some(crate::ModelPricing::flat(0.0, 0.0))
     }
 
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        Some(&self.learned)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the server
         // says, what this build was compiled with.
@@ -1021,6 +1025,7 @@ mod tests {
         let provider = OllamaProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
         );
+        assert!(provider.learned_models().is_some());
         let p = provider.pricing("qwen3.5:9b").expect("a known zero");
         assert_eq!(p.input_per_mtok, 0.0);
         assert_eq!(p.output_per_mtok, 0.0);

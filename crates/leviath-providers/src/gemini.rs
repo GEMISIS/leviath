@@ -375,6 +375,10 @@ impl Provider for GeminiProvider {
             .or_else(|| crate::pricing::published_rates("google", model))
     }
 
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        Some(&self.learned)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         let base = self
             .learned
@@ -616,6 +620,7 @@ mod tests {
             overrides,
             None,
         );
+        assert!(provider.learned_models().is_some());
 
         // Configured: the operator's number, not the table's.
         let configured = provider.pricing("gemini-3.5-flash").expect("configured");

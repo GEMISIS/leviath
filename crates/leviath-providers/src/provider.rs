@@ -1032,6 +1032,17 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// This provider's primed catalogue, so a registry can read it into the
+    /// shared on-disk cache after priming and fill it from that cache on a
+    /// build that has not primed.
+    ///
+    /// `None` for a provider that keeps no learned store: a script provider,
+    /// and any whose listing this build never reads. Such a provider answers
+    /// from its compiled table either way, so there is nothing to cache.
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        None
+    }
+
     /// Why this provider will not serve `model_key`, when it has something
     /// more useful to say than "it is not in my catalogue".
     ///
@@ -2162,6 +2173,9 @@ mod tests {
             .prime_capabilities()
             .await
             .expect("a provider that needs no priming reports success");
+        // A provider whose limits come from its compiled table keeps no learned
+        // store, so it neither writes to nor is filled from the shared cache.
+        assert!(MinimalProvider.learned_models().is_none());
     }
 
     #[tokio::test]

@@ -19,14 +19,19 @@
 use crate::capabilities::{LimitsSource, ModelCapabilities};
 use crate::pricing::ModelPricing;
 use crate::provider::ModelInfo;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// One model as its provider's listing described it.
 ///
 /// See the module doc for what `None` means. Not `Eq` because a rate is an
-/// `f64`.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// `f64`. `Serialize`/`Deserialize` so a primed catalogue can be written to a
+/// shared on-disk cache and read back by a process that did not prime it;
+/// `#[serde(default)]` so a field this build added is a missing key, not a
+/// parse error, when it reads a cache an older build wrote.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LearnedModel {
     /// The name the provider shows people, when it publishes one.
     pub display_name: Option<String>,
@@ -108,6 +113,15 @@ impl LearnedModels {
     /// Replace the whole catalogue with what a listing just said.
     pub fn replace(&self, models: HashMap<String, LearnedModel>) {
         *leviath_core::sync::lock(&self.0) = models;
+    }
+
+    /// A copy of the whole catalogue, for writing to the shared cache. Sorted
+    /// into a `BTreeMap` so two saves of the same data produce the same bytes.
+    pub fn snapshot(&self) -> std::collections::BTreeMap<String, LearnedModel> {
+        leviath_core::sync::lock(&self.0)
+            .iter()
+            .map(|(id, m)| (id.clone(), m.clone()))
+            .collect()
     }
 
     /// What the listing said about `id`, if it mentioned it.
@@ -380,6 +394,14 @@ mod tests {
                 .max_context_tokens,
             1_050_000
         );
+    }
+
+    #[test]
+    fn snapshot_copies_the_whole_catalogue_sorted() {
+        let snap = store().snapshot();
+        let keys: Vec<&str> = snap.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["claude-sonnet-5", "openai/gpt-5.5"]);
+        assert_eq!(snap["openai/gpt-5.5"].max_context_tokens, Some(1_050_000));
     }
 
     #[test]
