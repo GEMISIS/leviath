@@ -724,6 +724,56 @@ fn the_renamed_keys_migration_rewrites_a_legacy_default_model() {
     });
 }
 
+/// The media-cap migration: a config carrying the old 64 MiB default is lowered
+/// to the new default and taken only once, while a value the user chose is left
+/// untouched.
+#[test]
+fn the_media_cap_migration_lowers_the_old_default_but_spares_a_custom_value() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let write = |body: &str| {
+            std::fs::write(fixture.dir.path().join("config.toml"), body).expect("write the config");
+        };
+        write("[mime]\nmax_media_bytes_per_request = 67108864\n");
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let env = fixture.env_with("/home/u/.cargo/bin/lev", true, true, MIGRATIONS);
+
+        let names: Vec<&str> = plan(&args, &env)
+            .migrations
+            .iter()
+            .map(|m| m.name)
+            .collect();
+        assert!(names.contains(&"media-request-cap"), "{names:?}");
+
+        execute_with(&args, &env, "0.6.0").expect("the flow succeeds");
+        let after = Config::load_from_path_public(&env.config_path).expect("parses");
+        assert_eq!(
+            after.mime.max_media_bytes_per_request,
+            crate::config::DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST
+        );
+        // Taken once: the rewritten file no longer needs it.
+        assert!(
+            !plan(&args, &env)
+                .migrations
+                .iter()
+                .any(|m| m.name == "media-request-cap")
+        );
+
+        // A number the user chose (40 MiB) is left exactly as written.
+        write("[mime]\nmax_media_bytes_per_request = 41943040\n");
+        assert!(
+            !plan(&args, &env)
+                .migrations
+                .iter()
+                .any(|m| m.name == "media-request-cap"),
+            "a deliberate value must not be migrated"
+        );
+    });
+}
+
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 #[test]
