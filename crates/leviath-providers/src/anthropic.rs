@@ -941,6 +941,10 @@ impl Provider for AnthropicProvider {
             .or_else(|| crate::pricing::published_rates("anthropic", model))
     }
 
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        Some(&self.learned)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the API
         // says, what this build was compiled with.
@@ -1099,6 +1103,7 @@ mod tests {
             overrides,
             None,
         );
+        assert!(provider.learned_models().is_some());
 
         // Configured: the operator's number, not the table's.
         let configured = provider.pricing("claude-opus-5").expect("configured");

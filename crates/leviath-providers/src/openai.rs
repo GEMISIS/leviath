@@ -441,6 +441,10 @@ impl Provider for OpenAIProvider {
             .or_else(|| crate::pricing::published_rates("openai", model))
     }
 
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        Some(&self.learned)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // The listing says nothing about size or shape (see
         // `prime_capabilities`), so the table is the base and the operator's
@@ -604,6 +608,7 @@ mod tests {
             overrides,
             None,
         );
+        assert!(provider.learned_models().is_some());
 
         // Configured: the operator's number, not the table's.
         let configured = provider.pricing("gpt-5.5").expect("configured");

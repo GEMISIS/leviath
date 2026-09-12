@@ -688,6 +688,10 @@ impl Provider for OpenRouterProvider {
         "openrouter"
     }
 
+    fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
+        Some(&self.learned)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what OpenRouter
         // says, what this build was compiled with.
@@ -870,6 +874,7 @@ mod tests {
             crate::provider::build_http_client(None).expect("a test client builds"),
             "k".to_string(),
         );
+        assert!(p.learned_models().is_some());
         assert_eq!(p.pricing("x-ai/grok-4.6"), None);
     }
     use super::*;

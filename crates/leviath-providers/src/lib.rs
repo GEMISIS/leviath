@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 pub mod capabilities;
+pub mod capability_cache;
 pub mod claude_code;
 pub mod codex;
 #[cfg(feature = "debug-http")]
@@ -40,6 +41,7 @@ mod test_support;
 
 pub use anthropic::AnthropicProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMime};
+pub use capability_cache::CapabilityCache;
 pub use claude_code::ClaudeCodeProvider;
 pub use codex::{CodexProvider, ProviderAuthStore, ProviderGrant};
 pub use endpoint::EndpointProvider;
