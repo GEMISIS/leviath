@@ -542,6 +542,22 @@ fn build_agent_inner(
     // 1. Load the blueprint (the client resolves the manifest path).
     let (content, blueprint) = load_blueprint(args, deps.config)?;
 
+    // 1b. Fail fast if a required dependency is not satisfied, before any
+    // billed inference. Every spawn - `lev run`, the serve API, sub-agents and
+    // fan-out - passes through here, so this is the one place that gate lives.
+    if let Some(msg) = crate::dependencies::evaluate(
+        &blueprint.dependencies,
+        &deps.config.mcp_servers,
+        Path::new(&args.blueprint_path)
+            .parent()
+            .unwrap_or(Path::new(".")),
+        &crate::dependencies::SystemProbe,
+    )
+    .blocking_message()
+    {
+        return Err(msg);
+    }
+
     // 2a. Entry stage + per-stage sandbox resolution. Each stage's effective
     // sandbox cascades stage → agent → global (`resolve_sandbox`); building the
     // manager creates any containers up front and fails here (returning the
@@ -1819,6 +1835,44 @@ system = { kind = "pinned", max_tokens = 1000 }
         .unwrap_err();
         assert!(err.contains("cannot read mime check"), "got: {err}");
         assert!(err.contains("gone.rhai"), "got: {err}");
+    }
+
+    /// A required dependency that is not satisfied fails the spawn before any
+    /// tokens are spent, with a message pointing at `lev deps`.
+    #[tokio::test]
+    async fn build_agent_fails_fast_on_an_unmet_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [[dependencies]]\nname = \"key\"\nkind = \"env\"\n\
+             var = \"LEVIATH_DEPS_SPAWN_UNSET_XYZ\"\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let err = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &args,
+        )
+        .unwrap_err();
+        assert!(err.contains("dependencies are not satisfied"), "got: {err}");
+        assert!(err.contains("LEVIATH_DEPS_SPAWN_UNSET_XYZ"), "got: {err}");
+        assert!(err.contains("lev deps"), "got: {err}");
     }
 
     /// The run id becomes a directory name and everything a run writes lands

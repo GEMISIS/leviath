@@ -164,16 +164,28 @@
             "description": "Exactly one of per_byte, per_pixel (with max), per_second or fixed.",
             "additionalProperties": false,
             "properties": {
-              "per_byte": { "type": "number" },
-              "per_pixel": { "type": "integer" },
-              "max": { "type": "integer" },
-              "per_second": { "type": "integer" },
-              "fixed": { "type": "integer" }
+              "per_byte": {
+                "type": "number"
+              },
+              "per_pixel": {
+                "type": "integer"
+              },
+              "max": {
+                "type": "integer"
+              },
+              "per_second": {
+                "type": "integer"
+              },
+              "fixed": {
+                "type": "integer"
+              }
             }
           },
           "extensions": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Extensions, without the dot, that imply this type."
           },
           "magic": {
@@ -233,6 +245,13 @@
             }
           }
         }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Things that must be in place before the agent runs: an MCP server, an environment variable, a program on PATH, or a condition a Rhai script checks. Declared, never granted; an unmet required dependency fails the spawn before any billed inference.",
+      "items": {
+        "$ref": "#/$defs/dependency"
       }
     }
   },
@@ -1197,6 +1216,135 @@
         },
         "on_error": {
           "type": "string"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One [[dependencies]] entry. The kind field selects what must be present and which of the kind fields (server/env, var, command, check) apply.",
+      "required": [
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "A short identifier, unique within the blueprint."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mcp_server",
+            "env",
+            "binary",
+            "script"
+          ],
+          "description": "What must be present."
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether an unmet dependency blocks the run."
+        },
+        "remedy": {
+          "type": "string",
+          "description": "A human sentence on how to satisfy the dependency, shown when it is missing."
+        },
+        "description": {
+          "type": "string",
+          "description": "Why the agent needs it."
+        },
+        "server": {
+          "type": "string",
+          "description": "kind=mcp_server: the MCP server name that must be configured."
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "kind=mcp_server: environment variables or secrets the server needs."
+        },
+        "var": {
+          "type": "string",
+          "description": "kind=env: the variable that must be set and non-empty."
+        },
+        "command": {
+          "type": "string",
+          "description": "kind=binary: the program that must resolve on PATH."
+        },
+        "check": {
+          "type": "string",
+          "description": "kind=script: path to the Rhai check script (returns #{ ok, remedy })."
+        },
+        "install": {
+          "$ref": "#/$defs/dependencyInstall"
+        }
+      }
+    },
+    "dependencyInstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How `lev deps install` can put a dependency in place. Never run automatically.",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "A shell command that installs the dependency on any platform."
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Per-OS shell commands keyed by macos/linux/windows, preferred over command on a matching host."
+        },
+        "script": {
+          "type": "string",
+          "description": "A Rhai install script (relative to the blueprint), gated like a script tool."
+        },
+        "server": {
+          "$ref": "#/$defs/mcpServerTemplate"
+        }
+      }
+    },
+    "mcpServerTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "kind=mcp_server install: the non-secret server settings written into the user's config. Secrets are named in env and prompted for.",
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": [
+            "stdio",
+            "http"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Non-secret headers; a value may reference a secret with ${VAR} named in env."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment for a stdio server's child; a value may reference a secret with ${VAR} named in env."
         }
       }
     }

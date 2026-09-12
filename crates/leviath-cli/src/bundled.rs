@@ -1405,6 +1405,16 @@ mod tests {
                 leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
 
             for stage in &blueprint.stages {
+                // Portability is about stages that fall back to the user's
+                // configured default. A stage that pins its models on purpose
+                // (`allow_user_default = false`) is opting out of it - an image
+                // or 3D stage cannot be provider-portable, because a vendor like
+                // Anthropic has no image model at all - so it is not held to the
+                // every-provider rule. Stages that allow the default (every
+                // other bundled stage) still are.
+                if !stage.model.allow_user_default {
+                    continue;
+                }
                 let stage_name = &stage.name;
                 let listed: Vec<&str> = stage
                     .model

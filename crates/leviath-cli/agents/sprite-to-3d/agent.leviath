@@ -1,0 +1,267 @@
+[agent]
+name = "sprite-to-3d"
+version = "0.1.0"
+description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
+entry_stage = "prep-reference"
+
+# Meshy does the actual image-to-3D work over its MCP server (run with npx),
+# which needs an API key. The run refuses to start until the server is
+# configured and the key is set. lev deps install writes the non-secret server
+# settings and allowlists the key so its ${MESHY_API_KEY} stays in your
+# environment rather than the config file.
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+description = "Meshy image-to-3D, reached over its MCP server"
+remedy = "Run: lev deps install sprite-to-3d, then set MESHY_API_KEY in your environment"
+
+[dependencies.install.server]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@meshy-ai/meshy-mcp-server"]
+
+[dependencies.install.server.env]
+MESHY_API_KEY = "${MESHY_API_KEY}"
+
+# The Meshy MCP server runs with npx, which Node.js provides.
+[[dependencies]]
+name = "npx"
+kind = "binary"
+command = "npx"
+remedy = "Install Node.js (it provides npx), for example from https://nodejs.org"
+
+[dependencies.install.commands]
+macos = "brew install node"
+linux = "sudo apt-get install -y nodejs npm"
+
+# ── Regions ────────────────────────────────────────────────────────────────
+
+[context.regions.task]
+kind = "pinned"
+budget = "5%"
+
+[context.regions.conversation]
+kind = "sliding_window"
+max_items = 40
+max_tokens = 8000
+budget = "5%"
+
+[context.regions.source]
+kind = "pinned"
+budget = "20%"
+accepts = ["image/*"]
+
+# One reference only: a sliding window of size one keeps just the latest image
+# the reference stage settled on, so build-model has a single, unambiguous
+# picture to hand Meshy - no picking among same-named candidates.
+[context.regions.reference]
+kind = "sliding_window"
+max_items = 1
+max_tokens = 4000
+budget = "20%"
+accepts = ["image/*"]
+
+[context.regions.review]
+kind = "pinned"
+budget = "10%"
+accepts = ["text/*"]
+
+[context.regions.model]
+kind = "pinned"
+budget = "20%"
+accepts = ["model/*"]
+
+[context.regions.scratchpad]
+kind = "clearable"
+max_tokens = 20000
+budget = "20%"
+
+# ── 1. Prepare a single clean T-pose reference image ─────────────────────────
+
+[stages.prep-reference]
+mode = "autonomous"
+description = "Make one polished 3D-style T-pose reference render of the character"
+max_iterations = 10
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
+system_prompt = """
+The source region holds a sprite sheet or a single image of a character.
+
+Produce ONE polished, high-quality render of that character standing in a
+full-body, front-facing T-pose on a plain neutral background, and store it in the
+reference region. This render is what a 3D model will be built from, so it must
+look like a clean 3D character render, NOT pixel art: smooth surfaces, rounded
+volumes, soft studio lighting and clear depth, the way a modern stylized game
+character looks. Translate the sprite's design into that 3D-render style.
+
+Keep the character on-model: the same silhouette, proportions, colors, and
+accessories as the source, just rendered as a solid 3D-looking figure rather than
+pixels. Do not invent details the source does not show, and do not make a
+multi-frame sheet - a single clean T-pose gives the best image-to-3D result.
+
+Regenerate until you have one you are happy with, then submit; only the latest
+image is kept as the reference. Use the scratchpad for working notes.
+"""
+
+[stages.prep-reference.model]
+allow_user_default = false
+
+[[stages.prep-reference.model.models]]
+provider = "openrouter"
+model = "openai/gpt-5-image"
+
+[stages.prep-reference.output]
+format = "image/*"
+
+[stages.prep-reference.output_routing]
+"image/*" = "reference"
+
+[stages.prep-reference.transitions.review-reference]
+hint = "Once the reference region holds a single clean full-body T-pose of the character."
+# Carry the reference forward. `clear` would wipe it (a sliding-window region is
+# stage-specific); the conversation is freshened by each stage's context.reset.
+transform = "direct"
+
+# ── 2. Rank and critique the reference before spending on 3D ─────────────────
+
+[stages.review-reference]
+mode = "autonomous"
+description = "Rank the reference against the source and call out flaws before building the model"
+max_iterations = 8
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "submit_output"]
+system_prompt = """
+Compare the reference image against the source. If more than one candidate is
+present, pick the best one and say why. Judge whether the reference is a faithful,
+clean, single T-pose: correct silhouette, proportions, colors and accessories,
+neutral background, no missing or invented details.
+
+Write your ranking and any flaws into the review region, then hand off to
+build-model. Call out flaws clearly even when you proceed, so the later stages
+can compensate for them.
+"""
+
+[stages.review-reference.model]
+allow_user_default = false
+
+[[stages.review-reference.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.review-reference.context]
+reset = ["conversation"]
+
+[stages.review-reference.transitions.build-model]
+hint = "Once you have ranked the reference and written your assessment, with any flaws, into the review region."
+
+# ── 3. Build the rigged, game-ready model with Meshy ─────────────────────────
+
+[stages.build-model]
+mode = "autonomous"
+description = "Use Meshy to turn the T-pose reference into a rigged, game-ready model"
+max_iterations = 20
+require_output = true
+available_connectors = ["meshy"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
+system_prompt = """
+The reference region holds exactly one finished T-pose render of the character.
+That render is your 3D input - not the source sprite sheet. It is final: do not
+change it, and do not generate or edit any images. Meshy is here to build a 3D
+model, nothing else.
+
+Export that one reference image to the working directory, and feed THAT file to
+Meshy. Never pass the source sprite sheet to image_to_3d - it would build a relief
+of the whole sheet instead of the character. Then use only Meshy's 3D tools:
+- meshy_image_to_3d on the reference to generate the model.
+- meshy_get_task_status to poll until it is done.
+- meshy_rig to rig the model when the character is humanoid.
+- meshy_download_model to fetch the finished file.
+
+Model settings that matter, passed to image_to_3d:
+- symmetry_mode = "off". This is important: the character is symmetric except for
+  one-sided details like an arm cannon or a shoulder pad, and Meshy's default
+  auto-symmetry mirrors both sides to match, which deletes those details (the
+  arm cannon becomes an ordinary hand). Turn symmetry off so asymmetric
+  accessories survive.
+- Prefer the balanced model tier over the highest-detail one: the very high
+  detail setting tends to lose geometry behind the character, while the balanced
+  tier keeps clean, complete topology for a stylized game asset.
+- Aim for roughly 8k to 12k polygons (target_polycount), and quad topology for
+  clean rigging.
+- Enable PBR, and give a texture_prompt describing the character's palette and
+  materials (read the review notes and the reference) so the colors match.
+
+After the model comes back, look at Meshy's preview and confirm the asymmetric
+details from the reference are present - in particular any arm cannon. If a
+one-sided accessory was flattened to match the other side, regenerate with
+symmetry off before finishing.
+
+Store the downloaded model in the model region and submit it as the run's model
+artifact. Use the scratchpad for working notes.
+"""
+
+# Meshy is for 3D only. Its image-generation and text tools are denied here, so
+# the model cannot spend credits regenerating the reference - the image work is
+# the reference stage's job, done with an image model.
+[stages.build-model.tool_permissions]
+"meshy__meshy_image_to_image" = "deny"
+"meshy__meshy_text_to_image" = "deny"
+"meshy__meshy_text_to_3d" = "deny"
+"meshy__meshy_creative_lab" = "deny"
+
+[stages.build-model.model]
+allow_user_default = false
+
+[[stages.build-model.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.build-model.context]
+reset = ["conversation"]
+
+[stages.build-model.output_routing]
+"model/*" = "model"
+
+[stages.build-model.transitions.verify-model]
+hint = "Once a rigged, game-ready model is in the model region."
+# Carry the model and reference forward so verify-model can compare them.
+transform = "direct"
+
+# ── 4. Check the model against the source for gaps before finalizing ─────────
+
+[stages.verify-model]
+mode = "output"
+description = "Compare the model against the source for gaps before finalizing"
+max_iterations = 10
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir", "submit_output"]
+system_prompt = """
+Look at the finished model in the model region against the source and the
+reference. Call out any gaps: missing accessories, wrong proportions, colors that
+drifted, geometry that is incomplete.
+
+Write any gaps you find into the review region, then submit the model as the
+final output. If the gaps are serious, say so plainly in your notes so the
+operator can re-run with a better reference.
+"""
+
+[stages.verify-model.model]
+allow_user_default = false
+
+[[stages.verify-model.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.verify-model.context]
+reset = ["conversation"]
+
+# No outgoing transitions: this stage finalizes the run by submitting the model.
+# Fixing gaps happens by re-running the build within build-model's own revisits.
+[stages.verify-model.transitions]
+
+[[stages.verify-model.output.artifacts]]
+name = "model"
+type = "model/*"
+required = true

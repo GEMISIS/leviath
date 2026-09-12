@@ -378,6 +378,25 @@ named as such, with the stanza that would grant it. The daemon's own lint has no
 consult, so there it stays the plain "these need granting" note. See
 [reading outside the workdir](/docs/security#reading-outside-the-workdir).
 
+### `lev deps <list|check|install> <agent>`
+
+Inspect and set up what an agent [declares it needs](/docs/agents#dependencies). The agent is an
+installed name or a path to a blueprint directory or manifest.
+
+`lev deps list <agent>` prints the declared dependencies: an MCP server, an environment variable, a
+program on PATH, or a condition a Rhai script decides.
+
+`lev deps check <agent>` says whether this machine satisfies them, marking each one and exiting
+non-zero when a required one is missing, so it fits a setup script. This is the same check a run
+makes: an agent whose required dependency is unmet fails to spawn before any model is billed.
+
+`lev deps install <agent>` puts them in place, and always asks before it does anything, because it
+changes your machine. For an MCP server it writes the blueprint's non-secret server settings into
+your config; for each secret the server needs it tells you to set the variable in your own
+environment rather than writing it to a file. For a program it runs the install command the
+blueprint declares (a per-OS one when given) or a Rhai install script. Pass `--yes` to skip the
+confirmation and `--all` to act on every dependency, not only the missing ones.
+
 ### `lev test [PATH]`
 
 Run a blueprint's tests: everything in its `tests/` directory, against the real provider.

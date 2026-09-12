@@ -6002,6 +6002,11 @@ fn the_published_schema_and_the_parser_agree_on_every_key() {
             super::stage::HOOK_KEYS,
         ),
         ("agent", &["$defs", "agent"][..], super::AGENT_KEYS),
+        (
+            "dependency",
+            &["$defs", "dependency"][..],
+            super::sections::DEPENDENCIES_KEYS,
+        ),
     ] {
         assert_eq!(
             keys_at(schema_path),
@@ -6294,4 +6299,376 @@ fn artifact_declarations_are_checked_at_load() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("tool_accepts must be a table"), "{err}");
+}
+
+// ─── [[dependencies]] ─────────────────────────────────────────────────────
+
+use crate::blueprint::{Dependency, DependencyInstall, DependencyKind, McpServerTemplate};
+
+fn deps_manifest(body: &str) -> Result<crate::Blueprint> {
+    parse_manifest(&format!("[agent]\nname = \"deps\"\n{body}\n"))
+}
+
+#[test]
+fn parses_every_dependency_kind() {
+    let bp = deps_manifest(
+        r#"
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+remedy = "set up meshy"
+description = "image to 3d"
+
+[[dependencies]]
+name = "key"
+kind = "env"
+var = "SOME_KEY"
+
+[[dependencies]]
+name = "blender"
+kind = "binary"
+command = "blender"
+required = false
+
+[[dependencies]]
+name = "probe"
+kind = "script"
+check = "deps/check.rhai"
+"#,
+    )
+    .unwrap();
+    assert_eq!(bp.dependencies.len(), 4);
+    let meshy = &bp.dependencies[0];
+    assert!(meshy.required);
+    assert_eq!(meshy.remedy.as_deref(), Some("set up meshy"));
+    assert_eq!(meshy.description.as_deref(), Some("image to 3d"));
+    assert!(
+        matches!(&meshy.kind, DependencyKind::McpServer { server, env }
+        if server == "meshy" && env == &["MESHY_API_KEY".to_string()])
+    );
+    assert!(matches!(&bp.dependencies[1].kind, DependencyKind::Env { var } if var == "SOME_KEY"));
+    assert!(!bp.dependencies[2].required);
+    assert!(
+        matches!(&bp.dependencies[2].kind, DependencyKind::Binary { command } if command == "blender")
+    );
+    assert!(
+        matches!(&bp.dependencies[3].kind, DependencyKind::Script { check } if check == "deps/check.rhai")
+    );
+    bp.validate().unwrap();
+}
+
+#[test]
+fn dependency_kind_tag_names_each_variant() {
+    assert_eq!(
+        DependencyKind::McpServer {
+            server: "s".into(),
+            env: vec![]
+        }
+        .tag(),
+        "mcp_server"
+    );
+    assert_eq!(DependencyKind::Env { var: "v".into() }.tag(), "env");
+    assert_eq!(
+        DependencyKind::Binary {
+            command: "c".into()
+        }
+        .tag(),
+        "binary"
+    );
+    assert_eq!(DependencyKind::Script { check: "x".into() }.tag(), "script");
+}
+
+#[test]
+fn parses_mcp_install_with_server_template() {
+    let bp = deps_manifest(
+        r#"
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+
+[dependencies.install]
+command = "echo generic"
+
+[dependencies.install.commands]
+macos = "brew install meshy"
+linux = "apt install meshy"
+
+[dependencies.install.server]
+transport = "http"
+url = "https://api.meshy.ai/mcp"
+args = ["--flag"]
+
+[dependencies.install.server.headers]
+Authorization = "Bearer ${MESHY_API_KEY}"
+
+[dependencies.install.server.env]
+MESHY_API_KEY = "${MESHY_API_KEY}"
+"#,
+    )
+    .unwrap();
+    let install = bp.dependencies[0].install.as_ref().unwrap();
+    assert_eq!(install.command.as_deref(), Some("echo generic"));
+    assert_eq!(
+        install.commands.get("macos").map(String::as_str),
+        Some("brew install meshy")
+    );
+    assert_eq!(
+        install.commands.get("linux").map(String::as_str),
+        Some("apt install meshy")
+    );
+    let server = install.server.as_ref().unwrap();
+    assert_eq!(server.transport.as_deref(), Some("http"));
+    assert_eq!(server.url.as_deref(), Some("https://api.meshy.ai/mcp"));
+    assert_eq!(server.args, vec!["--flag".to_string()]);
+    assert_eq!(
+        server.headers.get("Authorization").map(String::as_str),
+        Some("Bearer ${MESHY_API_KEY}")
+    );
+    assert_eq!(
+        server.env.get("MESHY_API_KEY").map(String::as_str),
+        Some("${MESHY_API_KEY}")
+    );
+    bp.validate().unwrap();
+}
+
+#[test]
+fn parses_script_install_and_stdio_server_command() {
+    let bp = deps_manifest(
+        r#"
+[[dependencies]]
+name = "thing"
+kind = "script"
+check = "deps/check.rhai"
+[dependencies.install]
+script = "deps/install.rhai"
+"#,
+    )
+    .unwrap();
+    let install = bp.dependencies[0].install.as_ref().unwrap();
+    assert_eq!(install.script.as_deref(), Some("deps/install.rhai"));
+    bp.validate().unwrap();
+
+    // A stdio server template (command, no transport) parses too.
+    let bp = deps_manifest(
+        r#"
+[[dependencies]]
+name = "srv"
+kind = "mcp_server"
+server = "srv"
+[dependencies.install.server]
+command = "srv-mcp"
+"#,
+    )
+    .unwrap();
+    let server = bp.dependencies[0]
+        .install
+        .as_ref()
+        .unwrap()
+        .server
+        .as_ref()
+        .unwrap();
+    assert_eq!(server.command.as_deref(), Some("srv-mcp"));
+    bp.validate().unwrap();
+}
+
+#[test]
+fn dependency_entry_must_be_a_table() {
+    let err = parse_manifest("dependencies = [\"x\"]\n[agent]\nname = \"d\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("must be a table"), "{err}");
+}
+
+#[test]
+fn dependency_parse_errors() {
+    for (body, expect) in [
+        (
+            "[[dependencies]]\nkind = \"env\"\nvar = \"X\"",
+            "a dependency needs a name",
+        ),
+        ("[[dependencies]]\nname = \"d\"", "needs a kind"),
+        (
+            "[[dependencies]]\nname = \"d\"\nkind = \"nope\"",
+            "unknown kind 'nope'",
+        ),
+        (
+            "[[dependencies]]\nname = \"d\"\nkind = \"mcp_server\"",
+            "needs 'server'",
+        ),
+        (
+            "[[dependencies]]\nname = \"d\"\nkind = \"env\"",
+            "needs 'var'",
+        ),
+        (
+            "[[dependencies]]\nname = \"d\"\nkind = \"binary\"",
+            "needs 'command'",
+        ),
+        (
+            "[[dependencies]]\nname = \"d\"\nkind = \"script\"",
+            "needs 'check'",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\nenv=[1]",
+            "env entries must be strings",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\ninstall = 3",
+            "install must be a table",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install]\nserver = 3",
+            "install.server must be a table",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\nargs=[1]",
+            "install.server.args entries must be strings",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ncommand=\"x\"\n[dependencies.install.server.headers]\nA = 1",
+            "install.server.headers values must be strings",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ncommand=\"x\"\n[dependencies.install.server.env]\nK = 1",
+            "install.server.env values must be strings",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.commands]\nmacos = 1",
+            "install.commands values must be strings",
+        ),
+    ] {
+        let err = deps_manifest(body).unwrap_err().to_string();
+        assert!(err.contains(expect), "body {body:?} -> {err}");
+    }
+}
+
+#[test]
+fn dependency_validate_errors() {
+    for (body, expect) in [
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"env\"\nvar=\"A\"\n[[dependencies]]\nname=\"d\"\nkind=\"env\"\nvar=\"B\"",
+            "two dependencies share this name",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.server]\ncommand=\"x\"",
+            "install.server is only valid",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ntransport=\"ftp\"",
+            "must be \"stdio\" or \"http\"",
+        ),
+        (
+            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.commands]\nfreebsd=\"x\"",
+            "must be \"macos\", \"linux\" or \"windows\"",
+        ),
+    ] {
+        let bp = deps_manifest(body).unwrap();
+        let err = bp.validate().unwrap_err().to_string();
+        assert!(err.contains(expect), "body {body:?} -> {err}");
+    }
+}
+
+#[test]
+fn empty_dependency_name_fails_validate() {
+    let mut bp = parse_manifest("[agent]\nname = \"a\"\n").unwrap();
+    bp.dependencies.push(Dependency {
+        name: "  ".into(),
+        kind: DependencyKind::Env { var: "X".into() },
+        required: true,
+        remedy: None,
+        description: None,
+        install: None,
+    });
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("non-empty name"), "{err}");
+}
+
+#[test]
+fn dependencies_round_trip_through_json() {
+    let bp = deps_manifest(
+        r#"
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+[dependencies.install]
+command = "pip install meshy"
+[dependencies.install.server]
+url = "https://api.meshy.ai/mcp"
+
+[[dependencies]]
+name = "blender"
+kind = "binary"
+command = "blender"
+required = false
+"#,
+    )
+    .unwrap();
+    let json = serde_json::to_string(&bp.dependencies).unwrap();
+    let back: Vec<Dependency> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, bp.dependencies);
+}
+
+#[test]
+fn dependency_required_defaults_true_on_deserialize() {
+    let dep: Dependency = serde_json::from_str(r#"{"name":"d","kind":"env","var":"X"}"#).unwrap();
+    assert!(dep.required);
+    assert!(matches!(dep.kind, DependencyKind::Env { .. }));
+}
+
+#[test]
+fn install_and_template_defaults_are_empty() {
+    assert!(DependencyInstall::default().command.is_none());
+    assert!(DependencyInstall::default().commands.is_empty());
+    assert!(McpServerTemplate::default().transport.is_none());
+    assert!(McpServerTemplate::default().args.is_empty());
+}
+
+#[test]
+fn empty_kind_fields_fail_validate() {
+    // The parser rejects an empty kind field up front, so these are only
+    // reachable on a blueprint built in code or restored from JSON. Validate
+    // catches them there too.
+    let cases = [
+        (
+            DependencyKind::McpServer {
+                server: " ".into(),
+                env: vec![],
+            },
+            "non-empty 'server'",
+        ),
+        (
+            DependencyKind::Env { var: String::new() },
+            "non-empty 'var'",
+        ),
+        (
+            DependencyKind::Binary {
+                command: "  ".into(),
+            },
+            "non-empty 'command'",
+        ),
+        (
+            DependencyKind::Script {
+                check: String::new(),
+            },
+            "non-empty 'check'",
+        ),
+    ];
+    for (kind, expect) in cases {
+        let mut bp = parse_manifest("[agent]\nname = \"a\"\n").unwrap();
+        bp.dependencies.push(Dependency {
+            name: "d".into(),
+            kind,
+            required: true,
+            remedy: None,
+            description: None,
+            install: None,
+        });
+        let err = bp.validate().unwrap_err().to_string();
+        assert!(err.contains(expect), "{err}");
+    }
 }

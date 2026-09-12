@@ -9,7 +9,7 @@ use crate::error::ValidationError;
 use crate::layout::{ContextLayout, RegionSeed};
 use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Regions every stage can see, whatever its own `[context.regions]` says.
 ///
@@ -142,6 +142,15 @@ pub struct Blueprint {
     /// empty table is the common case and is not written back.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub mime_types: toml::Table,
+
+    /// Things that must be in place before this agent can run, declared as
+    /// `[[dependencies]]` in the manifest: an MCP server, an environment
+    /// variable, a program on `PATH`, or a condition a Rhai script checks.
+    /// Declared, never granted. The operator is shown what is missing and how
+    /// to fix it, and an unmet required dependency fails the spawn before the
+    /// first billed inference. See [`Dependency`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<Dependency>,
 }
 
 /// The `[safe_commands]` section of a manifest.
@@ -179,6 +188,158 @@ pub struct ReadPathsConfig {
     pub allow: Vec<String>,
 }
 
+/// One `[[dependencies]]` entry: something that must be in place before an
+/// agent can run. Declared in the manifest, never granted - every surface that
+/// reports it (`lev validate`, `lev deps`, the spawn gate, the API) shows what
+/// is missing and the `remedy` for fixing it.
+///
+/// The `kind` field selects what must be present and carries its own fields
+/// (see [`DependencyKind`]); the optional [`install`](Self::install) block says
+/// how `lev deps install` can put it in place, and is never run automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dependency {
+    /// A short identifier, unique within the blueprint.
+    pub name: String,
+
+    /// What must be present, and the fields describing it.
+    #[serde(flatten)]
+    pub kind: DependencyKind,
+
+    /// Whether an unmet dependency blocks the run. `true` (the default) fails
+    /// the spawn; `false` downgrades a miss to a warning the run proceeds past.
+    #[serde(default = "default_dependency_required")]
+    pub required: bool,
+
+    /// A human sentence telling the user how to satisfy the dependency, shown
+    /// wherever a miss is reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+
+    /// A one-line note on why the agent needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// How `lev deps install` can put this dependency in place. Optional and
+    /// never run automatically: installing runs commands or writes config on
+    /// the user's machine and always asks first. See [`DependencyInstall`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<DependencyInstall>,
+}
+
+/// The default for [`Dependency::required`]: a declared dependency blocks the
+/// run unless the manifest says otherwise.
+fn default_dependency_required() -> bool {
+    true
+}
+
+/// What a [`Dependency`] requires, selected by the manifest's `kind` field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DependencyKind {
+    /// An MCP server that must be configured in the user's config, plus any
+    /// environment variables or secrets it needs. The check confirms the named
+    /// server exists and every `env` var is set and non-empty.
+    McpServer {
+        /// The server name that must appear in the user's `[[mcp_servers]]`.
+        server: String,
+        /// Environment variables / secrets the server needs. Values are
+        /// prompted for at install, never stored in the blueprint.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<String>,
+    },
+    /// An environment variable that must be set and non-empty.
+    Env {
+        /// The variable name.
+        var: String,
+    },
+    /// A program that must resolve on `PATH`.
+    Binary {
+        /// The program name, e.g. `blender`.
+        command: String,
+    },
+    /// A condition a Rhai script decides. The `check` script returns
+    /// `#{ ok: bool, remedy: string }`; the optional installer lives in
+    /// [`DependencyInstall::script`].
+    Script {
+        /// Path to the Rhai check script, relative to the blueprint directory.
+        check: String,
+    },
+}
+
+impl DependencyKind {
+    /// The manifest `kind` string for this variant (`"mcp_server"`, `"env"`,
+    /// `"binary"`, `"script"`), matching the serialized tag.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            DependencyKind::McpServer { .. } => "mcp_server",
+            DependencyKind::Env { .. } => "env",
+            DependencyKind::Binary { .. } => "binary",
+            DependencyKind::Script { .. } => "script",
+        }
+    }
+}
+
+/// How a [`Dependency`] can be installed by `lev deps install`.
+///
+/// Every field is optional; a dependency may declare any combination. Nothing
+/// here runs without an explicit `lev deps install` and a confirmation, because
+/// each option changes the user's machine: running a command, executing a
+/// script, or writing an MCP server into their config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyInstall {
+    /// A shell command that installs the dependency on any platform, e.g.
+    /// `"pip install trimesh"`. Run only after the user confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Per-OS shell commands, keyed by `"macos"`, `"linux"` or `"windows"`,
+    /// preferred over [`command`](Self::command) on a matching host.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, String>,
+
+    /// A Rhai install script (relative to the blueprint), run with the script
+    /// I/O surface and gated exactly like a script tool. For a `script`
+    /// dependency this is its installer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+
+    /// For an `mcp_server` dependency: the non-user-specific server settings the
+    /// installer writes into the user's config. Secrets are never placed here -
+    /// they are named in the dependency's `env` and prompted for securely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<McpServerTemplate>,
+}
+
+/// The non-secret settings for an MCP server that a blueprint can ship so
+/// `lev deps install` can write it into the user's config. Mirrors the
+/// installable half of the CLI's MCP server config; the user-specific secrets
+/// (header and env values) are prompted for and stored separately.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerTemplate {
+    /// `"stdio"` or `"http"`. Inferred from `command`/`url` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// The program to launch for a stdio server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The endpoint for an http server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Arguments passed to `command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Non-secret headers, for an http server. A value may reference a secret
+    /// with `${VAR}`, where `VAR` is named in the dependency's `env`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Environment for a stdio server's child process. A value may reference a
+    /// secret with `${VAR}` (expanded from the environment at connect time, so
+    /// the secret stays out of the config file), where `VAR` is named in the
+    /// dependency's `env`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
 impl Blueprint {
     /// Create a new blueprint with the specified configuration.
     pub fn new(
@@ -210,6 +371,7 @@ impl Blueprint {
             safe_commands: None,
             output: None,
             mime_types: toml::Table::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -344,6 +506,83 @@ impl Blueprint {
 
         self.validate_region_references()?;
 
+        self.validate_dependencies()?;
+
+        Ok(())
+    }
+
+    /// Check every `[[dependencies]]` entry is well-formed. This validates the
+    /// declaration only - names are unique and non-empty, each kind's fields are
+    /// present, and an `install` block is shaped for its kind. Whether the
+    /// dependency is actually satisfied (the server exists, the var is set, the
+    /// binary is on `PATH`) is checked at spawn and by `lev deps check`, which
+    /// see the machine this crate does not touch.
+    fn validate_dependencies(&self) -> std::result::Result<(), ValidationError> {
+        let mut seen = std::collections::HashSet::new();
+        for dep in &self.dependencies {
+            let name = dep.name.trim();
+            if name.is_empty() {
+                return Err(ValidationError::Dependency {
+                    name: dep.name.clone(),
+                    message: "a dependency needs a non-empty name".to_string(),
+                });
+            }
+            if !seen.insert(name) {
+                return Err(ValidationError::Dependency {
+                    name: name.to_string(),
+                    message: "two dependencies share this name".to_string(),
+                });
+            }
+            let require = |field: &str, value: &str| -> std::result::Result<(), ValidationError> {
+                if value.trim().is_empty() {
+                    return Err(ValidationError::Dependency {
+                        name: name.to_string(),
+                        message: format!(
+                            "a '{}' dependency needs a non-empty '{field}'",
+                            dep.kind.tag()
+                        ),
+                    });
+                }
+                Ok(())
+            };
+            match &dep.kind {
+                DependencyKind::McpServer { server, .. } => require("server", server)?,
+                DependencyKind::Env { var } => require("var", var)?,
+                DependencyKind::Binary { command } => require("command", command)?,
+                DependencyKind::Script { check } => require("check", check)?,
+            }
+            if let Some(install) = &dep.install {
+                if install.server.is_some() && !matches!(dep.kind, DependencyKind::McpServer { .. })
+                {
+                    return Err(ValidationError::Dependency {
+                        name: name.to_string(),
+                        message: "install.server is only valid for a 'mcp_server' dependency"
+                            .to_string(),
+                    });
+                }
+                if let Some(transport) =
+                    install.server.as_ref().and_then(|s| s.transport.as_deref())
+                    && !matches!(transport, "stdio" | "http")
+                {
+                    return Err(ValidationError::Dependency {
+                        name: name.to_string(),
+                        message: format!(
+                            "install.server.transport must be \"stdio\" or \"http\", got \"{transport}\""
+                        ),
+                    });
+                }
+                for os in install.commands.keys() {
+                    if !matches!(os.as_str(), "macos" | "linux" | "windows") {
+                        return Err(ValidationError::Dependency {
+                            name: name.to_string(),
+                            message: format!(
+                                "install.commands key '{os}' must be \"macos\", \"linux\" or \"windows\""
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
