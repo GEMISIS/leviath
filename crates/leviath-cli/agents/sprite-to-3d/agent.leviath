@@ -94,8 +94,7 @@ budget = "20%"
 mode = "autonomous"
 description = "Render a clean front T-pose, then matching back and side views, from the sprite"
 max_iterations = 14
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
 The source region holds a sprite sheet or a single image of a character. Your
 job is to turn it into a small set of clean reference renders that a 3D model
@@ -131,8 +130,8 @@ each in the references region.
 Keep the set small: at most two candidates for any one angle, and no more than
 EIGHT renders in all. A larger set will not fit in a single request downstream,
 and the oldest images are dropped when it does not. When the references region
-holds a good front, back, left and right, submit even if you could draw more. Use
-the scratchpad for notes.
+holds a good front, back, left and right, stop even if you could draw more, and
+the run moves on to filter them. Use the scratchpad for notes.
 """
 
 [stages.prep-references.model]
@@ -159,8 +158,7 @@ mode = "autonomous"
 description = "Delete off-model, malformed, or multi-view renders; keep the good single views"
 max_iterations = 10
 max_revisits = 4
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 The references region holds the view renders drawn so far. Compare them against
 the source and against each other, and remove the ones that would hurt the model.
@@ -204,8 +202,7 @@ mode = "autonomous"
 description = "Critically compare the views to the source and maintain the missing-details list"
 max_iterations = 8
 max_revisits = 4
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 You are the critical reviewer. Compare the reference views in the references
 region against the source sprite carefully and skeptically. Your job is to catch
@@ -254,8 +251,14 @@ mode = "autonomous"
 description = "Decide whether the views are complete enough to build, or more are needed"
 max_iterations = 8
 max_revisits = 4
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append"]
+transition_prompt = """
+Decide what happens next with the reference views:
+- If the angles are covered and the missing region lists no serious detail still
+  absent or wrong, respond with: build-model
+- If an angle is missing or the missing region still lists a serious detail to
+  fix, respond with: generate-more
+"""
 system_prompt = """
 Look at the good views in the references region, the missing region's list, and
 the review notes.
@@ -301,8 +304,7 @@ mode = "autonomous"
 description = "Draw views that fix the missing details and fill the missing angles"
 max_iterations = 10
 max_revisits = 4
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
 You draw images. Your only job here is to DRAW the corrected and missing views
 now - do not just describe them.
@@ -325,7 +327,8 @@ references region as you go.
 
 Do not edit the missing region yourself; the critique stage re-checks your work
 and signs off what is truly fixed. Keep the set small enough to fit one request.
-Once you have drawn the fixes and the missing angles, submit.
+Once you have drawn the fixes and the missing angles, stop; the run moves back to
+the filter.
 """
 
 [stages.generate-more.model]
@@ -355,9 +358,8 @@ mode = "autonomous"
 description = "Use Meshy to turn the chosen views into one rigged, game-ready model"
 max_iterations = 20
 max_revisits = 2
-require_output = true
 available_connectors = ["meshy"]
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir"]
 system_prompt = """
 The references region holds the good views of the character - a front, and
 usually a back and sides. Those renders are your 3D input, not the source sprite
@@ -396,8 +398,10 @@ Model settings that matter:
 - Enable PBR, and give a texture_prompt describing the character's palette and
   materials (read the review notes and the references) so the colors match.
 
-Store the downloaded model in the model region and submit it as the run's model
-artifact. Use the scratchpad for working notes.
+Download the finished model to the working directory, then attach it to the model
+region with context_attach so the next stages can see and use it. Note the file's
+path in the review region. Do not end the run here; when the model is in the model
+region the run moves on to verify it. Use the scratchpad for working notes.
 """
 
 # Meshy is for 3D only. Its image-generation and text tools are denied here, so
@@ -438,8 +442,13 @@ mode = "autonomous"
 description = "Compare the model against the reference views and decide to rebuild or finalize"
 max_iterations = 10
 max_revisits = 2
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir", "submit_output"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
+transition_prompt = """
+Decide what happens to the model you just judged:
+- If it has a serious, fixable gap you have written into the review region,
+  respond with: build-model
+- If it faithfully matches the reference views, respond with: finalize
+"""
 system_prompt = """
 Look at the finished model in the model region against the reference views, the
 source, and the missing region. Judge it honestly: are the proportions right, the
@@ -482,13 +491,16 @@ transform = "direct"
 mode = "output"
 description = "Submit the finished model as the run's artifact"
 max_iterations = 6
-require_output = true
-available_tools = ["context_read", "context_list", "read_file", "list_dir", "submit_output"]
+available_tools = ["context_read", "context_list", "read_file", "list_dir"]
 system_prompt = """
 The model region holds the finished, rigged model and the review region holds the
-verifier's assessment. Submit the model as the run's final output. In your answer,
-summarize briefly what the model is and note any caveats the verifier or the
-missing region raised, so the operator knows what they are getting.
+verifier's assessment and the model file's path in the working directory.
+
+Call submit_output with the required `model` artifact pointing at that model file
+(list_dir the working directory if you need to find it - it is the downloaded
+.glb or .fbx). In the answer text, summarize briefly what the model is and note
+any caveats the verifier or the missing region raised, so the operator knows what
+they are getting. The run ends when you submit.
 """
 
 [stages.finalize.model]
