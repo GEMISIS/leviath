@@ -181,6 +181,13 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         blueprint.mime_types = rows.clone();
     }
 
+    // What the agent needs in place before it runs: [[dependencies]]. Parsed
+    // here so a broken declaration fails `lev validate` and the spawn rather
+    // than being ignored until the agent reaches for the missing thing.
+    if let Some(deps_arr) = array_of(&parsed, "dependencies") {
+        blueprint.dependencies = parse_dependencies(deps_arr)?;
+    }
+
     Ok(blueprint)
 }
 
