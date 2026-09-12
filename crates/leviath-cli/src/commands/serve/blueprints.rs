@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 
-use super::blueprint_types::{RoutePair, StageRoutingInfo};
+use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
 use super::types::*;
 use leviath_core::manifest::parse_manifest;
 
@@ -327,11 +327,16 @@ pub(super) async fn get_blueprint(
         .unwrap_or_default();
     let fan_outs = parsed.as_ref().map(fan_out_infos).unwrap_or_default();
     let stage_routing = parsed.as_ref().map(stage_routing_infos).unwrap_or_default();
+    let dependencies = parsed
+        .as_ref()
+        .map(super::blueprint_types::dependency_infos)
+        .unwrap_or_default();
     Ok(Json(BlueprintDetail {
         info,
         regions,
         fan_outs,
         stage_routing,
+        dependencies,
         manifest,
     }))
 }

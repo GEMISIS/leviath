@@ -455,7 +455,8 @@ pub(super) struct BlueprintInfo {
     /// answer to that would be an error arm no test can reach.
     ///
     /// Skipped when serializing, so `GET /api/blueprints` stays a catalog.
-    /// [`BlueprintDetail`] is what puts it on the wire.
+    /// [`BlueprintDetail`](super::blueprint_types::BlueprintDetail) is what puts
+    /// it on the wire.
     #[serde(skip)]
     pub(super) manifest: String,
 }
@@ -520,41 +521,6 @@ pub(super) struct FanOutInfo {
     /// stage names one; `null` means the conversation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) results_region: Option<String>,
-}
-
-/// One blueprint, with the manifest text behind it.
-///
-/// The detail route only. A listing that carried one of these per blueprint
-/// would send every manifest on the machine to answer "what agents are there",
-/// which is why this is a separate shape rather than an extra field on
-/// [`BlueprintInfo`].
-///
-/// Flattened, so the detail route's JSON is [`BlueprintInfo`]'s own fields
-/// plus `manifest`, and a client that reads only those is unaffected.
-#[derive(Debug, Serialize)]
-pub(super) struct BlueprintDetail {
-    #[serde(flatten)]
-    pub(super) info: BlueprintInfo,
-    /// The blueprint's context regions.
-    ///
-    /// On the detail route rather than the listing, for the same reason the
-    /// manifest is: answering "what agents are there" should not cost every
-    /// region of every agent on the machine.
-    pub(super) regions: Vec<RegionInfo>,
-    /// The blueprint's fan-out stages, with their limits as the daemon will
-    /// apply them. Empty for a blueprint that never fans out.
-    pub(super) fan_outs: Vec<FanOutInfo>,
-    /// The stages that route produced parts (`output_routing`) or reset a
-    /// region on entry (`context.reset`); empty when the blueprint does neither.
-    pub(super) stage_routing: Vec<super::blueprint_types::StageRoutingInfo>,
-    /// The manifest exactly as it is on disk.
-    ///
-    /// Without this a console has no way to read what it is editing: naming
-    /// the file in `path` is not the same as being able to open it, since the
-    /// browser cannot, and the fallbacks it is left with (a draft in local
-    /// storage, or a copy bundled at build time) are both disconnected from
-    /// the file the daemon actually runs.
-    pub(super) manifest: String,
 }
 
 /// Query for `GET /api/blueprints`.
