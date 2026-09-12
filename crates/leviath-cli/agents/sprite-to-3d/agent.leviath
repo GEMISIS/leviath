@@ -120,7 +120,9 @@ format = "image/*"
 
 [stages.prep-reference.transitions.review-reference]
 hint = "Once the reference region holds a single clean full-body T-pose of the character."
-transform = "clear"
+# Carry the reference forward. `clear` would wipe it (a sliding-window region is
+# stage-specific); the conversation is freshened by each stage's context.reset.
+transform = "direct"
 
 # ── 2. Rank and critique the reference before spending on 3D ─────────────────
 
@@ -164,12 +166,14 @@ require_output = true
 available_connectors = ["meshy"]
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
 system_prompt = """
-The reference region holds one finished T-pose render of the character. It is
-final: do not change it, and do not generate or edit any images. Meshy is here to
-build a 3D model, nothing else.
+The reference region holds exactly one finished T-pose render of the character.
+That render is your 3D input - not the source sprite sheet. It is final: do not
+change it, and do not generate or edit any images. Meshy is here to build a 3D
+model, nothing else.
 
-Export the reference image to the working directory, then use only Meshy's 3D
-tools on it:
+Export that one reference image to the working directory, and feed THAT file to
+Meshy. Never pass the source sprite sheet to image_to_3d - it would build a relief
+of the whole sheet instead of the character. Then use only Meshy's 3D tools:
 - meshy_image_to_3d on the reference to generate the model.
 - meshy_get_task_status to poll until it is done.
 - meshy_rig to rig the model when the character is humanoid.
@@ -210,7 +214,8 @@ reset = ["conversation"]
 
 [stages.build-model.transitions.verify-model]
 hint = "Once a rigged, game-ready model is in the model region."
-transform = "clear"
+# Carry the model and reference forward so verify-model can compare them.
+transform = "direct"
 
 # ── 4. Check the model against the source for gaps before finalizing ─────────
 
