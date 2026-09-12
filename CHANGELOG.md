@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+### Added
+
+- Blueprints can declare what has to be in place before they run, as a top-level
+  `[[dependencies]]` array: an MCP server with the env secrets it needs, an
+  environment variable, a program on `PATH`, or a condition a Rhai script
+  decides. An unmet required dependency fails the spawn before any model is
+  billed. `lev deps list` shows what an agent needs, `lev deps check` says
+  whether this machine has it and exits non-zero when it does not, and
+  `lev deps install` sets it up after asking: it writes an MCP server's
+  non-secret settings into your config and tells you to set the secret in your
+  own environment, or runs a declared shell command or Rhai install script. A
+  `sprite-to-3d` example agent under `docs/examples/` turns a sprite sheet into a
+  rigged, game-ready model with Meshy and declares the Meshy dependency (#827).
+
 ### Changed
 
 - The dashboard stage graph reads more clearly. A stage that can end the run
