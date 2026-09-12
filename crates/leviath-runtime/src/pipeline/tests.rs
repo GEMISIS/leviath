@@ -4158,6 +4158,142 @@ fn empty_response_respects_a_stage_that_disables_its_nudge() {
     assert_eq!(conversation_text(&world, e), "r");
 }
 
+// ── image stage: text-only when an image was expected ──
+
+/// A one-stage blueprint whose stage produces an image (declared through
+/// `output_routing`), so a text-only reply reads as a likely image-generation
+/// failure.
+fn image_bp() -> AgentBlueprint {
+    let mut stage = stage_named("draw", None, false, None);
+    stage
+        .output_routing
+        .insert("image/*".to_string(), "conversation".to_string());
+    AgentBlueprint(blueprint(vec![stage]))
+}
+
+/// A text-only reply that also carries one produced image part.
+fn infer_with_image() -> crate::components::InferenceResult {
+    let mut ir = infer_result_only(false);
+    ir.parts = vec![leviath_core::mime::Part::inline(
+        leviath_core::mime::MimeType::parse("image/png").unwrap(),
+        "x",
+    )];
+    ir
+}
+
+#[test]
+fn stage_expects_image_reads_format_and_routing() {
+    assert!(!stage_expects_image(None));
+    let plain = stage_named("a", None, false, None);
+    assert!(!stage_expects_image(Some(&plain)));
+
+    let mut routed = stage_named("b", None, false, None);
+    routed.output_routing.insert("image/*".into(), "r".into());
+    assert!(stage_expects_image(Some(&routed)));
+
+    let mut fmt_image = stage_named("c", None, false, None);
+    fmt_image.output = Some(leviath_core::output::OutputSpec {
+        format: Some("image/*".into()),
+        ..Default::default()
+    });
+    assert!(stage_expects_image(Some(&fmt_image)));
+
+    let mut fmt_text = stage_named("d", None, false, None);
+    fmt_text.output = Some(leviath_core::output::OutputSpec {
+        format: Some("markdown".into()),
+        ..Default::default()
+    });
+    assert!(!stage_expects_image(Some(&fmt_text)));
+}
+
+#[test]
+fn no_image_nudge_quotes_the_reply_and_truncates_a_long_one() {
+    assert!(no_image_nudge("   ").contains("may have failed"));
+    let short = no_image_nudge("I cannot draw that");
+    assert!(short.contains("I cannot draw that"));
+    assert!(!short.contains("..."));
+    let long = no_image_nudge(&"z".repeat(600));
+    assert!(long.contains("..."), "a long reply is truncated: {long}");
+}
+
+#[test]
+fn image_stage_nudges_when_the_reply_has_no_image() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false), // text "r", no image, no tool calls
+            StageProgress::default(),
+            image_bp(),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    // Sent round again, with the image nudge counted separately from the
+    // ordinary text-only one.
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    let p = world.get::<StageProgress>(e).unwrap();
+    assert_eq!(p.no_image_nudges, 1);
+    assert_eq!(p.images_produced, 0);
+    assert_eq!(p.text_only_nudges, 0);
+    assert!(conversation_text(&world, e).contains("no image"));
+}
+
+#[test]
+fn image_stage_does_not_nudge_when_the_reply_has_an_image() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_with_image(),
+            StageProgress::default(),
+            image_bp(),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    let p = world.get::<StageProgress>(e).unwrap();
+    assert_eq!(p.images_produced, 1, "the produced image was counted");
+    assert_eq!(p.no_image_nudges, 0, "so the image guard did not fire");
+}
+
+#[test]
+fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
+    // Budget spent and still no image: the guard steps aside so the stage can
+    // end rather than loop. The stage's nudge is off, so the fall-through
+    // resolves rather than nudging on text alone.
+    let mut bp = image_bp();
+    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+        enabled: Some(false),
+        ..Default::default()
+    });
+    let progress = StageProgress {
+        no_image_nudges: MAX_NO_IMAGE_NUDGES,
+        ..Default::default()
+    };
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            progress,
+            bp,
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(
+        world.get::<StageProgress>(e).unwrap().no_image_nudges,
+        MAX_NO_IMAGE_NUDGES,
+        "the guard did not fire again"
+    );
+}
+
 #[test]
 fn empty_response_honors_an_agent_level_max() {
     // `[agent.nudge] max = 0`: the very first text-only response is final.

@@ -687,6 +687,15 @@ pub(crate) struct StageProgress {
     /// without it a stuck interrupt whose edge became unavailable would ping-pong
     /// between [`detect_stuck_stage`] and [`resolve_transition`]'s resume arm.
     pub stuck_fired: bool,
+    /// Image parts this stage has produced. A stage that declares image output
+    /// but has produced none is one whose image generation is failing; the
+    /// counter tells that apart from a stage that has already drawn something
+    /// and is now wrapping up in text.
+    pub images_produced: usize,
+    /// Text-only replies nudged back because the stage expected an image and
+    /// had produced none. Bounded by `MAX_NO_IMAGE_NUDGES` so a model that
+    /// keeps refusing does not loop forever.
+    pub no_image_nudges: usize,
 }
 
 /// How a stage ended, when that governs the transition. Absent ⇒ the stage
@@ -871,6 +880,30 @@ pub(crate) fn handle_empty_response(
                 .insert(ReadyToInfer);
             continue;
         }
+        // A stage that produces an image but just returned text, and has drawn
+        // nothing so far, is one whose image generation is failing: a refusal, a
+        // content filter, or an error string in place of a data URI. Count what
+        // this turn drew first (an image reply has no tool calls, so it lands
+        // here too); if the stage still has no image, send the model's own words
+        // back so the retry is informed. Bounded, so a model that keeps refusing
+        // lets the stage end rather than looping.
+        if stage_expects_image(stage) {
+            progress.images_produced += image_part_count(&infer.parts);
+            if progress.images_produced == 0 && progress.no_image_nudges < MAX_NO_IMAGE_NUDGES {
+                progress.no_image_nudges += 1;
+                tracing::warn!(
+                    stage = stage.map(|s| s.name.as_str()).unwrap_or(""),
+                    "image stage returned text and no image; likely an image-generation failure"
+                );
+                store_reply(&mut window, infer, infer.reasoning.clone(), stage);
+                inject_system_nudge(&mut window, &no_image_nudge(&infer.response));
+                commands
+                    .entity(entity)
+                    .remove::<ReadyForTransition>()
+                    .insert(ReadyToInfer);
+                continue;
+            }
+        }
         if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
         {
             // The reply is accepted as the stage's last word, so it goes into
@@ -930,6 +963,56 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
          the work into smaller pieces: for a file, write the first part, then add each further \
          part with a separate call. The output limit has been raised to the model's maximum \
          for your next reply."
+    )
+}
+
+/// How many text-only replies an image stage is nudged back before it is let
+/// go. Small on purpose: an image model that returns text three times running
+/// is refusing or erroring, not warming up, and the stage's own
+/// `require_output`/`max_iterations` then ends it rather than looping.
+pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
+
+/// True when the stage declares image output: a `format`, or an
+/// `output_routing` target, for `image/*`. A plain prefix check, because both
+/// are opaque labels the manifest already validated as mime patterns.
+pub(crate) fn stage_expects_image(stage: Option<&leviath_core::blueprint::Stage>) -> bool {
+    let Some(stage) = stage else {
+        return false;
+    };
+    let format_is_image = stage
+        .output
+        .as_ref()
+        .and_then(|o| o.format.as_deref())
+        .is_some_and(|f| f.starts_with("image/"));
+    format_is_image || stage.output_routing.keys().any(|k| k.starts_with("image/"))
+}
+
+/// Image parts among a reply's produced parts.
+fn image_part_count(parts: &[leviath_core::mime::Part]) -> usize {
+    parts
+        .iter()
+        .filter(|p| p.mime_type.matches("image/*"))
+        .count()
+}
+
+/// The `[System]` line sent back when an image stage returned text and no
+/// image. It quotes the model's own words, because a refusal or a filtered
+/// request states its reason there, so the retry is informed rather than blind.
+pub(crate) fn no_image_nudge(reply_text: &str) -> String {
+    let trimmed = reply_text.trim();
+    if trimmed.is_empty() {
+        return "This stage produces an image, but your last reply contained no image. \
+                The image generation may have failed. Generate the image and try again."
+            .to_string();
+    }
+    let mut quoted = leviath_core::text::truncate_chars(trimmed, 500);
+    if trimmed.chars().count() > 500 {
+        quoted.push_str("...");
+    }
+    format!(
+        "This stage produces an image, but your last reply contained no image, only text: \
+         \"{quoted}\". That usually means the image generation failed or was refused. If that \
+         text names a problem, address it; then generate the image and try again."
     )
 }
 

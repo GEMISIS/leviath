@@ -34,6 +34,11 @@ same list.
 
 ### Changed
 
+- A stage that produces an image now notices when the model replies with text
+  and no image, which usually means the image generation failed or was refused.
+  It sends the model's own words back so the retry is informed, and after a few
+  such replies it lets the stage end rather than looping. The reply's text
+  often carries the reason, so it is no longer lost (#400).
 - An image a model draws is now named after its own content,
   `image-<sha>.png`, rather than its position in the reply. Two images drawn in
   different turns no longer collide on `image-1.png`, so a later stage can point
