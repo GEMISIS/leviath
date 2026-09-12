@@ -323,6 +323,68 @@ and the spawn, and a `check` script is compiled beside the agent's other scripts
 fence: it has to live inside the blueprint's directory. [Mime](/docs/mime#the-registry) has
 every field and [Rhai mime checks](/docs/rhai-mime-checks) the script.
 
+## Dependencies
+
+An agent can say what has to be in place on the machine before it runs, as a top-level
+`[[dependencies]]` array. This is a declaration, never a grant: Leviath shows the operator what is
+missing and how to fix it, and a run whose required dependency is unmet fails to spawn before any
+model is billed. `lev deps check <agent>` reports the same findings, and `lev deps install <agent>`
+sets them up after asking.
+
+Each entry has a `name`, a `kind`, an optional `required` (true by default), a human `remedy`
+shown when it is missing, and an optional `description`. The kind chooses what must be present:
+
+```toml
+# An MCP server that must be configured, plus the secret it needs.
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+remedy = "Run: lev deps install my-agent, then set MESHY_API_KEY"
+
+# What lev deps install writes into the user's config for that server. Secrets
+# are never stored here: they are named in env above and prompted for.
+[dependencies.install.server]
+transport = "http"
+url = "https://www.meshy.ai/mcp"
+[dependencies.install.server.headers]
+Authorization = "Bearer ${MESHY_API_KEY}"
+
+# A program that must be on PATH, with how to install it.
+[[dependencies]]
+name = "blender"
+kind = "binary"
+command = "blender"
+[dependencies.install]
+command = "brew install blender"          # or per-OS:
+[dependencies.install.commands]
+linux = "apt-get install -y blender"
+
+# An environment variable that must be set and non-empty.
+[[dependencies]]
+name = "token"
+kind = "env"
+var = "ACME_TOKEN"
+
+# A condition a Rhai script decides.
+[[dependencies]]
+name = "acme-setup"
+kind = "script"
+check = "deps/check.rhai"                  # returns () when satisfied, else a remedy string
+[dependencies.install]
+script = "deps/install.rhai"               # optional; runs only via lev deps install
+```
+
+A `check` script runs on a hardened engine with three read-only probes and nothing else:
+`has_env(name)`, `env(name)` and `path_exists(path)`. It returns `()` when the dependency is in
+place, or a string remedy when it is not. An `install` script gets one host function, `sh(command)`,
+and runs only when the user asks for it with `lev deps install`. Checking never changes the machine;
+only install does, and only after a confirmation.
+
+The `sprite-to-3d` example agent under `docs/examples/` declares the Meshy dependency above and is
+installed with `lev add docs/examples/sprite-to-3d`.
+
 ## How the coding agent verifies its work
 
 The bundled `coder` agent decides what "done" means before it starts, rather than judging it at

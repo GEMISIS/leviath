@@ -1,0 +1,210 @@
+[agent]
+name = "sprite-to-3d"
+version = "0.1.0"
+description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
+entry_stage = "prep-reference"
+
+# Meshy does the actual image-to-3D work over its MCP server, which needs an API
+# key. The run refuses to start until the server is configured and the key is
+# set, and lev deps install writes the non-secret server settings for you.
+[[dependencies]]
+name = "meshy"
+kind = "mcp_server"
+server = "meshy"
+env = ["MESHY_API_KEY"]
+description = "Meshy image-to-3D, reached over its MCP server"
+remedy = "Run: lev deps install sprite-to-3d, then set MESHY_API_KEY in your environment"
+
+[dependencies.install.server]
+transport = "http"
+url = "https://www.meshy.ai/mcp"
+
+[dependencies.install.server.headers]
+Authorization = "Bearer ${MESHY_API_KEY}"
+
+# ── Regions ────────────────────────────────────────────────────────────────
+
+[context.regions.task]
+kind = "pinned"
+budget = "5%"
+
+[context.regions.conversation]
+kind = "sliding_window"
+max_items = 40
+max_tokens = 8000
+budget = "5%"
+
+[context.regions.source]
+kind = "pinned"
+budget = "20%"
+accepts = ["image/*"]
+
+[context.regions.reference]
+kind = "pinned"
+budget = "20%"
+accepts = ["image/*"]
+
+[context.regions.review]
+kind = "pinned"
+budget = "10%"
+accepts = ["text/*"]
+
+[context.regions.model]
+kind = "pinned"
+budget = "20%"
+accepts = ["model/*"]
+
+[context.regions.scratchpad]
+kind = "clearable"
+max_tokens = 20000
+budget = "20%"
+
+# ── 1. Prepare a single clean T-pose reference image ─────────────────────────
+
+[stages.prep-reference]
+mode = "autonomous"
+description = "Make one clean, high-detail T-pose reference image of the character"
+max_iterations = 15
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
+system_prompt = """
+The source region holds a sprite sheet or a single image of a character.
+
+Produce ONE clean, high-detail image of that character standing in a full-body,
+front-facing T-pose on a plain neutral background, and store it in the reference
+region. A single clear T-pose image gives the best image-to-3D result, so do not
+make a multi-frame sheet here.
+
+Keep the character exactly on-model: the same silhouette, proportions, colors and
+accessories as the source. Do not restyle it, and do not invent details the
+source does not show. Use the scratchpad for working notes.
+"""
+
+[stages.prep-reference.model]
+allow_user_default = false
+
+[[stages.prep-reference.model.models]]
+provider = "openrouter"
+model = "openai/gpt-5-image"
+
+[stages.prep-reference.output]
+format = "image/*"
+
+[stages.prep-reference.output_routing]
+"image/*" = "reference"
+
+[stages.prep-reference.transitions.review-reference]
+hint = "Once the reference region holds a single clean full-body T-pose of the character."
+transform = "clear"
+
+# ── 2. Rank and critique the reference before spending on 3D ─────────────────
+
+[stages.review-reference]
+mode = "autonomous"
+description = "Rank the reference against the source and call out flaws before building the model"
+max_iterations = 8
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "submit_output"]
+system_prompt = """
+Compare the reference image against the source. If more than one candidate is
+present, pick the best one and say why. Judge whether the reference is a faithful,
+clean, single T-pose: correct silhouette, proportions, colors and accessories,
+neutral background, no missing or invented details.
+
+Write your ranking and any flaws into the review region, then hand off to
+build-model. Call out flaws clearly even when you proceed, so the later stages
+can compensate for them.
+"""
+
+[stages.review-reference.model]
+allow_user_default = false
+
+[[stages.review-reference.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.review-reference.context]
+reset = ["conversation"]
+
+[stages.review-reference.transitions.build-model]
+hint = "Once you have ranked the reference and written your assessment, with any flaws, into the review region."
+
+# ── 3. Build the rigged, game-ready model with Meshy ─────────────────────────
+
+[stages.build-model]
+mode = "autonomous"
+description = "Use Meshy to turn the T-pose reference into a rigged, game-ready model"
+max_iterations = 20
+require_output = true
+available_connectors = ["meshy"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
+system_prompt = """
+Use the Meshy tools to turn the single T-pose reference into a 3D model that is
+ready to drop into a game engine.
+
+Guidance that gives the best results:
+- Use Meshy's image-to-3D on the reference image.
+- Prefer the balanced model tier over the highest-detail one: the very high
+  detail setting tends to lose geometry behind the character, while the balanced
+  tier keeps clean, complete topology for a stylized game asset.
+- Aim for roughly 8k to 12k polygons.
+- Ask Meshy to rig the model when the character is humanoid.
+- Keep the colors and materials matching the reference.
+
+Download the finished model, store it in the model region, and submit it as the
+run's model artifact. Use the scratchpad for working notes.
+"""
+
+[stages.build-model.model]
+allow_user_default = false
+
+[[stages.build-model.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.build-model.context]
+reset = ["conversation"]
+
+[stages.build-model.output_routing]
+"model/*" = "model"
+
+[stages.build-model.transitions.verify-model]
+hint = "Once a rigged, game-ready model is in the model region."
+transform = "clear"
+
+# ── 4. Check the model against the source for gaps before finalizing ─────────
+
+[stages.verify-model]
+mode = "autonomous"
+description = "Compare the model against the source for gaps before finalizing"
+max_iterations = 10
+require_output = true
+available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir", "submit_output"]
+system_prompt = """
+Look at the finished model in the model region against the source and the
+reference. Call out any gaps: missing accessories, wrong proportions, colors that
+drifted, geometry that is incomplete.
+
+Write any gaps you find into the review region, then submit the model as the
+final output. If the gaps are serious, say so plainly in your notes so the
+operator can re-run with a better reference.
+"""
+
+[stages.verify-model.model]
+allow_user_default = false
+
+[[stages.verify-model.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.verify-model.context]
+reset = ["conversation"]
+
+# No outgoing transitions: this stage finalizes the run by submitting the model.
+# Fixing gaps happens by re-running the build within build-model's own revisits.
+[stages.verify-model.transitions]
+
+[[stages.verify-model.output.artifacts]]
+name = "model"
+type = "model/*"
+required = true
