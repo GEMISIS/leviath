@@ -115,10 +115,17 @@ impl NodeStatus {
 /// A box's height on the canvas: a border, the title, two detail rows.
 pub(crate) const NODE_HEIGHT: f64 = 4.0;
 
-/// A box's width for the longest id on the graph: `╭ ▶ ⠋ name ×12 ╮`, and
-/// room for `⑂ 3 run · 1 done · 0 fail`.
-pub(crate) fn node_width(longest_id: usize) -> f64 {
-    (longest_id + 10).max(28) as f64
+/// The smallest a box is drawn, so a one-word stage still reads as a box and
+/// the worker-count detail row (`⑂ 3 run · 1 done · 0 fail`) has room.
+pub(crate) const MIN_NODE_WIDTH: usize = 28;
+
+/// A box's width on the canvas, from the cells its content needs
+/// ([`StageNodeContent::box_width`]), floored at [`MIN_NODE_WIDTH`]. A
+/// left-to-right blueprint gives each box its own width this way; the snake and
+/// the top-to-bottom layout share one width (the widest node) so their columns
+/// stay aligned.
+pub(crate) fn node_width(content_cells: usize) -> f64 {
+    content_cells.max(MIN_NODE_WIDTH) as f64
 }
 
 /// Live counts of a fan-out stage's workers.
@@ -222,49 +229,106 @@ impl StageNodeContent {
         Line::from(Span::styled(format!(" {prefix}{name}{suffix} "), style))
     }
 
-    /// The first detail row: what the stage is, and how far the current
-    /// visit has got.
+    /// The first detail row: what the stage is and where the run is with it.
+    /// A stage is only ever current (the phase and iteration matter) or
+    /// visited (when it last ran matters) or pending (only its kind), never
+    /// two at once, so the row never has to carry an iteration and a clock
+    /// together and stays short enough for a plain box.
     fn detail_row(&self) -> String {
         if let Some(w) = self.workers {
             return format!("⑂ {} run · {} done · {} fail", w.running, w.done, w.failed);
         }
-        // The run's phase takes the kind label's place on the stage the run
-        // is in: "waiting" or "complete" is what matters there, and the row
-        // is not wide enough for both.
-        let phase = match self.status {
-            NodeStatus::Current { run, .. } => run.word(),
-            NodeStatus::Pending | NodeStatus::Visited { .. } => None,
-        };
-        let mut parts: Vec<String> = vec![phase.unwrap_or(self.kind_label).to_string()];
-        if let Some(iteration) = self.iteration {
-            parts.push(format!("iter {iteration}"));
+        match self.status {
+            NodeStatus::Current { run, .. } => {
+                // The phase takes the kind label's place: "waiting" or the
+                // spinner's silence is what matters on the stage the run is in.
+                let mut parts = vec![run.word().unwrap_or(self.kind_label).to_string()];
+                if let Some(iteration) = self.iteration {
+                    parts.push(format!("iter {iteration}"));
+                }
+                parts.join(" · ")
+            }
+            NodeStatus::Visited { .. } => self
+                .last_seen
+                .clone()
+                .unwrap_or_else(|| self.kind_label.to_string()),
+            NodeStatus::Pending => self.kind_label.to_string(),
         }
-        parts.join(" · ")
     }
 
-    /// The second detail row: badges. Mime the stage takes and hands back
-    /// sit here too, so a glance at the graph shows where the files go.
-    fn badge_row(&self) -> String {
+    /// The second detail row: what the stage takes and hands back, read as
+    /// `in <types> · out <types>`. Every stage takes and returns text, so
+    /// `text` leads both lists and the stage's own mime types (an image it
+    /// draws, a document it hands back) follow. `↺ loops` and `▣ own` ride
+    /// the front of the row. It is static - no live decoration - so a box can
+    /// be sized to it once and never have to truncate it. `⏹ can end` is not
+    /// here either: it is a corner marker on the border (see
+    /// [`Self::end_marker`]).
+    fn io_row(&self) -> String {
+        let listed = |extra: &[String]| {
+            std::iter::once("text".to_string())
+                .chain(extra.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
         let mut parts: Vec<String> = Vec::new();
         if self.self_loop {
             parts.push("↺ loops".to_string());
         }
-        if self.is_terminal {
-            parts.push("⏹ can end".to_string());
-        }
         if self.own_layout {
-            parts.push("▣ own context".to_string());
+            parts.push("▣ own".to_string());
         }
-        if !self.inputs.is_empty() {
-            parts.push(format!("◧ {}", self.inputs.join(" ")));
-        }
-        if !self.outputs.is_empty() {
-            parts.push(format!("▤ {}", self.outputs.join(" ")));
-        }
-        if let Some(seen) = &self.last_seen {
-            parts.push(seen.clone());
-        }
+        parts.push(format!("in {}", listed(&self.inputs)));
+        parts.push(format!("out {}", listed(&self.outputs)));
         parts.join(" · ")
+    }
+
+    /// The corner marker for a stage the run can end at, or `None`. Drawn
+    /// right-aligned on the top border rather than in a row, so "this can be
+    /// the last stage" reads as a property of the box, not another badge
+    /// competing with the mime types below.
+    fn end_marker(&self) -> Option<&'static str> {
+        self.is_terminal.then_some("⏹")
+    }
+
+    /// The box width this node needs, in cells: the widest of its three rows
+    /// (title, mode, in/out) plus the borders. The name is measured whole
+    /// here - the box is sized to show it - even though [`Self::title`]
+    /// ellipsizes it when a box is later squeezed narrower than this.
+    pub(crate) fn box_width(&self) -> usize {
+        let title = self.title_cells();
+        // The in/out row is static and the mode row is short in every state
+        // (phase and iteration, or a clock, never both), so a box sized before
+        // the run starts still fits every row once it is under way. A live
+        // "iter N" grows the mode row a little; the breathing cell absorbs it.
+        let detail = 1 + self.detail_row().chars().count();
+        let io = 1 + self.io_row().chars().count();
+        // Two borders, and a cell of breathing room on the right.
+        title.max(detail).max(io) + 3
+    }
+
+    /// The cells [`Self::title`] wants with the name shown whole and the end
+    /// marker's corner left free.
+    fn title_cells(&self) -> usize {
+        let mut prefix = 0;
+        if self.is_entry {
+            prefix += 2;
+        }
+        if self.problem {
+            prefix += 2;
+        }
+        // Status glyph and its trailing space.
+        prefix += 2;
+        let times = self.status.times();
+        let suffix = if times > 1 {
+            format!(" ×{times}").chars().count()
+        } else {
+            0
+        };
+        // Two cells of padding around the text, and the corner marker plus a
+        // gap when the stage can end there.
+        let marker = if self.end_marker().is_some() { 2 } else { 0 };
+        2 + prefix + self.name.chars().count() + suffix + marker
     }
 }
 
@@ -309,11 +373,20 @@ impl NodeContent for StageNodeContent {
             (false, true) => BorderType::Double,
             (false, false) => BorderType::Rounded,
         };
-        let block = Block::default()
+        // The end marker sits in the top-right corner, so the left title is
+        // given two fewer cells when one is present to keep them apart.
+        let marker = self.end_marker();
+        let title_budget = width.saturating_sub(if marker.is_some() { 4 } else { 2 });
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(border_type)
             .border_style(border_style)
-            .title(self.title(ctx.selected, width.saturating_sub(2)));
+            .title(self.title(ctx.selected, title_budget));
+        if let Some(marker) = marker {
+            block = block.title_top(
+                Line::from(Span::styled(marker, Style::default().fg(C_MUTED))).right_aligned(),
+            );
+        }
         let inner = block.inner(area);
         block.render(area, buf);
         let rows = [
@@ -322,7 +395,7 @@ impl NodeContent for StageNodeContent {
                 Style::default().fg(C_MUTED),
             )),
             Line::from(Span::styled(
-                format!(" {}", self.badge_row()),
+                format!(" {}", self.io_row()),
                 Style::default().fg(C_DIM),
             )),
         ];
@@ -515,18 +588,37 @@ mod tests {
             done: 2,
             failed: 1,
         });
-        let (_, text) = draw(&c, Rect::new(0, 0, 40, 4), false);
+        let (_, text) = draw(&c, Rect::new(0, 0, 60, 4), false);
         assert!(text.contains("▶"), "entry marker: {text}");
+        // A running fan-out shows its worker counts on the mode row.
         assert!(text.contains("⑂ 3 run · 2 done · 1 fail"), "{text}");
-        assert!(text.contains("↺ loops · ⏹ can end · 14:22:01"), "{text}");
-        // What the stage takes and hands back, between the layout badge and
-        // the clock.
+        // "can end" is a corner marker on the border now, not a badge.
+        assert!(text.contains("⏹"), "can-end corner marker: {text}");
+        assert!(
+            !text.contains("can end"),
+            "no can-end badge in a row: {text}"
+        );
+        // Every stage takes and hands back text; loops leads the in/out row.
+        assert!(text.contains("↺ loops · in text · out text"), "{text}");
+        // The stage's own mime types join text in the in/out lists.
         c.inputs = vec!["image/*".to_string(), "audio/wav".to_string()];
         c.outputs = vec!["video/mp4".to_string()];
         let (_, text) = draw(&c, Rect::new(0, 0, 80, 4), false);
         assert!(
-            text.contains("⏹ can end · ◧ image/* audio/wav · ▤ video/mp4 · 14:22:01"),
+            text.contains("in text · image/* · audio/wav · out text · video/mp4"),
             "{text}"
+        );
+        // The last-seen clock rides the mode row of a visited stage (not a
+        // running one, whose row shows its workers).
+        c.workers = None;
+        c.status = NodeStatus::Visited {
+            times: 1,
+            errored: false,
+        };
+        let (_, text) = draw(&c, Rect::new(0, 0, 80, 4), false);
+        assert!(
+            text.contains("14:22:01"),
+            "last-seen on a visited stage: {text}"
         );
         c.clear_live();
         assert_eq!(c.status, NodeStatus::Pending);
@@ -541,6 +633,49 @@ mod tests {
             text.contains('╔'),
             "double border for an external node: {text}"
         );
+    }
+
+    #[test]
+    fn the_end_marker_sits_in_the_corner_and_the_io_row_names_text_both_ways() {
+        let mut n = node("describe", NodeKind::Stage(StageKind::Autonomous));
+        n.is_terminal = true;
+        n.inputs = vec!["image/*".to_string()];
+        n.outputs = vec!["image/*".to_string()];
+        let c = StageNodeContent::from_node(&n);
+        let width = c.box_width();
+        let (_, text) = draw(&c, Rect::new(0, 0, width as u16, 4), false);
+        // The can-end marker is on the top border, in the right corner.
+        let marker = text.chars().position(|ch| ch == '⏹').expect("a marker");
+        assert_eq!(marker / width, 0, "on the top border: {text}");
+        assert!(marker % width >= width - 3, "in the right corner: {text}");
+        // The in/out row leads each side with text and lists the stage's own
+        // types after it.
+        assert!(
+            text.contains("in text · image/* · out text · image/*"),
+            "{text}"
+        );
+        // A stage that takes and hands back types needs a wider box than a
+        // plain one, and the box is sized to fit its content whole.
+        let plain = content();
+        assert!(c.box_width() > plain.box_width(), "wider for its types");
+        assert!(!text.contains('…'), "nothing truncated: {text}");
+    }
+
+    #[test]
+    fn box_width_counts_the_problem_flag_and_the_visit_count() {
+        // A long name so the title row drives the width; the problem marker
+        // and the visit count then each add to it.
+        let mut c = StageNodeContent::from_node(&node(
+            "a-stage-with-a-long-name",
+            NodeKind::Stage(StageKind::Autonomous),
+        ));
+        let base = c.box_width();
+        c.problem = true;
+        c.status = NodeStatus::Visited {
+            times: 12,
+            errored: false,
+        };
+        assert!(c.box_width() > base, "the flag and count widen the box");
     }
 
     #[test]
@@ -596,8 +731,9 @@ mod tests {
         assert!(title.add_modifier.contains(Modifier::BOLD));
         assert!(!title.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(NODE_HEIGHT, 4.0);
-        assert_eq!(node_width(10), 28.0);
-        assert_eq!(node_width(20), 30.0);
+        // Below the floor clamps to it; above it, the content width is used.
+        assert_eq!(node_width(10), MIN_NODE_WIDTH as f64);
+        assert_eq!(node_width(40), 40.0);
     }
 
     #[test]

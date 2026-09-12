@@ -499,7 +499,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
         );
         dash.stage_explorer = Some(explorer());
 
-        let (terminal, text) = rendered_at(&mut dash, 200, 50);
+        let (terminal, text) = rendered_at(&mut dash, 320, 60);
         assert!(text.contains("Stage explorer"), "{text}");
         // By default the canvas is the path and the options: the stages the
         // run has been through and where it can go from implement. Island
@@ -521,7 +521,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
         assert_eq!(style_at_text(&terminal, "implement ×2").fg, Some(C_ACTIVE));
         // `t` brings the whole graph back, pending stages dim.
         dash.stage_explorer.as_mut().unwrap().view.toggle_all();
-        let (terminal, text) = rendered_at(&mut dash, 200, 50);
+        let (terminal, text) = rendered_at(&mut dash, 320, 60);
         for stage in ["plan", "implement", "review", "recover", "island"] {
             assert!(text.contains(stage), "{stage}: {text}");
         }

@@ -85,6 +85,7 @@ impl GraphLayout {
         node_h: f64,
         gap_x: f64,
         gap_y: f64,
+        widths: &HashMap<String, f64>,
     ) -> Vec<(String, (f64, f64))> {
         // A snake is a wrapped grid, not a stack of layers: the sequence
         // index gives the cell directly, and short rows are NOT centred the
@@ -105,18 +106,39 @@ impl GraphLayout {
                 })
                 .collect();
         }
+        // Only the left-to-right layered path gives each column its own width,
+        // so a box wide enough for its in/out row does not force the whole
+        // graph wider. Each column sits at the running sum of the ones before
+        // it, and a column is as wide as its widest box. Top-to-bottom keeps a
+        // single width (`widths` is uniform there), so the packing across its
+        // shared axis is untouched.
+        let width_of = |name: &str| widths.get(name).copied().unwrap_or(node_w);
+        let column_x: Vec<f64> = {
+            let mut xs = Vec::with_capacity(self.max_layer + 1);
+            let mut acc = 0.0;
+            for l in 0..=self.max_layer {
+                xs.push(acc);
+                let col_w = self
+                    .layer_nodes(l)
+                    .iter()
+                    .map(|n| width_of(&n.name))
+                    .fold(0.0_f64, f64::max);
+                acc += col_w + gap_x;
+            }
+            xs
+        };
         let widest = (0..=self.max_layer)
             .map(|l| self.layer_nodes(l).len())
             .fold(0, usize::max);
         let mut out = Vec::with_capacity(self.nodes.len());
-        for l in 0..=self.max_layer {
+        for (l, &x_col) in column_x.iter().enumerate() {
             let column = self.layer_nodes(l);
             let offset = (widest.saturating_sub(column.len())) as f64 / 2.0;
             for node in column {
                 let along = l as f64;
                 let across = node.slot as f64 + offset;
                 let (x, y) = match direction {
-                    Direction::LeftToRight => (along * (node_w + gap_x), across * (node_h + gap_y)),
+                    Direction::LeftToRight => (x_col, across * (node_h + gap_y)),
                     Direction::TopToBottom => (across * (node_w + gap_x), along * (node_h + gap_y)),
                 };
                 out.push((node.name.clone(), (x, y)));
@@ -125,7 +147,10 @@ impl GraphLayout {
         out
     }
 
-    /// The far corner of the laid-out graph in world units.
+    /// The far corner of the laid-out graph in world units. Each node's own
+    /// width sets how far right it reaches, so a wide left-to-right box counts
+    /// for its whole width; on the uniform paths every `widths` entry equals
+    /// `node_w`, so this is the same answer as before.
     pub(crate) fn extent(
         &self,
         direction: Direction,
@@ -133,11 +158,13 @@ impl GraphLayout {
         node_h: f64,
         gap_x: f64,
         gap_y: f64,
+        widths: &HashMap<String, f64>,
     ) -> (f64, f64) {
-        self.positions(direction, node_w, node_h, gap_x, gap_y)
+        self.positions(direction, node_w, node_h, gap_x, gap_y, widths)
             .iter()
-            .fold((0.0_f64, 0.0_f64), |(w, h), (_, (x, y))| {
-                (w.max(x + node_w), h.max(y + node_h))
+            .fold((0.0_f64, 0.0_f64), |(w, h), (name, (x, y))| {
+                let nw = widths.get(name).copied().unwrap_or(node_w);
+                (w.max(x + nw), h.max(y + node_h))
             })
     }
 }
@@ -385,7 +412,14 @@ mod tests {
     fn the_last_box_of_a_row_sits_directly_above_the_first_of_the_next() {
         // The whole point of snaking: the hand-off between rows is a short
         // vertical hop, not a jump back across the canvas.
-        let pos = snake(&chain(10), 4).positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0);
+        let pos = snake(&chain(10), 4).positions(
+            Direction::LeftToRight,
+            10.0,
+            3.0,
+            4.0,
+            1.0,
+            &HashMap::new(),
+        );
         let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
         assert_eq!(at("s4").0, at("s3").0, "same column across the row change");
         assert!(at("s4").1 > at("s3").1, "and one row down");
@@ -400,7 +434,14 @@ mod tests {
         assert_eq!(at("s4"), (42.0, 4.0));
         assert_eq!(at("s8"), (0.0, 8.0));
         assert_eq!(
-            snake(&chain(10), 4).extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0),
+            snake(&chain(10), 4).extent(
+                Direction::LeftToRight,
+                10.0,
+                3.0,
+                4.0,
+                1.0,
+                &HashMap::new()
+            ),
             (52.0, 11.0)
         );
     }
@@ -417,7 +458,7 @@ mod tests {
         assert_eq!(empty.max_layer, 0);
         assert!(
             empty
-                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0)
+                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0, &HashMap::new())
                 .is_empty()
         );
     }
@@ -569,7 +610,7 @@ mod tests {
             ],
         );
         let l = layout(&g);
-        let pos = l.positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0);
+        let pos = l.positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0, &HashMap::new());
         assert_eq!(pos.len(), 4);
         let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
         // Layers step along x by node_w + gap_x.
@@ -590,26 +631,54 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), 4, "no two nodes share a cell");
         assert_eq!(
-            l.extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0),
+            l.extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0, &HashMap::new()),
             (38.0, 7.0)
         );
         // Top to bottom swaps the axes: layers are rows.
-        let pos = l.positions(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0);
+        let pos = l.positions(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0, &HashMap::new());
         let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
         assert_eq!(at("a"), (7.0, 0.0));
         assert_eq!(at("b"), (0.0, 4.0));
         assert_eq!(at("c"), (14.0, 4.0));
         assert_eq!(at("d"), (7.0, 8.0));
         assert_eq!(
-            l.extent(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0),
+            l.extent(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0, &HashMap::new()),
             (24.0, 11.0)
         );
         assert_eq!(Direction::LeftToRight.rotated(), Direction::TopToBottom);
         assert_eq!(Direction::TopToBottom.rotated(), Direction::LeftToRight);
         assert!(
             GraphLayout::default()
-                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0)
+                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0, &HashMap::new())
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn left_to_right_gives_each_column_the_width_of_its_widest_box() {
+        let g = graph(
+            "a",
+            &["a", "b", "c"],
+            &[("a", "b", P, false), ("b", "c", P, false)],
+        );
+        let l = layout(&g);
+        // `a` is wide (its in/out row); the rest are the plain minimum.
+        let widths = HashMap::from([
+            ("a".to_string(), 30.0),
+            ("b".to_string(), 10.0),
+            ("c".to_string(), 10.0),
+        ]);
+        let pos = l.positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0, &widths);
+        let x_of = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1.0;
+        // The wide first column pushes the next ones right past a uniform step:
+        // b sits at a's width (30) + the gap (4), not at 10 + 4.
+        assert_eq!(x_of("a"), 0.0);
+        assert_eq!(x_of("b"), 34.0);
+        assert_eq!(x_of("c"), 48.0);
+        // Each node reaches right by its own width: c's edge is 48 + 10.
+        assert_eq!(
+            l.extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0, &widths),
+            (58.0, 3.0)
         );
     }
 }

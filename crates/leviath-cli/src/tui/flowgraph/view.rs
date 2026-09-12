@@ -6,7 +6,7 @@
 //! It never uses rataflow's default key bindings (whose Delete and Backspace
 //! delete nodes): every key maps to an explicit action here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +23,9 @@ use ratatui::widgets::Block;
 use crate::blueprint_edit::Positions;
 use crate::tui::theme::C_ACCENT;
 
-use super::content::{NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, palette};
+use super::content::{
+    NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, node_width, palette,
+};
 use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
 use super::snake::{LayoutMode, handles_snake, metrics, route_snake, snake_per_row};
@@ -178,14 +180,39 @@ pub(crate) struct FlowView {
 /// Put saved positions on the boxes, and any box without one to the right
 /// of the rightmost saved box (the way The Lair appends a new stage), so an
 /// arrangement survives a stage being added.
+/// Each node's box width for `direction`. Only a left-to-right layered graph
+/// sizes each box to its own content (so one wide in/out row does not widen the
+/// whole graph); every other case keeps the uniform `node_w`, leaving the snake
+/// and top-to-bottom packing untouched.
+fn node_widths(
+    graph: &StageGraph,
+    direction: Direction,
+    layered: bool,
+    node_w: f64,
+) -> HashMap<String, f64> {
+    let variable = layered && direction == Direction::LeftToRight;
+    graph
+        .nodes
+        .iter()
+        .map(|n| {
+            let w = if variable {
+                node_width(StageNodeContent::from_node(n).box_width())
+            } else {
+                node_w
+            };
+            (n.id.clone(), w)
+        })
+        .collect()
+}
+
 fn apply_positions(
     flow: &mut Flow<StageNodeContent, StepEdge>,
     positions: &Positions,
-    node_w: f64,
     node_h: f64,
     gap_x: f64,
     gap_y: f64,
     snake: bool,
+    widths: &HashMap<String, f64>,
 ) {
     if positions.is_empty() {
         return;
@@ -202,8 +229,9 @@ fn apply_positions(
     }
     let mut right = f64::MIN;
     let mut top = f64::MAX;
-    for (x, y) in positions.values() {
-        right = right.max(x + node_w);
+    for (id, (x, y)) in positions {
+        let nw = widths.get(id).copied().unwrap_or(0.0);
+        right = right.max(x + nw);
         top = top.min(*y);
     }
     let ids: Vec<String> = flow.nodes().map(|n| n.id.clone()).collect();
@@ -347,11 +375,13 @@ fn build(
     let longest = graph
         .nodes
         .iter()
-        .map(super::model::StageNode::width_hint)
+        .map(|n| StageNodeContent::from_node(n).box_width())
         .max()
         .unwrap_or(0);
     let snake = layout.wrap.is_some();
     let (node_w, node_h, gap_x, gap_y) = metrics(longest, snake);
+
+    let widths = node_widths(graph, direction, !snake, node_w);
 
     let nodes: Vec<Node<StageNodeContent>> = graph
         .nodes
@@ -360,7 +390,7 @@ fn build(
             Node::new(
                 n.id.clone(),
                 (0.0, 0.0),
-                (node_w, node_h),
+                (widths[&n.id], node_h),
                 StageNodeContent::from_node(n),
             )
             .with_handles(if snake {
@@ -427,8 +457,8 @@ fn build(
         // the selection away, or Enter after a pan opens nothing.
         .with_deselect_on_pane_click(false)
         .with_locked(locked);
-    flow.set_node_positions(layout.positions(direction, node_w, node_h, gap_x, gap_y));
-    apply_positions(&mut flow, positions, node_w, node_h, gap_x, gap_y, snake);
+    flow.set_node_positions(layout.positions(direction, node_w, node_h, gap_x, gap_y, &widths));
+    apply_positions(&mut flow, positions, node_h, gap_x, gap_y, snake, &widths);
     if edit {
         // A path that exists is not drawn twice, whichever handles a drag
         // would route it through; and a box cannot be wired to itself on
@@ -664,15 +694,16 @@ impl FlowView {
         }
     }
 
-    /// The widest box's sizing hint: the longest id, or the badge row that
-    /// needs more (see [`StageNode::width_hint`]).
+    /// The widest box's content width in cells, so the shared box width fits
+    /// every node's title, mode and in/out row (see
+    /// [`StageNodeContent::box_width`]).
     ///
-    /// [`StageNode::width_hint`]: super::model::StageNode::width_hint
+    /// [`StageNodeContent::box_width`]: super::content::StageNodeContent::box_width
     fn longest_id(&self) -> usize {
         self.graph
             .nodes
             .iter()
-            .map(super::model::StageNode::width_hint)
+            .map(|n| StageNodeContent::from_node(n).box_width())
             .max()
             .unwrap_or(0)
     }
@@ -795,7 +826,9 @@ impl FlowView {
         let longest = self.longest_id();
         let extent = |dir: Direction| {
             let (node_w, node_h, gap_x, gap_y) = metrics(longest, self.mode != LayoutMode::Layered);
-            self.layout.extent(dir, node_w, node_h, gap_x, gap_y)
+            let widths = node_widths(&self.graph, dir, self.mode == LayoutMode::Layered, node_w);
+            self.layout
+                .extent(dir, node_w, node_h, gap_x, gap_y, &widths)
         };
         // A path has no other way round to be turned; what it does with a
         // wider or narrower canvas is fit more or fewer boxes to a row.
@@ -1698,14 +1731,17 @@ merge_stage = "merge"
         draw(&mut v, 200, 50);
         let moved = v.node_rect("plan").unwrap();
         assert!(moved.0 > x as i32 - 2 + 3, "{moved:?}");
-        // A minimap appears when the graph is bigger than the canvas.
+        // A minimap appears when the graph is bigger than the canvas. It is
+        // drawn with half-block cells; which halves are filled depends on the
+        // box sizes, so any of them counts as "a minimap is here".
+        let minimap = |text: &str| text.contains('▄') || text.contains('▀');
         let mut v = FlowView::new(graph(), false);
         let (_, text) = draw(&mut v, 90, 24);
-        assert!(text.contains('▄'), "{text}");
+        assert!(minimap(&text), "{text}");
         // And not when everything is on screen already.
         let mut v = FlowView::new(graph(), false);
         let (_, text) = draw(&mut v, 220, 50);
-        assert!(!text.contains('▄'), "{text}");
+        assert!(!minimap(&text), "{text}");
         // Turning a canvas with nothing selected selects nothing after.
         v.rotate();
         assert_eq!(v.selection(), Selection::Nothing);
@@ -1749,7 +1785,7 @@ notes = { kind = "pinned", accepts = ["text/*"] }
         ));
         let mut v = FlowView::new(g.clone(), false);
         let (_, text) = draw(&mut v, 220, 50);
-        assert!(text.contains("▤ video/mp4"), "{text}");
+        assert!(text.contains("out text · video/mp4"), "{text}");
         let dropped = &g.edges[0];
         assert_eq!(edge_label(dropped, false), "!");
         assert_eq!(edge_label(dropped, true), "! always");
@@ -1826,7 +1862,7 @@ notes = { kind = "pinned", accepts = ["text/*"] }
         v.select_stage("plan");
         let (_, text) = draw(&mut v, 220, 50);
         assert!(text.contains("! ○ plan"), "{text}");
-        assert!(text.contains("▣ own context"), "{text}");
+        assert!(text.contains("▣ own"), "{text}");
         v.clear_selection();
         assert_eq!(v.selection(), Selection::Nothing);
         let plan_implement = v
@@ -1869,5 +1905,49 @@ notes = { kind = "pinned", accepts = ["text/*"] }
         v.select_stage("plan");
         v.replace_graph(graph(), Positions::new());
         assert_eq!(v.selection(), Selection::Node("plan".into()));
+    }
+
+    #[test]
+    fn a_typed_box_is_wider_than_a_plain_one_left_to_right() {
+        let g = Arc::new(StageGraph::from_blueprint(
+            &parse_manifest(
+                r#"
+[agent]
+name = "img"
+entry_stage = "describe"
+[stages.describe]
+[stages.describe.input]
+accepts = ["image/*"]
+[[stages.describe.output.artifacts]]
+name = "image"
+type = "image/*"
+[stages.describe.transitions.done]
+[stages.done]
+[stages.done.transitions]
+"#,
+            )
+            .unwrap(),
+        ));
+        let mut v = FlowView::new(g, false);
+        let (_, text) = draw(&mut v, 200, 20);
+        assert_eq!(v.direction(), Direction::LeftToRight);
+        // node_rect is (left, top, right, bottom), so width is right - left.
+        let describe = v.node_rect("describe").expect("drawn");
+        let done = v.node_rect("done").expect("drawn");
+        let width = |r: (i32, i32, i32, i32)| r.2 - r.0;
+        // The busy box is wider than the plain one, which stays at the floor.
+        assert!(
+            width(describe) > width(done),
+            "typed wider: describe {describe:?}, done {done:?}"
+        );
+        // Its in/out row names the image type on both sides; the plain box
+        // still reads its text in and out.
+        assert!(
+            text.contains("in text · image/* · out text · image/*"),
+            "{text}"
+        );
+        assert!(text.contains("in text · out text"), "{text}");
+        // The edge still joins the two boxes.
+        assert!(text.contains('▶'), "an arrowhead joins them: {text}");
     }
 }
