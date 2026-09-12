@@ -250,12 +250,25 @@ impl ContextLayout {
             );
         }
 
-        // Ensure the layout leaves a minimum working budget once the fixed,
-        // non-evictable regions are full. Pinned / HashMap / CompactHistory
-        // regions persist for the whole run and consume budget; if they leave
-        // too little room, the conversation/tool-result (evictable) regions have
-        // almost no space and the agent operates "blind". Fail loudly at load
-        // instead of degrading silently at runtime.
+        // Ensure the fixed, non-evictable regions leave working room, judged
+        // against the whole budget.
+        self.validate_working_room(self.total_budget_tokens)
+    }
+
+    /// Fail when the fixed (non-evictable) regions would leave less than
+    /// `MIN_WORKING_TOKENS` of `window` for the evictable ones.
+    ///
+    /// Split out from [`validate`](Self::validate) so a caller can judge each
+    /// stage against that stage's own context window over just the regions it
+    /// can see, rather than one window for the whole layout: a region budgeted
+    /// against a wide-window stage must not be counted against a narrow-window
+    /// stage that never sees it. Pinned / HashMap / CompactHistory / persistent
+    /// custom regions persist for the whole run and consume budget; if they
+    /// leave too little, the evictable regions operate "blind", so fail loudly
+    /// at load instead of degrading silently at runtime. The floor is only
+    /// enforced on realistically-sized windows (`BUDGET_CHECK_MIN_TOTAL`); a toy
+    /// fixture's tiny window is left alone.
+    pub fn validate_working_room(&self, window: usize) -> std::result::Result<(), ValidationError> {
         let fixed_tokens: usize = self
             .regions
             .iter()
@@ -272,25 +285,17 @@ impl ContextLayout {
                 )
             })
             .fold(0usize, |acc, r| acc.saturating_add(r.max_tokens));
-        // Only enforce the absolute working-budget floor on realistically-sized
-        // layouts. Tiny illustrative layouts (toy examples, unit-test fixtures)
-        // have small budgets by design and are not real agent runs; applying an
-        // absolute floor to them would be nonsensical.
-        let working_tokens = self.total_budget_tokens.saturating_sub(fixed_tokens);
-        if self.total_budget_tokens >= Self::BUDGET_CHECK_MIN_TOTAL
-            && working_tokens < Self::MIN_WORKING_TOKENS
-        {
+        let working_tokens = window.saturating_sub(fixed_tokens);
+        if window >= Self::BUDGET_CHECK_MIN_TOTAL && working_tokens < Self::MIN_WORKING_TOKENS {
             return Err(ValidationError::Layout(format!(
                 "context layout leaves only {working_tokens} working tokens after fixed \
                  regions (pinned/hashmap/compact_history/persistent custom) consume \
-                 {fixed_tokens} of the {} \
-                 total budget; at least {} are needed for the agent to operate. Reduce the \
-                 fixed regions' max_tokens or increase the total budget.",
-                self.total_budget_tokens,
+                 {fixed_tokens} of the {window} \
+                 window; at least {} are needed for the agent to operate. Reduce the \
+                 fixed regions' max_tokens or increase the window.",
                 Self::MIN_WORKING_TOKENS
             )));
         }
-
         Ok(())
     }
 
@@ -370,6 +375,90 @@ impl ContextLayout {
             regions,
             total_budget_tokens,
             eviction_order: self.eviction_order.clone(),
+        }
+    }
+
+    /// Like [`resolved`](Self::resolved), but each region's percentage budget
+    /// is sized against a window chosen per region rather than one window for
+    /// the whole layout.
+    ///
+    /// `window_for(region_name)` gives the window a region is budgeted against:
+    /// the caller passes the smallest context window among the stages that can
+    /// actually see that region, so a region used only in wide-window stages
+    /// keeps a wide budget even when a narrow-window stage exists that never
+    /// sees it. The layout's `total_budget_tokens` becomes the largest of those
+    /// per-region windows; the authoritative fit check is per stage, done by the
+    /// caller against each stage's own window over the regions it sees.
+    ///
+    /// An absolute layout has nothing to resolve, so this is a no-op for it, the
+    /// same as [`resolved`](Self::resolved).
+    pub fn resolved_per_region(&self, window_for: &dyn Fn(&str) -> usize) -> ContextLayout {
+        let regions: Vec<RegionDefinition> = self
+            .regions
+            .iter()
+            .map(|r| {
+                let window = window_for(&r.name);
+                let max_tokens = r.budget.resolve(window);
+                let kind = match &r.kind {
+                    RegionKind::Compacting { threshold_tokens } => RegionKind::Compacting {
+                        threshold_tokens: Self::resolve_compacting_threshold(
+                            r.compact_at,
+                            *threshold_tokens,
+                            max_tokens,
+                        ),
+                    },
+                    other => other.clone(),
+                };
+                RegionDefinition {
+                    kind,
+                    max_tokens,
+                    budget: BudgetSpec::Absolute(max_tokens),
+                    compact_at: None,
+                    ..r.clone()
+                }
+            })
+            .collect();
+
+        let total_budget_tokens = if self.has_percent_budgets() {
+            self.regions
+                .iter()
+                .map(|r| window_for(&r.name))
+                .max()
+                .unwrap_or(self.total_budget_tokens)
+        } else {
+            self.total_budget_tokens
+        };
+
+        ContextLayout {
+            regions,
+            total_budget_tokens,
+            eviction_order: self.eviction_order.clone(),
+        }
+    }
+
+    /// A copy holding only the regions (and eviction-order entries) whose name
+    /// satisfies `keep`.
+    ///
+    /// The runtime carries some always-visible regions (conversation, tool
+    /// results) that no layout declares, so a stage's visible-region set may
+    /// name regions absent here; those are simply not present in the result.
+    /// Used to judge a stage's working room over exactly the regions it can see,
+    /// rather than every region the layout declares.
+    pub fn retaining<F: Fn(&str) -> bool>(&self, keep: F) -> ContextLayout {
+        ContextLayout {
+            regions: self
+                .regions
+                .iter()
+                .filter(|r| keep(&r.name))
+                .cloned()
+                .collect(),
+            total_budget_tokens: self.total_budget_tokens,
+            eviction_order: self
+                .eviction_order
+                .iter()
+                .filter(|n| keep(n))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -852,6 +941,27 @@ mod tests {
         });
     }
 
+    #[test]
+    fn validate_working_room_judges_fixed_regions_against_the_passed_window() {
+        // The same layout passes against a wide window and fails against a
+        // narrow one: the fixed region is fine when the stage seeing it has room
+        // and starves the working budget when the stage's window is small. This
+        // is what lets each stage be judged against its own model's window over
+        // just the regions it can see.
+        let regions = vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 30_000),
+            RegionDefinition::new("work".to_string(), RegionKind::Temporary, 10_000),
+        ];
+        let layout = ContextLayout::new(regions, 200_000);
+        with_tracing(|| {
+            assert!(layout.validate_working_room(200_000).is_ok());
+            let err = layout.validate_working_room(32_000).unwrap_err();
+            assert!(err.to_string().contains("working tokens"), "{err}");
+            // A tiny (toy-sized) window below the check floor is left alone.
+            assert!(layout.validate_working_room(10_000).is_ok());
+        });
+    }
+
     fn custom_kind(script: &str, persistent: bool) -> RegionKind {
         RegionKind::Custom {
             script: script.to_string(),
@@ -1148,6 +1258,94 @@ mod tests {
         assert_eq!(resolved.total_budget_tokens, 1_000_000);
         // eviction order carried through.
         assert_eq!(resolved.eviction_order, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn resolved_per_region_sizes_each_region_against_its_own_window() {
+        let pct = || BudgetSpec::Percent {
+            percent: 0.10,
+            min: None,
+            max: None,
+        };
+        // A Compacting region whose threshold is a fraction of its resolved
+        // budget, so the per-region path must recompute it against the region's
+        // own window like `resolved()` does.
+        let mut compact = RegionDefinition::new(
+            "roll".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: usize::MAX,
+            },
+            0,
+        )
+        .with_budget(pct());
+        compact.compact_at = Some(0.5);
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("wide".to_string(), RegionKind::Pinned, 0).with_budget(pct()),
+                RegionDefinition::new("narrow".to_string(), RegionKind::Pinned, 0)
+                    .with_budget(pct()),
+                compact,
+            ],
+            0,
+        );
+        let resolved = layout.resolved_per_region(&|name| match name {
+            "wide" => 200_000,
+            _ => 32_768,
+        });
+        let max_of = |n: &str| {
+            resolved
+                .regions
+                .iter()
+                .find(|r| r.name == n)
+                .unwrap()
+                .max_tokens
+        };
+        assert_eq!(max_of("wide"), 20_000); // 10% of 200k
+        assert_eq!(max_of("narrow"), 3_277); // 10% of 32768, rounded
+        // roll: 10% of 32768 = 3277 budget; threshold = 50% of that, sized
+        // against the region's own window, not the widest.
+        assert_eq!(max_of("roll"), 3_277);
+        let roll = resolved.regions.iter().find(|r| r.name == "roll").unwrap();
+        assert!(
+            matches!(roll.kind, RegionKind::Compacting { threshold_tokens } if threshold_tokens == 1_639),
+            "compacting threshold resolved per region: {:?}",
+            roll.kind
+        );
+        // The total is the largest per-region window; the real fit check is per
+        // stage, done by the caller.
+        assert_eq!(resolved.total_budget_tokens, 200_000);
+
+        // An absolute layout has nothing to resolve, so this is a no-op.
+        let absolute = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "x".to_string(),
+                RegionKind::Pinned,
+                5_000,
+            )],
+            5_000,
+        );
+        let same = absolute.resolved_per_region(&|_| 999_999);
+        assert_eq!(same.regions[0].max_tokens, 5_000);
+        assert_eq!(same.total_budget_tokens, 5_000);
+    }
+
+    #[test]
+    fn retaining_keeps_only_the_named_regions_and_eviction_entries() {
+        let layout = ContextLayout {
+            regions: vec![
+                RegionDefinition::new("keep".to_string(), RegionKind::Pinned, 1_000),
+                RegionDefinition::new("drop".to_string(), RegionKind::Temporary, 1_000),
+            ],
+            total_budget_tokens: 10_000,
+            eviction_order: vec!["keep".to_string(), "drop".to_string()],
+        };
+        let kept = layout.retaining(|name| name == "keep");
+        assert_eq!(kept.regions.len(), 1);
+        assert_eq!(kept.regions[0].name, "keep");
+        assert_eq!(kept.eviction_order, vec!["keep".to_string()]);
+        // total_budget rides along unchanged; the working-room check judges
+        // against a window the caller passes, not this field.
+        assert_eq!(kept.total_budget_tokens, 10_000);
     }
 
     #[test]
