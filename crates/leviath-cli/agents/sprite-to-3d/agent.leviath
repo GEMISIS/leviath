@@ -226,7 +226,7 @@ generation pass fixes from:
 - Add an item (context_write/context_append) for every missing or wrong detail
   you find that is not already listed, naming the detail, the view, and what it
   should be (for example: "front and left views: right arm is a plain hand, but
-  the source's Mega Buster arm cannon should be there").
+  the source shows an arm cannon there").
 
 When the missing region reflects the true state of the views, hand off to
 assess-coverage. Do not generate or delete images here.
