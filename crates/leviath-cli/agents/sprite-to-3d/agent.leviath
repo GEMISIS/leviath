@@ -53,8 +53,13 @@ kind = "pinned"
 budget = "20%"
 accepts = ["image/*"]
 
+# One reference only: a sliding window of size one keeps just the latest image
+# the reference stage settled on, so build-model has a single, unambiguous
+# picture to hand Meshy - no picking among same-named candidates.
 [context.regions.reference]
-kind = "pinned"
+kind = "sliding_window"
+max_items = 1
+max_tokens = 4000
 budget = "20%"
 accepts = ["image/*"]
 
@@ -77,21 +82,27 @@ budget = "20%"
 
 [stages.prep-reference]
 mode = "autonomous"
-description = "Make one clean, high-detail T-pose reference image of the character"
-max_iterations = 15
+description = "Make one polished 3D-style T-pose reference render of the character"
+max_iterations = 10
 require_output = true
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
 system_prompt = """
 The source region holds a sprite sheet or a single image of a character.
 
-Produce ONE clean, high-detail image of that character standing in a full-body,
-front-facing T-pose on a plain neutral background, and store it in the reference
-region. A single clear T-pose image gives the best image-to-3D result, so do not
-make a multi-frame sheet here.
+Produce ONE polished, high-quality render of that character standing in a
+full-body, front-facing T-pose on a plain neutral background, and store it in the
+reference region. This render is what a 3D model will be built from, so it must
+look like a clean 3D character render, NOT pixel art: smooth surfaces, rounded
+volumes, soft studio lighting and clear depth, the way a modern stylized game
+character looks. Translate the sprite's design into that 3D-render style.
 
-Keep the character exactly on-model: the same silhouette, proportions, colors and
-accessories as the source. Do not restyle it, and do not invent details the
-source does not show. Use the scratchpad for working notes.
+Keep the character on-model: the same silhouette, proportions, colors, and
+accessories as the source, just rendered as a solid 3D-looking figure rather than
+pixels. Do not invent details the source does not show, and do not make a
+multi-frame sheet - a single clean T-pose gives the best image-to-3D result.
+
+Regenerate until you have one you are happy with, then submit; only the latest
+image is kept as the reference. Use the scratchpad for working notes.
 """
 
 [stages.prep-reference.model]
@@ -153,21 +164,36 @@ require_output = true
 available_connectors = ["meshy"]
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
 system_prompt = """
-Use the Meshy tools to turn the single T-pose reference into a 3D model that is
-ready to drop into a game engine.
+The reference region holds one finished T-pose render of the character. It is
+final: do not change it, and do not generate or edit any images. Meshy is here to
+build a 3D model, nothing else.
 
-Guidance that gives the best results:
-- Use Meshy's image-to-3D on the reference image.
+Export the reference image to the working directory, then use only Meshy's 3D
+tools on it:
+- meshy_image_to_3d on the reference to generate the model.
+- meshy_get_task_status to poll until it is done.
+- meshy_rig to rig the model when the character is humanoid.
+- meshy_download_model to fetch the finished file.
+
+Model settings that give the best results:
 - Prefer the balanced model tier over the highest-detail one: the very high
   detail setting tends to lose geometry behind the character, while the balanced
   tier keeps clean, complete topology for a stylized game asset.
 - Aim for roughly 8k to 12k polygons.
-- Ask Meshy to rig the model when the character is humanoid.
 - Keep the colors and materials matching the reference.
 
-Download the finished model, store it in the model region, and submit it as the
-run's model artifact. Use the scratchpad for working notes.
+Store the downloaded model in the model region and submit it as the run's model
+artifact. Use the scratchpad for working notes.
 """
+
+# Meshy is for 3D only. Its image-generation and text tools are denied here, so
+# the model cannot spend credits regenerating the reference - the image work is
+# the reference stage's job, done with an image model.
+[stages.build-model.tool_permissions]
+"meshy__meshy_image_to_image" = "deny"
+"meshy__meshy_text_to_image" = "deny"
+"meshy__meshy_text_to_3d" = "deny"
+"meshy__meshy_creative_lab" = "deny"
 
 [stages.build-model.model]
 allow_user_default = false
