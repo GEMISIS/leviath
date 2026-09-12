@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- The dashboard stage graph reads more clearly. A stage that can end the run
+  shows a `⏹` in its box's top-right corner instead of a `can end` badge on the
+  crowded detail row; the row now names what the stage takes and hands back as
+  `in text · <types> · out text · <types>`, with text always shown; and a box
+  grows to fit its own in/out on a left-to-right graph, so a stage with several
+  types is wider without widening every other box (top-to-bottom and wrapped
+  graphs keep a uniform width) (#400).
 - `--yolo` takes an optional profile, `--yolo=<name>`, on `lev run` and
   `lev agent-client`. The equals sign is required, so `lev run --yolo coder`
   keeps meaning "run coder, plain yolo". The bare flag is unchanged.

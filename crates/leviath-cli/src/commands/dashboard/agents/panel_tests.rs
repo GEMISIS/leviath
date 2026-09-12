@@ -440,7 +440,7 @@ fn the_context_tab_owns_a_layout_adds_regions_and_routes_tools() {
     );
     let screen = text(&mut dash);
     assert!(screen.contains("its own layout"), "{screen}");
-    assert!(screen.contains("own context"), "{screen}");
+    assert!(screen.contains("▣ own"), "{screen}");
     // Add a region: the popup, Esc cancels, an empty name is ignored, a
     // name adds it and opens its panel.
     goto(&mut dash, FieldId::AddRegion);
@@ -1017,7 +1017,7 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     dash.handle_key(key(KeyCode::Char(' ')));
     dash.handle_key(key(KeyCode::Enter));
     let screen = text(&mut dash);
-    assert!(screen.contains("◧ audio/*"), "{screen}");
+    assert!(screen.contains("in text · audio/*"), "{screen}");
     // With nothing of its own, the input row shows what the regions take
     // between them: the union of their lists (text aside), or any type
     // when one of them takes anything.
