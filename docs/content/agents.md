@@ -387,11 +387,14 @@ character image into a rigged, game-ready model, and a run refuses to start unti
 Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite-to-3d`.
 
 It works in stages. First it renders a clean front T-pose from the sprite, then back and side views
-that match it, drawing more than one where it is unsure. A review stage keeps the best view of each
-angle and deletes the rest, so no rejected render is left to confuse the model builder. Meshy then
-builds one model from all the chosen views, with symmetry turned off so a one-sided detail like an
-arm cannon survives instead of being mirrored away. A final stage compares the model against the
-views and, if it drifted, sends it back to be rebuilt a bounded number of times before finishing.
+that match it, drawing more than one where it is unsure. A filter stage deletes the bad renders
+(off-model, pixel-art, or a multi-angle turnaround sheet) and keeps the good single views, so no
+rejected render is left to confuse the model builder. A coverage stage then checks whether the kept
+views cover enough angles; if a view is missing or weak it draws more, conditioning each on both the
+sprite sheet and the good views already in hand, and this loop is bounded. Meshy builds one model
+from the chosen views, with symmetry turned off so a one-sided detail like an arm cannon survives
+instead of being mirrored away. A final stage compares the model against the views and, if it
+drifted, sends it back to be rebuilt a bounded number of times before finishing.
 
 ## How the coding agent verifies its work
 
