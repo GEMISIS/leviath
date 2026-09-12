@@ -159,7 +159,7 @@ gate = { require_region_updated = "references", message = "You have not stored a
 mode = "autonomous"
 description = "Delete off-model, malformed, or multi-view renders; keep the good single views"
 max_iterations = 10
-max_revisits = 4
+max_revisits = 2
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 The references region holds the view renders drawn so far. Compare them against
@@ -203,7 +203,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Critically compare the views to the source and maintain the missing-details list"
 max_iterations = 8
-max_revisits = 4
+max_revisits = 2
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 You are the critical reviewer. Compare the reference views in the references
@@ -252,7 +252,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Decide whether the views are complete enough to build, or more are needed"
 max_iterations = 8
-max_revisits = 4
+max_revisits = 2
 available_tools = ["context_read", "context_list", "context_write", "context_append"]
 transition_prompt = """
 Decide what happens next with the reference views:
@@ -305,7 +305,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Draw views that fix the missing details and fill the missing angles"
 max_iterations = 10
-max_revisits = 4
+max_revisits = 2
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
 You draw images. Your only job here is to DRAW the corrected and missing views
@@ -354,6 +354,15 @@ hint = "Once the requested views are in the references region."
 transform = "direct"
 # Do not leave until the fixes have actually been drawn.
 gate = { require_region_updated = "references", message = "You have not drawn any new render yet. Draw the corrected and missing views the missing region asks for, and let them land in the references region before moving on." }
+
+# Un-exhaustible escape: some defects an image model simply will not fix (it keeps
+# redrawing an invented detail however clearly the critique names it). When the
+# filter/critique/assess loop has spent its revisits, move on and build with the
+# best views in hand rather than dead-ending the run.
+[stages.generate-more.transitions.build-model]
+hint = "The reference loop is out of revisits; build with the best views in hand."
+condition = "dead_end"
+transform = "direct"
 
 # ── 6. Build the rigged, game-ready model with Meshy ─────────────────────────
 
