@@ -116,8 +116,13 @@ Draw ONE single view per image. Do not pack several angles into one turnaround
 sheet: the later stages need each view on its own. Draw one at a time and store
 each in the references region. If a view comes out off-model or inconsistent with
 the front, draw it again; a second candidate for a view you are unsure about is
-fine, since the next stage filters them. When the references region holds a good
-front, back, left and right, submit. Use the scratchpad for notes.
+fine, since the next stage filters them.
+
+Keep the set small: at most two candidates for any one angle, and no more than
+EIGHT renders in all. A larger set will not fit in a single request downstream,
+and the oldest images are dropped when it does not. When the references region
+holds a good front, back, left and right, submit even if you could draw more. Use
+the scratchpad for notes.
 """
 
 [stages.prep-references.model]
@@ -242,14 +247,16 @@ The review region names the angles that are missing or too weak. The references
 region holds the good views kept so far, and the source region holds the original
 sprite sheet.
 
-Draw only the views the review region asks for. Condition each new render on BOTH
-the sprite sheet AND the good references already in place, so the new view is the
-same character, in the same style, proportions and colors, just turned to the
-angle that is missing. One single view per image, no turnaround sheets, on a
-plain neutral background. Store each in the references region.
+Draw only the views the review region asks for, at most one or two, and no more.
+Condition each new render on BOTH the sprite sheet AND the good references
+already in place, so the new view is the same character, in the same style,
+proportions and colors, just turned to the angle that is missing. One single view
+per image, no turnaround sheets, on a plain neutral background. Store each in the
+references region.
 
-When you have drawn the requested views, submit. The filter stage will check them
-next. Use the scratchpad for notes.
+Keep the total set of references small enough to fit one request: if it is
+already large, draw only what is truly missing. When you have drawn the requested
+views, submit. The filter stage will check them next. Use the scratchpad for notes.
 """
 
 [stages.generate-more.model]

@@ -227,7 +227,7 @@ with any number of file parts, or a JSON `parts` list naming files already insid
 [mime]
 max_part_bytes = 33554432               # one part, at every ingress
 inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
-max_media_bytes_per_request = 67108864  # bytes of stored media one model request carries
+max_media_bytes_per_request = 20971520  # bytes of stored media one model request carries
 ```
 
 `max_media_bytes_per_request` is a backstop for the vendor request-size limits a token budget
