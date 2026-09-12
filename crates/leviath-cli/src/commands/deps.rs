@@ -357,6 +357,36 @@ fn mcp_from_template(
     }
 }
 
+/// Whether `var` names a non-empty environment variable, read through `probe`.
+///
+/// Split out so the secret *value* the probe reads is consumed here and only a
+/// plain `bool` crosses back to the caller. The caller logs the variable *name*
+/// to guide the user, never its value.
+fn secret_env_is_set(probe: &dyn crate::dependencies::Probe, var: &str) -> bool {
+    probe.env(var).filter(|v| !v.trim().is_empty()).is_some()
+}
+
+/// Tell the user which of the server's secret environment variables are already
+/// set, and how to set the rest.
+///
+/// `env_var_names` are the *names* of the variables (`MESHY_API_KEY`), never
+/// their values - the values are only probed for presence, never printed or
+/// stored. Taking them as a plain `&[str]` parameter, the way [`add_server`]
+/// does, keeps this reporting a step removed from where the plan is parsed.
+fn report_secret_env_status(env_var_names: &[String], probe: &dyn crate::dependencies::Probe) {
+    for var in env_var_names {
+        if secret_env_is_set(probe, var) {
+            println!("  {var} is already set.");
+        } else {
+            println!(
+                "  {var} is not set. It is a secret, so set it in your environment yourself,\n\
+                 e.g. add `export {var}=...` to your shell profile, then open a new shell.\n\
+                 It is read at connect time and never written to a file by this command."
+            );
+        }
+    }
+}
+
 /// Carry out an install plan: write the server, run the command, run the script.
 fn run_plan(
     plan: &Plan,
@@ -366,22 +396,7 @@ fn run_plan(
 ) -> anyhow::Result<()> {
     if let Some((server, secrets)) = &plan.server {
         add_server(config, server, secrets, &env.config_path)?;
-        for var in secrets {
-            if env
-                .probe
-                .env(var)
-                .filter(|v| !v.trim().is_empty())
-                .is_some()
-            {
-                println!("  {var} is already set.");
-            } else {
-                println!(
-                    "  {var} is not set. It is a secret, so set it in your environment yourself,\n\
-                     e.g. add `export {var}=...` to your shell profile, then open a new shell.\n\
-                     It is read at connect time and never written to a file by this command."
-                );
-            }
-        }
+        report_secret_env_status(secrets, env.probe.as_ref());
     }
     if let Some(cmd) = &plan.command {
         println!("  running: {cmd}");
