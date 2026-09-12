@@ -175,7 +175,7 @@ transform = "clear"
 # ── 4. Check the model against the source for gaps before finalizing ─────────
 
 [stages.verify-model]
-mode = "autonomous"
+mode = "output"
 description = "Compare the model against the source for gaps before finalizing"
 max_iterations = 10
 require_output = true

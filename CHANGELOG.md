@@ -24,8 +24,8 @@ same list.
   `lev deps install` sets it up after asking: it writes an MCP server's
   non-secret settings into your config and tells you to set the secret in your
   own environment, or runs a declared shell command or Rhai install script. A
-  `sprite-to-3d` example agent under `docs/examples/` turns a sprite sheet into a
-  rigged, game-ready model with Meshy and declares the Meshy dependency (#827).
+  bundled `sprite-to-3d` agent turns a sprite sheet into a rigged, game-ready
+  model with Meshy and declares the Meshy dependency (#827).
 
 ### Changed
 

@@ -382,8 +382,9 @@ place, or a string remedy when it is not. An `install` script gets one host func
 and runs only when the user asks for it with `lev deps install`. Checking never changes the machine;
 only install does, and only after a confirmation.
 
-The `sprite-to-3d` example agent under `docs/examples/` declares the Meshy dependency above and is
-installed with `lev add docs/examples/sprite-to-3d`.
+The bundled `sprite-to-3d` agent declares the Meshy dependency above: it turns a sprite sheet or
+character image into a rigged, game-ready model, and a run refuses to start until Meshy is set up.
+Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite-to-3d`.
 
 ## How the coding agent verifies its work
 
