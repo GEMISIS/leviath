@@ -394,15 +394,41 @@ images. Meshy is here to build a 3D model, nothing else.
 If the review region lists gaps from a previous build attempt, read them first
 and address them this time.
 
-Export the reference images to the working directory, and feed THOSE files to
-Meshy. Pick one strong render per angle (front, back, left, right); do not pass
-two of the same angle. Never pass the source sprite sheet to Meshy - it would
-build a relief of the whole sheet instead of the character. Then use only Meshy's
-3D tools:
+Pick one strong render per angle (front, back, left, right); do not pass two of
+the same angle. Never pass the source sprite sheet to Meshy - it would build a
+relief of the whole sheet instead of the character.
+
+The images you see in this context are visible only to you. Meshy is a separate
+program running on this same machine, and it reads image FILES from disk (it
+uploads them to its cloud), so you have to hand it real files, not the pictures
+in your context. Get the paths right by exporting first, then confirming, then
+passing absolute paths:
+- Export each chosen view to the working directory with context_export. The
+  export tool reports back the exact filename it wrote; use THAT filename
+  verbatim. Never invent, shorten, or guess a name, and do not assume a file is
+  called ref_front.png or v_front.png - use only what the export actually
+  reported.
+- Run list_dir on the working directory to confirm every exported file is really
+  there and to read its true path before you call Meshy. If a file you meant to
+  pass is not listed, export it again; do not proceed on a name you have not
+  seen in the listing.
+- Pass Meshy the ABSOLUTE path to each exported file. The working directory is an
+  absolute path, and since Meshy runs on this same machine it can read an
+  absolute path directly. Never pass a bare relative name (front.png,
+  refs/back.png) and never guess a directory that Meshy might use, such as /app,
+  /tmp/outputs, /workspace, or refs/ - those do not resolve in Meshy's own
+  working directory and every such call fails with "File not found".
+- Only if Meshy's image-to-3D tool explicitly accepts an image URL or a
+  base64/data-URI argument may you pass the image that way instead of a file
+  path. The default, reliable route is the absolute exported-file path above.
+
+Then use only Meshy's 3D tools:
 - Prefer Meshy's multi-image image-to-3D tool when it is available: it takes
   several views (front, back, sides) and produces ONE model, which gives a far
-  better back and sides than a single front view can. Pass all the chosen views.
-- If only single-image image-to-3D is available, use the front view.
+  better back and sides than a single front view can. Pass all the chosen views,
+  each as the absolute path you confirmed above.
+- If only single-image image-to-3D is available, use the front view's absolute
+  path.
 - Poll the task status until it is done, but WAIT between polls rather than
   checking in a tight loop; the job takes minutes, and each check costs an
   inference.
