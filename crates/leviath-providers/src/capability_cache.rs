@@ -66,6 +66,27 @@ impl CapabilityCache {
         self.providers.get(provider)
     }
 
+    /// The context window a primed listing recorded for `model` under
+    /// `provider`, matched whole or by its last path segment.
+    ///
+    /// A gateway namespaces its ids (`x-ai/grok-4`) while a blueprint may name
+    /// the bare model, so both spellings find the entry - the same rule
+    /// [`LearnedModels::find_by_key`](crate::learned::LearnedModels::find_by_key)
+    /// uses. `None` when the cache holds no such model, or recorded no window
+    /// for it.
+    pub fn context_window(&self, provider: &str, model: &str) -> Option<usize> {
+        let models = self.providers.get(provider)?;
+        models
+            .get(model)
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|(id, _)| id.rsplit('/').next() == Some(model))
+                    .map(|(_, m)| m)
+            })
+            .and_then(|m| m.max_context_tokens)
+    }
+
     /// Its age in seconds at `now` (Unix seconds), saturating at 0 for a file
     /// stamped in the future (a clock that moved back).
     pub fn age_secs(&self, now: i64) -> i64 {
@@ -153,6 +174,40 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let path = file.join("sub").join("cache.json");
         assert!(CapabilityCache::new(1).save(&path).is_err());
+    }
+
+    #[test]
+    fn context_window_matches_whole_or_by_last_segment() {
+        let mut cache = CapabilityCache::new(1);
+        cache.set(
+            "openrouter",
+            BTreeMap::from([
+                (
+                    "x-ai/grok-4".to_string(),
+                    LearnedModel {
+                        max_context_tokens: Some(256_000),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    // A model the listing named but recorded no window for.
+                    "vendor/no-window".to_string(),
+                    LearnedModel::default(),
+                ),
+            ]),
+        );
+        // Whole-id match.
+        assert_eq!(
+            cache.context_window("openrouter", "x-ai/grok-4"),
+            Some(256_000)
+        );
+        // Last-segment match: a blueprint naming the bare model still resolves.
+        assert_eq!(cache.context_window("openrouter", "grok-4"), Some(256_000));
+        // A model with no recorded window.
+        assert_eq!(cache.context_window("openrouter", "no-window"), None);
+        // An unknown model, and an unknown provider.
+        assert_eq!(cache.context_window("openrouter", "nope"), None);
+        assert_eq!(cache.context_window("anthropic", "x-ai/grok-4"), None);
     }
 
     #[test]

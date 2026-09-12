@@ -175,6 +175,16 @@ pub(crate) async fn setup_daemon_host_with(
             &[config.default_provider.as_str()],
         )
         .await;
+    // Write what the prime learned to the shared capability cache, so a
+    // short-lived `lev models`, `lev validate` or serve handler answers a
+    // model's real limits from the same numbers instead of re-priming to its own
+    // conservative default. Best-effort: a home that does not resolve (path is
+    // `None`), or a file that cannot be written, just leaves the pre-cache
+    // behaviour in place.
+    providers.save_capability_cache(
+        leviath_core::paths::capability_cache_path().as_deref(),
+        chrono::Utc::now().timestamp(),
+    );
     // Keeps that registry in step with `config.toml` from here on: a run
     // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves
     // against the providers the file names now, without a daemon restart.
