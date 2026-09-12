@@ -849,7 +849,7 @@
         "max_media_bytes_per_request": {
           "type": "integer",
           "minimum": 1,
-          "description": "Bytes of stored media one model request carries before the oldest parts are sent as stand-ins; a backstop for vendor request-size limits a token budget cannot see. Default 67108864 (64 MiB)."
+          "description": "Bytes of stored media one model request carries before the oldest parts are sent as stand-ins; a backstop for vendor request-size limits a token budget cannot see. Default 20971520 (20 MiB)."
         }
       }
     },

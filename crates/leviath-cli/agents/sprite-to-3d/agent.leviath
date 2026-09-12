@@ -2,7 +2,7 @@
 name = "sprite-to-3d"
 version = "0.1.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
-entry_stage = "prep-reference"
+entry_stage = "prep-references"
 
 # Meshy does the actual image-to-3D work over its MCP server (run with npx),
 # which needs an API key. The run refuses to start until the server is
@@ -50,27 +50,37 @@ budget = "5%"
 
 [context.regions.source]
 kind = "pinned"
-budget = "20%"
+budget = "15%"
 accepts = ["image/*"]
 
-# One reference only: a sliding window of size one keeps just the latest image
-# the reference stage settled on, so build-model has a single, unambiguous
-# picture to hand Meshy - no picking among same-named candidates.
-[context.regions.reference]
-kind = "sliding_window"
-max_items = 1
-max_tokens = 4000
+# Every view render the prep and generate stages draw lands here, one entry
+# each. Because a produced image is named after its own bytes (image-<sha>.png),
+# the candidates never collide and the filter stage can point at one exactly to
+# keep or drop. The filter stage prunes this down to the good views, and the
+# generate stage refills it, so no rejected render lingers to distract Meshy.
+[context.regions.references]
+kind = "pinned"
 budget = "20%"
 accepts = ["image/*"]
 
 [context.regions.review]
 kind = "pinned"
-budget = "10%"
+budget = "8%"
+accepts = ["text/*"]
+
+# The running list of details that are absent or wrong in the reference renders
+# compared with the source: a missing arm cannon, a shoulder pad, a color that
+# drifted. The critique stage owns this region - it is the only stage that adds
+# or clears an item, and it clears one only after confirming, on the images, that
+# the detail is now present. Every generation pass reads it to know what to fix.
+[context.regions.missing]
+kind = "pinned"
+budget = "6%"
 accepts = ["text/*"]
 
 [context.regions.model]
 kind = "pinned"
-budget = "20%"
+budget = "18%"
 accepts = ["model/*"]
 
 [context.regions.scratchpad]
@@ -78,108 +88,354 @@ kind = "clearable"
 max_tokens = 20000
 budget = "20%"
 
-# ── 1. Prepare a single clean T-pose reference image ─────────────────────────
+# ── 1. Draw clean multi-view T-pose references from the sprite ────────────────
 
-[stages.prep-reference]
+[stages.prep-references]
 mode = "autonomous"
-description = "Make one polished 3D-style T-pose reference render of the character"
-max_iterations = 10
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "submit_output"]
+description = "Render a clean front T-pose, then matching back and side views, from the sprite"
+max_iterations = 14
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
-The source region holds a sprite sheet or a single image of a character.
+The source region holds a sprite sheet or a single image of a character. Your
+job is to turn it into a small set of clean reference renders that a 3D model
+will be built from, all in the same style and all on-model.
 
-Produce ONE polished, high-quality render of that character standing in a
-full-body, front-facing T-pose on a plain neutral background, and store it in the
-reference region. This render is what a 3D model will be built from, so it must
-look like a clean 3D character render, NOT pixel art: smooth surfaces, rounded
-volumes, soft studio lighting and clear depth, the way a modern stylized game
-character looks. Translate the sprite's design into that 3D-render style.
+If the task names a specific character on a busy sheet, render only that one and
+ignore the other characters, animation frames, and palette swatches.
 
-Keep the character on-model: the same silhouette, proportions, colors, and
-accessories as the source, just rendered as a solid 3D-looking figure rather than
-pixels. Do not invent details the source does not show, and do not make a
-multi-frame sheet - a single clean T-pose gives the best image-to-3D result.
+Render the character's CANONICAL design, drawn from the whole sheet, not from one
+frame. Look across every frame for the signature parts - a weapon, an arm cannon,
+a shoulder pad, a tail, a hat - and include them, even when a particular idle
+frame happens to omit one (an arm that is a cannon in most frames must be the
+cannon here, not a plain hand). Keep asymmetric parts on the correct side.
 
-Regenerate until you have one you are happy with, then submit; only the latest
-image is kept as the reference. Use the scratchpad for working notes.
+Work in this order:
+
+1. FRONT FIRST. Draw ONE polished, high-quality render of the character standing
+   in a full-body, front-facing T-pose on a plain neutral background. This is the
+   anchor every other view must match. It must look like a clean 3D character
+   render, NOT pixel art: smooth surfaces, rounded volumes, soft studio lighting
+   and clear depth, the way a modern stylized game character looks.
+
+2. THEN THE OTHER VIEWS. Using BOTH the sprite sheet in the source region AND the
+   front render you just made as reference, draw the same character, in the same
+   T-pose, style, proportions, colors and accessories, from three more angles:
+   the back, the left side, and the right side. Consistency with the front render
+   matters more than anything: it is the same character turning around.
+
+Draw ONE single view per image. Do not pack several angles into one turnaround
+sheet: the later stages need each view on its own. Draw one at a time and store
+each in the references region.
+
+Keep the set small: at most two candidates for any one angle, and no more than
+EIGHT renders in all. A larger set will not fit in a single request downstream,
+and the oldest images are dropped when it does not. When the references region
+holds a good front, back, left and right, stop even if you could draw more, and
+the run moves on to filter them. Use the scratchpad for notes.
 """
 
-[stages.prep-reference.model]
+[stages.prep-references.model]
 allow_user_default = false
 
-[[stages.prep-reference.model.models]]
+[[stages.prep-references.model.models]]
 provider = "openrouter"
-model = "openai/gpt-5-image"
+model = "google/gemini-2.5-flash-image"
 
-[stages.prep-reference.output]
+[stages.prep-references.output]
 format = "image/*"
 
-[stages.prep-reference.output_routing]
-"image/*" = "reference"
+[stages.prep-references.output_routing]
+"image/*" = "references"
 
-[stages.prep-reference.transitions.review-reference]
-hint = "Once the reference region holds a single clean full-body T-pose of the character."
-# Carry the reference forward. `clear` would wipe it (a sliding-window region is
-# stage-specific); the conversation is freshened by each stage's context.reset.
+[stages.prep-references.transitions.filter-references]
+hint = "Once the references region holds view renders of the character to filter."
 transform = "direct"
+# Do not leave until at least one render has actually been drawn and stored.
+gate = { require_region_updated = "references", message = "You have not stored any reference render yet. Draw the front T-pose (and the other views) and let them land in the references region before moving on." }
 
-# ── 2. Rank and critique the reference before spending on 3D ─────────────────
+# ── 2. Filter: drop the bad renders, keep the good single views ──────────────
 
-[stages.review-reference]
+[stages.filter-references]
 mode = "autonomous"
-description = "Rank the reference against the source and call out flaws before building the model"
-max_iterations = 8
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "submit_output"]
+description = "Delete off-model, malformed, or multi-view renders; keep the good single views"
+max_iterations = 10
+max_revisits = 2
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
-Compare the reference image against the source. If more than one candidate is
-present, pick the best one and say why. Judge whether the reference is a faithful,
-clean, single T-pose: correct silhouette, proportions, colors and accessories,
-neutral background, no missing or invented details.
+The references region holds the view renders drawn so far. Compare them against
+the source and against each other, and remove the ones that would hurt the model.
 
-Write your ranking and any flaws into the review region, then hand off to
-build-model. Call out flaws clearly even when you proceed, so the later stages
-can compensate for them.
+Delete a render (context_delete, by the index or key from context_list, one at a
+time) when it is any of these:
+- off-model: wrong silhouette, proportions, or colors;
+- not a clean 3D render: pixel art, flat, or malformed;
+- a multi-angle turnaround SHEET rather than a single view - Meshy needs one view
+  per image, and a composite sheet builds a relief of the sheet;
+- a duplicate or clearly weaker version of a view you are already keeping.
+
+Do NOT delete a render only because it is missing a detail like an arm cannon:
+that is the critique stage's call to make and record, not a reason to throw the
+view away here. Never delete the last remaining render of an angle. When in
+doubt, keep it.
+
+SUPERSEDED RENDERS MUST GO. When a later pass has drawn a corrected version of an
+angle, actually delete the older, flawed one from the references region with
+context_delete - do not leave it sitting there "stale". A discarded render that
+stays in the region is still shown to the model builder and still counts against
+the request's image budget, so at the end of this stage the region must hold only
+the views you are actually keeping: one current, best render per angle, nothing
+old or superseded.
+
+Keep the good single views: ideally a clean front, back, left and right. Write
+into the review region which views you kept, for which angles. Then hand off to
+critique-references.
 """
 
-[stages.review-reference.model]
+[stages.filter-references.model]
 allow_user_default = false
 
-[[stages.review-reference.model.models]]
+[[stages.filter-references.model.models]]
 provider = "openrouter"
 model = "anthropic/claude-opus-5"
 
-[stages.review-reference.context]
+[stages.filter-references.context]
 reset = ["conversation"]
 
-[stages.review-reference.transitions.build-model]
-hint = "Once you have ranked the reference and written your assessment, with any flaws, into the review region."
+[stages.filter-references.transitions.critique-references]
+hint = "Once only good single views remain and the review region records what was kept."
+transform = "direct"
 
-# ── 3. Build the rigged, game-ready model with Meshy ─────────────────────────
+# ── 3. Critique: compare each view to the source and log what is missing ─────
+
+[stages.critique-references]
+mode = "autonomous"
+description = "Critically compare the views to the source and maintain the missing-details list"
+max_iterations = 8
+max_revisits = 2
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
+system_prompt = """
+You are the critical reviewer. Compare the reference views in the references
+region against the source sprite carefully and skeptically. Your job is to catch
+details the renders dropped or got wrong - the mistakes a friendlier reviewer
+would let slide.
+
+Go part by part over the character's canonical design as the source shows it
+across all its frames: silhouette, proportions, colors, and every accessory or
+weapon - an arm cannon, a shoulder pad, a tail, a hat, a belt. For each view,
+note anything missing, on the wrong side, or wrong.
+
+The missing region is yours alone to maintain, and it is the record the next
+generation pass fixes from:
+- Read what it already lists (context_read). For each item, look at the current
+  views and decide whether it is now genuinely fixed. Only when you can confirm,
+  on the images, that the detail is present and correct do you remove that item
+  (context_delete). This sign-off is the whole point: an item leaves the list
+  only because you verified the fix, never on anyone's say-so.
+- Add an item (context_write/context_append) for every missing or wrong detail
+  you find that is not already listed, naming the detail, the view, and what it
+  should be (for example: "front and left views: right arm is a plain hand, but
+  the source shows an arm cannon there").
+
+When the missing region reflects the true state of the views, hand off to
+assess-coverage. Do not generate or delete images here.
+"""
+
+[stages.critique-references.model]
+allow_user_default = false
+
+[[stages.critique-references.model.models]]
+provider = "openrouter"
+model = "google/gemini-2.5-pro"
+
+[stages.critique-references.context]
+reset = ["conversation"]
+
+[stages.critique-references.transitions.assess-coverage]
+hint = "Once the missing region reflects the true state of the reference views."
+transform = "direct"
+
+# ── 4. Assess: enough good, complete views to build, or generate more? ───────
+
+[stages.assess-coverage]
+mode = "autonomous"
+description = "Decide whether the views are complete enough to build, or more are needed"
+max_iterations = 8
+max_revisits = 2
+available_tools = ["context_read", "context_list", "context_write", "context_append"]
+transition_prompt = """
+Decide what happens next with the reference views:
+- If the angles are covered and the missing region lists no serious detail still
+  absent or wrong, respond with: build-model
+- If an angle is missing or the missing region still lists a serious detail to
+  fix, respond with: generate-more
+"""
+system_prompt = """
+Look at the good views in the references region, the missing region's list, and
+the review notes.
+
+Decide whether the views are ready to build into a model. They are ready when two
+things hold: the angles are covered (a clear front, a back, and both sides), and
+the missing region lists no serious detail still absent or wrong. A front alone,
+or a set that still drops the arm cannon, is not ready.
+
+Then choose one path:
+- If ready, transition to build-model.
+- If an angle is missing or the missing region still lists a serious detail,
+  transition to generate-more. The missing region already says what to fix; add
+  to the review region anything else the generator should know.
+
+Do not generate or delete images here. Angles and fixes cannot be chased forever,
+so once the missing list holds only minor cosmetic notes and the angles are
+covered, prefer to build.
+"""
+
+[stages.assess-coverage.model]
+allow_user_default = false
+
+[[stages.assess-coverage.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.assess-coverage.context]
+reset = ["conversation"]
+
+[stages.assess-coverage.transitions.build-model]
+hint = "If the angles are covered and the missing region lists no serious detail."
+transform = "direct"
+
+[stages.assess-coverage.transitions.generate-more]
+hint = "If an angle is missing or the missing region still lists a serious detail to fix."
+transform = "direct"
+
+# ── 5. Generate more: fix the missing details and fill the missing angles ────
+
+[stages.generate-more]
+mode = "autonomous"
+description = "Draw views that fix the missing details and fill the missing angles"
+max_iterations = 10
+max_revisits = 2
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
+system_prompt = """
+You draw images. Your only job here is to DRAW the corrected and missing views
+now - do not just describe them.
+
+Read the missing region and the review region once: together they name the
+details to fix (for example "add the arm cannon", "remove the invented shorts",
+"make the ponytail long") and the angles that are missing or weak (for example
+"no left or right side view"). Then immediately start drawing.
+
+Draw one image at a time, and for each one produce an actual image, not text:
+- Redraw each view that needs a fix, applying every relevant item from the
+  missing region.
+- Draw each missing angle (commonly the left and right sides).
+
+Condition every render on BOTH the sprite sheet in the source region AND the good
+references already in place, so it is the same character in the same style,
+proportions and colors, just corrected or turned to a new angle. One single view
+per image, no turnaround sheets, on a plain neutral background. Store each in the
+references region as you go.
+
+Do not edit the missing region yourself; the critique stage re-checks your work
+and signs off what is truly fixed. Keep the set small enough to fit one request.
+Once you have drawn the fixes and the missing angles, stop; the run moves back to
+the filter.
+"""
+
+[stages.generate-more.model]
+allow_user_default = false
+
+[[stages.generate-more.model.models]]
+provider = "openrouter"
+model = "google/gemini-2.5-flash-image"
+
+[stages.generate-more.output]
+format = "image/*"
+
+[stages.generate-more.output_routing]
+"image/*" = "references"
+
+[stages.generate-more.context]
+reset = ["conversation"]
+
+[stages.generate-more.transitions.filter-references]
+hint = "Once the requested views are in the references region."
+transform = "direct"
+# Do not leave until the fixes have actually been drawn.
+gate = { require_region_updated = "references", message = "You have not drawn any new render yet. Draw the corrected and missing views the missing region asks for, and let them land in the references region before moving on." }
+
+# Un-exhaustible escape: some defects an image model simply will not fix (it keeps
+# redrawing an invented detail however clearly the critique names it). When the
+# filter/critique/assess loop has spent its revisits, move on and build with the
+# best views in hand rather than dead-ending the run.
+[stages.generate-more.transitions.build-model]
+hint = "The reference loop is out of revisits; build with the best views in hand."
+condition = "dead_end"
+transform = "direct"
+
+# ── 6. Build the rigged, game-ready model with Meshy ─────────────────────────
 
 [stages.build-model]
 mode = "autonomous"
-description = "Use Meshy to turn the T-pose reference into a rigged, game-ready model"
+description = "Use Meshy to turn the chosen views into one rigged, game-ready model"
 max_iterations = 20
-require_output = true
-available_connectors = ["meshy"]
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "submit_output"]
+max_revisits = 2
+# Grant only the five Meshy tools this stage needs, by name, rather than
+# available_connectors = ["meshy"], which pulls in all ~24 of Meshy's tools. The
+# full toolset's schemas are ~37k tokens - on their own larger than the context
+# window the entry stage's image model sets for the shared layout - which left no
+# room for a reply and stalled the stage in empty turns. Five tools fit easily.
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "meshy__meshy_image_to_3d", "meshy__meshy_multi_image_to_3d", "meshy__meshy_get_task_status", "meshy__meshy_rig", "meshy__meshy_download_model"]
 system_prompt = """
-The reference region holds exactly one finished T-pose render of the character.
-That render is your 3D input - not the source sprite sheet. It is final: do not
-change it, and do not generate or edit any images. Meshy is here to build a 3D
-model, nothing else.
+The references region holds the good views of the character - a front, and
+usually a back and sides. Those renders are your 3D input, not the source sprite
+sheet. They are final: do not change them, and do not generate or edit any
+images. Meshy is here to build a 3D model, nothing else.
 
-Export that one reference image to the working directory, and feed THAT file to
-Meshy. Never pass the source sprite sheet to image_to_3d - it would build a relief
-of the whole sheet instead of the character. Then use only Meshy's 3D tools:
-- meshy_image_to_3d on the reference to generate the model.
-- meshy_get_task_status to poll until it is done.
-- meshy_rig to rig the model when the character is humanoid.
-- meshy_download_model to fetch the finished file.
+If the review region lists gaps from a previous build attempt, read them first
+and address them this time.
 
-Model settings that matter, passed to image_to_3d:
+Pick one strong render per angle (front, back, left, right); do not pass two of
+the same angle. Never pass the source sprite sheet to Meshy - it would build a
+relief of the whole sheet instead of the character.
+
+The images you see in this context are visible only to you. Meshy is a separate
+program running on this same machine, and it reads image FILES from disk (it
+uploads them to its cloud), so you have to hand it real files, not the pictures
+in your context. Get the paths right by exporting first, then confirming, then
+passing absolute paths:
+- Export each chosen view to the working directory with context_export. The
+  export tool reports back the exact filename it wrote; use THAT filename
+  verbatim. Never invent, shorten, or guess a name, and do not assume a file is
+  called ref_front.png or v_front.png - use only what the export actually
+  reported.
+- Run list_dir on the working directory to confirm every exported file is really
+  there and to read its true path before you call Meshy. If a file you meant to
+  pass is not listed, export it again; do not proceed on a name you have not
+  seen in the listing.
+- Pass Meshy the ABSOLUTE path to each exported file. The working directory is an
+  absolute path, and since Meshy runs on this same machine it can read an
+  absolute path directly. Never pass a bare relative name (front.png,
+  refs/back.png) and never guess a directory that Meshy might use, such as /app,
+  /tmp/outputs, /workspace, or refs/ - those do not resolve in Meshy's own
+  working directory and every such call fails with "File not found".
+- Only if Meshy's image-to-3D tool explicitly accepts an image URL or a
+  base64/data-URI argument may you pass the image that way instead of a file
+  path. The default, reliable route is the absolute exported-file path above.
+
+Then use only Meshy's 3D tools:
+- Prefer Meshy's multi-image image-to-3D tool when it is available: it takes
+  several views (front, back, sides) and produces ONE model, which gives a far
+  better back and sides than a single front view can. Pass all the chosen views,
+  each as the absolute path you confirmed above.
+- If only single-image image-to-3D is available, use the front view's absolute
+  path.
+- Poll the task status until it is done, but WAIT between polls rather than
+  checking in a tight loop; the job takes minutes, and each check costs an
+  inference.
+- Rig the model when the character is humanoid.
+- Download the finished file.
+
+Model settings that matter:
 - symmetry_mode = "off". This is important: the character is symmetric except for
   one-sided details like an arm cannon or a shoulder pad, and Meshy's default
   auto-symmetry mirrors both sides to match, which deletes those details (the
@@ -191,29 +447,26 @@ Model settings that matter, passed to image_to_3d:
 - Aim for roughly 8k to 12k polygons (target_polycount), and quad topology for
   clean rigging.
 - Enable PBR, and give a texture_prompt describing the character's palette and
-  materials (read the review notes and the reference) so the colors match.
+  materials (read the review notes and the references) so the colors match.
 
-After the model comes back, look at Meshy's preview and confirm the asymmetric
-details from the reference are present - in particular any arm cannon. If a
-one-sided accessory was flattened to match the other side, regenerate with
-symmetry off before finishing.
-
-Store the downloaded model in the model region and submit it as the run's model
-artifact. Use the scratchpad for working notes.
+Download the finished model to the working directory, then attach it to the model
+region with context_attach so the next stages can see and use it. Note the file's
+path in the review region. Do not end the run here; when the model is in the model
+region the run moves on to verify it. Use the scratchpad for working notes.
 """
 
-# Meshy is for 3D only. Its image-generation and text tools are denied here, so
-# the model cannot spend credits regenerating the reference - the image work is
-# the reference stage's job, done with an image model.
-[stages.build-model.tool_permissions]
-"meshy__meshy_image_to_image" = "deny"
-"meshy__meshy_text_to_image" = "deny"
-"meshy__meshy_text_to_3d" = "deny"
-"meshy__meshy_creative_lab" = "deny"
-
+# Meshy is for 3D only. The five tools granted above are the only ones this stage
+# can reach, so its image-generation and text tools are simply absent - no
+# deny-list needed, and the credits cannot be spent regenerating a reference.
 [stages.build-model.model]
 allow_user_default = false
 
+# build-model has to drive Meshy's MCP tools correctly (export the views, feed the
+# right paths, poll, rig, download) with the reference images in its context.
+# Smaller models fail this: gpt-5.4-mini could not ingest the images at all, and
+# sonnet drew nothing after the first turn (it stalls in a tool loop once several
+# images are in context). Opus drives it reliably, so build uses opus; the
+# reference stages, which are the bulk of the work, stay on cheaper models.
 [[stages.build-model.model.models]]
 provider = "openrouter"
 model = "anthropic/claude-opus-5"
@@ -226,25 +479,43 @@ reset = ["conversation"]
 
 [stages.build-model.transitions.verify-model]
 hint = "Once a rigged, game-ready model is in the model region."
-# Carry the model and reference forward so verify-model can compare them.
 transform = "direct"
+# Do not leave until a model has actually been built and attached: without this
+# the stage can hand an empty model region to verify and finalize, and the run
+# ends owing an artifact it never made. Meshy builds take minutes, so allow
+# several passes.
+gate = { require_region_updated = "model", message = "The model region is still empty. Build the model with Meshy (image-to-3D, poll until done, rig, download), then attach the downloaded file to the model region with context_attach before moving on.", max_attempts = 8 }
 
-# ── 4. Check the model against the source for gaps before finalizing ─────────
+# ── 7. Check the model against the references, and rebuild if it is off ───────
 
 [stages.verify-model]
-mode = "output"
-description = "Compare the model against the source for gaps before finalizing"
+mode = "autonomous"
+description = "Compare the model against the reference views and decide to rebuild or finalize"
 max_iterations = 10
-require_output = true
-available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir", "submit_output"]
+max_revisits = 2
+available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
+transition_prompt = """
+Decide what happens to the model you just judged:
+- If it has a serious, fixable gap you have written into the review region,
+  respond with: build-model
+- If it faithfully matches the reference views, respond with: finalize
+"""
 system_prompt = """
-Look at the finished model in the model region against the source and the
-reference. Call out any gaps: missing accessories, wrong proportions, colors that
-drifted, geometry that is incomplete.
+Look at the finished model in the model region against the reference views, the
+source, and the missing region. Judge it honestly: are the proportions right, the
+colors faithful, the accessories all present and on the correct side (including
+anything the missing region flagged), the back and sides complete rather than
+flat, the topology clean?
 
-Write any gaps you find into the review region, then submit the model as the
-final output. If the gaps are serious, say so plainly in your notes so the
-operator can re-run with a better reference.
+Then choose one path:
+- If the model has a serious, fixable gap - a missing accessory, a flattened
+  back, colors that drifted badly - write exactly what is wrong and how to fix it
+  into the review region, then transition back to build-model to rebuild. Be
+  specific; the builder acts only on what you write. Only loop back for problems a
+  rebuild can realistically fix, and remember rebuilds are limited.
+- If the model faithfully matches the references, transition to finalize.
+
+Do not try to rebuild the model yourself here; your job is to judge and route.
 """
 
 [stages.verify-model.model]
@@ -257,11 +528,46 @@ model = "anthropic/claude-opus-5"
 [stages.verify-model.context]
 reset = ["conversation"]
 
-# No outgoing transitions: this stage finalizes the run by submitting the model.
-# Fixing gaps happens by re-running the build within build-model's own revisits.
-[stages.verify-model.transitions]
+[stages.verify-model.transitions.build-model]
+hint = "If the model has a serious gap you have written into the review region for the builder to fix."
+transform = "direct"
 
-[[stages.verify-model.output.artifacts]]
+[stages.verify-model.transitions.finalize]
+hint = "If the model faithfully matches the reference views."
+transform = "direct"
+
+# ── 8. Finalize: submit the model as the run's artifact ──────────────────────
+
+[stages.finalize]
+mode = "output"
+description = "Submit the finished model as the run's artifact"
+max_iterations = 6
+available_tools = ["context_read", "context_list", "read_file", "list_dir"]
+system_prompt = """
+The model region holds the finished, rigged model and the review region holds the
+verifier's assessment and the model file's path in the working directory.
+
+Call submit_output with the required `model` artifact pointing at that model file
+(list_dir the working directory if you need to find it - it is the downloaded
+.glb or .fbx). In the answer text, summarize briefly what the model is and note
+any caveats the verifier or the missing region raised, so the operator knows what
+they are getting. The run ends when you submit.
+"""
+
+[stages.finalize.model]
+allow_user_default = false
+
+[[stages.finalize.model.models]]
+provider = "openrouter"
+model = "anthropic/claude-opus-5"
+
+[stages.finalize.context]
+reset = ["conversation"]
+
+# No outgoing transitions: this stage finalizes the run by submitting the model.
+[stages.finalize.transitions]
+
+[[stages.finalize.output.artifacts]]
 name = "model"
 type = "model/*"
 required = true

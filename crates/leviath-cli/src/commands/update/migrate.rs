@@ -8,7 +8,16 @@ use std::path::Path;
 
 use super::{UpdateArgs, UpdateEnv, UpdatePlan, agreed};
 use crate::config::Config;
+use crate::config::DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST;
 use crate::config::renamed::legacy_keys_present;
+
+/// The `max_media_bytes_per_request` value shipped as the default before it was
+/// lowered. `lev setup` wrote the default into `config.toml` explicitly, so an
+/// install that ran setup before the change carries this number verbatim and
+/// never picks up the new default on its own; the migration below spots exactly
+/// this value and lowers it, while leaving a number the user chose themselves
+/// alone.
+const OLD_MAX_MEDIA_BYTES_PER_REQUEST: u64 = 64 * 1024 * 1024;
 
 // ─── Config migrations ────────────────────────────────────────────────────────
 
@@ -78,6 +87,27 @@ pub const MIGRATIONS: &[Migration] = &[
                 }
             }
             done
+        },
+    },
+    // A value whose default changed. The loader cannot tell "the user wrote the
+    // old default" from "the user wants exactly this number", so it leaves the
+    // written value alone; this migration lowers it, but only when it is the old
+    // default to the letter, so a deliberate choice survives.
+    Migration {
+        name: "media-request-cap",
+        description: "lower `max_media_bytes_per_request` from the old 64 MiB default to 20 MiB, \
+                      so an image-heavy request stays under the ~30 MB limit several vendors enforce",
+        applies: |config, _raw| {
+            config.mime.max_media_bytes_per_request == OLD_MAX_MEDIA_BYTES_PER_REQUEST
+        },
+        apply: |config, _raw| {
+            config.mime.max_media_bytes_per_request = DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST;
+            vec![format!(
+                "`max_media_bytes_per_request = {OLD_MAX_MEDIA_BYTES_PER_REQUEST}` becomes \
+                 `{DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST}`: the old 64 MiB default sat above the \
+                 ~30 MB image-content limit several vendors enforce, so a request heavy with \
+                 images hit the vendor's error instead of the runtime's own backstop"
+            )]
         },
     },
     // The loader already read each old key under its new name, so the parsed

@@ -34,6 +34,27 @@ same list.
 
 ### Changed
 
+- The default ceiling on stored media carried in one model request is now 20 MiB
+  rather than 64 MiB. Several vendors reject a request whose image content
+  exceeds about 30 MB, and 64 MiB sat above that, so a request heavy with images
+  hit the vendor's hard error instead of the runtime's own backstop; at 20 MiB
+  the oldest media becomes stand-ins before the vendor limit is reached. Raise it
+  in `[mime]` for a provider that allows more (#400).
+- A stage that produces an image now notices when the model replies with text
+  and no image, which usually means the image generation failed or was refused.
+  It sends the model's own words back so the retry is informed, and after a few
+  such replies it lets the stage end rather than looping. The reply's text
+  often carries the reason, so it is no longer lost (#400).
+- An image a model draws is now named after its own content,
+  `image-<sha>.png`, rather than its position in the reply. Two images drawn in
+  different turns no longer collide on `image-1.png`, so a later stage can point
+  at one exactly to keep it or drop it, and byte-identical images share the one
+  name the run's blob store already dedupes them to (#400).
+- The bundled `sprite-to-3d` agent now draws a front T-pose and matching back
+  and side views, keeps the best of each and drops the rest, builds one model
+  from all the views with Meshy (symmetry off, so an arm cannon survives), and
+  checks the result against the views before finishing, rebuilding a bounded
+  number of times if it drifted (#400).
 - The dashboard stage graph reads more clearly. A stage that can end the run
   shows a `⏹` in its box's top-right corner instead of a `can end` badge on the
   crowded detail row; the row now names what the stage takes and hands back as
