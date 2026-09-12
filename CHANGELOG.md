@@ -393,6 +393,18 @@ same list.
 
 ### Fixed
 
+- An OpenRouter model that refuses the temperature parameter outright no longer
+  fails the run. A reasoning or image model reached through OpenRouter can reject
+  temperature with "Unsupported parameter: 'temperature' is not supported with
+  this model" (the catalogue lists temperature for it anyway, since that
+  describes the gateway, not the backend). Two gaps let this fail a run: the
+  retry that drops temperature and resends only recognised "does not support" (a
+  refused value), not this "is not supported"/"unsupported" wording (the
+  parameter refused); and the retry lived only on the buffered path, so an image
+  model reached by streaming never got it. Both are fixed - the wording is
+  recognised, and buffered and streaming share one retry helper - so the request
+  is resent without temperature and the model is remembered, and the rest of the
+  run omits it up front (#400).
 - A model that hands back the same file twice in one reply is stored once. Some
   image gateways (gemini-3-pro-image) return several byte-identical copies of a
   picture in a single call; the store is content-addressed, so the copies were

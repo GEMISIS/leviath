@@ -634,13 +634,21 @@ pub(crate) fn tools_refused_over_reasoning_effort(detail: &str) -> bool {
 
 /// Whether the API refused the request over the temperature we sent.
 ///
-/// Some models take only their default temperature and reject any other value
-/// outright:
+/// A model may reject temperature two ways, and both mean "resend without it":
 ///
 /// ```text
 /// Unsupported value: 'temperature' does not support 0.7 with this model.
 /// Only the default (1) value is supported.
 /// ```
+/// ```text
+/// Unsupported parameter: 'temperature' is not supported with this model.
+/// ```
+///
+/// The first refuses a *value* (the model takes only its default); the second
+/// refuses the *parameter* outright (a reasoning or image model that takes no
+/// temperature at all). OpenRouter's `supported_parameters` lists temperature
+/// for these anyway - it describes the gateway's surface, not the backend's -
+/// so the catalogue says supported and the backend says no.
 ///
 /// The capability table said `gpt-5.5` supports temperature, because it matches
 /// the `gpt-5` family branch and the rest of that family does. It does not, and
@@ -650,7 +658,10 @@ pub(crate) fn tools_refused_over_reasoning_effort(detail: &str) -> bool {
 /// on the day it ships. The API already says so, so ask it rather than a list.
 pub(crate) fn temperature_refused(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
-    detail.contains("temperature") && detail.contains("does not support")
+    detail.contains("temperature")
+        && (detail.contains("does not support")
+            || detail.contains("not supported")
+            || detail.contains("unsupported"))
 }
 
 /// The request's tools in the OpenAI `tools` wire shape.
@@ -1259,6 +1270,18 @@ mod tests {
         // Case is not guaranteed by the API.
         assert!(super::temperature_refused(
             "UNSUPPORTED VALUE: 'TEMPERATURE' DOES NOT SUPPORT 0.7"
+        ));
+        // The parameter refused outright (a reasoning or image model), the
+        // shape that killed sprites-to-model through OpenRouter.
+        assert!(super::temperature_refused(
+            "Unsupported parameter: 'temperature' is not supported with this model."
+        ));
+        assert!(super::temperature_refused(
+            "'temperature' is not supported with this model"
+        ));
+        // A terser variant that only the "unsupported" wording catches.
+        assert!(super::temperature_refused(
+            "Unsupported parameter: 'temperature'"
         ));
         // A different unsupported field is not ours to fix.
         assert!(!super::temperature_refused(
