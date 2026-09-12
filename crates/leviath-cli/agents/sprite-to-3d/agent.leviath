@@ -140,7 +140,7 @@ allow_user_default = false
 
 [[stages.prep-references.model.models]]
 provider = "openrouter"
-model = "openai/gpt-5-image"
+model = "google/gemini-2.5-flash-image"
 
 [stages.prep-references.output]
 format = "image/*"
@@ -326,7 +326,7 @@ allow_user_default = false
 
 [[stages.generate-more.model.models]]
 provider = "openrouter"
-model = "openai/gpt-5-image"
+model = "google/gemini-2.5-flash-image"
 
 [stages.generate-more.output]
 format = "image/*"
