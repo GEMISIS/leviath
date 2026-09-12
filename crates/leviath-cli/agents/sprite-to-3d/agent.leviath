@@ -178,6 +178,14 @@ that is the critique stage's call to make and record, not a reason to throw the
 view away here. Never delete the last remaining render of an angle. When in
 doubt, keep it.
 
+SUPERSEDED RENDERS MUST GO. When a later pass has drawn a corrected version of an
+angle, actually delete the older, flawed one from the references region with
+context_delete - do not leave it sitting there "stale". A discarded render that
+stays in the region is still shown to the model builder and still counts against
+the request's image budget, so at the end of this stage the region must hold only
+the views you are actually keeping: one current, best render per angle, nothing
+old or superseded.
+
 Keep the good single views: ideally a clean front, back, left and right. Write
 into the review region which views you kept, for which angles. Then hand off to
 critique-references.
@@ -429,14 +437,15 @@ region the run moves on to verify it. Use the scratchpad for working notes.
 [stages.build-model.model]
 allow_user_default = false
 
-# A capable mid model: build-model has to drive Meshy's MCP tools correctly
-# (export the views, feed the right paths, poll, rig, download), which a small
-# model gets wrong - it failed to ingest the images at all. Sonnet is reliable at
-# tool use and cheaper than opus; the critical judgement of the result stays with
-# verify-model on opus.
+# build-model has to drive Meshy's MCP tools correctly (export the views, feed the
+# right paths, poll, rig, download) with the reference images in its context.
+# Smaller models fail this: gpt-5.4-mini could not ingest the images at all, and
+# sonnet drew nothing after the first turn (it stalls in a tool loop once several
+# images are in context). Opus drives it reliably, so build uses opus; the
+# reference stages, which are the bulk of the work, stay on cheaper models.
 [[stages.build-model.model.models]]
 provider = "openrouter"
-model = "anthropic/claude-sonnet-5"
+model = "anthropic/claude-opus-5"
 
 [stages.build-model.context]
 reset = ["conversation"]
