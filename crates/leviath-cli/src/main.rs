@@ -108,6 +108,46 @@ async fn async_main() -> anyhow::Result<()> {
 /// command cores. Never compiled into the coverage-measured `--lib` build.
 struct RealExecutors;
 
+/// Runs `lev deps install` shell commands through the platform shell.
+struct SystemRunner;
+
+impl commands::deps::CommandRunner for SystemRunner {
+    fn run(&self, command: &str) -> Result<(), String> {
+        let status = if cfg!(windows) {
+            leviath_sys::child_command("cmd")
+                .arg("/C")
+                .arg(command)
+                .status()
+        } else {
+            leviath_sys::child_command("sh")
+                .arg("-c")
+                .arg(command)
+                .status()
+        };
+        match status {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("command exited with {s}")),
+            Err(e) => Err(format!("could not run command: {e}")),
+        }
+    }
+}
+
+/// Asks `lev deps install` confirmations on the real terminal.
+struct StdinPrompt;
+
+impl commands::deps::Prompt for StdinPrompt {
+    fn confirm(&self, message: &str) -> bool {
+        use std::io::Write;
+        print!("{message} [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return false;
+        }
+        matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    }
+}
+
 impl RiskyExecutors for RealExecutors {
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()> {
         real_run(args).await
@@ -239,6 +279,21 @@ impl RiskyExecutors for RealExecutors {
             config_path: leviath_cli::config::Config::config_path(),
         };
         commands::providers::execute_with(args, &env).await
+    }
+
+    async fn deps(&self, args: commands::deps::DepsArgs) -> anyhow::Result<()> {
+        // The command logic is the tested `deps::execute_with`; only the real
+        // machine seams - the config path, env/PATH reads, the shell and the
+        // stdin prompt - are composed here.
+        let env = commands::deps::DepsEnv {
+            config_path: leviath_cli::config::Config::config_path(),
+            agents_dir: leviath_core::paths::agents_dir(),
+            probe: Box::new(leviath_cli::dependencies::SystemProbe),
+            runner: std::sync::Arc::new(SystemRunner),
+            prompt: Box::new(StdinPrompt),
+            os: commands::deps::host_os(),
+        };
+        commands::deps::execute_with(args, &env)
     }
 
     async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {

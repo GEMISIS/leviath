@@ -19,7 +19,7 @@ pub mod commands;
 pub mod config;
 pub mod credentials;
 pub mod daemon;
-pub(crate) mod dependencies;
+pub mod dependencies;
 pub mod dispatch;
 pub(crate) mod held_checkpoints;
 pub(crate) mod lint;
