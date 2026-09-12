@@ -6,6 +6,7 @@
 //! validators, context transforms, and compaction strategies without modifying
 //! Leviath's core code.
 
+pub mod dependency_check;
 pub mod engine;
 pub mod functions;
 pub mod mime_check;
