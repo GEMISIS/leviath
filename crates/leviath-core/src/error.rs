@@ -30,6 +30,15 @@ pub enum ValidationError {
         message: String,
     },
 
+    /// Dependency-declaration validation failure
+    #[error("Invalid dependency '{name}': {message}")]
+    Dependency {
+        /// The offending dependency's name.
+        name: String,
+        /// What is wrong with it.
+        message: String,
+    },
+
     /// Layout-level validation failure
     #[error("Invalid layout: {0}")]
     Layout(String),
