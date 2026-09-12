@@ -179,12 +179,24 @@ of the whole sheet instead of the character. Then use only Meshy's 3D tools:
 - meshy_rig to rig the model when the character is humanoid.
 - meshy_download_model to fetch the finished file.
 
-Model settings that give the best results:
+Model settings that matter, passed to image_to_3d:
+- symmetry_mode = "off". This is important: the character is symmetric except for
+  one-sided details like an arm cannon or a shoulder pad, and Meshy's default
+  auto-symmetry mirrors both sides to match, which deletes those details (the
+  arm cannon becomes an ordinary hand). Turn symmetry off so asymmetric
+  accessories survive.
 - Prefer the balanced model tier over the highest-detail one: the very high
   detail setting tends to lose geometry behind the character, while the balanced
   tier keeps clean, complete topology for a stylized game asset.
-- Aim for roughly 8k to 12k polygons.
-- Keep the colors and materials matching the reference.
+- Aim for roughly 8k to 12k polygons (target_polycount), and quad topology for
+  clean rigging.
+- Enable PBR, and give a texture_prompt describing the character's palette and
+  materials (read the review notes and the reference) so the colors match.
+
+After the model comes back, look at Meshy's preview and confirm the asymmetric
+details from the reference are present - in particular any arm cannon. If a
+one-sided accessory was flattened to match the other side, regenerate with
+symmetry off before finishing.
 
 Store the downloaded model in the model region and submit it as the run's model
 artifact. Use the scratchpad for working notes.
