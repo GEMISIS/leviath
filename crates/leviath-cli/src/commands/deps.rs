@@ -18,7 +18,7 @@ use anyhow::{Context, bail};
 use leviath_core::blueprint::{Blueprint, Dependency, DependencyInstall, DependencyKind};
 use leviath_mcp::{MCPServerConfig, MCPTransport};
 
-use crate::dependencies::{self, DependencyState, Probe};
+use crate::dependencies::{self, Probe};
 
 /// `lev deps` and its subcommands.
 #[derive(clap::Args, Debug)]
@@ -212,13 +212,7 @@ fn check(agent: &str, env: &DepsEnv) -> anyhow::Result<()> {
     }
     println!("'{}' dependencies:", blueprint.name);
     for s in &report.statuses {
-        let (mark, detail) = match &s.state {
-            DependencyState::Satisfied => ("ok  ", String::new()),
-            DependencyState::Unmet(remedy) => ("MISS", format!(" - {remedy}")),
-            DependencyState::Unusable(reason) => ("ERR ", format!(" - {reason}")),
-        };
-        let req = if s.required { "" } else { " (optional)" };
-        println!("  [{mark}] {} ({}){req}{detail}", s.name, s.kind);
+        println!("  {}", s.line());
     }
     if let Some(msg) = report.blocking_message() {
         bail!("{msg}");

@@ -23,9 +23,12 @@ same list.
   whether this machine has it and exits non-zero when it does not, and
   `lev deps install` sets it up after asking: it writes an MCP server's
   non-secret settings into your config and tells you to set the secret in your
-  own environment, or runs a declared shell command or Rhai install script. A
-  bundled `sprite-to-3d` agent turns a sprite sheet into a rigged, game-ready
-  model with Meshy and declares the Meshy dependency (#827).
+  own environment, or runs a declared shell command or Rhai install script.
+  `lev validate` lists each declared dependency and whether this machine has it,
+  and `GET /api/blueprints/{name}` carries them as `dependencies` (announced by
+  the `blueprints.dependencies` capability). A bundled `sprite-to-3d` agent
+  turns a sprite sheet into a rigged, game-ready model with Meshy and declares
+  the Meshy dependency (#827).
 
 ### Changed
 

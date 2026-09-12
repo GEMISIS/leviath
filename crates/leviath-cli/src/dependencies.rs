@@ -91,6 +91,25 @@ pub struct DependencyStatus {
     pub state: DependencyState,
 }
 
+impl DependencyStatus {
+    /// A one-line human status, shared by `lev deps check`, `lev validate` and
+    /// `lev doctor`: `[ok  ] name (kind)`, or `[MISS] name (kind) - remedy`.
+    pub fn line(&self) -> String {
+        let mark = match &self.state {
+            DependencyState::Satisfied => "ok  ",
+            DependencyState::Unmet(_) => "MISS",
+            DependencyState::Unusable(_) => "ERR ",
+        };
+        let req = if self.required { "" } else { " (optional)" };
+        let detail = self.state.detail();
+        if detail.is_empty() {
+            format!("[{mark}] {} ({}){req}", self.name, self.kind)
+        } else {
+            format!("[{mark}] {} ({}){req} - {detail}", self.name, self.kind)
+        }
+    }
+}
+
 /// The evaluation of a blueprint's whole dependency list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyReport {
@@ -452,6 +471,28 @@ mod tests {
         assert_eq!(DependencyState::Satisfied.detail(), "");
         assert_eq!(DependencyState::Unmet("fix it".into()).detail(), "fix it");
         assert_eq!(DependencyState::Unusable("broke".into()).detail(), "broke");
+    }
+
+    #[test]
+    fn status_line_covers_marks_and_optional() {
+        let mk = |state, required| DependencyStatus {
+            name: "d".into(),
+            kind: "env",
+            required,
+            state,
+        };
+        assert_eq!(
+            mk(DependencyState::Satisfied, true).line(),
+            "[ok  ] d (env)"
+        );
+        assert_eq!(
+            mk(DependencyState::Unmet("set it".into()), true).line(),
+            "[MISS] d (env) - set it"
+        );
+        assert_eq!(
+            mk(DependencyState::Unusable("broke".into()), false).line(),
+            "[ERR ] d (env) (optional) - broke"
+        );
     }
 
     #[test]

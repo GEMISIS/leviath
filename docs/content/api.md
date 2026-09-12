@@ -803,6 +803,14 @@ does neither has an empty list. Changing either is a manifest write through `PUT
 /api/blueprints/{name}`. `blueprints.stage_routing` in the `capabilities` list on `GET /api/config`
 says the daemon reports this.
 
+`dependencies` on the same detail route lists what the agent declares it needs before it runs (see
+[dependencies](/docs/agents#dependencies)): each entry has a `name`, a `kind` (`mcp_server`, `env`,
+`binary` or `script`), whether it is `required`, an optional `remedy` and `description`, the
+kind-specific field (`server` and `env`, `var`, `command`, or `check`), and `installable` for
+whether the blueprint says how to set it up. A console can show these and warn before a spawn that
+would fail the dependency gate. `blueprints.dependencies` in the `capabilities` list says the daemon
+reports this.
+
 ## Yolo profiles
 
 The profiles a run can be launched under with `--yolo=<name>` live in

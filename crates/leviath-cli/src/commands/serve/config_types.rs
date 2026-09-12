@@ -307,6 +307,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // entry (`context.reset`), so a console shows or checks them without
     // parsing the manifest.
     "blueprints.stage_routing",
+    // `dependencies` on the detail route: what an agent declares it needs
+    // before it runs (an MCP server, an env var, a program on PATH, a Rhai
+    // check), each with its kind, whether it is required, and whether the
+    // blueprint says how to install it. A console can show them and warn before
+    // a spawn that would fail the dependency gate, rather than parsing the
+    // manifest or discovering the failure by running.
+    "blueprints.dependencies",
     "tools.list",
     // `GET /api/update`: how this copy was installed, and the command that
     // upgrades it. Announced because the fallback is guessing, and the console

@@ -511,6 +511,7 @@ fn execute_reporting_outcome(
         let workdir = crate::commands::resolve_cwd().unwrap_or_default();
         if !args.json {
             print_model_resolution(&checked.blueprint, config, registry);
+            print_dependencies(&checked.blueprint, config, &checked.agent_dir);
         }
         env = env
             .with_providers(&checked.blueprint, config)
@@ -537,6 +538,31 @@ fn execute_reporting_outcome(
         return Ok(ValidateOutcome::LintFailed { errors, warnings });
     }
     Ok(ValidateOutcome::Success)
+}
+
+/// Print each declared dependency and whether this machine satisfies it, the
+/// same check the spawn gate makes. Non-fatal: an unmet dependency is a
+/// machine-setup fact, not a blueprint error, so it is shown rather than
+/// counted as a finding. A blueprint that declares none prints nothing.
+fn print_dependencies(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    agent_dir: &std::path::Path,
+) {
+    if blueprint.dependencies.is_empty() {
+        return;
+    }
+    let report = crate::dependencies::evaluate(
+        &blueprint.dependencies,
+        &config.mcp_servers,
+        agent_dir,
+        &crate::dependencies::SystemProbe,
+    );
+    println!();
+    println!("Dependencies:");
+    for status in &report.statuses {
+        println!("  {}", status.line());
+    }
 }
 
 /// What each stage would actually dispatch to on this machine, and why.
@@ -1378,6 +1404,21 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     fn parse(toml: &str) -> leviath_core::Blueprint {
         leviath_core::manifest::parse_manifest(toml).unwrap()
+    }
+
+    #[test]
+    fn print_dependencies_skips_when_none_and_lists_when_present() {
+        let cfg = crate::config::Config::default();
+        let dir = std::path::Path::new(".");
+        // A blueprint with no dependencies prints nothing and must not panic.
+        let none = parse("[agent]\nname = \"n\"\n");
+        print_dependencies(&none, &cfg, dir);
+        // One with a dependency reaches the listing loop.
+        let some = parse(
+            "[agent]\nname = \"a\"\n\n\
+             [[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"LEVIATH_VALIDATE_UNSET_XYZ\"\n",
+        );
+        print_dependencies(&some, &cfg, dir);
     }
 
     /// Helper to create a minimal valid blueprint TOML with given stages.
