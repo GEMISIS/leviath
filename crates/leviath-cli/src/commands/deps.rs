@@ -278,7 +278,8 @@ fn install(args: InstallArgs, env: &DepsEnv) -> anyhow::Result<()> {
 
 /// What installing one dependency will do, resolved for this host's OS.
 struct Plan {
-    /// An MCP server to write into the config, and the secrets it still needs.
+    /// An MCP server to write into the config, and the names of the environment
+    /// variables it still needs set.
     server: Option<(MCPServerConfig, Vec<String>)>,
     /// A shell command to run.
     command: Option<String>,
@@ -357,6 +358,33 @@ fn mcp_from_template(
     }
 }
 
+/// Whether `name` is set to a non-empty environment variable, via `probe`.
+///
+/// Only presence is examined; the value is never returned or logged. Returning a
+/// plain `bool` keeps the value from travelling any further.
+fn env_var_is_set(probe: &dyn crate::dependencies::Probe, name: &str) -> bool {
+    probe.env(name).filter(|v| !v.trim().is_empty()).is_some()
+}
+
+/// Tell the user which of the server's required environment variables are set,
+/// and how to set the rest.
+///
+/// `env_var_names` are variable *names* (`MESHY_API_KEY`); only the name is ever
+/// logged, and the value only probed for presence, so no value is written out.
+fn report_env_var_status(env_var_names: &[String], probe: &dyn crate::dependencies::Probe) {
+    for name in env_var_names {
+        if env_var_is_set(probe, name) {
+            println!("  {name} is already set.");
+        } else {
+            println!(
+                "  {name} is not set. It is a secret, so set it in your environment yourself,\n\
+                 e.g. add `export {name}=...` to your shell profile, then open a new shell.\n\
+                 It is read at connect time and never written to a file by this command."
+            );
+        }
+    }
+}
+
 /// Carry out an install plan: write the server, run the command, run the script.
 fn run_plan(
     plan: &Plan,
@@ -364,24 +392,9 @@ fn run_plan(
     env: &DepsEnv,
     config: &mut crate::config::Config,
 ) -> anyhow::Result<()> {
-    if let Some((server, secrets)) = &plan.server {
-        add_server(config, server, secrets, &env.config_path)?;
-        for var in secrets {
-            if env
-                .probe
-                .env(var)
-                .filter(|v| !v.trim().is_empty())
-                .is_some()
-            {
-                println!("  {var} is already set.");
-            } else {
-                println!(
-                    "  {var} is not set. It is a secret, so set it in your environment yourself,\n\
-                     e.g. add `export {var}=...` to your shell profile, then open a new shell.\n\
-                     It is read at connect time and never written to a file by this command."
-                );
-            }
-        }
+    if let Some((server, env_var_names)) = &plan.server {
+        add_server(config, server, env_var_names, &env.config_path)?;
+        report_env_var_status(env_var_names, env.probe.as_ref());
     }
     if let Some(cmd) = &plan.command {
         println!("  running: {cmd}");
@@ -401,7 +414,7 @@ fn run_plan(
 fn add_server(
     config: &mut crate::config::Config,
     server: &MCPServerConfig,
-    env_secrets: &[String],
+    env_var_names: &[String],
     path: &Path,
 ) -> anyhow::Result<()> {
     server
@@ -420,10 +433,10 @@ fn add_server(
     // this the header is refused even when the variable is set, so the server
     // connects unauthenticated - the exact gap that makes an install look done
     // but fail at the first call.
-    for var in env_secrets {
-        if !config.security.allow_env_vars.iter().any(|v| v == var) {
-            config.security.allow_env_vars.push(var.clone());
-            println!("  allowed {var} for the server's headers ([security] allow_env_vars).");
+    for name in env_var_names {
+        if !config.security.allow_env_vars.iter().any(|v| v == name) {
+            config.security.allow_env_vars.push(name.clone());
+            println!("  allowed {name} for the server's headers ([security] allow_env_vars).");
             changed = true;
         }
     }
