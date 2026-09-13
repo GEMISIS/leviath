@@ -186,7 +186,13 @@ mod tests {
             "[image/png, 12 B] hero.png"
         );
         assert_eq!(art.stored_count(), 1);
-        assert!(art.content[0].tokens >= 1600);
+        // A stored part is charged its short stand-in, not the native estimate
+        // (which for this rule would be ~1600): in a region it is only a ref.
+        assert_eq!(
+            art.content[0].tokens,
+            leviath_core::estimate_tokens("[image/png, 12 B] hero.png")
+        );
+        assert!(art.content[0].tokens < 100);
         let task = window.get_region("task").unwrap();
         assert_eq!(
             task.content[0].content.as_str(),
@@ -246,14 +252,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("takes no task"), "{err}");
-        let err = ingest_parts(
+        // A stored part is charged its small stand-in, not the native estimate,
+        // so an image now fits an ordinary region rather than overflowing it.
+        ingest_parts(
             &mut window,
             &taskless,
             vec![InboundPart::from_bytes("x.png", b"\x89PNG\r\n\x1a\n".to_vec()).in_region("log")],
             &sink,
         )
-        .unwrap_err();
-        assert!(err.contains("token budget"), "{err}");
+        .unwrap();
+        assert_eq!(window.get_region("log").unwrap().stored_count(), 1);
         // A store that cannot write reports it by name.
         struct Broken;
         impl BlobStore for Broken {

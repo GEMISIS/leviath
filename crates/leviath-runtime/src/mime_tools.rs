@@ -583,10 +583,6 @@ mod tests {
                     json!({"region": "tiny", "path": "ok.png", "deliver": "text"}),
                     "refused 'ok.png'",
                 ),
-                (
-                    json!({"region": "art", "path": "ok.png", "caption": "c"}),
-                    "carries text/plain",
-                ),
             ];
             for (args, expect) in cases {
                 let out = call("context_attach", args.clone(), &mut w, mime, entity, wd);
@@ -601,6 +597,17 @@ mod tests {
                 wd,
             );
             assert!(out.starts_with("Attached"), "{out}");
+            // A caption travels with the media: an image region takes the pair
+            // (the caption is text/plain and is not gated by `accepts`).
+            let out = call(
+                "context_attach",
+                json!({"region": "art", "path": "ok.png", "caption": "a note"}),
+                &mut w,
+                mime,
+                entity,
+                wd,
+            );
+            assert!(out.starts_with("Attached"), "captioned attach: {out}");
 
             let out = call("context_export", json!({}), &mut w, mime, entity, wd);
             assert!(out.contains("missing 'name'"), "{out}");
