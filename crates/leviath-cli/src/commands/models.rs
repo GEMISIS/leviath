@@ -128,7 +128,7 @@ pub(crate) async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
 /// sample, and a script provider defines its own catalog at run time. Naming
 /// a model those hosts have and this build has not heard of is normal, so
 /// they are never checked offline.
-const CLOSED_CATALOG_PROVIDERS: &[&str] = &["anthropic", "openai", "google"];
+const CLOSED_CATALOG_PROVIDERS: &[&str] = &["anthropic", "openai", "google", "meshy"];
 
 /// The `(provider, model)` rows [`crate::lint`] checks a blueprint's model
 /// references against, limited to the providers with a closed catalog.
@@ -936,14 +936,16 @@ mod tests {
     /// nothing else; an open provider in this list would flag every model
     /// it happens not to name.
     #[test]
-    fn the_closed_catalogue_names_the_three_providers_that_publish_one() {
+    fn the_closed_catalogue_names_the_providers_that_publish_one() {
         let rows = closed_catalog_models();
         assert!(!rows.is_empty());
         let providers: std::collections::BTreeSet<&str> =
             rows.iter().map(|(p, _)| p.as_str()).collect();
+        // The three text vendors plus Meshy, whose 3D operations are a fixed,
+        // compiled catalogue just as their model line-ups are.
         assert_eq!(
             providers.into_iter().collect::<Vec<_>>(),
-            ["anthropic", "google", "openai"]
+            ["anthropic", "google", "meshy", "openai"]
         );
     }
 
