@@ -276,6 +276,24 @@ work item, so a single file does not pay for a fan-out.
 can refine itself before returning results. Findings persist in a [context region](/docs/context)
 across passes so the report ranks them by severity.
 
+## 3D models (Meshy)
+
+Four agents build 3D assets through the [Meshy provider](/docs/providers#meshy-generative-3d).
+Configure Meshy (set `MESHY_API_KEY`, or `lev setup` and choose Meshy) and hand each one its input.
+
+- **`sprite-to-3d`** turns a sprite sheet or character image into a rigged, game-ready model: it
+  draws clean multi-view references, critiques them against the source, builds the mesh, rigs it,
+  and checks the result. `lev run sprite-to-3d --task "the character on the left" --attach sheet.png:source`.
+- **`image-to-model`** turns one image straight into a textured model, no reference-drawing step.
+  `lev run image-to-model --task "matte plastic" --attach toy.png:image`.
+- **`text-to-image-to-model`** draws a reference image from a description, then builds a model from
+  it. `lev run text-to-image-to-model --task "a stout clay teapot"`.
+- **`model-to-animated-model`** rigs an existing mesh and applies an animation from Meshy's library.
+  `lev run model-to-animated-model --task "run" --attach hero.glb:source_model`.
+
+Each hands the finished model back as a `model/gltf-binary` artifact; `lev result <run> --out .`
+writes it out.
+
 ## Running one
 
 Every agent runs the same way, name it and hand it a task:

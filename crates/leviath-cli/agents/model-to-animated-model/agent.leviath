@@ -1,0 +1,83 @@
+[agent]
+name = "model-to-animated-model"
+version = "0.1.0"
+description = "Rig an existing 3D model and apply an animation with Meshy"
+entry_stage = "animate"
+
+# Attach the mesh with `--attach <file.glb>:source_model`, and name the action
+# as the task ("walk", "run", "jump" ...); it defaults to a walk. Meshy rigs the
+# model, looks the action up in its animation library, and applies it. Set
+# MESHY_API_KEY (or `lev setup` and choose Meshy) first.
+
+# The action to apply, as the task text.
+[context.regions.task]
+kind = "pinned"
+budget = "10%"
+
+# The mesh to animate, attached by the caller.
+[context.regions.source_model]
+kind = "pinned"
+budget = "40%"
+accepts = ["model/*"]
+
+[context.regions.conversation]
+kind = "sliding_window"
+max_items = 8
+max_tokens = 4000
+budget = "10%"
+
+# The finished animated mesh.
+[context.regions.animated]
+kind = "sliding_window"
+max_items = 1
+budget = "20%"
+accepts = ["model/*"]
+
+[stages.animate]
+mode = "autonomous"
+description = "Meshy rigs the model and applies the requested animation"
+max_iterations = 3
+
+[stages.animate.model]
+allow_user_default = false
+# Rig plus animate is two Meshy jobs in a row, so allow a generous deadline.
+request_timeout_secs = 1200
+
+[[stages.animate.model.models]]
+provider = "meshy"
+model = "animate"
+
+[stages.animate.output_routing]
+"model/*" = "animated"
+
+[stages.animate.transitions.finalize]
+hint = "Once the animated model is in the animated region."
+transform = "direct"
+gate = { require_region_updated = "animated", message = "The animated region is empty - Meshy landed no animated mesh.", max_attempts = 2 }
+
+# ── 2. Hand the animated model back as the run's artifact ─────────────────────
+
+[stages.finalize]
+mode = "output"
+description = "Hand back the animated model as the run's artifact"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+max_iterations = 4
+available_tools = ["context_read", "context_list"]
+system_prompt = """
+The animated region holds the finished animated model as a produced part - a
+.glb Meshy just made. Call context_list on the animated region to read the
+part's exact name, then call submit_output with an `animation` artifact whose
+`path` is that part name (submit_output resolves a produced part by its name).
+In the answer, say in one line what the animation is.
+"""
+
+[stages.finalize.context]
+reset = ["conversation"]
+hide = ["source_model"]
+
+[stages.finalize.transitions]
+
+[[stages.finalize.output.artifacts]]
+name = "animation"
+type = "model/gltf-binary"
+required = true
