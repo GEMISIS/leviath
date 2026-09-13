@@ -263,9 +263,17 @@ impl StdioTransport {
         Ok(Some(frame))
     }
 
-    /// Read frames until one is a response to us, answering anything the
-    /// server asks along the way.
-    async fn read_until_response(&mut self) -> anyhow::Result<JsonRpcResponse> {
+    /// Read frames until one is the response to request `expected_id`,
+    /// answering anything the server asks along the way.
+    ///
+    /// A response whose numeric id is not `expected_id` is a stale frame - in
+    /// practice the late answer to an earlier request that already timed out,
+    /// still sitting in the pipe. Returning it here would hand this call the
+    /// wrong answer and leave every later call reading one behind (the
+    /// "offset reply" failure). So a non-matching numeric id is discarded and
+    /// the read continues; a null or absent id (which servers emit on protocol
+    /// errors) is accepted rather than strand the caller.
+    async fn read_until_response(&mut self, expected_id: u64) -> anyhow::Result<JsonRpcResponse> {
         loop {
             let Some(frame) = self.read_frame().await? else {
                 return Err(
@@ -277,7 +285,16 @@ impl StdioTransport {
             }
 
             match jsonrpc::classify(frame).map_err(|e| self.with_stderr(e.to_string()))? {
-                Inbound::Response(response) => return Ok(*response),
+                Inbound::Response(response) => {
+                    if response_answers(&response, expected_id) {
+                        return Ok(*response);
+                    }
+                    tracing::debug!(
+                        id = ?response.id,
+                        expected_id,
+                        "Discarding a stale MCP response with a non-matching id"
+                    );
+                }
                 Inbound::ServerRequest { id, method } => {
                     tracing::debug!(method = %method, "Answering server-initiated request");
                     let reply = jsonrpc::reply_to_server_request(&id, &method);
@@ -395,6 +412,21 @@ async fn discard_to_newline(reader: &mut (dyn AsyncBufRead + Unpin + Send)) -> s
     }
 }
 
+/// Whether `response` answers request `expected_id`.
+///
+/// A numeric id must match. A null or absent id (which a server emits on a
+/// protocol error) is accepted, since refusing it would strand the caller
+/// waiting for a frame that is never coming; the same goes for the
+/// (protocol-illegal, never-seen-from-real-servers) non-numeric id, which we
+/// accept rather than loop forever. Only a *different numeric* id is treated as
+/// a stale frame to skip.
+fn response_answers(response: &JsonRpcResponse, expected_id: u64) -> bool {
+    match &response.id {
+        Some(Value::Number(n)) => n.as_u64() == Some(expected_id),
+        _ => true,
+    }
+}
+
 #[async_trait]
 impl Transport for StdioTransport {
     async fn send_request(
@@ -414,7 +446,7 @@ impl Transport for StdioTransport {
 
         // Bounded: without a deadline a server that accepts the request and
         // then goes silent blocks the caller forever.
-        match tokio::time::timeout(timeout, self.read_until_response()).await {
+        match tokio::time::timeout(timeout, self.read_until_response(req.id.unwrap_or(0))).await {
             Ok(result) => result,
             Err(_) => {
                 // Read before building the message: which of the two failures
@@ -739,6 +771,65 @@ for line in sys.stdin:
             .await
             .expect("initialize should succeed");
         assert!(response.into_result().is_ok());
+    }
+
+    /// A stale response left in the pipe (the late answer to an earlier,
+    /// timed-out request) must be skipped, so a call gets the answer to its own
+    /// id instead of reading one behind forever. Covers both numeric arms of
+    /// `response_answers`: the id-999 frame does not match and is discarded, the
+    /// id-1 frame does and is returned.
+    #[tokio::test]
+    async fn a_stale_response_with_a_wrong_id_is_skipped() {
+        let _guard = always_on_tracing_guard();
+        let script = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    if req.get("method") == "initialize":
+        # A leftover answer to an earlier request arrives first...
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": 999, "result": {"stale": True}}) + "\n")
+        # ...then the real answer to THIS request.
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": {"fresh": True}}) + "\n")
+        sys.stdout.flush()
+"#;
+        let mut t = spawn_stub(script).await;
+        let response = t
+            .send_request(&init_request(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .expect("the stale frame is skipped and the matching one returned");
+        assert_eq!(response.id, Some(serde_json::json!(1)));
+        assert_eq!(
+            response.into_result().unwrap(),
+            serde_json::json!({"fresh": true})
+        );
+    }
+
+    /// A response with a null id (which servers emit on protocol errors) is
+    /// accepted rather than skipped - refusing it would strand the caller.
+    /// Covers the accept arm of `response_answers`.
+    #[tokio::test]
+    async fn a_null_id_response_is_accepted() {
+        let _guard = always_on_tracing_guard();
+        let script = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    if req.get("method") == "initialize":
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "bad"}}) + "\n")
+        sys.stdout.flush()
+"#;
+        let mut t = spawn_stub(script).await;
+        let response = t
+            .send_request(&init_request(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .expect("a null-id frame is returned, not skipped");
+        assert!(response.into_result().is_err());
     }
 
     #[tokio::test]
