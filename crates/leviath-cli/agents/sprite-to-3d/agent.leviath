@@ -1,40 +1,13 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.2.4"
+version = "0.3.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
-# Meshy does the actual image-to-3D work over its MCP server (run with npx),
-# which needs an API key. The run refuses to start until the server is
-# configured and the key is set. lev deps install writes the non-secret server
-# settings and allowlists the key so its ${MESHY_API_KEY} stays in your
-# environment rather than the config file.
-[[dependencies]]
-name = "meshy"
-kind = "mcp_server"
-server = "meshy"
-env = ["MESHY_API_KEY"]
-description = "Meshy image-to-3D, reached over its MCP server"
-remedy = "Run: lev deps install sprite-to-3d, then set MESHY_API_KEY in your environment"
-
-[dependencies.install.server]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@meshy-ai/meshy-mcp-server"]
-
-[dependencies.install.server.env]
-MESHY_API_KEY = "${MESHY_API_KEY}"
-
-# The Meshy MCP server runs with npx, which Node.js provides.
-[[dependencies]]
-name = "npx"
-kind = "binary"
-command = "npx"
-remedy = "Install Node.js (it provides npx), for example from https://nodejs.org"
-
-[dependencies.install.commands]
-macos = "brew install node"
-linux = "sudo apt-get install -y nodejs npm"
+# Meshy is a first-class Leviath provider now, not an MCP server: the build and
+# rig stages below select `provider = "meshy"` the way any stage selects a model.
+# Configure it like any other provider - set MESHY_API_KEY, or `lev setup` and
+# choose Meshy - and no per-agent dependency or npx install is needed.
 
 # ── Regions ────────────────────────────────────────────────────────────────
 
@@ -92,9 +65,13 @@ budget = "6%"
 accepts = ["text/*"]
 
 [context.regions.model]
-kind = "pinned"
-# The model is held as a reference plus a short stand-in, not inlined bytes, so a
-# small budget is plenty - it no longer needs room for the whole mesh.
+# A window of one: build-model writes the generated mesh here, then rig-model
+# reads it and writes the rigged mesh back, and keeping only the latest means the
+# rigged mesh replaces the unrigged one rather than both piling up. The mesh is
+# held as a reference plus a short stand-in, not inlined bytes, so a small budget
+# is plenty - it no longer needs room for the whole mesh.
+kind = "sliding_window"
+max_items = 1
 budget = "8%"
 accepts = ["model/*"]
 
@@ -107,12 +84,12 @@ kind = "clearable"
 budget = "10%"
 accepts = ["image/*"]
 
-# The text hints that steer the 3D build, written by assess-coverage once the
-# references are settled and read by build-model when it calls Meshy: a
-# texture_prompt (palette and materials), a negative_prompt (failure modes to
-# avoid), and an art_style. Kept as a first-class, reviewable field rather than
-# improvised at build time - and it maps directly onto the optional per-model
-# hints a future Meshy provider would take.
+# The text hint that steers the 3D texturing, written by assess-coverage once the
+# references are settled. build-model is a meshy provider stage, and the meshy
+# provider reads a visible text region as its texture prompt, so whatever
+# assess-coverage writes here (the palette and materials the references agree on)
+# becomes Meshy's texture_prompt. Kept as a first-class, reviewable field rather
+# than improvised at build time.
 [context.regions.build_spec]
 kind = "pinned"
 budget = "5%"
@@ -499,166 +476,84 @@ transform = "direct"
 
 [stages.build-model]
 mode = "autonomous"
-description = "Use Meshy to turn the chosen views into one rigged, game-ready model"
-# Generous: a full Meshy round is submit, poll to done, rig, poll again,
-# download, verify on disk, then attach - and each poll is one iteration. Too low
-# a cap once stranded the stage after it had the file but before it attached it.
-max_iterations = 32
+description = "Meshy turns the chosen reference views into one 3D model"
+# A provider stage, not a tool loop. The meshy provider submits the multi-image
+# job, polls it to completion, and hands back the mesh - one inference, no MCP,
+# no offset replies, no download babysitting. A little iteration headroom only.
+max_iterations = 3
 max_revisits = 2
-# Grant only the five Meshy tools this stage needs, by name, rather than
-# available_connectors = ["meshy"], which pulls in all ~24 of Meshy's tools. The
-# full toolset's schemas are ~37k tokens - on their own larger than the context
-# window the entry stage's image model sets for the shared layout - which left no
-# room for a reply and stalled the stage in empty turns. Five tools fit easily.
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "shell", "meshy__meshy_image_to_3d", "meshy__meshy_multi_image_to_3d", "meshy__meshy_get_task_status", "meshy__meshy_rig", "meshy__meshy_download_model"]
-system_prompt = """
-The references region holds the good views of the character - a front, and
-usually a back and sides. Those renders are your 3D input, not the source sprite
-sheet. They are final: do not change them, and do not generate or edit any
-images. Meshy is here to build a 3D model, nothing else.
 
-If the review region lists gaps from a previous build attempt, read them first
-and address them this time.
-
-Pick one strong render per angle (front-left, front-right, back-left, back-right
-three-quarter); do not pass two of the same angle. Never pass the source sprite sheet to Meshy - it would build a
-relief of the whole sheet instead of the character.
-
-The images you see in this context are visible only to you. Meshy is a separate
-program running on this same machine, and it reads image FILES from disk (it
-uploads them to its cloud), so you have to hand it real files, not the pictures
-in your context. Get the paths right by exporting first, then confirming, then
-passing absolute paths:
-- Export each chosen view to the working directory with context_export. The
-  export tool reports back the exact filename it wrote; use THAT filename
-  verbatim. Never invent, shorten, or guess a name, and do not assume a file is
-  called ref_front.png or v_front.png - use only what the export actually
-  reported.
-- Run list_dir on the working directory to confirm every exported file is really
-  there and to read its true path before you call Meshy. If a file you meant to
-  pass is not listed, export it again; do not proceed on a name you have not
-  seen in the listing.
-- Pass Meshy the ABSOLUTE path to each exported file. The working directory is an
-  absolute path, and since Meshy runs on this same machine it can read an
-  absolute path directly. Never pass a bare relative name (front.png,
-  refs/back.png) and never guess a directory that Meshy might use, such as /app,
-  /tmp/outputs, /workspace, or refs/ - those do not resolve in Meshy's own
-  working directory and every such call fails with "File not found".
-- Only if Meshy's image-to-3D tool explicitly accepts an image URL or a
-  base64/data-URI argument may you pass the image that way instead of a file
-  path. The default, reliable route is the absolute exported-file path above.
-
-Then use only Meshy's 3D tools:
-- Prefer Meshy's multi-image image-to-3D tool when it is available: it takes
-  several views (front, back, sides) and produces ONE model, which gives a far
-  better back and sides than a single front view can. Pass all the chosen views,
-  each as the absolute path you confirmed above.
-- If only single-image image-to-3D is available, use the front view's absolute
-  path.
-- CAPTURE THE TASK ID the moment you create a task, and drive everything off
-  that id. Meshy's MCP sometimes returns a response that belongs to a DIFFERENT
-  call than the one you just made (the replies arrive offset by one). So never
-  trust a bare reply by position: after every call, check that the id in the
-  response is the id you expected, and if it is not, ignore that reply and poll
-  again by explicit task id. Keep a short note in the scratchpad of each task id
-  (the mesh task, then the rig task) so you always know which id you are waiting
-  on.
-- Poll the task status by EXPLICIT task id until that id reports SUCCEEDED, but
-  WAIT between polls rather than checking in a tight loop; the job takes minutes,
-  and each check costs an inference. A status reply whose id is not the one you
-  are polling is a stale/offset reply - discard it and poll again.
-- Rig the model when the character is humanoid; capture the rig task id the same
-  way and poll it to SUCCEEDED.
-- Get the finished model onto local disk (see the download step below).
-
-Model settings that matter:
-- symmetry_mode = "off". This is important: the character is symmetric except for
-  one-sided details like an arm cannon or a shoulder pad, and Meshy's default
-  auto-symmetry mirrors both sides to match, which deletes those details (the
-  arm cannon becomes an ordinary hand). Turn symmetry off so asymmetric
-  accessories survive.
-- Prefer the balanced model tier over the highest-detail one: the very high
-  detail setting tends to lose geometry behind the character, while the balanced
-  tier keeps clean, complete topology for a stylized game asset.
-- Aim for roughly 8k to 12k polygons (target_polycount), and quad topology for
-  clean rigging.
-- Enable PBR, and pass the text hints the build_spec region holds: use its
-  `texture_prompt` line as Meshy's texture_prompt (so the colours and materials
-  match), its `negative_prompt` line as Meshy's negative_prompt (to steer away
-  from the listed failure modes - painted-on eyelashes, smeared textures, seams,
-  duplicated limbs), and its `art_style` line as Meshy's art_style. If build_spec
-  is somehow empty, fall back to describing the palette and materials from the
-  references yourself.
-
-GET THE MODEL ONTO DISK - THIS STEP MUST NOT BE SKIPPED, AND MUST ACTUALLY
-PRODUCE A LOCAL FILE. Meshy's download tool does NOT write a file you can reach:
-it returns download URLs (a .glb for the mesh, a rigged .glb after rigging, and a
-preview/thumbnail image). The whole run fails downstream if you leave without a
-real local .glb, so treat this as the most important part of the stage and keep
-at it until the file is on disk.
-
-Get the URLs reliably, working from the task id you confirmed:
-- Ask for the finished task's download URLs (the download tool, or a status query
-  by explicit task id). VERIFY the reply is for the id you want; if it is offset
-  or stale, ask again by id. You need the .glb URL (prefer the RIGGED task's .glb
-  when you rigged, else the mesh task's .glb) and the preview/thumbnail image URL.
-
-Download each URL to the working directory with the shell tool, and VERIFY it:
-- The signed URL contains & and ?, so quote it. Write to an absolute path:
-    curl -fL -o "<ABSOLUTE workdir>/model.glb" "<the .glb url>"
-    curl -fL -o "<ABSOLUTE workdir>/model_preview.png" "<the thumbnail url>"
-- After each curl, confirm the file with shell, e.g. `ls -l` and `wc -c` (or
-  list_dir): a real .glb is at least ~1 MB. If the file is missing, tiny, or is
-  an HTML/JSON error page, the URL was wrong or expired - re-query the task by id
-  for a FRESH URL and curl again. Try a few times; a signed URL can expire in
-  minutes, so re-fetch it right before downloading.
-- The `-f` flag makes curl fail on an HTTP error instead of saving the error
-  body, so a failed curl is obvious.
-
-Only once `model.glb` really exists in the working directory and is a sensible
-size, wire things into context:
-- context_attach model.glb to the model region (this is the run's deliverable).
-- context_attach model_preview.png to the model_preview region (verify looks at
-  this).
-- Note both file paths and the Meshy task ids in the review region.
-
-Do NOT transition out of this stage until model.glb is on disk AND attached to
-the model region - the next stage cannot verify a model that is not there. When
-the model is in the model region the run moves on to verify it. Use the
-scratchpad for working notes.
-"""
-
-# Meshy is for 3D only. The five tools granted above are the only ones this stage
-# can reach, so its image-generation and text tools are simply absent - no
-# deny-list needed, and the credits cannot be spent regenerating a reference.
 [stages.build-model.model]
 allow_user_default = false
+# A Meshy job runs for minutes; give the provider room to poll to completion.
+request_timeout_secs = 900
 
-# build-model has to drive Meshy's MCP tools correctly (export the views, feed the
-# right paths, poll, rig, download) with the reference images in its context.
-# Smaller models fail this: gpt-5.4-mini could not ingest the images at all, and
-# sonnet drew nothing after the first turn (it stalls in a tool loop once several
-# images are in context). Opus drives it reliably, so build uses opus; the
-# reference stages, which are the bulk of the work, stay on cheaper models.
 [[stages.build-model.model.models]]
-provider = "openrouter"
-model = "anthropic/claude-opus-5"
+provider = "meshy"
+model = "multi-image-to-3d"
 
+# The static build hints. Remesh to a game-ready, cleanly-riggable polycount;
+# quad topology and PBR for a stylized asset. The dynamic texture prompt rides in
+# from the build_spec region's text - the provider reads a visible text region as
+# its texture prompt - so the palette and materials the reference stages settled
+# on steer the texturing. Only fields Meshy documents for this endpoint are sent.
+[stages.build-model.model.parameters]
+should_remesh = true
+target_polycount = 12000
+topology = "quad"
+enable_pbr = true
+texture_resolution = "2k"
+
+# Only the reference views may reach Meshy as input images. Hide every other
+# image region so the source sprite sheet (which would build a relief of the
+# whole sheet) and the marketing art are never fed to the builder, and hide the
+# critique text so only build_spec steers the texture prompt.
 [stages.build-model.context]
 reset = ["conversation"]
-hide = ["marketing", "model_preview"]
+hide = ["task", "source", "marketing", "model_preview", "review", "missing"]
 
+# The produced mesh goes to the model region; the preview render Meshy returns
+# beside it goes to model_preview, where verify can look at it.
 [stages.build-model.output_routing]
 "model/*" = "model"
+"image/*" = "model_preview"
 
-[stages.build-model.transitions.verify-model]
-hint = "Once a rigged, game-ready model is in the model region."
+[stages.build-model.transitions.rig-model]
+hint = "Once the built mesh is in the model region."
 transform = "direct"
-# Do not leave until a model has actually been built and attached: without this
-# the stage can hand an empty model region to verify and finalize, and the run
-# ends owing an artifact it never made. Meshy builds take minutes, so allow
-# several passes.
-gate = { require_region_updated = "model", message = "The model region is still empty. Build the model with Meshy (image-to-3D, poll until done, rig, download), then attach the downloaded file to the model region with context_attach before moving on.", max_attempts = 8 }
+# The build is deterministic, so this rarely holds; it catches a Meshy failure
+# that landed no mesh rather than moving on to rig nothing.
+gate = { require_region_updated = "model", message = "The model region is empty - the Meshy build landed no mesh.", max_attempts = 2 }
+
+# ── 6b. Rig the built mesh into an animation-ready model ───────────
+
+[stages.rig-model]
+mode = "autonomous"
+description = "Meshy rigs the built mesh into an animation-ready model"
+max_iterations = 3
+max_revisits = 2
+
+[stages.rig-model.model]
+allow_user_default = false
+request_timeout_secs = 900
+
+[[stages.rig-model.model.models]]
+provider = "meshy"
+model = "rig"
+
+# The mesh in the model region is the only input. Hide the image and text
+# regions so nothing but that GLB reaches the rigger.
+[stages.rig-model.context]
+reset = ["conversation"]
+hide = ["task", "source", "marketing", "references", "model_preview", "review", "missing", "build_spec"]
+
+# The rigged mesh replaces the unrigged one in the model region (a window of one).
+[stages.rig-model.output_routing]
+"model/*" = "model"
+
+[stages.rig-model.transitions.verify-model]
+hint = "Once the rigged mesh is in the model region."
+transform = "direct"
 
 # ── 7. Check the model against the references, and rebuild if it is off ───────
 
