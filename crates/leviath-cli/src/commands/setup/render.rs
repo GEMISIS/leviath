@@ -540,7 +540,30 @@ fn build_welcome(wizard: &Wizard) -> Screen {
 
 fn build_providers(wizard: &Wizard) -> Screen {
     let mut screen = Screen::default();
+    let mut section: Option<(&str, &str)> = None;
     for (index, row) in wizard.providers.iter().enumerate() {
+        // Group the list under an auth-kind heading (how you sign in) and a
+        // modality sub-heading (what it makes), so a long provider list stays
+        // scannable. Headers are plain lines, not `row()`s, so the cursor still
+        // steps provider to provider - the catalog is already in grouped order.
+        let auth = row.provider.auth_kind();
+        let modality = row.provider.modality();
+        if section.map(|(a, _)| a) != Some(auth) {
+            if section.is_some() {
+                screen.blank();
+            }
+            screen.push(Line::from(Span::styled(
+                auth,
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            )));
+        }
+        if section != Some((auth, modality)) {
+            screen.push(Line::from(Span::styled(
+                format!("  {modality}"),
+                Style::default().fg(C_MUTED),
+            )));
+        }
+        section = Some((auth, modality));
         let mark = if row.selected {
             GLYPH_COMPLETE
         } else {
@@ -1091,7 +1114,9 @@ mod tests {
     fn narrow_window_wraps_provider_blurbs_instead_of_clipping() {
         let (_dir, mut w) = wizard();
         w.enter(Step::Providers);
-        let mut terminal = Terminal::new(TestBackendHarness::new(48, 44)).unwrap();
+        // Tall enough that the whole (section-headed) list fits from the top,
+        // so this test is about the narrow WIDTH wrapping rather than scrolling.
+        let mut terminal = Terminal::new(TestBackendHarness::new(48, 64)).unwrap();
         terminal.draw(|frame| draw(frame, &w)).unwrap();
         let screen = terminal.backend().text();
         assert!(
@@ -1257,6 +1282,27 @@ mod tests {
     }
 
     /// A cursor past the end of the rows draws the top of the screen rather
+    /// The provider list is grouped under auth-kind and modality headings, tall
+    /// enough that all of them render in one frame.
+    #[test]
+    fn the_provider_list_shows_its_section_headings() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Providers);
+        let screen = rendered_at(&w, 140, 64);
+        for heading in [
+            "API key",
+            "Text and images",
+            "3D models and textures",
+            "Subscription logins",
+            "Local and custom",
+        ] {
+            assert!(
+                screen.contains(heading),
+                "missing heading {heading}:\n{screen}"
+            );
+        }
+    }
+
     /// than panicking. Nothing in the wizard puts it there, but tests do, and
     /// a render is never the right place to discover an inconsistency.
     #[test]

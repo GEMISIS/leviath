@@ -99,6 +99,29 @@ pub struct Provider {
     pub setting: Setting,
 }
 
+impl Provider {
+    /// How this provider authenticates, the wizard's top-level grouping: a
+    /// browser subscription login, an API key, or a local/custom endpoint.
+    pub(crate) fn auth_kind(&self) -> &'static str {
+        match self.credential {
+            Credential::Signin => "Subscription logins",
+            Credential::ApiKey => "API key",
+            Credential::BaseUrl | Credential::Endpoint => "Local and custom",
+        }
+    }
+
+    /// What this provider produces, the wizard's grouping within an auth kind.
+    /// Everything shipped is a text-and-images model except Meshy, which makes
+    /// 3D; the arm is here so an image, audio, or video provider slots in by
+    /// naming its own family.
+    pub(crate) fn modality(&self) -> &'static str {
+        match self.id {
+            "meshy" => "3D models and textures",
+            _ => "Text and images",
+        }
+    }
+}
+
 /// Every provider the wizard offers, in the order it offers them.
 pub(crate) fn providers() -> Vec<Provider> {
     vec![
@@ -427,7 +450,23 @@ mod tests {
         for p in &all {
             assert!(!p.display.is_empty(), "provider {} has no label", p.id);
             assert!(!p.blurb.is_empty(), "provider {} has no blurb", p.id);
+            // Every provider files under an auth kind and a modality, the two
+            // headings the wizard groups by.
+            assert!(
+                ["Subscription logins", "API key", "Local and custom"].contains(&p.auth_kind()),
+                "provider {} has an unknown auth kind {}",
+                p.id,
+                p.auth_kind()
+            );
+            assert!(!p.modality().is_empty(), "provider {} has no modality", p.id);
         }
+        // The catalog carries all four auth kinds and both modalities in use, so
+        // the classifier's arms are all exercised.
+        assert!(all.iter().any(|p| p.credential == Credential::Signin));
+        assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
+        assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
+        assert!(all.iter().any(|p| p.modality() == "3D models and textures"));
+        assert!(all.iter().any(|p| p.modality() == "Text and images"));
     }
 
     #[test]
