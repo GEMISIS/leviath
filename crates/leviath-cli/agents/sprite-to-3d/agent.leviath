@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.2.3"
+version = "0.2.4"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -93,7 +93,9 @@ accepts = ["text/*"]
 
 [context.regions.model]
 kind = "pinned"
-budget = "18%"
+# The model is held as a reference plus a short stand-in, not inlined bytes, so a
+# small budget is plenty - it no longer needs room for the whole mesh.
+budget = "8%"
 accepts = ["model/*"]
 
 # A rendered preview IMAGE of the built model (Meshy returns a thumbnail render
@@ -104,6 +106,17 @@ accepts = ["model/*"]
 kind = "clearable"
 budget = "10%"
 accepts = ["image/*"]
+
+# The text hints that steer the 3D build, written by assess-coverage once the
+# references are settled and read by build-model when it calls Meshy: a
+# texture_prompt (palette and materials), a negative_prompt (failure modes to
+# avoid), and an art_style. Kept as a first-class, reviewable field rather than
+# improvised at build time - and it maps directly onto the optional per-model
+# hints a future Meshy provider would take.
+[context.regions.build_spec]
+kind = "pinned"
+budget = "5%"
+accepts = ["text/*"]
 
 [context.regions.scratchpad]
 kind = "clearable"
@@ -154,15 +167,22 @@ palms in) on a plain neutral background, and each is a clean 3D character render
 smooth surfaces, rounded volumes, soft studio lighting, clear depth - never pixel
 art.
 
+The same character rotating in place, viewed from each corner:
 1. FRONT THREE-QUARTER, LEFT - turned about 45 degrees toward its left, so you see
    the face, the front, and the character's left side at once. Draw this one
    first: it is the anchor the other three must match for style, proportions,
    colors and pose.
-2. FRONT THREE-QUARTER, RIGHT - the mirror, turned about 45 degrees toward its
-   right.
+2. FRONT THREE-QUARTER, RIGHT - turned about 45 degrees toward its right.
 3. BACK THREE-QUARTER, LEFT - turned about 135 degrees, so you see the back and
    the left side at once.
 4. BACK THREE-QUARTER, RIGHT - turned about 135 degrees the other way.
+
+NEVER MIRROR - ROTATE. These are one character turning in place, NOT mirror
+images. An asymmetric feature - a ponytail worn to one side, an arm cannon, a
+single shoulder pad, a side bag - stays on its OWN physical side in every view;
+it must not jump to the other side when the character turns. (Mirroring a
+side-worn ponytail across the views makes the 3D builder fuse two ponytails, one
+per side - draw the one ponytail on its true side, seen from four angles.)
 
 WHY ALL DIAGONALS, AND NO STRAIGHT FRONT. A straight front or back is flat: it
 hides how far a feature sticks out, and the 3D builder both weights a straight
@@ -170,10 +190,16 @@ front heavily AND collapses thin or trailing parts - a long ponytail, a tail,
 long hair, a cape, an arm cannon - into stubs when the view only hints at them. A
 three-quarter view shows every feature with its depth (how far it juts, which way
 it hangs), and with all four corners covered nothing thin can be flattened away
-and no single flat view dominates. Put any long ponytail, tail or hair on its
-correct side and show its FULL length in all four views. The two front
-three-quarters together cover the front symmetrically, so no straight front is
-needed.
+and no single flat view dominates. Show any long ponytail, tail or hair at its
+FULL length in all four views. The two front three-quarters together cover the
+front symmetrically, so no straight front is needed.
+
+ASSEMBLE THE CHARACTER LOGICALLY. Draw every part attached where it physically
+connects: a hat resting on the head, hair emerging from the scalp, straps, belts
+and bands sitting on the body, limbs joined at their joints, a weapon held or
+mounted where it attaches - so the character reads as one connected form, not
+floating or interpenetrating pieces. Follow the character's own design wherever
+it clearly, intentionally deviates from that.
 
 A rig binds cleanly only when every view shares one pose - the arms in the same
 45-degree position in all four, not relaxed in some and out in others; a
@@ -355,7 +381,17 @@ detail still absent or wrong. A single view, or a set that still drops the arm
 cannon, is not ready.
 
 Then choose one path:
-- If ready, transition to build-model.
+- If ready, WRITE THE BUILD HINTS into the build_spec region (context_write),
+  then transition to build-model. Write three labelled lines the builder will
+  pass to the 3D tool, grounded in what the references actually show:
+    texture_prompt: the character's palette and materials in a few words (for
+      example the coat colour, the metal of a weapon, fur vs. cloth vs. skin).
+    negative_prompt: the failure modes to steer away from - "eyelashes or facial
+      details painted flat onto the eyeballs, smeared or ghosted textures, visible
+      seams, duplicated or mirrored limbs, a second mirrored ponytail, extra
+      fingers".
+    art_style: the overall look in a few words (for example "stylized cartoon
+      game character, clean flat shading").
 - If an angle is missing or the missing region still lists a serious detail,
   transition to generate-more. The missing region already says what to fix; add
   to the review region anything else the generator should know.
@@ -413,7 +449,12 @@ style, proportions and colors, just corrected or turned to a new angle. Trust th
 marketing art for appearance (true colors, and the length and shape of features
 like a long ponytail) but never copy its action pose. Every render must use the
 same A-pose as the existing references: arms held down and out at ~45 degrees,
-identical in all views, so the set rigs cleanly. One single view per image, no
+identical in all views, so the set rigs cleanly. Views are the character ROTATED,
+never mirrored: an asymmetric feature (a side-worn ponytail, an arm cannon, a
+single pad) stays on its own physical side in every view, so the build does not
+fuse two of it. Draw parts attached where they physically connect (hat on the
+head, hair from the scalp, belts on the body, limbs at their joints), except
+where the character's design clearly deviates. One single view per image, no
 turnaround sheets, on a plain neutral background. Store each in the references
 region as you go.
 
@@ -541,8 +582,13 @@ Model settings that matter:
   tier keeps clean, complete topology for a stylized game asset.
 - Aim for roughly 8k to 12k polygons (target_polycount), and quad topology for
   clean rigging.
-- Enable PBR, and give a texture_prompt describing the character's palette and
-  materials (read the review notes and the references) so the colors match.
+- Enable PBR, and pass the text hints the build_spec region holds: use its
+  `texture_prompt` line as Meshy's texture_prompt (so the colours and materials
+  match), its `negative_prompt` line as Meshy's negative_prompt (to steer away
+  from the listed failure modes - painted-on eyelashes, smeared textures, seams,
+  duplicated limbs), and its `art_style` line as Meshy's art_style. If build_spec
+  is somehow empty, fall back to describing the palette and materials from the
+  references yourself.
 
 GET THE MODEL ONTO DISK - THIS STEP MUST NOT BE SKIPPED, AND MUST ACTUALLY
 PRODUCE A LOCAL FILE. Meshy's download tool does NOT write a file you can reach:
