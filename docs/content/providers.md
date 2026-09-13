@@ -491,9 +491,15 @@ a typed part, which is the shape every provider speaks. Set `MESHY_API_KEY` (or
 | `animate` | a `model/gltf-binary` mesh plus an action name | the animated mesh (rigs, then applies the action) |
 
 A stage's texture prompt, text prompt, or animation action comes from the text
-of a visible region; `text-to-3d` and `animate` each run more than one Meshy job
-in turn (a preview then a refine; a rig, a library lookup, then the animation)
-under one `request_timeout_secs`.
+of a visible region: text in the conversation first, and when there is none,
+the pinned regions the stage sees (the `task` region a caller fills, say). A
+stage can also pin the action or texture prompt in
+`[stages.<name>.model.parameters]` as `action` or `texture_prompt`, which wins
+over any region text. `text-to-3d` and `animate` each run more than one Meshy
+job in turn (a preview then a refine; a rig, a library lookup, then the
+animation) under one `request_timeout_secs`. The action is a search of Meshy's
+animation library, and the first match is applied, so name a clip the way the
+library does (`Idle 1`, `Run`) rather than describing it.
 
 ```toml
 [context.regions]

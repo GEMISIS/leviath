@@ -276,9 +276,10 @@ fn required_prompt(request: &InferenceRequest, op: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// The animation action to apply, from the request text, defaulting to a walk.
+/// The animation action to apply: the `action` hint a stage set in
+/// `[model.parameters]`, else the request text, defaulting to a walk.
 pub(crate) fn animate_action(request: &InferenceRequest) -> String {
-    let action = request_text(request);
+    let action = extra_str(request, "action").unwrap_or_else(|| request_text(request));
     match action.trim().is_empty() {
         true => "walk".to_string(),
         false => action.trim().to_string(),
@@ -420,7 +421,40 @@ fn request_text(request: &InferenceRequest) -> String {
             }
         }
     }
+    // A pinned region renders into the system prompt, not a message, so a
+    // task or prompt that lives in one never reached here and every such
+    // stage ran on the default action or refused for want of a prompt. With
+    // no message text, read the system blocks instead: only the ones a region
+    // produced (a hint carries no region), never the runtime's own
+    // instruction blocks, and never a region whose text is a stored part's
+    // stand-in. Message text still wins when there is any, so a prompt an
+    // upstream stage wrote into a conversation is not diluted by the task.
+    if chunks.is_empty() {
+        for block in &request.system {
+            if block.region.is_empty() || RUNTIME_REGIONS.contains(&block.region.as_str()) {
+                continue;
+            }
+            let body = unlabelled(&block.text, &block.region);
+            if !is_pointer(body) && !body.trim().is_empty() {
+                chunks.push(body.to_string());
+            }
+        }
+    }
     chunks.join("\n").trim().to_string()
+}
+
+/// Regions the runtime writes for its own purposes, whose text is never a
+/// prompt: the stage's standing instructions, and the mirrored final answer.
+const RUNTIME_REGIONS: &[&str] = &["stage_instructions", "final_output"];
+
+/// A region's system block without the `## <region>` heading assembly puts
+/// on it, so the prompt is the region's text and not its label. A block
+/// carrying no such heading is returned whole.
+fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
+    text.strip_prefix("## ")
+        .and_then(|rest| rest.strip_prefix(region))
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .unwrap_or(text)
 }
 
 /// Add the texture prompt to a create body, from the explicit hint or, when
@@ -826,6 +860,58 @@ mod tests {
         });
         assert_eq!(request_text(&request), "walk");
         assert_eq!(animate_action(&request), "walk");
+    }
+
+    /// A system block the way assembly renders a pinned region: its text
+    /// under a `## <region>` heading, tagged with the region's name.
+    fn system_block(region: &str, text: &str) -> crate::SystemBlock {
+        crate::SystemBlock {
+            text: text.to_string(),
+            cache_hint: leviath_core::CacheHint::Always,
+            region: region.to_string(),
+            volatility: leviath_core::Volatility::default(),
+        }
+    }
+
+    #[test]
+    fn request_text_falls_back_to_the_pinned_regions_in_the_system_prompt() {
+        // The bundled model-to-animated-model puts the action in a pinned
+        // `task` region, which assembly renders into the system prompt; the
+        // messages carry only the lifted mesh. The action was invisible here,
+        // so every such run animated the default walk.
+        let mut request = with_blocks(vec![hydrated_block("model/gltf-binary", "m.glb", "R0xC")]);
+        request.system = vec![
+            system_block(
+                "stage_instructions",
+                "## stage_instructions\n[Stage instructions: call submit_output]",
+            ),
+            system_block("", "a hint that came from no region"),
+            system_block("source_model", "## source_model\n[model/gltf-binary] m.glb"),
+            system_block("task", "## task\nIdle 1"),
+        ];
+        assert_eq!(request_text(&request), "Idle 1");
+        assert_eq!(animate_action(&request), "Idle 1");
+        // A block without the heading is taken whole.
+        request.system = vec![system_block("notes", "matte clay")];
+        assert_eq!(request_text(&request), "matte clay");
+    }
+
+    #[test]
+    fn message_text_outranks_the_system_prompt() {
+        let mut request = with_blocks(vec![ContentBlock::Text {
+            text: "walk".into(),
+        }]);
+        request.system = vec![system_block("task", "## task\nIdle 1")];
+        assert_eq!(request_text(&request), "walk");
+    }
+
+    #[test]
+    fn the_action_hint_outranks_every_region() {
+        let mut request = with_blocks(vec![ContentBlock::Text {
+            text: "walk".into(),
+        }]);
+        request.extra = json!({ "action": "Idle 3" });
+        assert_eq!(animate_action(&request), "Idle 3");
     }
 
     #[test]
