@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.2.0"
+version = "0.2.1"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -157,6 +157,16 @@ Work in this order:
    surfaces, rounded volumes, soft studio lighting and clear depth, the way a
    modern stylized game character looks.
 
+   LONG TRAILING FEATURES MUST BE VISIBLE FROM THE FRONT. If the character has a
+   long ponytail, a tail, long hair, a cape or a scarf that naturally hangs
+   behind the body, do NOT leave it hidden behind the silhouette in this front
+   view - drape it forward over one shoulder, or sweep it out to one side, so its
+   full length is plainly visible here. The 3D builder weights this front view
+   most heavily and reconstructs a thin feature poorly when the front view only
+   hints at it; a ponytail shown clearly here survives into the model, one hidden
+   behind the head collapses into a stub. Keep it on its correct side, and show
+   it at full length in the back and side views as well.
+
 2. THEN THE OTHER VIEWS. Using BOTH the sprite sheet in the source region AND the
    front render you just made as reference, draw the same character from three
    more angles: the back, the left side, and the right side. Every view MUST use
@@ -276,6 +286,14 @@ too: every view must share the same A-pose (arms ~45 degrees down), so flag any
 view whose arms or stance differ - a mixed-pose set rigs badly. Give special
 attention to a long ponytail or tail: it is the detail the downstream 3D step
 most often drops, so if any view weakens or omits it, log that.
+
+Judge MATERIAL and TEXTURE fidelity too, against the marketing art when present,
+not just shape and color: hair rendered as smooth flowing strands vs. a stiff
+feathered or scaled look, fur vs. plastic, matte vs. glossy, a knitted or ribbed
+fabric vs. flat plastic. If a surface's texture reads clearly wrong compared with
+the reference art, log it as a missing-region item naming the part and the
+correct material (for example: "ponytail: rendered as stiff overlapping scales,
+but the art shows soft smooth flowing hair").
 
 The missing region is yours alone to maintain, and it is the record the next
 generation pass fixes from:
@@ -488,10 +506,20 @@ Then use only Meshy's 3D tools:
   each as the absolute path you confirmed above.
 - If only single-image image-to-3D is available, use the front view's absolute
   path.
-- Poll the task status until it is done, but WAIT between polls rather than
-  checking in a tight loop; the job takes minutes, and each check costs an
-  inference.
-- Rig the model when the character is humanoid.
+- CAPTURE THE TASK ID the moment you create a task, and drive everything off
+  that id. Meshy's MCP sometimes returns a response that belongs to a DIFFERENT
+  call than the one you just made (the replies arrive offset by one). So never
+  trust a bare reply by position: after every call, check that the id in the
+  response is the id you expected, and if it is not, ignore that reply and poll
+  again by explicit task id. Keep a short note in the scratchpad of each task id
+  (the mesh task, then the rig task) so you always know which id you are waiting
+  on.
+- Poll the task status by EXPLICIT task id until that id reports SUCCEEDED, but
+  WAIT between polls rather than checking in a tight loop; the job takes minutes,
+  and each check costs an inference. A status reply whose id is not the one you
+  are polling is a stale/offset reply - discard it and poll again.
+- Rig the model when the character is humanoid; capture the rig task id the same
+  way and poll it to SUCCEEDED.
 - Get the finished model onto local disk (see the download step below).
 
 Model settings that matter:
@@ -508,30 +536,42 @@ Model settings that matter:
 - Enable PBR, and give a texture_prompt describing the character's palette and
   materials (read the review notes and the references) so the colors match.
 
-GET THE MODEL ONTO DISK. Meshy's download tool does NOT write a local file in
-this environment - it returns download URLs (a .glb for the mesh, and after
-rigging a rigged .glb, plus a preview/thumbnail image). So you fetch them
-yourself with the shell tool:
-- Call the download tool (or read the finished task's JSON) to obtain the URLs.
-  Prefer the RIGGED model's .glb URL when you rigged; otherwise the mesh .glb URL.
-- Download it into the working directory with shell, quoting the URL (the signed
-  URL contains & and ? and must be quoted):
-    curl -L -o "<ABSOLUTE workdir>/model.glb" "<the .glb url>"
-- Also download the preview/thumbnail render, which is a picture of the built
-  model the verify stage needs to look at:
-    curl -L -o "<ABSOLUTE workdir>/model_preview.png" "<the thumbnail url>"
-- Run list_dir to confirm both files exist and are non-empty (a few MB for the
-  glb). If curl wrote a tiny file or an error page, the URL was wrong or expired -
-  re-read the task JSON for a fresh URL and try again.
+GET THE MODEL ONTO DISK - THIS STEP MUST NOT BE SKIPPED, AND MUST ACTUALLY
+PRODUCE A LOCAL FILE. Meshy's download tool does NOT write a file you can reach:
+it returns download URLs (a .glb for the mesh, a rigged .glb after rigging, and a
+preview/thumbnail image). The whole run fails downstream if you leave without a
+real local .glb, so treat this as the most important part of the stage and keep
+at it until the file is on disk.
 
-Then wire them into context so the next stages can use them:
+Get the URLs reliably, working from the task id you confirmed:
+- Ask for the finished task's download URLs (the download tool, or a status query
+  by explicit task id). VERIFY the reply is for the id you want; if it is offset
+  or stale, ask again by id. You need the .glb URL (prefer the RIGGED task's .glb
+  when you rigged, else the mesh task's .glb) and the preview/thumbnail image URL.
+
+Download each URL to the working directory with the shell tool, and VERIFY it:
+- The signed URL contains & and ?, so quote it. Write to an absolute path:
+    curl -fL -o "<ABSOLUTE workdir>/model.glb" "<the .glb url>"
+    curl -fL -o "<ABSOLUTE workdir>/model_preview.png" "<the thumbnail url>"
+- After each curl, confirm the file with shell, e.g. `ls -l` and `wc -c` (or
+  list_dir): a real .glb is at least ~1 MB. If the file is missing, tiny, or is
+  an HTML/JSON error page, the URL was wrong or expired - re-query the task by id
+  for a FRESH URL and curl again. Try a few times; a signed URL can expire in
+  minutes, so re-fetch it right before downloading.
+- The `-f` flag makes curl fail on an HTTP error instead of saving the error
+  body, so a failed curl is obvious.
+
+Only once `model.glb` really exists in the working directory and is a sensible
+size, wire things into context:
 - context_attach model.glb to the model region (this is the run's deliverable).
-- context_attach model_preview.png to the model_preview region (this is what
-  verify looks at).
+- context_attach model_preview.png to the model_preview region (verify looks at
+  this).
 - Note both file paths and the Meshy task ids in the review region.
 
-Do not end the run here; when the model is in the model region the run moves on to
-verify it. Use the scratchpad for working notes.
+Do NOT transition out of this stage until model.glb is on disk AND attached to
+the model region - the next stage cannot verify a model that is not there. When
+the model is in the model region the run moves on to verify it. Use the
+scratchpad for working notes.
 """
 
 # Meshy is for 3D only. The five tools granted above are the only ones this stage
