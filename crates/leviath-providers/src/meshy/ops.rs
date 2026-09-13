@@ -380,13 +380,40 @@ fn mime_data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Ve
 /// The texture prompt an upstream stage wrote lands here, as the text of the
 /// region it wrote it to; it is the dynamic hint the operation textures with.
 fn request_text(request: &InferenceRequest) -> String {
+    // Assembly emits a stored part as a pointer text block ("[region] [mime,
+    // size] name") beside its bytes block. That pointer is not the user's
+    // prompt, so exclude any text carrying a stored part's stand-in, or the
+    // texture prompt and the animation action would be the mesh's file line
+    // rather than "weathered bronze" or "walk".
+    let stand_ins: Vec<&str> = request
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(|b| match b {
+            ContentBlock::Mime { part, .. } => Some(part.stand_in.as_str()),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    let is_pointer = |text: &str| stand_ins.iter().any(|s| text.contains(s));
+
     let mut chunks = Vec::new();
     for message in &request.messages {
         match &message.content {
-            MessageContent::Text(text) => chunks.push(text.clone()),
+            MessageContent::Text(text) => {
+                if !is_pointer(text) {
+                    chunks.push(text.clone());
+                }
+            }
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
-                    if let ContentBlock::Text { text } = block {
+                    if let ContentBlock::Text { text } = block
+                        && !is_pointer(text)
+                    {
                         chunks.push(text.clone());
                     }
                 }
@@ -775,6 +802,30 @@ mod tests {
             },
         ];
         assert_eq!(request_text(&request), "plain\nblock");
+    }
+
+    #[test]
+    fn request_text_excludes_a_stored_parts_pointer() {
+        // Assembly emits a stored part as bytes plus a pointer text carrying its
+        // stand-in. That pointer must not be read as the prompt or the action,
+        // whether it lands as a plain-text message or a text block.
+        let mut request = with_blocks(vec![
+            ContentBlock::Text {
+                text: "walk".into(),
+            },
+            hydrated_block("model/gltf-binary", "m.glb", "R0xC"),
+            ContentBlock::Text {
+                text: "[source] [model/gltf-binary] m.glb".into(),
+            },
+        ]);
+        request.messages.push(Message {
+            role: "user".into(),
+            content: MessageContent::Text("[model/gltf-binary] m.glb".into()),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+        assert_eq!(request_text(&request), "walk");
+        assert_eq!(animate_action(&request), "walk");
     }
 
     #[test]
