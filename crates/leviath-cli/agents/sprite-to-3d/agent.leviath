@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.2.1"
+version = "0.2.2"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -114,7 +114,7 @@ budget = "20%"
 
 [stages.prep-references]
 mode = "autonomous"
-description = "Render a clean front A-pose, then matching back and side views, from the sprite"
+description = "Render a clean front A-pose, then matching back and three-quarter views, from the sprite"
 max_iterations = 14
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
@@ -146,38 +146,40 @@ must be the cannon here, not a plain hand; a ponytail the marketing art shows
 hanging to the knees must be that long, not a stub). Keep asymmetric parts on the
 correct side.
 
-Work in this order:
+Work in this order.
 
-1. FRONT FIRST. Draw ONE polished, high-quality render of the character standing
-   in a full-body, front-facing A-pose - feet apart, arms straight and held down
-   and out at roughly 45 degrees from the body, palms in - on a plain neutral
-   background. Use an A-pose, not a T-pose: it rigs far more reliably than arms
-   held straight out. This front render is the anchor every other view must
-   match. It must look like a clean 3D character render, NOT pixel art: smooth
-   surfaces, rounded volumes, soft studio lighting and clear depth, the way a
-   modern stylized game character looks.
+1. FRONT FIRST. Draw ONE polished, full-body A-pose render, front-facing - feet
+   apart, arms straight and held down and out at roughly 45 degrees from the
+   body, palms in - on a plain neutral background. Use an A-pose, not a T-pose:
+   it rigs far more reliably than arms held straight out. This front render is
+   the anchor every other view matches. It must look like a clean 3D character
+   render, NOT pixel art: smooth surfaces, rounded volumes, soft studio lighting
+   and clear depth, the way a modern stylized game character looks.
 
-   LONG TRAILING FEATURES MUST BE VISIBLE FROM THE FRONT. If the character has a
-   long ponytail, a tail, long hair, a cape or a scarf that naturally hangs
-   behind the body, do NOT leave it hidden behind the silhouette in this front
-   view - drape it forward over one shoulder, or sweep it out to one side, so its
-   full length is plainly visible here. The 3D builder weights this front view
-   most heavily and reconstructs a thin feature poorly when the front view only
-   hints at it; a ponytail shown clearly here survives into the model, one hidden
-   behind the head collapses into a stub. Keep it on its correct side, and show
-   it at full length in the back and side views as well.
+2. THEN A BACK VIEW AND TWO THREE-QUARTER (DIAGONAL) VIEWS. Using BOTH the sprite
+   sheet in the source region AND the front render you just made, draw the same
+   character, same A-pose, scale, framing, style, proportions, colors and
+   accessories, from three more angles:
+   - a straight BACK view;
+   - a FRONT THREE-QUARTER view - the character turned about 45 degrees, so you
+     see the face, the front, and one full side at once;
+   - a BACK THREE-QUARTER view - turned about 135 degrees, so you see the back
+     and one side at once.
 
-2. THEN THE OTHER VIEWS. Using BOTH the sprite sheet in the source region AND the
-   front render you just made as reference, draw the same character from three
-   more angles: the back, the left side, and the right side. Every view MUST use
-   the IDENTICAL A-pose, scale, framing, style, proportions, colors and
-   accessories as the front render - the arms in the same 45-degree position in
-   all four, not relaxed in some and out in others. A rig binds cleanly only when
-   the four views agree on one pose; a set that mixes poses deforms when rigged.
-   Consistency with the front render matters more than anything: it is the same
-   character, in the same pose, turning around. Show a long ponytail or tail in
-   the back and side views at its true length - it is the detail most easily lost
-   downstream, so make it unmistakable here.
+   THE DIAGONAL VIEWS ARE ESSENTIAL, NOT OPTIONAL. A straight front or back is
+   flat: it hides how far a feature sticks out, so the 3D builder collapses thin
+   or trailing parts - a long ponytail, a tail, long hair, a cape, an arm cannon -
+   into stubs. A three-quarter view shows the feature AND its depth (how far it
+   juts, which way it hangs), which is exactly what the builder needs to rebuild
+   it as solid geometry. Put any long ponytail, tail or hair on its correct side
+   and show its FULL length in the back and both three-quarter views; let it be at
+   least partly visible past the shoulder in the front too, so no view denies it.
+
+   A rig binds cleanly only when every view shares one pose - the arms in the same
+   45-degree position in all of them, not relaxed in some and out in others; a
+   mixed-pose set deforms when rigged. Consistency with the front render matters
+   more than anything: it is the same character, in the same pose, turning in
+   space.
 
 Draw ONE single view per image. Do not pack several angles into one turnaround
 sheet: the later stages need each view on its own. Draw one at a time and store
@@ -186,8 +188,9 @@ each in the references region.
 Keep the set small: at most two candidates for any one angle, and no more than
 EIGHT renders in all. A larger set will not fit in a single request downstream,
 and the oldest images are dropped when it does not. When the references region
-holds a good front, back, left and right, stop even if you could draw more, and
-the run moves on to filter them. Use the scratchpad for notes.
+holds a good front, back, front three-quarter and back three-quarter, stop even
+if you could draw more, and the run moves on to filter them. Use the scratchpad
+for notes.
 """
 
 [stages.prep-references.model]
@@ -287,13 +290,15 @@ view whose arms or stance differ - a mixed-pose set rigs badly. Give special
 attention to a long ponytail or tail: it is the detail the downstream 3D step
 most often drops, so if any view weakens or omits it, log that.
 
-Judge MATERIAL and TEXTURE fidelity too, against the marketing art when present,
-not just shape and color: hair rendered as smooth flowing strands vs. a stiff
-feathered or scaled look, fur vs. plastic, matte vs. glossy, a knitted or ribbed
-fabric vs. flat plastic. If a surface's texture reads clearly wrong compared with
-the reference art, log it as a missing-region item naming the part and the
-correct material (for example: "ponytail: rendered as stiff overlapping scales,
-but the art shows soft smooth flowing hair").
+Judge MATERIAL and TEXTURE CONSISTENCY too, not just shape and color. The goal is
+not to match any one art style exactly - it is that the surfaces read the SAME
+across the set: the ponytail should be the same kind of hair in every view, the
+fur the same fur, the fabric the same fabric, so the views agree on what each
+part is made of. Flag a view whose material clearly disagrees with the others
+(for example: "back three-quarter view: ponytail rendered as stiff overlapping
+scales, but the front and back views show it as soft flowing hair - make it
+consistent"). Consistency between the views is what lets the 3D build produce one
+coherent material rather than a patchwork.
 
 The missing region is yours alone to maintain, and it is the record the next
 generation pass fixes from:
@@ -304,7 +309,7 @@ generation pass fixes from:
   only because you verified the fix, never on anyone's say-so.
 - Add an item (context_write/context_append) for every missing or wrong detail
   you find that is not already listed, naming the detail, the view, and what it
-  should be (for example: "front and left views: right arm is a plain hand, but
+  should be (for example: "front and back three-quarter views: right arm is a plain hand, but
   the source shows an arm cannon there").
 
 When the missing region reflects the true state of the views, hand off to
@@ -345,7 +350,8 @@ Look at the good views in the references region, the missing region's list, and
 the review notes.
 
 Decide whether the views are ready to build into a model. They are ready when two
-things hold: the angles are covered (a clear front, a back, and both sides), and
+things hold: the angles are covered (a clear front, a back, and both three-quarter
+diagonal views), and
 the missing region lists no serious detail still absent or wrong. A front alone,
 or a set that still drops the arm cannon, is not ready.
 
@@ -394,12 +400,12 @@ now - do not just describe them.
 Read the missing region and the review region once: together they name the
 details to fix (for example "add the arm cannon", "remove the invented shorts",
 "make the ponytail long") and the angles that are missing or weak (for example
-"no left or right side view"). Then immediately start drawing.
+"no back three-quarter view"). Then immediately start drawing.
 
 Draw one image at a time, and for each one produce an actual image, not text:
 - Redraw each view that needs a fix, applying every relevant item from the
   missing region.
-- Draw each missing angle (commonly the left and right sides).
+- Draw each missing angle (commonly a front or back three-quarter view).
 
 Condition every render on the sprite sheet in the source region, the good
 references already in place, and the high-resolution marketing art in the
@@ -454,7 +460,10 @@ transform = "direct"
 [stages.build-model]
 mode = "autonomous"
 description = "Use Meshy to turn the chosen views into one rigged, game-ready model"
-max_iterations = 20
+# Generous: a full Meshy round is submit, poll to done, rig, poll again,
+# download, verify on disk, then attach - and each poll is one iteration. Too low
+# a cap once stranded the stage after it had the file but before it attached it.
+max_iterations = 32
 max_revisits = 2
 # Grant only the five Meshy tools this stage needs, by name, rather than
 # available_connectors = ["meshy"], which pulls in all ~24 of Meshy's tools. The
@@ -630,7 +639,7 @@ Judge it honestly: are the proportions right, the colors faithful, the
 accessories all present and on the correct side (including anything the missing
 region flagged), the topology clean? Give particular attention to a long ponytail
 or tail: the image-to-3D step frequently flattens or drops one, so if the
-references show a long ponytail and the preview does not, that is a serious gap.
+references show a long ponytail and the preview does not, that is a serious gap. Judge material CONSISTENCY with the references too: the built surfaces (hair, fur, fabric) should read as the same materials the reference views agree on, not a different look.
 
 Note the preview is usually a single front-ish angle, so it will not show
 everything on the back. Judge what it does show; do not fail the model for a
