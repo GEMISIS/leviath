@@ -154,6 +154,11 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::claude_code::CATALOG,
         crate::claude_code::table_capabilities,
     ))
+    .chain(rows(
+        "meshy",
+        crate::meshy::CATALOG,
+        crate::meshy::table_capabilities,
+    ))
     .collect()
 }
 

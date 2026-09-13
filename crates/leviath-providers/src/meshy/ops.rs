@@ -1,0 +1,655 @@
+//! The Meshy operations, and the pure logic that turns an inference request
+//! into a Meshy REST body and reads a finished task back.
+//!
+//! Kept apart from the provider itself because it is a different subject and
+//! because it is where the testable decisions live: which images and hints a
+//! request carries, what the create body looks like per operation, and where
+//! a finished task keeps its GLB. The provider around it is the thin HTTP
+//! orchestration (submit, poll, download) over these.
+
+use serde_json::{Map, Value, json};
+
+use crate::capabilities::ModelMime;
+use crate::provider::{ContentBlock, InferenceRequest, MessageContent, ProviderError, Result};
+
+/// The most texture-prompt characters Meshy accepts.
+const MAX_TEXTURE_PROMPT: usize = 800;
+/// The most reference images a multi-image task takes.
+const MAX_MULTI_IMAGES: usize = 4;
+/// The default character height a rig assumes, in meters.
+const DEFAULT_RIG_HEIGHT_METERS: f64 = 1.7;
+
+/// One Meshy generative operation, named by the model id a stage selects.
+///
+/// A stage runs a Meshy operation by naming it as its model: `provider =
+/// "meshy"`, `model = "multi-image-to-3d"`. Each operation reads a different
+/// input (one image, several images, or a mesh) and every one produces a
+/// `model/gltf-binary` part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MeshyOp {
+    /// One reference image to a textured mesh.
+    ImageTo3d,
+    /// Up to four reference views to a single textured mesh.
+    MultiImageTo3d,
+    /// An existing mesh to a rigged, animation-ready mesh.
+    Rig,
+}
+
+impl MeshyOp {
+    /// The operation a model id names, matching the whole id or its last
+    /// segment so `meshy/rig` and `rig` both resolve.
+    pub(crate) fn parse(model: &str) -> Option<Self> {
+        let id = model.rsplit('/').next().unwrap_or(model);
+        match id {
+            "image-to-3d" => Some(Self::ImageTo3d),
+            "multi-image-to-3d" => Some(Self::MultiImageTo3d),
+            "rig" => Some(Self::Rig),
+            _ => None,
+        }
+    }
+
+    /// The canonical model id for this operation.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::ImageTo3d => "image-to-3d",
+            Self::MultiImageTo3d => "multi-image-to-3d",
+            Self::Rig => "rig",
+        }
+    }
+
+    /// The path under the base URL that creates and lists tasks of this kind.
+    ///
+    /// The same path serves the POST that creates a task and, with the task
+    /// id appended, the GET that reads its status.
+    pub(crate) fn path(self) -> &'static str {
+        match self {
+            Self::ImageTo3d => "openapi/v1/image-to-3d",
+            Self::MultiImageTo3d => "openapi/v1/multi-image-to-3d",
+            Self::Rig => "openapi/v1/rigging",
+        }
+    }
+
+    /// What the operation takes and hands back, in mime patterns.
+    pub(crate) fn mime(self) -> ModelMime {
+        match self {
+            // The reference images plus an optional text texture prompt in;
+            // a mesh (and, for multi-image, the preview renders) out.
+            Self::ImageTo3d => ModelMime::new(&["text/*", "image/*"], &["model/gltf-binary"]),
+            Self::MultiImageTo3d => {
+                ModelMime::new(&["text/*", "image/*"], &["model/gltf-binary", "image/*"])
+            }
+            // A mesh in, the rigged mesh out.
+            Self::Rig => ModelMime::new(&["model/gltf-binary"], &["model/gltf-binary"]),
+        }
+    }
+
+    /// The name the produced mesh part carries.
+    pub(crate) fn output_name(self) -> &'static str {
+        match self {
+            Self::ImageTo3d | Self::MultiImageTo3d => "model.glb",
+            Self::Rig => "rigged.glb",
+        }
+    }
+
+    /// The Meshy create body for this operation, read from the request's
+    /// hydrated parts and its `[model.parameters]` hints.
+    ///
+    /// An error here is a request the operation cannot run: an image
+    /// operation with no image, a rig with no mesh. Naming the miss beats
+    /// letting Meshy reject an empty body with a generic 400.
+    pub(crate) fn build_body(self, request: &InferenceRequest) -> Result<Value> {
+        match self {
+            Self::ImageTo3d => {
+                let image = input_images(request).into_iter().next().ok_or_else(|| {
+                    ProviderError::InvalidResponse(
+                        "image-to-3d needs an image in a visible region, and found none".into(),
+                    )
+                })?;
+                let mut body = Map::new();
+                body.insert("image_url".into(), json!(image));
+                apply_texture(&mut body, request);
+                apply_common_hints(&mut body, request);
+                Ok(Value::Object(body))
+            }
+            Self::MultiImageTo3d => {
+                let images: Vec<String> = input_images(request)
+                    .into_iter()
+                    .take(MAX_MULTI_IMAGES)
+                    .collect();
+                if images.is_empty() {
+                    return Err(ProviderError::InvalidResponse(
+                        "multi-image-to-3d needs at least one image in a visible region, and \
+                         found none"
+                            .into(),
+                    ));
+                }
+                let mut body = Map::new();
+                body.insert("image_urls".into(), json!(images));
+                // The four cardinal preview renders come back beside the mesh,
+                // so a downstream stage can judge the model without a headless
+                // render of its own.
+                body.insert("multi_view_thumbnails".into(), json!(true));
+                apply_texture(&mut body, request);
+                apply_common_hints(&mut body, request);
+                Ok(Value::Object(body))
+            }
+            Self::Rig => {
+                let mesh = input_model(request).ok_or_else(|| {
+                    ProviderError::InvalidResponse(
+                        "rig needs a model/gltf-binary mesh in a visible region, and found none"
+                            .into(),
+                    )
+                })?;
+                let mut body = Map::new();
+                body.insert("model_url".into(), json!(mesh));
+                let height =
+                    extra_f64(request, "height_meters").unwrap_or(DEFAULT_RIG_HEIGHT_METERS);
+                body.insert("height_meters".into(), json!(height));
+                Ok(Value::Object(body))
+            }
+        }
+    }
+
+    /// The GLB url of a finished task, or `None` when the task carries no
+    /// mesh (a shape a rig and a generation express differently).
+    pub(crate) fn glb_url(self, task: &Value) -> Option<String> {
+        let url = match self {
+            Self::ImageTo3d | Self::MultiImageTo3d => task.get("model_urls")?.get("glb")?,
+            Self::Rig => task.get("result")?.get("rigged_character_glb_url")?,
+        };
+        url.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+    }
+
+    /// The preview-render url of a finished task, when it has one to show.
+    ///
+    /// A rig has no new render; a generation's front-view thumbnail is a
+    /// cheap image a verify stage can look at.
+    pub(crate) fn preview_url(self, task: &Value) -> Option<String> {
+        match self {
+            Self::ImageTo3d | Self::MultiImageTo3d => task
+                .get("thumbnail_url")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            Self::Rig => None,
+        }
+    }
+}
+
+/// The task id a create response reports, under its `result` key.
+pub(crate) fn created_task_id(create_response: &Value) -> Result<String> {
+    create_response
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ProviderError::InvalidResponse(format!(
+                "Meshy create response carried no task id: {create_response}"
+            ))
+        })
+}
+
+/// Where a polled task is: its status word and how far along it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskState {
+    /// Queued or running, at this percentage.
+    Running(u64),
+    /// Finished; the mesh is ready to read.
+    Succeeded,
+    /// Ended without a mesh; the string is Meshy's reason, when it gave one.
+    Failed(String),
+}
+
+/// Read a polled task's state from its status body.
+///
+/// An unknown status word is treated as still running rather than as a
+/// failure: Meshy adding a transitional state should not abort a run that
+/// would have finished, and the operation's own deadline still bounds it.
+pub(crate) fn task_state(task: &Value) -> TaskState {
+    match task.get("status").and_then(Value::as_str) {
+        Some("SUCCEEDED") => TaskState::Succeeded,
+        Some("FAILED") | Some("CANCELED") => {
+            let reason = task
+                .get("task_error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Meshy reported no reason")
+                .to_string();
+            TaskState::Failed(reason)
+        }
+        _ => {
+            let progress = task.get("progress").and_then(Value::as_u64).unwrap_or(0);
+            TaskState::Running(progress)
+        }
+    }
+}
+
+/// The hydrated image parts of a request, as `data:` URIs Meshy accepts.
+///
+/// Only a mime block carrying its bytes counts: an unhydrated block (empty
+/// `data`) is one the runtime chose to send as text, which Meshy cannot use.
+fn input_images(request: &InferenceRequest) -> Vec<String> {
+    mime_data_uris(request, |mime| mime.starts_with("image/"))
+}
+
+/// The first hydrated mesh part of a request, as a `data:` URI, when it has
+/// one.
+fn input_model(request: &InferenceRequest) -> Option<String> {
+    mime_data_uris(request, |mime| mime.starts_with("model/"))
+        .into_iter()
+        .next()
+}
+
+/// Every hydrated mime block whose type passes `want`, as a `data:` URI.
+fn mime_data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut uris = Vec::new();
+    for message in &request.messages {
+        let MessageContent::Blocks(blocks) = &message.content else {
+            continue;
+        };
+        for block in blocks {
+            if let ContentBlock::Mime { part, data, .. } = block
+                && !data.is_empty()
+                && want(part.mime_type.as_str())
+            {
+                uris.push(format!("data:{};base64,{}", part.mime_type.as_str(), data));
+            }
+        }
+    }
+    uris
+}
+
+/// The plain text of a request, across its text blocks and plain messages.
+///
+/// The texture prompt an upstream stage wrote lands here, as the text of the
+/// region it wrote it to; it is the dynamic hint the operation textures with.
+fn request_text(request: &InferenceRequest) -> String {
+    let mut chunks = Vec::new();
+    for message in &request.messages {
+        match &message.content {
+            MessageContent::Text(text) => chunks.push(text.clone()),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::Text { text } = block {
+                        chunks.push(text.clone());
+                    }
+                }
+            }
+        }
+    }
+    chunks.join("\n").trim().to_string()
+}
+
+/// Add the texture prompt to a create body, from the explicit hint or, when
+/// that is unset, the request text, capped at Meshy's limit.
+fn apply_texture(body: &mut Map<String, Value>, request: &InferenceRequest) {
+    let prompt = extra_str(request, "texture_prompt").unwrap_or_else(|| request_text(request));
+    let prompt: String = prompt.trim().chars().take(MAX_TEXTURE_PROMPT).collect();
+    if !prompt.is_empty() {
+        body.insert("texture_prompt".into(), json!(prompt));
+    }
+}
+
+/// Copy the generation hints a stage set in `[model.parameters]` into a
+/// create body, each only when it is present.
+///
+/// Only fields Meshy documents for the image operations are forwarded, so a
+/// stale or provider-neutral hint (a deprecated `symmetry_mode`, a
+/// `negative_prompt` these endpoints do not take) is dropped here rather than
+/// drawing a 400 from Meshy.
+fn apply_common_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
+    for key in ["ai_model", "topology", "texture_resolution", "pose_mode"] {
+        if let Some(value) = extra_str(request, key) {
+            body.insert(key.into(), json!(value));
+        }
+    }
+    if let Some(count) = extra_i64(request, "target_polycount") {
+        body.insert("target_polycount".into(), json!(count));
+    }
+    for key in ["enable_pbr", "should_remesh", "ultra_mode", "moderation"] {
+        if let Some(value) = extra_bool(request, key) {
+            body.insert(key.into(), json!(value));
+        }
+    }
+}
+
+/// A non-empty string hint from `request.extra`.
+fn extra_str(request: &InferenceRequest, key: &str) -> Option<String> {
+    request
+        .extra
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// An integer hint from `request.extra`.
+fn extra_i64(request: &InferenceRequest, key: &str) -> Option<i64> {
+    request.extra.get(key).and_then(Value::as_i64)
+}
+
+/// A floating-point hint from `request.extra`.
+fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
+    request.extra.get(key).and_then(Value::as_f64)
+}
+
+/// A boolean hint from `request.extra`.
+fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> {
+    request.extra.get(key).and_then(Value::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{InferenceRequest, Message, MessageContent};
+    use leviath_core::mime::{BlobRef, MimeType};
+
+    fn empty_request() -> InferenceRequest {
+        InferenceRequest {
+            system: Vec::new(),
+            messages: Vec::new(),
+            model: "multi-image-to-3d".into(),
+            max_tokens: 0,
+            temperature: 0.0,
+            tools: Vec::new(),
+            extra: Value::Null,
+            request_timeout_secs: None,
+        }
+    }
+
+    fn hydrated_block(mime: &str, name: &str, data: &str) -> ContentBlock {
+        ContentBlock::Mime {
+            part: BlobRef {
+                sha256: "a".repeat(64),
+                mime_type: MimeType::parse(mime).unwrap(),
+                size: 3,
+                width: None,
+                height: None,
+                duration_ms: None,
+                tokens: 1,
+                stand_in: format!("[{mime}] {name}"),
+            },
+            data: data.into(),
+            name: Some(name.into()),
+            deliver: None,
+        }
+    }
+
+    fn with_blocks(blocks: Vec<ContentBlock>) -> InferenceRequest {
+        let mut request = empty_request();
+        request.messages = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(blocks),
+            cache_breakpoint: false,
+            reasoning: None,
+        }];
+        request
+    }
+
+    #[test]
+    fn parse_reads_the_id_or_its_last_segment() {
+        assert_eq!(MeshyOp::parse("image-to-3d"), Some(MeshyOp::ImageTo3d));
+        assert_eq!(
+            MeshyOp::parse("meshy/multi-image-to-3d"),
+            Some(MeshyOp::MultiImageTo3d)
+        );
+        assert_eq!(MeshyOp::parse("rig"), Some(MeshyOp::Rig));
+        assert_eq!(MeshyOp::parse("text-to-3d"), None);
+    }
+
+    #[test]
+    fn each_operation_names_its_path_id_display_output_and_mime() {
+        for op in [MeshyOp::ImageTo3d, MeshyOp::MultiImageTo3d, MeshyOp::Rig] {
+            assert!(!op.path().is_empty());
+            assert_eq!(MeshyOp::parse(op.id()), Some(op));
+            assert!(op.output_name().ends_with(".glb"));
+            assert!(!op.mime().output.is_empty());
+        }
+        assert!(
+            MeshyOp::Rig
+                .mime()
+                .input
+                .iter()
+                .all(|p| !p.starts_with("text/")),
+            "a rig takes a mesh, not text"
+        );
+    }
+
+    #[test]
+    fn image_to_3d_builds_a_single_image_body_with_the_texture_prompt() {
+        let mut request = with_blocks(vec![
+            ContentBlock::Text {
+                text: "a red fox".into(),
+            },
+            hydrated_block("image/png", "front.png", "QUJD"),
+        ]);
+        request.extra = json!({ "ai_model": "meshy-7", "target_polycount": 20000 });
+        let body = MeshyOp::ImageTo3d.build_body(&request).unwrap();
+        assert_eq!(
+            body["image_url"].as_str().unwrap(),
+            "data:image/png;base64,QUJD"
+        );
+        assert_eq!(body["texture_prompt"].as_str().unwrap(), "a red fox");
+        assert_eq!(body["ai_model"].as_str().unwrap(), "meshy-7");
+        assert_eq!(body["target_polycount"].as_i64().unwrap(), 20000);
+    }
+
+    #[test]
+    fn an_explicit_texture_prompt_beats_the_request_text_and_is_capped() {
+        let long = "x".repeat(1000);
+        let mut request = with_blocks(vec![
+            ContentBlock::Text {
+                text: "ignored region text".into(),
+            },
+            hydrated_block("image/jpeg", "a.jpg", "QQ"),
+        ]);
+        request.extra = json!({ "texture_prompt": long });
+        let body = MeshyOp::ImageTo3d.build_body(&request).unwrap();
+        assert_eq!(
+            body["texture_prompt"].as_str().unwrap().chars().count(),
+            800
+        );
+    }
+
+    #[test]
+    fn multi_image_takes_up_to_four_images_and_asks_for_preview_renders() {
+        let blocks: Vec<ContentBlock> = (0..6)
+            .map(|i| hydrated_block("image/png", &format!("v{i}.png"), "QQ"))
+            .collect();
+        let body = MeshyOp::MultiImageTo3d
+            .build_body(&with_blocks(blocks))
+            .unwrap();
+        assert_eq!(body["image_urls"].as_array().unwrap().len(), 4);
+        assert!(body["multi_view_thumbnails"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn an_image_operation_with_no_image_is_a_named_error() {
+        let err = MeshyOp::ImageTo3d.build_body(&empty_request()).unwrap_err();
+        assert!(
+            err.to_string().contains("image-to-3d needs an image"),
+            "{err}"
+        );
+        let err = MeshyOp::MultiImageTo3d
+            .build_body(&empty_request())
+            .unwrap_err();
+        assert!(err.to_string().contains("multi-image-to-3d needs"), "{err}");
+    }
+
+    #[test]
+    fn rig_reads_the_mesh_and_the_height_hint() {
+        let mut request = with_blocks(vec![hydrated_block("model/gltf-binary", "m.glb", "R0xC")]);
+        request.extra = json!({ "height_meters": 1.9 });
+        let body = MeshyOp::Rig.build_body(&request).unwrap();
+        assert_eq!(
+            body["model_url"].as_str().unwrap(),
+            "data:model/gltf-binary;base64,R0xC"
+        );
+        assert_eq!(body["height_meters"].as_f64().unwrap(), 1.9);
+        // A rig ignores an image where its mesh should be.
+        let err = MeshyOp::Rig
+            .build_body(&with_blocks(vec![hydrated_block(
+                "image/png",
+                "a.png",
+                "QQ",
+            )]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("rig needs a model/gltf-binary"),
+            "{err}"
+        );
+        // With no height hint it assumes the default.
+        let body = MeshyOp::Rig
+            .build_body(&with_blocks(vec![hydrated_block(
+                "model/gltf-binary",
+                "m.glb",
+                "R0xC",
+            )]))
+            .unwrap();
+        assert_eq!(body["height_meters"].as_f64().unwrap(), 1.7);
+    }
+
+    #[test]
+    fn an_unhydrated_or_wrongly_typed_block_supplies_no_input() {
+        // An image block with empty data (the runtime sent it as text) does
+        // not count as an image.
+        let dry = hydrated_block("image/png", "a.png", "");
+        assert!(
+            MeshyOp::ImageTo3d
+                .build_body(&with_blocks(vec![dry]))
+                .is_err(),
+            "an unhydrated image is no image"
+        );
+    }
+
+    #[test]
+    fn created_task_id_reads_the_result_or_reports_the_body() {
+        assert_eq!(
+            created_task_id(&json!({ "result": "task-1" })).unwrap(),
+            "task-1"
+        );
+        let err = created_task_id(&json!({ "result": "" })).unwrap_err();
+        assert!(err.to_string().contains("no task id"), "{err}");
+        assert!(created_task_id(&json!({ "other": 1 })).is_err());
+    }
+
+    #[test]
+    fn task_state_reads_the_status_word() {
+        assert_eq!(
+            task_state(&json!({ "status": "PENDING", "progress": 10 })),
+            TaskState::Running(10)
+        );
+        assert_eq!(
+            task_state(&json!({ "status": "SUCCEEDED" })),
+            TaskState::Succeeded
+        );
+        assert_eq!(
+            task_state(&json!({ "status": "IN_PROGRESS" })),
+            TaskState::Running(0)
+        );
+        // An unknown word keeps polling rather than failing the run.
+        assert_eq!(
+            task_state(&json!({ "status": "QUEUED_SOMEHOW" })),
+            TaskState::Running(0)
+        );
+        assert_eq!(
+            task_state(&json!({ "status": "FAILED", "task_error": { "message": "bad mesh" } })),
+            TaskState::Failed("bad mesh".into())
+        );
+        // A cancel with no message reports a placeholder reason.
+        assert_eq!(
+            task_state(&json!({ "status": "CANCELED" })),
+            TaskState::Failed("Meshy reported no reason".into())
+        );
+    }
+
+    #[test]
+    fn glb_and_preview_urls_read_the_right_shape_per_operation() {
+        let generated = json!({
+            "model_urls": { "glb": "https://a/m.glb" },
+            "thumbnail_url": "https://a/t.png"
+        });
+        assert_eq!(
+            MeshyOp::MultiImageTo3d.glb_url(&generated).unwrap(),
+            "https://a/m.glb"
+        );
+        assert_eq!(
+            MeshyOp::MultiImageTo3d.preview_url(&generated).unwrap(),
+            "https://a/t.png"
+        );
+        let rig = json!({ "result": { "rigged_character_glb_url": "https://a/r.glb" } });
+        assert_eq!(MeshyOp::Rig.glb_url(&rig).unwrap(), "https://a/r.glb");
+        assert_eq!(MeshyOp::Rig.preview_url(&rig), None);
+        // A body missing the mesh answers None rather than a wrong url.
+        assert_eq!(MeshyOp::MultiImageTo3d.glb_url(&json!({})), None);
+        assert_eq!(MeshyOp::Rig.glb_url(&json!({ "result": {} })), None);
+        assert_eq!(MeshyOp::Rig.glb_url(&json!({})), None);
+        assert_eq!(MeshyOp::MultiImageTo3d.preview_url(&json!({})), None);
+    }
+
+    #[test]
+    fn an_image_in_a_later_message_is_read_past_a_plain_text_one() {
+        let mut request = empty_request();
+        request.messages = vec![
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("the task, as plain text".into()),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![hydrated_block("image/png", "v.png", "QQ")]),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+        ];
+        let body = MeshyOp::ImageTo3d.build_body(&request).unwrap();
+        assert_eq!(
+            body["image_url"].as_str().unwrap(),
+            "data:image/png;base64,QQ"
+        );
+    }
+
+    #[test]
+    fn request_text_joins_text_blocks_and_plain_messages() {
+        let mut request = empty_request();
+        request.messages = vec![
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("plain".into()),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: "block".into(),
+                }]),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+        ];
+        assert_eq!(request_text(&request), "plain\nblock");
+    }
+
+    #[test]
+    fn common_hints_forward_only_present_documented_fields() {
+        let mut request = with_blocks(vec![hydrated_block("image/png", "a.png", "QQ")]);
+        request.extra = json!({
+            "enable_pbr": true,
+            "should_remesh": false,
+            "negative_prompt": "blurry",
+            "symmetry_mode": "on"
+        });
+        let body = MeshyOp::ImageTo3d.build_body(&request).unwrap();
+        assert!(body["enable_pbr"].as_bool().unwrap());
+        assert!(!body["should_remesh"].as_bool().unwrap());
+        // A field Meshy does not document for this endpoint is dropped.
+        assert!(body.get("negative_prompt").is_none());
+        assert!(body.get("symmetry_mode").is_none());
+    }
+}
