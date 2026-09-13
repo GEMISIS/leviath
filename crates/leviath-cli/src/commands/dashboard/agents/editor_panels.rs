@@ -54,6 +54,29 @@ pub(super) fn window_label(tokens: usize) -> String {
     }
 }
 
+/// A short label for what a model makes, when it is not a plain text model:
+/// "makes 3D models", "makes images", and so on. `None` for a text model, so
+/// the picker only tags the ones worth calling out (a Meshy operation, an image
+/// model). Read from the compiled mime table, which needs no live provider.
+fn model_modality_tag(provider: &str, model: &str) -> Option<&'static str> {
+    let mime = leviath_providers::mime_tables::builtin_mime(provider, model);
+    for (family, tag) in [
+        ("model/", "makes 3D models"),
+        ("image/", "makes images"),
+        ("audio/", "makes audio"),
+        ("video/", "makes video"),
+    ] {
+        if mime
+            .output
+            .iter()
+            .any(|pattern| pattern.starts_with(family))
+        {
+            return Some(tag);
+        }
+    }
+    None
+}
+
 /// The regions a stage's tool routing may name: its effective layout plus
 /// the regions the runtime always provides.
 const ALWAYS_VISIBLE: [&str; 4] = [
@@ -830,6 +853,12 @@ impl Dashboard {
                 if let Some(window) = windows.get(&(provider.to_string(), id.to_string())) {
                     detail.push(format!("{} context", window_label(*window)));
                 }
+                // What the model makes, so a stage that must emit a mesh or an
+                // image can be pointed at a model that produces one rather than
+                // a text model that cannot.
+                if let Some(tag) = model_modality_tag(provider, id) {
+                    detail.push(tag.to_string());
+                }
                 PickerOption {
                     value: m.clone(),
                     detail: detail.join(" · "),
@@ -1054,5 +1083,25 @@ impl Dashboard {
         if self.editor_mutate(|d| d.add_region(&scope, &name)) {
             self.editor_open_region(scope, &name);
         }
+    }
+}
+
+#[cfg(test)]
+mod modality_tag_tests {
+    use super::model_modality_tag;
+
+    #[test]
+    fn labels_non_text_makers_and_leaves_text_models_untagged() {
+        assert_eq!(
+            model_modality_tag("meshy", "image-to-3d"),
+            Some("makes 3D models")
+        );
+        assert_eq!(
+            model_modality_tag("openai", "gpt-image-1"),
+            Some("makes images")
+        );
+        assert_eq!(model_modality_tag("openai", "tts-1"), Some("makes audio"));
+        assert_eq!(model_modality_tag("google", "veo-3"), Some("makes video"));
+        assert_eq!(model_modality_tag("anthropic", "claude-opus-5"), None);
     }
 }

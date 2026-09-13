@@ -452,13 +452,13 @@ mod tests {
             assert!(!p.blurb.is_empty(), "provider {} has no blurb", p.id);
             // Every provider files under an auth kind and a modality, the two
             // headings the wizard groups by.
+            let auth = p.auth_kind();
+            let id = p.id;
             assert!(
-                ["Subscription logins", "API key", "Local and custom"].contains(&p.auth_kind()),
-                "provider {} has an unknown auth kind {}",
-                p.id,
-                p.auth_kind()
+                ["Subscription logins", "API key", "Local and custom"].contains(&auth),
+                "provider {id} has an unknown auth kind {auth}"
             );
-            assert!(!p.modality().is_empty(), "provider {} has no modality", p.id);
+            assert!(!p.modality().is_empty(), "provider {id} has no modality");
         }
         // The catalog carries all four auth kinds and both modalities in use, so
         // the classifier's arms are all exercised.
