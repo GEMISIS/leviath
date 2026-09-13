@@ -871,7 +871,16 @@ pub(crate) fn handle_empty_response(
                 .insert(ReadyToInfer);
             continue;
         }
-        if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
+        // A reply that produced a part (a mesh from a 3D generator, an image
+        // from a drawing model) has done the stage's work even with no text
+        // and no tool call: its output is the part, not a call it forgot to
+        // make. Accept it rather than nudging "use your tools" at a stage
+        // whose whole answer is what it just produced.
+        let produced_a_part = !infer.parts.is_empty();
+        if progress.total_tool_calls > 0
+            || produced_a_part
+            || !nudge.enabled
+            || progress.text_only_nudges >= nudge.max
         {
             // The reply is accepted as the stage's last word, so it goes into
             // the conversation like every other turn. Drop it here and a

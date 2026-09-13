@@ -4224,6 +4224,54 @@ fn empty_response_finishes_after_max_nudges() {
     assert!(world.get::<ResolveTransition>(e).is_some());
 }
 
+/// A reply that produced a part (a mesh from a 3D generator, an image from a
+/// drawing model) ends the stage even with no text and no tool call: the part
+/// is the answer. Without this a Meshy stage, whose whole output is the GLB it
+/// produced, would be nudged "use your tools" and loop, having no tool to call.
+#[test]
+fn empty_response_accepts_a_reply_that_produced_a_part() {
+    let mut world = World::new();
+    let (offers, mut infer) = infer_result(false);
+    infer.response = String::new();
+    infer.parts = vec![
+        leviath_core::mime::Part::stored(leviath_core::mime::BlobRef {
+            sha256: "c".repeat(64),
+            mime_type: leviath_core::mime::MimeType::parse("model/gltf-binary").unwrap(),
+            size: 4,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens: 1,
+            stand_in: "[model/gltf-binary] model.glb".into(),
+        })
+        .named("model.glb"),
+    ];
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            (offers, infer),
+            StageProgress::default(), // no tool calls, no nudges yet
+            nudge_bp(false),          // autonomous, nudge enabled
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(
+        world.get::<ResolveTransition>(e).is_some(),
+        "a produced part ends the stage"
+    );
+    assert!(
+        world.get::<ReadyToInfer>(e).is_none(),
+        "not sent round again with a nudge"
+    );
+    assert_eq!(
+        world.get::<StageProgress>(e).unwrap().text_only_nudges,
+        0,
+        "and not counted as a nudge"
+    );
+}
+
 /// A stage that presents its output for review is finished when it produces
 /// that output. This is the whole failure, from a real run: `plan` wrote a
 /// complete plan on its first turn - correctly, with no tool calls, because
