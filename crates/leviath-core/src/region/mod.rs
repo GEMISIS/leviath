@@ -506,9 +506,18 @@ impl Region {
         if self.accepts.is_empty() {
             return Ok(());
         }
+        // `accepts` gates the media payload a region holds, not the plain-text
+        // caption that travels with it. A stored image or model is routinely
+        // attached alongside a `text/plain` caption; that caption is the
+        // universal carrier and always travels inline, so an `image/*` or
+        // `model/*` region must not reject an attachment just because it carries
+        // one. Only `text/plain` is exempt - a region that lists specific text
+        // subtypes (e.g. `text/plain` but not `text/markdown`) still gates the
+        // rest. Everything non-`text/plain` is checked against `accepts`.
         match content
             .parts()
             .iter()
+            .filter(|p| !p.mime_type.matches("text/plain"))
             .find(|p| !p.mime_type.matches_any(&self.accepts))
         {
             Some(p) => Err(p.mime_type.clone()),
@@ -1713,6 +1722,32 @@ mod tests {
         let result = region.add_entry("{\"a\":1}".to_string(), 10);
         assert!(result.is_ok());
         assert_eq!(region.entry_count(), 1);
+    }
+
+    #[test]
+    fn accepts_content_allows_a_caption_beside_media_but_gates_the_payload() {
+        use crate::mime::{MimeType, Part};
+        let mut region = Region::new("art".to_string(), RegionKind::Pinned, 1000);
+        region.accepts = vec!["image/*".to_string()];
+        let png = || Part::inline(MimeType::parse("image/png").unwrap(), "x");
+        let wav = || Part::inline(MimeType::parse("audio/wav").unwrap(), "x");
+
+        // An image payload paired with a text caption: the caption (text/*) is
+        // allowed through, and the image matches `accepts`.
+        let ok = EntryContent::from_parts(vec![Part::text("a caption"), png()]);
+        assert!(region.accepts_content(&ok).is_ok());
+
+        // A non-text payload the region does not accept is still refused, even
+        // with a caption present.
+        let bad = EntryContent::from_parts(vec![Part::text("a caption"), wav()]);
+        assert_eq!(
+            region.accepts_content(&bad).unwrap_err(),
+            MimeType::parse("audio/wav").unwrap()
+        );
+
+        // A region with no `accepts` list takes anything.
+        let open = Region::new("open".to_string(), RegionKind::Pinned, 1000);
+        assert!(open.accepts_content(&bad).is_ok());
     }
 
     #[test]

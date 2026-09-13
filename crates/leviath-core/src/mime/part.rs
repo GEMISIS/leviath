@@ -208,6 +208,15 @@ impl Part {
     }
 
     /// What this part costs a region.
+    ///
+    /// A stored part is charged its STAND-IN, not its native token estimate. In
+    /// a region a stored blob is only a reference plus the short stand-in line
+    /// that stands for it in the assembled prompt; the native estimate on the
+    /// blob ref (which can be enormous - a per-byte rule over a multi-megabyte
+    /// model is millions of tokens) is the cost of sending the bytes to a model
+    /// that can read them, and that is charged separately at request-build time,
+    /// not against the region's budget. Charging the native estimate here made
+    /// it impossible for any reasonably-sized region to hold real media.
     pub fn tokens(&self, reg: &MimeRegistry) -> usize {
         match &self.body {
             PartBody::Inline(s) => {
@@ -219,7 +228,7 @@ impl Part {
                     rule => rule.estimate(s.len() as u64, None, None),
                 }
             }
-            PartBody::Stored(b) => b.tokens,
+            PartBody::Stored(b) => crate::text::estimate_tokens(&b.stand_in),
         }
     }
 
@@ -297,7 +306,11 @@ mod tests {
         assert!(p.is_stored());
         assert_eq!(p.blob(), Some(&r));
         assert!(p.inline_text().is_none());
-        assert_eq!(p.tokens(&reg), 1600);
+        // A stored part is charged its stand-in against a region, not its native
+        // token estimate (1600): in a region it is only a ref plus the short
+        // stand-in line, and the native cost is charged at request-build time.
+        assert_eq!(p.tokens(&reg), crate::text::estimate_tokens(&r.stand_in));
+        assert!(p.tokens(&reg) < r.tokens);
         assert_eq!(p.stand_in(), "[image/png, 12 B] a.png");
         assert_eq!(r.stand_in, "[image/png, 12 B] a.png");
         assert_eq!(p.deliver, Some(Delivery::Text));
