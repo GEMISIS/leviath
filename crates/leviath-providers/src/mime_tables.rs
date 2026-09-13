@@ -147,6 +147,7 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
         "codex" => codex(model),
         "ollama" => ollama(model),
         "openrouter" => by_prefix(model),
+        "meshy" => crate::meshy::mime_for(model),
         _ => ModelMime::text_only(),
     }
 }
