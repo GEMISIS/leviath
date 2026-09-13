@@ -8191,6 +8191,91 @@ fn a_run_that_owed_no_output_still_completes() {
     ));
 }
 
+fn run_require_final_output(world: &mut World) {
+    let mut s = Schedule::default();
+    s.add_systems(require_final_output);
+    s.run(world);
+}
+
+#[test]
+fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
+    // A pure "bytes in, bytes out" stage: it produced a mesh, routed it into
+    // the region its `output_routing` names, and declared that as its artifact.
+    // `require_final_output` records those parts as the run's answer with no
+    // `submit_output` call, so the agent needs no text model to hand its blob
+    // back - the whole point of the auto-emit path.
+    let mut stage = stage_named("build", None, false, None);
+    stage.require_output = true;
+    stage
+        .output_routing
+        .insert("model/*".to_string(), "model".to_string());
+    let bp = blueprint(vec![stage]);
+
+    // The routed mesh sits in the model region; the pinned final_output region
+    // is where the one-line answer is mirrored.
+    let mut window = ContextWindow::new(100_000);
+    window.add_region(Region::new(
+        "model".to_string(),
+        RegionKind::Pinned,
+        100_000,
+    ));
+    window.add_region(Region::new(
+        crate::output_tool::FINAL_OUTPUT_REGION.to_string(),
+        RegionKind::Pinned,
+        crate::output_tool::FINAL_OUTPUT_REGION_TOKENS,
+    ));
+    let reg = leviath_core::mime::MimeRegistry::builtin();
+    let blob = leviath_core::mime::Blob::new(
+        leviath_core::mime::MimeType::parse("model/gltf-binary").unwrap(),
+        vec![1, 2, 3, 4],
+    )
+    .named("hero.glb");
+    let part = leviath_core::mime::Part::stored(blob.describe(&reg)).named("hero.glb");
+    let content = leviath_core::region::EntryContent::from_parts(vec![part]);
+    let tokens = content.tokens_hint();
+    window
+        .add_content_entry("model", leviath_core::EntryKind::Text, content, tokens)
+        .unwrap();
+
+    // The resolved output spec is carried on StageInference, the way dispatch
+    // leaves it for the stage.
+    let mut stage_inf = si("build");
+    stage_inf.output = Some(leviath_core::output::OutputSpec {
+        artifacts: vec![leviath_core::output::ArtifactSpec {
+            name: "model".to_string(),
+            mime_type: "model/gltf-binary".to_string(),
+            required: true,
+            description: None,
+        }],
+        ..Default::default()
+    });
+
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            AgentBlueprint(bp),
+            StageCursor { index: 0 },
+            agent_state(),
+            window,
+            stage_inf,
+            ResolveTransition,
+        ))
+        .id();
+
+    run_require_final_output(&mut world);
+
+    let output = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("auto-emit records a final output");
+    assert_eq!(output.0.stage, "build");
+    assert_eq!(output.0.artifacts.len(), 1);
+    assert_eq!(output.0.artifacts[0].name, "model");
+    assert_eq!(output.0.artifacts[0].path, "hero.glb");
+    assert!(!output.0.artifacts[0].sha256.is_empty());
+    // Not nudged back for a submit_output it never needed to call.
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+}
+
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     use leviath_core::blueprint::TransitionCondition;

@@ -927,7 +927,15 @@ mode = "output"
                 "{}: no way to finish",
                 agent.name
             );
-            assert!(g.is_branching, "{}: bundled agents are graphs", agent.name);
+            // A multi-stage agent is a branching graph; a single-stage one (a
+            // pure provider pipeline - a picture straight to a mesh) is one
+            // node and hands its answer back on its own, which is a valid graph
+            // too. Only a multi-stage agent that forgot its transitions is not.
+            assert!(
+                g.is_branching || g.nodes.len() == 1,
+                "{}: a multi-stage agent must be a branching graph",
+                agent.name
+            );
             seen += 1;
         }
         assert!(seen > 0, "the binary bundles agents");

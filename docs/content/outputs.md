@@ -395,6 +395,43 @@ output with `--output-format` retires them with the schema and validator.
 Files are what a stage hands back; what it takes is its regions' `accepts`, and
 `[stages.<name>.input]` can narrow or widen that. See [Mime](/docs/mime).
 
+### A model that makes files answers on its own
+
+Some models produce a file rather than prose: a 3D generator returns a mesh, an image model returns
+a picture. When an output stage's model is one of those, there is nothing for a `submit_output` call
+to add - the produced part *is* the answer. So an output stage records it directly: route the
+produced part into a region with `output_routing`, declare it as an artifact, and the run hands it
+back with no tool call and no text turn.
+
+```toml
+[stages.build]
+mode = "output"
+
+[stages.build.model]
+allow_user_default = false
+
+[[stages.build.model.models]]
+provider = "meshy"
+model = "image-to-3d"
+
+[stages.build.output_routing]
+"model/*" = "model"
+
+[[stages.build.output.artifacts]]
+name = "model"
+type = "model/gltf-binary"
+required = true
+```
+
+When the stage finishes, the parts it routed are matched against the artifacts it declared, by type
+and in order; if every `required` artifact is matched, they become the run's final output. Only the
+regions this stage's `output_routing` names are searched, so an input mesh sat in another region is
+never mistaken for the one this stage made. If a required artifact has no matching produced part -
+the model returned only text, say - the stage falls back to the ordinary `submit_output` nudge.
+
+This is what lets a pure "bytes in, bytes out" pipeline run with no text provider at all: the
+bundled `image-to-model` and `model-to-animated-model` need only Meshy configured.
+
 This is why there is no pagination. What a caller reads is bounded by what a model can say. What
 gets big is a file, and files are fetched by path.
 

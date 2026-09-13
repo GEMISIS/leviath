@@ -340,6 +340,7 @@ fn fit_to_region(content: &str, budget: usize) -> String {
 }
 
 mod artifacts;
+pub(crate) mod auto_emit;
 
 #[cfg(test)]
 mod tests;

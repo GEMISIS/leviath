@@ -277,6 +277,7 @@ type FinalOutputQuery = (
     Option<&'static StageOutcome>,
     Option<&'static crate::persistence::FinalOutput>,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
+    Option<&'static StageInference>,
 );
 
 /// Required-output gate: hold a stage that owes a final output and has not
@@ -301,8 +302,18 @@ pub(crate) fn require_final_output(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, state, mut window, reentries, outcome, submitted, mut flags) in
-        agents.iter_mut()
+    for (
+        entity,
+        bp,
+        cursor,
+        state,
+        mut window,
+        reentries,
+        outcome,
+        submitted,
+        mut flags,
+        stage_inf,
+    ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
         let stage = &bp.0.stages[cursor.index];
@@ -329,6 +340,25 @@ pub(crate) fn require_final_output(
             if let Some(flags) = flags.as_mut() {
                 flags.0.output_forced += 1;
             }
+            continue;
+        }
+        // The stage may have already handed back its answer as the parts it
+        // produced: a 3D generator's mesh, an image model's picture, routed
+        // into the regions its `output_routing` names and matching the
+        // artifacts it declared. When they do, record them as the final output
+        // directly - no `submit_output`, no text turn, no second provider - so
+        // a pure "bytes in, bytes out" agent needs no text model at all. A
+        // stage that produced nothing to satisfy its declared artifacts falls
+        // through to the nudge below, exactly as before.
+        if let Some(output) = crate::output_tool::auto_emit::try_emit(
+            stage,
+            stage_inf.and_then(|si| si.output.as_ref()),
+            chrono::Utc::now().timestamp(),
+            &mut window,
+        ) {
+            commands
+                .entity(entity)
+                .insert(crate::persistence::FinalOutput(output));
             continue;
         }
         // Its own budget, not the stage's `max_revisits`. Those are different

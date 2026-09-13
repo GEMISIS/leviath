@@ -285,14 +285,19 @@ Configure Meshy (set `MESHY_API_KEY`, or `lev setup` and choose Meshy) and hand 
   draws clean multi-view references, critiques them against the source, builds the mesh, rigs it,
   and checks the result. `lev run sprite-to-3d --task "the character on the left" --attach sheet.png:source`.
 - **`image-to-model`** turns one image straight into a textured model, no reference-drawing step.
-  `lev run image-to-model --task "matte plastic" --attach toy.png:image`.
+  `lev run image-to-model --task "matte plastic" --attach toy.png:image`. Pure Meshy: it needs no
+  text provider at all.
 - **`text-to-image-to-model`** draws a reference image from a description, then builds a model from
-  it. `lev run text-to-image-to-model --task "a stout clay teapot"`.
+  it. `lev run text-to-image-to-model --task "a stout clay teapot"`. The draw step needs an
+  image-capable provider (OpenRouter's image model by default); the build needs only Meshy.
 - **`model-to-animated-model`** rigs an existing mesh and applies an animation from Meshy's library.
-  `lev run model-to-animated-model --task "run" --attach hero.glb:source_model`.
+  `lev run model-to-animated-model --task "run" --attach hero.glb:source_model`. Pure Meshy, no
+  text provider.
 
 Each hands the finished model back as a `model/gltf-binary` artifact; `lev result <run> --out .`
-writes it out.
+writes it out. A single-provider agent like `image-to-model` or `model-to-animated-model` records
+that mesh as its answer directly, with no `submit_output` turn, so a pure "bytes in, bytes out"
+pipeline runs with only Meshy configured.
 
 ## Running one
 
