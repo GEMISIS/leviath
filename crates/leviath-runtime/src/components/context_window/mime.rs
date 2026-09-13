@@ -25,6 +25,21 @@ impl super::ContextWindow {
             .cloned()
             .collect()
     }
+
+    /// Every stored part in the named regions, in the order the regions are
+    /// given and entries within each. What the auto-emit output path reads to
+    /// find the parts a stage routed as its produced answer: only its
+    /// `output_routing` targets, never the whole window, so an input mesh sat
+    /// in some other region is never mistaken for the one this stage made.
+    pub(crate) fn stored_parts_in(&self, regions: &[&str]) -> Vec<Part> {
+        regions
+            .iter()
+            .filter_map(|name| self.get_region(name))
+            .flat_map(|r| &r.content)
+            .flat_map(|e| e.content.stored())
+            .cloned()
+            .collect()
+    }
 }
 
 /// Every part of `content` as blocks, in order.

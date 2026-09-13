@@ -15,6 +15,19 @@ same list.
 
 ### Added
 
+- An output stage whose model makes a file - a 3D generator, an image model -
+  can hand that file back as the run's answer with no `submit_output` call and
+  no text turn. Route the produced part into a region with `output_routing` and
+  declare it under `[[stages.<name>.output.artifacts]]`; when the routed parts
+  satisfy the declared artifacts, the run records them as its final output
+  directly. Only the stage's own `output_routing` targets are searched, so an
+  input part in another region is never mistaken for a produced one, and a stage
+  whose model returned only text still falls back to the `submit_output` nudge.
+  This lets a pure "bytes in, bytes out" pipeline run with no text provider at
+  all: the bundled `image-to-model` and `model-to-animated-model` are now single
+  Meshy stages that need only `MESHY_API_KEY`, and `text-to-image-to-model` no
+  longer needs a text model for its final step. (#836)
+
 - The Meshy provider gains three more operations: `text-to-3d` (a text prompt to
   a textured mesh, a preview task then a refine task), `retexture` (a mesh plus a
   text style to a re-textured mesh), and `animate` (a mesh to an animated mesh -
