@@ -74,6 +74,16 @@ same list.
   `[mime] max_part_bytes` ceiling, and a request that still exceeds it is
   refused with a message that names the limit. (#837)
 
+- A Meshy stage whose prompt or animation action lived in a pinned region (the
+  `task` region a caller fills) never saw it: the operations read only message
+  text, and a pinned region renders into the system prompt. So the bundled
+  `model-to-animated-model` applied its default walk whatever action the task
+  named, and a `text-to-3d` or `retexture` fed from a pinned region refused for
+  want of a prompt. With no message text the operations now read the stage's
+  pinned regions (never the runtime's own instruction block), and `animate`
+  takes an `action` parameter beside `texture_prompt` for a stage that wants to
+  pin the clip. (#837)
+
 ### Changed
 
 - The default ceiling on stored media carried in one model request is now 20 MiB

@@ -758,12 +758,32 @@ where
             return Ok(());
         }
 
-        // Refused by name, and the connection closed: the tail of the cut
-        // line is still inbound, and read on it would be parsed as a run of
-        // garbage requests, each answered `invalid request`.
+        // Refused by name, then the tail of the cut line is drained up to its
+        // newline and the loop goes on. Read on as-is, that tail would parse as
+        // a run of garbage requests, each answered `invalid request`; closing
+        // instead is no better, because a socket closed with unread inbound
+        // data resets the peer rather than ending its stream (Linux), which
+        // can discard the very reply that says what went wrong. Drained in
+        // small pieces so the tail is never buffered whole.
         if over_cap {
             write_line(&mut write_half, &over_cap_refusal(max_request_bytes)).await;
-            return Ok(());
+            let mut piece = Vec::new();
+            loop {
+                piece.clear();
+                lines.get_mut().get_mut().set_limit(64 * 1024);
+                // A read error here is treated as the end of the tail: the
+                // loop below reads next, and surfaces the error itself.
+                let n = lines
+                    .get_mut()
+                    .read_until(b'\n', &mut piece)
+                    .await
+                    .unwrap_or(0);
+                if n == 0 || piece.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+            lines.get_mut().get_mut().set_limit(max_request_bytes);
+            continue;
         }
 
         let response = match serde_json::from_str::<ControlRequest>(&line) {
@@ -1120,13 +1140,16 @@ mod tests {
             .expect("it ends cleanly");
     }
 
-    /// A request past the cap is refused by name, and the connection closed.
+    /// A request past the cap is refused by name, its tail is swallowed, and
+    /// the connection goes on serving.
     ///
     /// `take` cuts the stream at the cap, so before this the daemon parsed the
     /// truncated line and answered `invalid request: EOF while parsing a string
     /// at line 1 column 8388608` - which is what a `lev run --attach` of a 7 MB
-    /// mesh got, with nothing in it to say there was a limit or what it was.
-    /// Left open, the tail of the cut line would then be read as garbage.
+    /// mesh got, with nothing in it to say there was a limit or what it was -
+    /// and then read the rest of the line as more requests. Closing instead
+    /// would reset a Linux peer with data still unread, and could drop the
+    /// refusal with it.
     #[tokio::test]
     async fn a_request_over_the_cap_is_refused_by_name() {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
@@ -1153,8 +1176,9 @@ mod tests {
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
 
-        // A spawn-sized line: well past the cap before its newline.
-        let line = format!("{{\"op\":\"list\",\"pad\":\"{}\"}}\n", "x".repeat(200));
+        // A spawn-sized line: well past the cap before its newline, and long
+        // enough that the drain needs more than one piece to reach it.
+        let line = format!("{{\"op\":\"list\",\"pad\":\"{}\"}}\n", "x".repeat(200_000));
         write_half.write_all(line.as_bytes()).await.unwrap();
         let resp = lines
             .next_line()
@@ -1167,14 +1191,71 @@ mod tests {
             "names the cap: {resp}"
         );
         assert!(!resp.contains(INVALID_REQUEST), "not a parse error: {resp}");
-        // The rest of the oversized line is still inbound, so the daemon
-        // closes rather than reading it on as new requests.
-        let closed = lines.next_line().await.expect("readable");
+        // The rest of the oversized line was swallowed, not parsed as further
+        // requests, and the connection still serves: an ordinary request on it
+        // is answered with the success shape.
+        let req = ControlRequest::List;
+        let mut line = serde_json::to_string(&req).unwrap();
+        line.push('\n');
+        write_half.write_all(line.as_bytes()).await.unwrap();
+        let resp = lines
+            .next_line()
+            .await
+            .expect("the connection stays readable")
+            .expect("the connection stays open after a refusal");
         assert!(
-            closed.is_none(),
-            "the connection is closed after the refusal"
+            !resp.contains(r#""result":"error""#),
+            "the next request is answered, not refused: {resp}"
         );
 
+        drop(write_half);
+        drop(lines);
+        server
+            .await
+            .expect("the handler task joins")
+            .expect("it ends cleanly");
+    }
+
+    /// A peer that hangs up partway through an oversized request: the refusal
+    /// still goes out, the drain sees the stream end, and the handler returns
+    /// cleanly rather than waiting for a newline that will never come.
+    #[tokio::test]
+    async fn a_peer_that_hangs_up_mid_oversized_request_ends_the_drain() {
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, _dir) = test_listener();
+        let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            handle_connection_capped(
+                stream,
+                op_tx,
+                no_events(),
+                None,
+                DaemonIdentity::this_process("test"),
+                40,
+            )
+            .await
+        });
+
+        let stream = connect(&id).await.unwrap();
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+
+        // Past the cap, and no newline ever follows.
+        let head = format!("{{\"op\":\"list\",\"pad\":\"{}", "x".repeat(200));
+        write_half.write_all(head.as_bytes()).await.unwrap();
+        let resp = lines
+            .next_line()
+            .await
+            .expect("the connection stays readable")
+            .expect("the refusal arrives");
+        assert!(resp.contains("over the control socket's"), "{resp}");
+
+        // Hang up with the request unfinished; the drain ends on EOF.
         drop(write_half);
         drop(lines);
         server
