@@ -27,12 +27,18 @@ const DEFAULT_RIG_HEIGHT_METERS: f64 = 1.7;
 /// `model/gltf-binary` part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MeshyOp {
+    /// A text prompt to a textured mesh (preview then refine).
+    TextTo3d,
     /// One reference image to a textured mesh.
     ImageTo3d,
     /// Up to four reference views to a single textured mesh.
     MultiImageTo3d,
+    /// An existing mesh plus a text style to a re-textured mesh.
+    Retexture,
     /// An existing mesh to a rigged, animation-ready mesh.
     Rig,
+    /// An existing mesh to an animated mesh (rig, then apply an action).
+    Animate,
 }
 
 impl MeshyOp {
@@ -41,9 +47,12 @@ impl MeshyOp {
     pub(crate) fn parse(model: &str) -> Option<Self> {
         let id = model.rsplit('/').next().unwrap_or(model);
         match id {
+            "text-to-3d" => Some(Self::TextTo3d),
             "image-to-3d" => Some(Self::ImageTo3d),
             "multi-image-to-3d" => Some(Self::MultiImageTo3d),
+            "retexture" => Some(Self::Retexture),
             "rig" => Some(Self::Rig),
+            "animate" => Some(Self::Animate),
             _ => None,
         }
     }
@@ -51,43 +60,68 @@ impl MeshyOp {
     /// The canonical model id for this operation.
     pub(crate) fn id(self) -> &'static str {
         match self {
+            Self::TextTo3d => "text-to-3d",
             Self::ImageTo3d => "image-to-3d",
             Self::MultiImageTo3d => "multi-image-to-3d",
+            Self::Retexture => "retexture",
             Self::Rig => "rig",
+            Self::Animate => "animate",
         }
     }
 
-    /// The path under the base URL that creates and lists tasks of this kind.
+    /// The path under the base URL that creates and lists this operation's
+    /// first task.
     ///
-    /// The same path serves the POST that creates a task and, with the task
-    /// id appended, the GET that reads its status.
+    /// The same path serves the POST that creates a task and, with the task id
+    /// appended, the GET that reads its status. For a two-phase operation this
+    /// is the first phase's path (both text-to-3d phases share one endpoint;
+    /// animate's first phase is a rig, and its animate phase uses the
+    /// animations path directly).
     pub(crate) fn path(self) -> &'static str {
         match self {
+            Self::TextTo3d => "openapi/v2/text-to-3d",
             Self::ImageTo3d => "openapi/v1/image-to-3d",
             Self::MultiImageTo3d => "openapi/v1/multi-image-to-3d",
-            Self::Rig => "openapi/v1/rigging",
+            Self::Retexture => "openapi/v1/retexture",
+            Self::Rig | Self::Animate => "openapi/v1/rigging",
         }
     }
 
     /// What the operation takes and hands back, in mime patterns.
     pub(crate) fn mime(self) -> ModelMime {
         match self {
+            // A text prompt in, a mesh (with a preview render) out.
+            Self::TextTo3d => ModelMime::new(&["text/*"], &["model/gltf-binary", "image/*"]),
             // The reference images plus an optional text texture prompt in;
             // a mesh (and, for multi-image, the preview renders) out.
-            Self::ImageTo3d => ModelMime::new(&["text/*", "image/*"], &["model/gltf-binary"]),
+            Self::ImageTo3d => {
+                ModelMime::new(&["text/*", "image/*"], &["model/gltf-binary", "image/*"])
+            }
             Self::MultiImageTo3d => {
                 ModelMime::new(&["text/*", "image/*"], &["model/gltf-binary", "image/*"])
             }
+            // A mesh plus a text style (or a style image) in, the re-textured
+            // mesh out.
+            Self::Retexture => ModelMime::new(
+                &["text/*", "image/*", "model/gltf-binary"],
+                &["model/gltf-binary"],
+            ),
             // A mesh in, the rigged mesh out.
             Self::Rig => ModelMime::new(&["model/gltf-binary"], &["model/gltf-binary"]),
+            // A mesh plus an optional action name in, the animated mesh out.
+            Self::Animate => {
+                ModelMime::new(&["text/*", "model/gltf-binary"], &["model/gltf-binary"])
+            }
         }
     }
 
     /// The name the produced mesh part carries.
     pub(crate) fn output_name(self) -> &'static str {
         match self {
-            Self::ImageTo3d | Self::MultiImageTo3d => "model.glb",
+            Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d => "model.glb",
+            Self::Retexture => "retextured.glb",
             Self::Rig => "rigged.glb",
+            Self::Animate => "animated.glb",
         }
     }
 
@@ -108,7 +142,8 @@ impl MeshyOp {
                 let mut body = Map::new();
                 body.insert("image_url".into(), json!(image));
                 apply_texture(&mut body, request);
-                apply_common_hints(&mut body, request);
+                apply_model_hints(&mut body, request);
+                apply_texture_hints(&mut body, request);
                 Ok(Value::Object(body))
             }
             Self::MultiImageTo3d => {
@@ -130,15 +165,45 @@ impl MeshyOp {
                 // render of its own.
                 body.insert("multi_view_thumbnails".into(), json!(true));
                 apply_texture(&mut body, request);
-                apply_common_hints(&mut body, request);
+                apply_model_hints(&mut body, request);
+                apply_texture_hints(&mut body, request);
                 Ok(Value::Object(body))
             }
-            Self::Rig => {
+            // The preview phase of text-to-3d: geometry from the prompt, no
+            // texturing yet (the refine phase textures it).
+            Self::TextTo3d => {
+                let prompt = required_prompt(request, "text-to-3d")?;
+                let mut body = Map::new();
+                body.insert("mode".into(), json!("preview"));
+                body.insert("prompt".into(), json!(prompt));
+                apply_model_hints(&mut body, request);
+                Ok(Value::Object(body))
+            }
+            Self::Retexture => {
                 let mesh = input_model(request).ok_or_else(|| {
                     ProviderError::InvalidResponse(
-                        "rig needs a model/gltf-binary mesh in a visible region, and found none"
+                        "retexture needs a model/gltf-binary mesh in a visible region, and found \
+                         none"
                             .into(),
                     )
+                })?;
+                let style = required_prompt(request, "retexture")?;
+                let mut body = Map::new();
+                body.insert("model_url".into(), json!(mesh));
+                body.insert("text_style_prompt".into(), json!(style));
+                if let Some(model) = extra_str(request, "ai_model") {
+                    body.insert("ai_model".into(), json!(model));
+                }
+                apply_texture_hints(&mut body, request);
+                Ok(Value::Object(body))
+            }
+            // Rig, and animate's first phase which is a rig: a mesh in.
+            Self::Rig | Self::Animate => {
+                let mesh = input_model(request).ok_or_else(|| {
+                    ProviderError::InvalidResponse(format!(
+                        "{} needs a model/gltf-binary mesh in a visible region, and found none",
+                        self.id()
+                    ))
                 })?;
                 let mut body = Map::new();
                 body.insert("model_url".into(), json!(mesh));
@@ -150,12 +215,30 @@ impl MeshyOp {
         }
     }
 
+    /// The refine-phase body of text-to-3d, texturing the preview task.
+    pub(crate) fn text_refine_body(preview_task_id: &str, request: &InferenceRequest) -> Value {
+        let mut body = Map::new();
+        body.insert("mode".into(), json!("refine"));
+        body.insert("preview_task_id".into(), json!(preview_task_id));
+        apply_texture(&mut body, request);
+        apply_texture_hints(&mut body, request);
+        Value::Object(body)
+    }
+
+    /// The animate-phase body: the rigged task plus the chosen action.
+    pub(crate) fn animate_body(rig_task_id: &str, action_id: i64) -> Value {
+        json!({ "rig_task_id": rig_task_id, "action_id": action_id })
+    }
+
     /// The GLB url of a finished task, or `None` when the task carries no
     /// mesh (a shape a rig and a generation express differently).
     pub(crate) fn glb_url(self, task: &Value) -> Option<String> {
         let url = match self {
-            Self::ImageTo3d | Self::MultiImageTo3d => task.get("model_urls")?.get("glb")?,
+            Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d | Self::Retexture => {
+                task.get("model_urls")?.get("glb")?
+            }
             Self::Rig => task.get("result")?.get("rigged_character_glb_url")?,
+            Self::Animate => task.get("result")?.get("animation_glb_url")?,
         };
         url.as_str().filter(|s| !s.is_empty()).map(str::to_string)
     }
@@ -166,14 +249,45 @@ impl MeshyOp {
     /// cheap image a verify stage can look at.
     pub(crate) fn preview_url(self, task: &Value) -> Option<String> {
         match self {
-            Self::ImageTo3d | Self::MultiImageTo3d => task
+            Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d | Self::Retexture => task
                 .get("thumbnail_url")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            Self::Rig => None,
+            Self::Rig | Self::Animate => None,
         }
     }
+}
+
+/// The text a generation or retexture must have, capped at Meshy's limit.
+///
+/// A text-to-3d with no prompt or a retexture with no style is a request Meshy
+/// cannot run; naming the miss beats a generic 400.
+fn required_prompt(request: &InferenceRequest, op: &str) -> Result<String> {
+    let prompt: String = request_text(request)
+        .chars()
+        .take(MAX_TEXTURE_PROMPT)
+        .collect();
+    if prompt.trim().is_empty() {
+        return Err(ProviderError::InvalidResponse(format!(
+            "{op} needs a text prompt in a visible region, and found none"
+        )));
+    }
+    Ok(prompt)
+}
+
+/// The animation action to apply, from the request text, defaulting to a walk.
+pub(crate) fn animate_action(request: &InferenceRequest) -> String {
+    let action = request_text(request);
+    match action.trim().is_empty() {
+        true => "walk".to_string(),
+        false => action.trim().to_string(),
+    }
+}
+
+/// The first `action_id` in an animation-library listing, when it has one.
+pub(crate) fn library_action_id(library: &Value) -> Option<i64> {
+    library.as_array()?.first()?.get("action_id")?.as_i64()
 }
 
 /// The task id a create response reports, under its `result` key.
@@ -292,15 +406,16 @@ fn apply_texture(body: &mut Map<String, Value>, request: &InferenceRequest) {
     }
 }
 
-/// Copy the generation hints a stage set in `[model.parameters]` into a
-/// create body, each only when it is present.
+/// Copy the geometry and model-tier hints a stage set in `[model.parameters]`
+/// into a create body, each only when present.
 ///
-/// Only fields Meshy documents for the image operations are forwarded, so a
-/// stale or provider-neutral hint (a deprecated `symmetry_mode`, a
-/// `negative_prompt` these endpoints do not take) is dropped here rather than
+/// These are valid on every phase that produces geometry - image and text
+/// generation, and a text-to-3d preview. Only fields Meshy documents are
+/// forwarded, so a stale or provider-neutral hint (a deprecated `symmetry_mode`,
+/// a `negative_prompt` these endpoints do not take) is dropped here rather than
 /// drawing a 400 from Meshy.
-fn apply_common_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
-    for key in ["ai_model", "topology", "texture_resolution", "pose_mode"] {
+fn apply_model_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
+    for key in ["ai_model", "topology", "pose_mode"] {
         if let Some(value) = extra_str(request, key) {
             body.insert(key.into(), json!(value));
         }
@@ -308,10 +423,24 @@ fn apply_common_hints(body: &mut Map<String, Value>, request: &InferenceRequest)
     if let Some(count) = extra_i64(request, "target_polycount") {
         body.insert("target_polycount".into(), json!(count));
     }
-    for key in ["enable_pbr", "should_remesh", "ultra_mode", "moderation"] {
+    for key in ["should_remesh", "ultra_mode", "moderation"] {
         if let Some(value) = extra_bool(request, key) {
             body.insert(key.into(), json!(value));
         }
+    }
+}
+
+/// Copy the texturing hints into a create body, each only when present.
+///
+/// Kept apart from the geometry hints because a text-to-3d preview textures
+/// nothing and rejects them; they belong to the image ops, the refine phase and
+/// a retexture.
+fn apply_texture_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
+    if let Some(value) = extra_str(request, "texture_resolution") {
+        body.insert("texture_resolution".into(), json!(value));
+    }
+    if let Some(value) = extra_bool(request, "enable_pbr") {
+        body.insert("enable_pbr".into(), json!(value));
     }
 }
 
@@ -389,6 +518,15 @@ mod tests {
         request
     }
 
+    const ALL_OPS: [MeshyOp; 6] = [
+        MeshyOp::TextTo3d,
+        MeshyOp::ImageTo3d,
+        MeshyOp::MultiImageTo3d,
+        MeshyOp::Retexture,
+        MeshyOp::Rig,
+        MeshyOp::Animate,
+    ];
+
     #[test]
     fn parse_reads_the_id_or_its_last_segment() {
         assert_eq!(MeshyOp::parse("image-to-3d"), Some(MeshyOp::ImageTo3d));
@@ -397,12 +535,15 @@ mod tests {
             Some(MeshyOp::MultiImageTo3d)
         );
         assert_eq!(MeshyOp::parse("rig"), Some(MeshyOp::Rig));
-        assert_eq!(MeshyOp::parse("text-to-3d"), None);
+        assert_eq!(MeshyOp::parse("text-to-3d"), Some(MeshyOp::TextTo3d));
+        assert_eq!(MeshyOp::parse("retexture"), Some(MeshyOp::Retexture));
+        assert_eq!(MeshyOp::parse("meshy/animate"), Some(MeshyOp::Animate));
+        assert_eq!(MeshyOp::parse("sculpt"), None);
     }
 
     #[test]
     fn each_operation_names_its_path_id_display_output_and_mime() {
-        for op in [MeshyOp::ImageTo3d, MeshyOp::MultiImageTo3d, MeshyOp::Rig] {
+        for op in ALL_OPS {
             assert!(!op.path().is_empty());
             assert_eq!(MeshyOp::parse(op.id()), Some(op));
             assert!(op.output_name().ends_with(".glb"));
@@ -651,5 +792,148 @@ mod tests {
         // A field Meshy does not document for this endpoint is dropped.
         assert!(body.get("negative_prompt").is_none());
         assert!(body.get("symmetry_mode").is_none());
+    }
+
+    #[test]
+    fn text_to_3d_builds_a_preview_body_and_needs_a_prompt() {
+        let mut request = with_blocks(vec![ContentBlock::Text {
+            text: "a brass robot".into(),
+        }]);
+        request.extra = json!({ "target_polycount": 15000, "enable_pbr": true });
+        let body = MeshyOp::TextTo3d.build_body(&request).unwrap();
+        assert_eq!(body["mode"].as_str().unwrap(), "preview");
+        assert_eq!(body["prompt"].as_str().unwrap(), "a brass robot");
+        assert_eq!(body["target_polycount"].as_i64().unwrap(), 15000);
+        // A preview textures nothing, so texture hints are withheld.
+        assert!(body.get("enable_pbr").is_none());
+        let err = MeshyOp::TextTo3d.build_body(&empty_request()).unwrap_err();
+        assert!(
+            err.to_string().contains("text-to-3d needs a text prompt"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn text_refine_body_textures_the_preview_task() {
+        let request = with_blocks(vec![ContentBlock::Text {
+            text: "matte red enamel".into(),
+        }]);
+        let body = MeshyOp::text_refine_body("preview-1", &request);
+        assert_eq!(body["mode"].as_str().unwrap(), "refine");
+        assert_eq!(body["preview_task_id"].as_str().unwrap(), "preview-1");
+        assert_eq!(body["texture_prompt"].as_str().unwrap(), "matte red enamel");
+    }
+
+    #[test]
+    fn retexture_needs_a_mesh_and_a_style() {
+        let mut request = with_blocks(vec![
+            ContentBlock::Text {
+                text: "weathered bronze".into(),
+            },
+            hydrated_block("model/gltf-binary", "m.glb", "R0xC"),
+        ]);
+        request.extra = json!({ "texture_resolution": "4k", "ai_model": "meshy-7" });
+        let body = MeshyOp::Retexture.build_body(&request).unwrap();
+        assert_eq!(
+            body["model_url"].as_str().unwrap(),
+            "data:model/gltf-binary;base64,R0xC"
+        );
+        assert_eq!(
+            body["text_style_prompt"].as_str().unwrap(),
+            "weathered bronze"
+        );
+        assert_eq!(body["texture_resolution"].as_str().unwrap(), "4k");
+        assert_eq!(body["ai_model"].as_str().unwrap(), "meshy-7");
+        let no_mesh = with_blocks(vec![ContentBlock::Text { text: "x".into() }]);
+        assert!(
+            MeshyOp::Retexture
+                .build_body(&no_mesh)
+                .unwrap_err()
+                .to_string()
+                .contains("retexture needs a model")
+        );
+        let no_style = with_blocks(vec![hydrated_block("model/gltf-binary", "m.glb", "R0xC")]);
+        assert!(
+            MeshyOp::Retexture
+                .build_body(&no_style)
+                .unwrap_err()
+                .to_string()
+                .contains("retexture needs a text prompt")
+        );
+    }
+
+    #[test]
+    fn animate_rigs_first_and_reads_the_action_and_library() {
+        // animate's build_body is a rig body (its first phase is a rig).
+        let request = with_blocks(vec![hydrated_block("model/gltf-binary", "m.glb", "R0xC")]);
+        let body = MeshyOp::Animate.build_body(&request).unwrap();
+        assert_eq!(
+            body["model_url"].as_str().unwrap(),
+            "data:model/gltf-binary;base64,R0xC"
+        );
+        assert_eq!(body["height_meters"].as_f64().unwrap(), 1.7);
+        assert!(
+            MeshyOp::Animate
+                .build_body(&empty_request())
+                .unwrap_err()
+                .to_string()
+                .contains("animate needs a model")
+        );
+
+        // The action defaults to a walk, or reads the request text.
+        assert_eq!(animate_action(&empty_request()), "walk");
+        assert_eq!(
+            animate_action(&with_blocks(vec![ContentBlock::Text {
+                text: "run".into()
+            }])),
+            "run"
+        );
+
+        // animate_body pairs the rig task with the action id.
+        let ab = MeshyOp::animate_body("rig-9", 42);
+        assert_eq!(ab["rig_task_id"].as_str().unwrap(), "rig-9");
+        assert_eq!(ab["action_id"].as_i64().unwrap(), 42);
+
+        // The library's first action id, or None when there is none.
+        assert_eq!(
+            library_action_id(&json!([{ "action_id": 7, "name": "Walk" }])),
+            Some(7)
+        );
+        assert_eq!(library_action_id(&json!([])), None);
+        assert_eq!(library_action_id(&json!({ "not": "an array" })), None);
+        // An entry missing an action_id yields None.
+        assert_eq!(library_action_id(&json!([{ "name": "Walk" }])), None);
+    }
+
+    #[test]
+    fn glb_and_preview_for_the_new_ops() {
+        let generated = json!({
+            "model_urls": { "glb": "https://a/m.glb" },
+            "thumbnail_url": "https://a/t.png"
+        });
+        assert_eq!(
+            MeshyOp::TextTo3d.glb_url(&generated).unwrap(),
+            "https://a/m.glb"
+        );
+        assert_eq!(
+            MeshyOp::Retexture.glb_url(&generated).unwrap(),
+            "https://a/m.glb"
+        );
+        assert_eq!(
+            MeshyOp::TextTo3d.preview_url(&generated).unwrap(),
+            "https://a/t.png"
+        );
+        assert_eq!(
+            MeshyOp::Retexture.preview_url(&generated).unwrap(),
+            "https://a/t.png"
+        );
+        let anim = json!({ "result": { "animation_glb_url": "https://a/anim.glb" } });
+        assert_eq!(
+            MeshyOp::Animate.glb_url(&anim).unwrap(),
+            "https://a/anim.glb"
+        );
+        assert_eq!(MeshyOp::Animate.preview_url(&anim), None);
+        assert_eq!(MeshyOp::Animate.glb_url(&json!({ "result": {} })), None);
+        assert_eq!(MeshyOp::Animate.glb_url(&json!({})), None);
     }
 }

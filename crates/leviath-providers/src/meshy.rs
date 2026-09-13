@@ -31,7 +31,7 @@ use crate::provider::{
 use crate::rate_limit::RateLimiter;
 
 mod ops;
-use ops::{MeshyOp, TaskState, created_task_id, task_state};
+use ops::{MeshyOp, TaskState, animate_action, created_task_id, library_action_id, task_state};
 
 /// The default Meshy API origin.
 const DEFAULT_BASE_URL: &str = "https://api.meshy.ai";
@@ -50,10 +50,16 @@ const DOWNLOAD_REQUEST_SECS: u64 = 300;
 
 /// The models this build names for a listing, one per operation.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("text-to-3d", "Meshy Text to 3D"),
     ("image-to-3d", "Meshy Image to 3D"),
     ("multi-image-to-3d", "Meshy Multi-Image to 3D"),
+    ("retexture", "Meshy Retexture"),
     ("rig", "Meshy Rig"),
+    ("animate", "Meshy Animate"),
 ];
+
+/// The path that creates and lists an animation task (animate's second phase).
+const ANIMATIONS_PATH: &str = "openapi/v1/animations";
 
 /// The nominal limits for a Meshy model.
 ///
@@ -210,9 +216,19 @@ impl MeshyProvider {
             .map_err(|e| ProviderError::transport("reading Meshy asset bytes", &e))
     }
 
-    /// Poll a task to completion, or fail on its deadline or its own failure.
-    async fn poll_to_completion(&self, status_url: &str, deadline: Duration) -> Result<Value> {
-        let started = Instant::now();
+    /// The absolute deadline for a whole operation, from its stage timeout.
+    /// One deadline covers every phase of a multi-phase operation.
+    fn deadline_for(request: &InferenceRequest) -> Instant {
+        Instant::now()
+            + Duration::from_secs(
+                request
+                    .request_timeout_secs
+                    .unwrap_or(DEFAULT_OP_TIMEOUT_SECS),
+            )
+    }
+
+    /// Poll a task to completion, or fail on the deadline or its own failure.
+    async fn poll_to_completion(&self, status_url: &str, deadline: Instant) -> Result<Value> {
         loop {
             let task = self.get_json(status_url).await?;
             match task_state(&task) {
@@ -222,31 +238,26 @@ impl MeshyProvider {
                 }
                 TaskState::Running(_) => {}
             }
-            if started.elapsed() >= deadline {
-                return Err(ProviderError::Other(format!(
-                    "Meshy task did not finish within {} seconds",
-                    deadline.as_secs()
-                )));
+            if Instant::now() >= deadline {
+                return Err(ProviderError::Other(
+                    "Meshy task did not finish within its deadline".to_string(),
+                ));
             }
             sleep(self.poll_interval).await;
         }
     }
 
-    /// Run one operation end to end: submit, poll, download the mesh and its
-    /// preview render.
-    async fn run_operation(&self, op: MeshyOp, request: &InferenceRequest) -> Result<Vec<Blob>> {
-        let body = op.build_body(request)?;
-        let create = self.post_json(&self.url(op.path()), &body).await?;
-        let task_id = created_task_id(&create)?;
-        let status_url = format!("{}/{task_id}", self.url(op.path()));
-        let deadline = Duration::from_secs(
-            request
-                .request_timeout_secs
-                .unwrap_or(DEFAULT_OP_TIMEOUT_SECS),
-        );
-        let task = self.poll_to_completion(&status_url, deadline).await?;
+    /// POST a create body to a path and return the new task's id.
+    async fn create_task(&self, path: &str, body: &Value) -> Result<String> {
+        let create = self.post_json(&self.url(path), body).await?;
+        created_task_id(&create)
+    }
 
-        let glb_url = op.glb_url(&task).ok_or_else(|| {
+    /// Download a finished task's mesh, and its preview render when it has one,
+    /// as parts. The preview is best-effort: a mesh that came back is a success
+    /// even if its thumbnail cannot be fetched.
+    async fn download_parts(&self, op: MeshyOp, task: &Value) -> Result<Vec<Blob>> {
+        let glb_url = op.glb_url(task).ok_or_else(|| {
             ProviderError::InvalidResponse(format!(
                 "a finished Meshy {} task carried no GLB url",
                 op.id()
@@ -255,10 +266,7 @@ impl MeshyProvider {
         let glb = self.get_bytes(&glb_url).await?;
         let mime = MimeType::parse(GLTF_BINARY).expect("model/gltf-binary is a valid mime type");
         let mut parts = vec![Blob::new(mime, glb).named(op.output_name())];
-
-        // The preview render is a bonus, not a requirement: a mesh that came
-        // back is a success even if its thumbnail cannot be fetched.
-        if let Some(preview_url) = op.preview_url(&task) {
+        if let Some(preview_url) = op.preview_url(task) {
             match self.get_bytes(&preview_url).await {
                 Ok(bytes) => {
                     let png = MimeType::parse("image/png").expect("image/png is valid");
@@ -271,6 +279,102 @@ impl MeshyProvider {
         }
         Ok(parts)
     }
+
+    /// Run a single-phase operation end to end: submit, poll, download.
+    async fn run_operation(&self, op: MeshyOp, request: &InferenceRequest) -> Result<Vec<Blob>> {
+        let deadline = Self::deadline_for(request);
+        let task_id = self
+            .create_task(op.path(), &op.build_body(request)?)
+            .await?;
+        let status_url = format!("{}/{task_id}", self.url(op.path()));
+        let task = self.poll_to_completion(&status_url, deadline).await?;
+        self.download_parts(op, &task).await
+    }
+
+    /// Text to a textured mesh: a preview task builds the geometry, then a
+    /// refine task textures it. Both share one endpoint and one deadline.
+    async fn run_text_to_3d(&self, request: &InferenceRequest) -> Result<Vec<Blob>> {
+        let op = MeshyOp::TextTo3d;
+        let deadline = Self::deadline_for(request);
+        let preview_id = self
+            .create_task(op.path(), &op.build_body(request)?)
+            .await?;
+        let preview_url = format!("{}/{preview_id}", self.url(op.path()));
+        self.poll_to_completion(&preview_url, deadline).await?;
+
+        let refine_body = MeshyOp::text_refine_body(&preview_id, request);
+        let refine_id = self.create_task(op.path(), &refine_body).await?;
+        let refine_url = format!("{}/{refine_id}", self.url(op.path()));
+        let task = self.poll_to_completion(&refine_url, deadline).await?;
+        self.download_parts(op, &task).await
+    }
+
+    /// A mesh to an animated mesh: rig it, look the requested action up in the
+    /// animation library, then apply that action to the rigged model.
+    async fn run_animate(&self, request: &InferenceRequest) -> Result<Vec<Blob>> {
+        let op = MeshyOp::Animate;
+        let deadline = Self::deadline_for(request);
+
+        // Phase 1: rig. Animate's build_body is a rig body and its path a rig
+        // path, so the first phase reuses them.
+        let rig_id = self
+            .create_task(op.path(), &op.build_body(request)?)
+            .await?;
+        let rig_url = format!("{}/{rig_id}", self.url(op.path()));
+        self.poll_to_completion(&rig_url, deadline).await?;
+
+        // Phase 2: resolve the requested action to a library action id.
+        let action = animate_action(request);
+        let library = self.get_library(&action).await?;
+        let action_id = library_action_id(&library).ok_or_else(|| {
+            ProviderError::InvalidResponse(format!("Meshy has no animation matching '{action}'"))
+        })?;
+
+        // Phase 3: animate the rigged model with that action.
+        let anim_body = MeshyOp::animate_body(&rig_id, action_id);
+        let anim_id = self.create_task(ANIMATIONS_PATH, &anim_body).await?;
+        let anim_url = format!("{}/{anim_id}", self.url(ANIMATIONS_PATH));
+        let task = self.poll_to_completion(&anim_url, deadline).await?;
+        self.download_parts(op, &task).await
+    }
+
+    /// The animation library, filtered by a search term.
+    async fn get_library(&self, search: &str) -> Result<Value> {
+        let url = self.url(&format!(
+            "{ANIMATIONS_PATH}/library?search={}",
+            query_encode(search)
+        ));
+        let builder = self.client.get(&url).bearer_auth(&self.api_key);
+        let response = apply_request_timeout(builder, Some(SHORT_REQUEST_SECS))
+            .send()
+            .await
+            .map_err(|e| ProviderError::transport("listing Meshy animations", &e))?;
+        if !response.status().is_success() {
+            return Err(Self::status_error("library", response).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|e| ProviderError::transport("reading the Meshy animation library", &e))
+    }
+}
+
+/// Percent-encode a query-parameter value (the animation search term).
+///
+/// The workspace's reqwest is built without the query-string feature, so the
+/// term is encoded here rather than by `RequestBuilder::query`. Unreserved
+/// characters pass through; everything else becomes `%XX`.
+fn query_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -290,7 +394,11 @@ impl Provider for MeshyProvider {
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
-        let parts = self.run_operation(op, request).await?;
+        let parts = match op {
+            MeshyOp::TextTo3d => self.run_text_to_3d(request).await?,
+            MeshyOp::Animate => self.run_animate(request).await?,
+            single => self.run_operation(single, request).await?,
+        };
         let summary = format!(
             "Produced {} part(s) with meshy/{}: {}",
             parts.len(),
@@ -585,12 +693,9 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_operation_is_refused_before_any_call() {
         let p = MeshyProvider::new(client(), "k".into());
-        let err = p
-            .infer(&request_with("text-to-3d", vec![]))
-            .await
-            .unwrap_err();
+        let err = p.infer(&request_with("sculpt", vec![])).await.unwrap_err();
         assert!(
-            err.to_string().contains("no operation named 'text-to-3d'"),
+            err.to_string().contains("no operation named 'sculpt'"),
             "{err}"
         );
     }
@@ -918,5 +1023,308 @@ mod tests {
             err.to_string().contains("reading Meshy asset bytes"),
             "{err}"
         );
+    }
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text { text: text.into() }
+    }
+
+    #[tokio::test]
+    async fn text_to_3d_runs_preview_then_refine_and_returns_the_mesh() {
+        let glb = spawn_mock_server(200, "OK", b"mesh".to_vec()).await;
+        let refined = json!({
+            "status": "SUCCEEDED",
+            "model_urls": { "glb": format!("{glb}/m.glb") }
+        });
+        let (api, bodies) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"preview-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"{"result":"refine-1"}"#.to_vec()),
+            (200, "OK", refined.to_string().into_bytes()),
+        ])
+        .await;
+        let out = provider_at(&api)
+            .infer(&request_with(
+                "text-to-3d",
+                vec![text_block("a brass robot")],
+            ))
+            .await
+            .expect("a mesh from text");
+        assert_eq!(out.parts.len(), 1);
+        assert_eq!(out.parts[0].bytes, b"mesh");
+        let b = bodies.lock().unwrap();
+        let preview = &b[0];
+        let refine = &b[2];
+        assert!(
+            preview.contains("\"mode\":\"preview\"") && preview.contains("a brass robot"),
+            "{preview}"
+        );
+        assert!(
+            refine.contains("\"mode\":\"refine\"") && refine.contains("preview-1"),
+            "{refine}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retexture_submits_polls_and_returns_the_mesh() {
+        let glb = spawn_mock_server(200, "OK", b"retex".to_vec()).await;
+        let (api, bodies) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rt-1"}"#.to_vec()),
+            (
+                200,
+                "OK",
+                json!({"status":"SUCCEEDED","model_urls":{"glb":format!("{glb}/m.glb")}})
+                    .to_string()
+                    .into_bytes(),
+            ),
+        ])
+        .await;
+        let req = request_with(
+            "retexture",
+            vec![
+                text_block("weathered bronze"),
+                image_block("model/gltf-binary", "R0xC"),
+            ],
+        );
+        let out = provider_at(&api)
+            .infer(&req)
+            .await
+            .expect("retextured mesh");
+        assert_eq!(out.parts[0].name.as_deref(), Some("retextured.glb"));
+        let b = bodies.lock().unwrap();
+        let created = &b[0];
+        assert!(created.contains("text_style_prompt"), "{created}");
+    }
+
+    #[tokio::test]
+    async fn animate_rigs_looks_up_the_action_and_returns_the_animation() {
+        let glb = spawn_mock_server(200, "OK", b"anim".to_vec()).await;
+        let done = json!({
+            "status": "SUCCEEDED",
+            "result": { "animation_glb_url": format!("{glb}/a.glb") }
+        });
+        let (api, bodies) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"[{"action_id":7,"name":"Walk"}]"#.to_vec()),
+            (200, "OK", br#"{"result":"anim-1"}"#.to_vec()),
+            (200, "OK", done.to_string().into_bytes()),
+        ])
+        .await;
+        let out = provider_at(&api)
+            .infer(&request_with(
+                "animate",
+                vec![image_block("model/gltf-binary", "R0xC")],
+            ))
+            .await
+            .expect("an animated mesh");
+        assert_eq!(out.parts[0].bytes, b"anim");
+        assert_eq!(out.parts[0].name.as_deref(), Some("animated.glb"));
+        let b = bodies.lock().unwrap();
+        let rig_created = &b[0];
+        let anim_created = &b[3];
+        assert!(rig_created.contains("model_url"), "{rig_created}");
+        assert!(
+            anim_created.contains("\"rig_task_id\":\"rig-1\"")
+                && anim_created.contains("\"action_id\":7"),
+            "{anim_created}"
+        );
+    }
+
+    #[tokio::test]
+    async fn animate_with_no_matching_action_is_an_error() {
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"[]"#.to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api)
+            .infer(&request_with(
+                "animate",
+                vec![image_block("model/gltf-binary", "R0xC")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no animation matching"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_animation_library_failures_are_reported() {
+        // Non-2xx from the library endpoint.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (500, "Internal", b"boom".to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api)
+            .infer(&request_with(
+                "animate",
+                vec![image_block("model/gltf-binary", "R0xC")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 500"), "{err}");
+
+        // A library body that is not JSON.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", b"not json".to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api)
+            .infer(&request_with(
+                "animate",
+                vec![image_block("model/gltf-binary", "R0xC")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("reading the Meshy animation library"),
+            "{err}"
+        );
+
+        // The library endpoint unreachable (server gone after the rig).
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig-1"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api)
+            .infer(&request_with(
+                "animate",
+                vec![image_block("model/gltf-binary", "R0xC")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("listing Meshy animations"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn query_encode_escapes_reserved_characters() {
+        assert_eq!(query_encode("walk"), "walk");
+        assert_eq!(query_encode("jump kick"), "jump%20kick");
+        assert_eq!(query_encode("a/b?c"), "a%2Fb%3Fc");
+    }
+
+    #[tokio::test]
+    async fn text_to_3d_reports_a_failure_at_each_phase() {
+        // No prompt: the build fails before any call.
+        let err = provider_at("http://127.0.0.1:1")
+            .infer(&request_with("text-to-3d", vec![]))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("text-to-3d needs a text prompt"),
+            "{err}"
+        );
+        let prompt = || request_with("text-to-3d", vec![text_block("a robot")]);
+
+        // The preview create cannot be sent.
+        let err = provider_at("http://127.0.0.1:1")
+            .infer(&prompt())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+
+        // The preview task fails.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"p"}"#.to_vec()),
+            (
+                200,
+                "OK",
+                br#"{"status":"FAILED","task_error":{"message":"bad prompt"}}"#.to_vec(),
+            ),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&prompt()).await.unwrap_err();
+        assert!(err.to_string().contains("bad prompt"), "{err}");
+
+        // The refine create errors (the server has nothing more to give).
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"p"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&prompt()).await.unwrap_err();
+        assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+
+        // The refine task fails.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"p"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"{"result":"r"}"#.to_vec()),
+            (
+                200,
+                "OK",
+                br#"{"status":"FAILED","task_error":{"message":"refine died"}}"#.to_vec(),
+            ),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&prompt()).await.unwrap_err();
+        assert!(err.to_string().contains("refine died"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn animate_reports_a_failure_at_each_phase() {
+        // No mesh: the build fails before any call.
+        let err = provider_at("http://127.0.0.1:1")
+            .infer(&request_with("animate", vec![]))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("animate needs a model"), "{err}");
+        let mesh = || request_with("animate", vec![image_block("model/gltf-binary", "R0xC")]);
+
+        // The rig create cannot be sent.
+        let err = provider_at("http://127.0.0.1:1")
+            .infer(&mesh())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+
+        // The rig task fails.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig"}"#.to_vec()),
+            (
+                200,
+                "OK",
+                br#"{"status":"FAILED","task_error":{"message":"rig died"}}"#.to_vec(),
+            ),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&mesh()).await.unwrap_err();
+        assert!(err.to_string().contains("rig died"), "{err}");
+
+        // The animate create errors after the rig and library succeed.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"[{"action_id":7}]"#.to_vec()),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&mesh()).await.unwrap_err();
+        assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+
+        // The animate task fails.
+        let (api, _b) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"result":"rig"}"#.to_vec()),
+            (200, "OK", br#"{"status":"SUCCEEDED"}"#.to_vec()),
+            (200, "OK", br#"[{"action_id":7}]"#.to_vec()),
+            (200, "OK", br#"{"result":"anim"}"#.to_vec()),
+            (
+                200,
+                "OK",
+                br#"{"status":"FAILED","task_error":{"message":"anim died"}}"#.to_vec(),
+            ),
+        ])
+        .await;
+        let err = provider_at(&api).infer(&mesh()).await.unwrap_err();
+        assert!(err.to_string().contains("anim died"), "{err}");
     }
 }

@@ -15,6 +15,13 @@ same list.
 
 ### Added
 
+- The Meshy provider gains three more operations: `text-to-3d` (a text prompt to
+  a textured mesh, a preview task then a refine task), `retexture` (a mesh plus a
+  text style to a re-textured mesh), and `animate` (a mesh to an animated mesh -
+  it rigs the model, looks the requested action up in Meshy's animation library,
+  and applies it). Each runs its phases under one `request_timeout_secs`, and its
+  text prompt or action comes from a visible region's text. (#833)
+
 - Meshy is a first-class provider for generative 3D. A stage selects it with
   `provider = "meshy"` and one of `image-to-3d`, `multi-image-to-3d` or `rig`:
   the stage's visible image or mesh parts go in, and it submits a Meshy REST

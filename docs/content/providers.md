@@ -483,9 +483,17 @@ a typed part, which is the shape every provider speaks. Set `MESHY_API_KEY` (or
 
 | Model | Takes | Produces |
 |---|---|---|
+| `text-to-3d` | a text prompt | a textured `model/gltf-binary` (preview then refine) |
 | `image-to-3d` | one image | a textured `model/gltf-binary` |
 | `multi-image-to-3d` | up to four views of one subject | a textured `model/gltf-binary`, with preview renders |
+| `retexture` | a `model/gltf-binary` mesh plus a text style | the re-textured mesh |
 | `rig` | a `model/gltf-binary` mesh | the rigged, animation-ready mesh |
+| `animate` | a `model/gltf-binary` mesh plus an action name | the animated mesh (rigs, then applies the action) |
+
+A stage's texture prompt, text prompt, or animation action comes from the text
+of a visible region; `text-to-3d` and `animate` each run more than one Meshy job
+in turn (a preview then a refine; a rig, a library lookup, then the animation)
+under one `request_timeout_secs`.
 
 ```toml
 [context.regions]
