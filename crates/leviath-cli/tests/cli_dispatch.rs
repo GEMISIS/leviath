@@ -57,6 +57,7 @@ fn lev_command(tmp_home: &std::path::Path) -> Command {
         .env_remove("OPENAI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
         .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MESHY_API_KEY")
         .current_dir(tmp_home);
     cmd
 }

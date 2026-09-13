@@ -27,6 +27,11 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub google_api_key: Option<String>,
 
+    /// Meshy API key. Meshy is a generative 3D provider: reference images or
+    /// an existing mesh in, a textured model out.
+    #[serde(default)]
+    pub meshy_api_key: Option<String>,
+
     /// Host to reach Anthropic on, when it is not Anthropic's own.
     ///
     /// For an enterprise gateway or a self-hosted proxy that speaks the same
@@ -50,6 +55,10 @@ pub struct ProviderConfig {
     /// Host to reach OpenRouter on. See [`Self::anthropic_base_url`].
     #[serde(default)]
     pub openrouter_base_url: Option<String>,
+
+    /// Host to reach Meshy on. See [`Self::anthropic_base_url`].
+    #[serde(default)]
+    pub meshy_base_url: Option<String>,
 
     /// Whether the Claude Code CLI transport is enabled.
     ///
@@ -188,6 +197,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("anthropic_api_key", &redacted(&self.anthropic_api_key))
             .field("openai_api_key", &redacted(&self.openai_api_key))
             .field("google_api_key", &redacted(&self.google_api_key))
+            .field("meshy_api_key", &redacted(&self.meshy_api_key))
             .field("claude_code_enabled", &self.claude_code_enabled)
             .field("claude_code_binary", &self.claude_code_binary)
             .field("claude_code_effort", &self.claude_code_effort)
@@ -215,10 +225,12 @@ impl Default for ProviderConfig {
             anthropic_api_key: None,
             openai_api_key: None,
             google_api_key: None,
+            meshy_api_key: None,
             anthropic_base_url: None,
             openai_base_url: None,
             google_base_url: None,
             openrouter_base_url: None,
+            meshy_base_url: None,
             claude_code_enabled: false,
             claude_code_binary: None,
             claude_code_effort: None,
