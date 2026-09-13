@@ -19,7 +19,8 @@ use std::sync::Arc;
 #[derive(Clone, PartialEq)]
 pub struct ProviderCreds {
     /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
-    /// `ollama` | `claude-code`. Selects which provider is instantiated.
+    /// `ollama` | `claude-code` | `meshy`. Selects which provider is
+    /// instantiated.
     pub name: String,
     /// API key, when the provider needs one (`None` for `ollama`/`claude-code`).
     pub api_key: Option<String>,
@@ -470,6 +471,22 @@ pub fn build_provider_registry_probing(
                     );
                 }
             }
+            "meshy" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "meshy".to_string(),
+                        Arc::new(
+                            leviath_providers::MeshyProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            .with_base_url(c.base_url.clone()),
+                        ),
+                    );
+                }
+            }
             "ollama" => {
                 let url = c
                     .base_url
@@ -605,6 +622,27 @@ mod tests {
                 "configured {configured:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_meshy_key_registers_the_provider_and_a_missing_one_does_not() {
+        let mut cred = ProviderCreds::simple("meshy");
+        cred.api_key = Some("msy-test".to_string());
+        cred.base_url = Some("https://gateway.example/v1".to_string());
+        let registry = build_provider_registry(&[cred]).expect("an HTTPS client builds in tests");
+        assert!(
+            registry.get("meshy").is_some(),
+            "a keyed meshy is registered"
+        );
+
+        // A meshy cred with no key registers nothing, like every other keyed
+        // provider: an empty account authenticates as nobody.
+        let keyless = ProviderCreds::simple("meshy");
+        let registry = build_provider_registry(&[keyless]).expect("builds");
+        assert!(
+            registry.get("meshy").is_none(),
+            "a keyless meshy is skipped"
+        );
     }
 
     /// One `tracing::debug!(?creds)` - or an error context that formats a struct
@@ -1004,7 +1042,15 @@ mod tests {
         // seam exists to close.
         let endpoint =
             ProviderCreds::openai_compatible("mock", "http://h/v1", None, vec![], None, vec![]);
-        let keyed = ["anthropic", "openai", "google", "openrouter", "ollama"].map(|name| {
+        let keyed = [
+            "anthropic",
+            "openai",
+            "google",
+            "openrouter",
+            "meshy",
+            "ollama",
+        ]
+        .map(|name| {
             let mut cred = ProviderCreds::simple(name);
             cred.api_key = Some("k".to_string());
             cred

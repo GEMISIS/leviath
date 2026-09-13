@@ -62,6 +62,9 @@
         "google_api_key": {
           "type": "string"
         },
+        "meshy_api_key": {
+          "type": "string"
+        },
         "anthropic_base_url": {
           "type": "string"
         },
@@ -69,6 +72,9 @@
           "type": "string"
         },
         "google_base_url": {
+          "type": "string"
+        },
+        "meshy_base_url": {
           "type": "string"
         },
         "openrouter_base_url": {

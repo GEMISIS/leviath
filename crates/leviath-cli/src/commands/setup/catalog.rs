@@ -159,6 +159,21 @@ pub(crate) fn providers() -> Vec<Provider> {
             },
         },
         Provider {
+            id: "meshy",
+            display: "Meshy (3D models)",
+            blurb: "Generative 3D: reference images or a mesh in, a textured \
+                    model out.",
+            credential: Credential::ApiKey,
+            hint: "msy_...",
+            env_var: Some("MESHY_API_KEY"),
+            signup_url: Some("https://www.meshy.ai/api"),
+            preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.meshy_api_key.clone(),
+                write: |c, v| c.providers.meshy_api_key = v,
+            },
+        },
+        Provider {
             id: "codex",
             display: "OpenAI Codex (ChatGPT subscription)",
             blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \

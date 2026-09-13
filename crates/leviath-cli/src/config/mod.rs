@@ -762,6 +762,9 @@ impl Config {
         if config.providers.google_api_key.is_none() {
             config.providers.google_api_key = std::env::var("GOOGLE_API_KEY").ok();
         }
+        if config.providers.meshy_api_key.is_none() {
+            config.providers.meshy_api_key = std::env::var("MESHY_API_KEY").ok();
+        }
         if config.openrouter_api_key.is_none() {
             config.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
         }
@@ -783,6 +786,9 @@ impl Config {
         }
         if config.providers.openrouter_base_url.is_none() {
             config.providers.openrouter_base_url = std::env::var("OPENROUTER_BASE_URL").ok();
+        }
+        if config.providers.meshy_base_url.is_none() {
+            config.providers.meshy_base_url = std::env::var("MESHY_BASE_URL").ok();
         }
 
         config.fill_from_credential_store();
@@ -1093,6 +1099,7 @@ const PROVIDER_KEY_ENV_VARS: &[&str] = &[
     "OPENAI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
+    "MESHY_API_KEY",
 ];
 
 /// Create a fresh, empty temp directory to stand in for the config directory.
@@ -2515,6 +2522,7 @@ some_custom_thing = \"forwarded to the script\"
                 ("OPENAI_BASE_URL", Some("https://gw/from-env")),
                 ("GOOGLE_BASE_URL", Some("https://gw/from-env")),
                 ("OPENROUTER_BASE_URL", Some("https://gw/from-env")),
+                ("MESHY_BASE_URL", Some("https://gw/from-env")),
             ],
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -2530,6 +2538,7 @@ anthropic_base_url = "https://gw/from-file"
 openai_base_url = "https://gw/from-file"
 google_base_url = "https://gw/from-file"
 openrouter_base_url = "https://gw/from-file"
+meshy_base_url = "https://gw/from-file"
 "#,
                 )
                 .unwrap();
@@ -2541,6 +2550,7 @@ openrouter_base_url = "https://gw/from-file"
                     config.providers.openai_base_url.as_deref(),
                     config.providers.google_base_url.as_deref(),
                     config.providers.openrouter_base_url.as_deref(),
+                    config.providers.meshy_base_url.as_deref(),
                 ] {
                     assert_eq!(got, Some("https://gw/from-file"));
                 }
@@ -2577,6 +2587,7 @@ agent_paths = []
 anthropic_api_key = "sk-ant-existing"
 openai_api_key = "sk-openai-existing"
 google_api_key = "AIza-existing"
+meshy_api_key = "msy-existing"
 "#,
             )
             .unwrap();
@@ -2594,6 +2605,10 @@ google_api_key = "AIza-existing"
             assert_eq!(
                 config.providers.google_api_key.as_deref(),
                 Some("AIza-existing")
+            );
+            assert_eq!(
+                config.providers.meshy_api_key.as_deref(),
+                Some("msy-existing")
             );
             assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-existing"));
             assert_eq!(

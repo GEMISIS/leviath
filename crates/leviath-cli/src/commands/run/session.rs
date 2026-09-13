@@ -60,6 +60,11 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             config.openrouter_api_key.as_deref(),
             config.providers.openrouter_base_url.as_deref(),
         ),
+        (
+            "meshy",
+            config.providers.meshy_api_key.as_deref(),
+            config.providers.meshy_base_url.as_deref(),
+        ),
     ];
     for (name, key, base_url) in keyed {
         // A blank key is not a key: `lev setup` writes empty strings for
