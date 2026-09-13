@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.2.2"
+version = "0.2.3"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -114,7 +114,7 @@ budget = "20%"
 
 [stages.prep-references]
 mode = "autonomous"
-description = "Render a clean front A-pose, then matching back and three-quarter views, from the sprite"
+description = "Render four consistent three-quarter A-pose reference views from the sprite"
 max_iterations = 14
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
@@ -130,7 +130,7 @@ character - trust it for APPEARANCE: exact colors, materials, the shape and
 length of features a tiny sprite blurs (a long ponytail, a hat's real form, an
 arm cannon). Borrow appearance and detail from the marketing art, but NOT its
 pose or background: marketing art is often mid-action (leaping, crouching), and
-you must still draw fresh, clean, static orthographic views. Where the two
+you must still draw fresh, clean, static three-quarter views. Where the two
 disagree on a detail, the marketing art wins on how it looks and the sprite sheet
 wins on whether and where it belongs.
 
@@ -146,40 +146,39 @@ must be the cannon here, not a plain hand; a ponytail the marketing art shows
 hanging to the knees must be that long, not a stub). Keep asymmetric parts on the
 correct side.
 
-Work in this order.
+Draw FOUR THREE-QUARTER (DIAGONAL) VIEWS - no straight front and no straight
+back. Every view is the character turned to a corner, so each one shows a feature
+AND how far it sticks out. All four are the same character in the IDENTICAL
+A-pose (feet apart, arms straight and held down and out at roughly 45 degrees,
+palms in) on a plain neutral background, and each is a clean 3D character render -
+smooth surfaces, rounded volumes, soft studio lighting, clear depth - never pixel
+art.
 
-1. FRONT FIRST. Draw ONE polished, full-body A-pose render, front-facing - feet
-   apart, arms straight and held down and out at roughly 45 degrees from the
-   body, palms in - on a plain neutral background. Use an A-pose, not a T-pose:
-   it rigs far more reliably than arms held straight out. This front render is
-   the anchor every other view matches. It must look like a clean 3D character
-   render, NOT pixel art: smooth surfaces, rounded volumes, soft studio lighting
-   and clear depth, the way a modern stylized game character looks.
+1. FRONT THREE-QUARTER, LEFT - turned about 45 degrees toward its left, so you see
+   the face, the front, and the character's left side at once. Draw this one
+   first: it is the anchor the other three must match for style, proportions,
+   colors and pose.
+2. FRONT THREE-QUARTER, RIGHT - the mirror, turned about 45 degrees toward its
+   right.
+3. BACK THREE-QUARTER, LEFT - turned about 135 degrees, so you see the back and
+   the left side at once.
+4. BACK THREE-QUARTER, RIGHT - turned about 135 degrees the other way.
 
-2. THEN A BACK VIEW AND TWO THREE-QUARTER (DIAGONAL) VIEWS. Using BOTH the sprite
-   sheet in the source region AND the front render you just made, draw the same
-   character, same A-pose, scale, framing, style, proportions, colors and
-   accessories, from three more angles:
-   - a straight BACK view;
-   - a FRONT THREE-QUARTER view - the character turned about 45 degrees, so you
-     see the face, the front, and one full side at once;
-   - a BACK THREE-QUARTER view - turned about 135 degrees, so you see the back
-     and one side at once.
+WHY ALL DIAGONALS, AND NO STRAIGHT FRONT. A straight front or back is flat: it
+hides how far a feature sticks out, and the 3D builder both weights a straight
+front heavily AND collapses thin or trailing parts - a long ponytail, a tail,
+long hair, a cape, an arm cannon - into stubs when the view only hints at them. A
+three-quarter view shows every feature with its depth (how far it juts, which way
+it hangs), and with all four corners covered nothing thin can be flattened away
+and no single flat view dominates. Put any long ponytail, tail or hair on its
+correct side and show its FULL length in all four views. The two front
+three-quarters together cover the front symmetrically, so no straight front is
+needed.
 
-   THE DIAGONAL VIEWS ARE ESSENTIAL, NOT OPTIONAL. A straight front or back is
-   flat: it hides how far a feature sticks out, so the 3D builder collapses thin
-   or trailing parts - a long ponytail, a tail, long hair, a cape, an arm cannon -
-   into stubs. A three-quarter view shows the feature AND its depth (how far it
-   juts, which way it hangs), which is exactly what the builder needs to rebuild
-   it as solid geometry. Put any long ponytail, tail or hair on its correct side
-   and show its FULL length in the back and both three-quarter views; let it be at
-   least partly visible past the shoulder in the front too, so no view denies it.
-
-   A rig binds cleanly only when every view shares one pose - the arms in the same
-   45-degree position in all of them, not relaxed in some and out in others; a
-   mixed-pose set deforms when rigged. Consistency with the front render matters
-   more than anything: it is the same character, in the same pose, turning in
-   space.
+A rig binds cleanly only when every view shares one pose - the arms in the same
+45-degree position in all four, not relaxed in some and out in others; a
+mixed-pose set deforms when rigged. Consistency with the anchor render matters
+more than anything: it is the same character, in the same pose, turning in space.
 
 Draw ONE single view per image. Do not pack several angles into one turnaround
 sheet: the later stages need each view on its own. Draw one at a time and store
@@ -188,9 +187,9 @@ each in the references region.
 Keep the set small: at most two candidates for any one angle, and no more than
 EIGHT renders in all. A larger set will not fit in a single request downstream,
 and the oldest images are dropped when it does not. When the references region
-holds a good front, back, front three-quarter and back three-quarter, stop even
-if you could draw more, and the run moves on to filter them. Use the scratchpad
-for notes.
+holds a good front-left, front-right, back-left and back-right three-quarter
+view, stop even if you could draw more, and the run moves on to filter them. Use
+the scratchpad for notes.
 """
 
 [stages.prep-references.model]
@@ -350,10 +349,10 @@ Look at the good views in the references region, the missing region's list, and
 the review notes.
 
 Decide whether the views are ready to build into a model. They are ready when two
-things hold: the angles are covered (a clear front, a back, and both three-quarter
-diagonal views), and
-the missing region lists no serious detail still absent or wrong. A front alone,
-or a set that still drops the arm cannon, is not ready.
+things hold: the four three-quarter (diagonal) views are covered - front-left,
+front-right, back-left and back-right - and the missing region lists no serious
+detail still absent or wrong. A single view, or a set that still drops the arm
+cannon, is not ready.
 
 Then choose one path:
 - If ready, transition to build-model.
@@ -480,8 +479,8 @@ images. Meshy is here to build a 3D model, nothing else.
 If the review region lists gaps from a previous build attempt, read them first
 and address them this time.
 
-Pick one strong render per angle (front, back, left, right); do not pass two of
-the same angle. Never pass the source sprite sheet to Meshy - it would build a
+Pick one strong render per angle (front-left, front-right, back-left, back-right
+three-quarter); do not pass two of the same angle. Never pass the source sprite sheet to Meshy - it would build a
 relief of the whole sheet instead of the character.
 
 The images you see in this context are visible only to you. Meshy is a separate
