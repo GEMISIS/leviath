@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Configure Anthropic, OpenAI, OpenAI Codex, Google, OpenRouter, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
+description: Configure Anthropic, OpenAI, OpenAI Codex, Google, OpenRouter, Meshy, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
 group: Get started
 group_order: 1
 order: 3
@@ -21,6 +21,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | OpenAI Codex | none (ChatGPT subscription; browser sign-in) | [see below](#openai-codex-chatgpt-subscription) |
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| Meshy (3D models) | `MESHY_API_KEY` | [meshy.ai](https://www.meshy.ai/api) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
 | Claude Code | none (subscription; terms caveat below; not in the wizard) | [see below](#claude-code-transport) |
 
@@ -472,6 +473,42 @@ example are in [OpenAI-compatible endpoints](/docs/configuration#openai-compatib
 
 A server that needs more than the OpenAI shape, or a different one altogether, is a small Rhai
 script instead. [Rhai providers](/docs/rhai-providers) walks through a complete Groq provider.
+
+## Meshy (generative 3D)
+
+Meshy is not a chat backend: it turns reference images or an existing mesh into a textured 3D
+model. It is a provider all the same, because a stage that runs it takes typed input and produces
+a typed part, which is the shape every provider speaks. Set `MESHY_API_KEY` (or
+`[providers] meshy_api_key`), then a stage selects an operation as its model:
+
+| Model | Takes | Produces |
+|---|---|---|
+| `image-to-3d` | one image | a textured `model/gltf-binary` |
+| `multi-image-to-3d` | up to four views of one subject | a textured `model/gltf-binary`, with preview renders |
+| `rig` | a `model/gltf-binary` mesh | the rigged, animation-ready mesh |
+
+```toml
+[context.regions]
+views = { kind = "pinned", seed = "input", accepts = ["image/*"], max_stored = 4 }
+mesh  = { kind = "hashmap", accepts = ["model/gltf-binary"] }
+
+[stages.build]
+[[stages.build.model.models]]
+provider = "meshy"
+model    = "multi-image-to-3d"
+[stages.build.output_routing]
+"model/gltf-binary" = "mesh"        # hand the produced mesh to the next stage
+
+[stages.build.model.parameters]     # optional static hints, all documented Meshy fields
+ai_model         = "meshy-7"
+target_polycount = 30000
+texture_resolution = "4k"
+```
+
+The images a stage can see become the request; a texture prompt an upstream stage wrote becomes
+the texturing hint; the produced mesh lands in the region `output_routing` names, so the next
+stage (a `rig`, say) can see it. A Meshy job runs for minutes, so give the stage a generous
+`[stages.<name>.model] request_timeout_secs`; the provider polls to completion under it.
 
 ## OpenAI Codex (ChatGPT subscription)
 
