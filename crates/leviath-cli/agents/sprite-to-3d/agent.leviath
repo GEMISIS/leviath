@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -53,6 +53,19 @@ kind = "pinned"
 budget = "15%"
 accepts = ["image/*"]
 
+# Optional high-resolution "marketing" or official art of the character, richer
+# than a low-res sprite sheet: it carries the true colors, proportions and
+# signature features - a long ponytail, an arm cannon, a hat's real shape - that
+# a tiny sprite only hints at. Supply any number with `--attach <file>:marketing`;
+# the run works fine without it. Clearable rather than pinned so it never counts
+# against the working-budget floor on a small window, yet stays put at a real one.
+# Only the reference-drawing and critique stages read it - Meshy is fed the clean
+# generated views, never this busy, dynamically-posed art.
+[context.regions.marketing]
+kind = "clearable"
+budget = "15%"
+accepts = ["image/*"]
+
 # Every view render the prep and generate stages draw lands here, one entry
 # each. Because a produced image is named after its own bytes (image-<sha>.png),
 # the candidates never collide and the filter stage can point at one exactly to
@@ -83,16 +96,25 @@ kind = "pinned"
 budget = "18%"
 accepts = ["model/*"]
 
+# A rendered preview IMAGE of the built model (Meshy returns a thumbnail render
+# alongside the mesh). The model region holds the GLB itself, which is binary and
+# nothing can look at; this holds a picture the verify stage can actually see and
+# compare against the reference views. Clearable, so it stays off the fixed floor.
+[context.regions.model_preview]
+kind = "clearable"
+budget = "10%"
+accepts = ["image/*"]
+
 [context.regions.scratchpad]
 kind = "clearable"
 max_tokens = 20000
 budget = "20%"
 
-# ── 1. Draw clean multi-view T-pose references from the sprite ────────────────
+# ── 1. Draw clean multi-view A-pose references from the sprite ────────────────
 
 [stages.prep-references]
 mode = "autonomous"
-description = "Render a clean front T-pose, then matching back and side views, from the sprite"
+description = "Render a clean front A-pose, then matching back and side views, from the sprite"
 max_iterations = 14
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
@@ -100,28 +122,52 @@ The source region holds a sprite sheet or a single image of a character. Your
 job is to turn it into a small set of clean reference renders that a 3D model
 will be built from, all in the same style and all on-model.
 
+SOURCES - use both, for different things. The source sprite sheet is the
+authority on the character's CANONICAL layout: which parts exist, which side they
+sit on, the true proportions and silhouette across all its frames. The marketing
+region, when it holds anything, is high-resolution official art of the same
+character - trust it for APPEARANCE: exact colors, materials, the shape and
+length of features a tiny sprite blurs (a long ponytail, a hat's real form, an
+arm cannon). Borrow appearance and detail from the marketing art, but NOT its
+pose or background: marketing art is often mid-action (leaping, crouching), and
+you must still draw fresh, clean, static orthographic views. Where the two
+disagree on a detail, the marketing art wins on how it looks and the sprite sheet
+wins on whether and where it belongs.
+
 If the task names a specific character on a busy sheet, render only that one and
 ignore the other characters, animation frames, and palette swatches.
 
-Render the character's CANONICAL design, drawn from the whole sheet, not from one
-frame. Look across every frame for the signature parts - a weapon, an arm cannon,
-a shoulder pad, a tail, a hat - and include them, even when a particular idle
-frame happens to omit one (an arm that is a cannon in most frames must be the
-cannon here, not a plain hand). Keep asymmetric parts on the correct side.
+Render the character's CANONICAL design, drawn from the whole sheet (and the
+marketing art when present), not from one frame. Look across every frame for the
+signature parts - a weapon, an arm cannon, a shoulder pad, a tail, a long
+ponytail, a hat - and include them at their true size, even when a particular
+idle frame happens to omit or shrink one (an arm that is a cannon in most frames
+must be the cannon here, not a plain hand; a ponytail the marketing art shows
+hanging to the knees must be that long, not a stub). Keep asymmetric parts on the
+correct side.
 
 Work in this order:
 
 1. FRONT FIRST. Draw ONE polished, high-quality render of the character standing
-   in a full-body, front-facing T-pose on a plain neutral background. This is the
-   anchor every other view must match. It must look like a clean 3D character
-   render, NOT pixel art: smooth surfaces, rounded volumes, soft studio lighting
-   and clear depth, the way a modern stylized game character looks.
+   in a full-body, front-facing A-pose - feet apart, arms straight and held down
+   and out at roughly 45 degrees from the body, palms in - on a plain neutral
+   background. Use an A-pose, not a T-pose: it rigs far more reliably than arms
+   held straight out. This front render is the anchor every other view must
+   match. It must look like a clean 3D character render, NOT pixel art: smooth
+   surfaces, rounded volumes, soft studio lighting and clear depth, the way a
+   modern stylized game character looks.
 
 2. THEN THE OTHER VIEWS. Using BOTH the sprite sheet in the source region AND the
-   front render you just made as reference, draw the same character, in the same
-   T-pose, style, proportions, colors and accessories, from three more angles:
-   the back, the left side, and the right side. Consistency with the front render
-   matters more than anything: it is the same character turning around.
+   front render you just made as reference, draw the same character from three
+   more angles: the back, the left side, and the right side. Every view MUST use
+   the IDENTICAL A-pose, scale, framing, style, proportions, colors and
+   accessories as the front render - the arms in the same 45-degree position in
+   all four, not relaxed in some and out in others. A rig binds cleanly only when
+   the four views agree on one pose; a set that mixes poses deforms when rigged.
+   Consistency with the front render matters more than anything: it is the same
+   character, in the same pose, turning around. Show a long ponytail or tail in
+   the back and side views at its true length - it is the detail most easily lost
+   downstream, so make it unmistakable here.
 
 Draw ONE single view per image. Do not pack several angles into one turnaround
 sheet: the later stages need each view on its own. Draw one at a time and store
@@ -151,7 +197,7 @@ format = "image/*"
 hint = "Once the references region holds view renders of the character to filter."
 transform = "direct"
 # Do not leave until at least one render has actually been drawn and stored.
-gate = { require_region_updated = "references", message = "You have not stored any reference render yet. Draw the front T-pose (and the other views) and let them land in the references region before moving on." }
+gate = { require_region_updated = "references", message = "You have not stored any reference render yet. Draw the front A-pose (and the other views) and let them land in the references region before moving on." }
 
 # ── 2. Filter: drop the bad renders, keep the good single views ──────────────
 
@@ -200,6 +246,7 @@ model = "anthropic/claude-opus-5"
 
 [stages.filter-references.context]
 reset = ["conversation"]
+hide = ["marketing", "model_preview"]
 
 [stages.filter-references.transitions.critique-references]
 hint = "Once only good single views remain and the review region records what was kept."
@@ -215,14 +262,20 @@ max_revisits = 2
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 You are the critical reviewer. Compare the reference views in the references
-region against the source sprite carefully and skeptically. Your job is to catch
+region against the source sprite - and against the marketing art in the marketing
+region when it holds any - carefully and skeptically. Your job is to catch
 details the renders dropped or got wrong - the mistakes a friendlier reviewer
 would let slide.
 
 Go part by part over the character's canonical design as the source shows it
-across all its frames: silhouette, proportions, colors, and every accessory or
-weapon - an arm cannon, a shoulder pad, a tail, a hat, a belt. For each view,
-note anything missing, on the wrong side, or wrong.
+across all its frames, and as the marketing art shows it in high resolution:
+silhouette, proportions, colors, and every accessory or weapon - an arm cannon, a
+shoulder pad, a long ponytail or tail, a hat, a belt. For each view, note
+anything missing, shrunk, on the wrong side, or wrong. Judge pose consistency
+too: every view must share the same A-pose (arms ~45 degrees down), so flag any
+view whose arms or stance differ - a mixed-pose set rigs badly. Give special
+attention to a long ponytail or tail: it is the detail the downstream 3D step
+most often drops, so if any view weakens or omits it, log that.
 
 The missing region is yours alone to maintain, and it is the record the next
 generation pass fixes from:
@@ -298,6 +351,7 @@ model = "anthropic/claude-opus-5"
 
 [stages.assess-coverage.context]
 reset = ["conversation"]
+hide = ["marketing", "model_preview"]
 
 [stages.assess-coverage.transitions.build-model]
 hint = "If the angles are covered and the missing region lists no serious detail."
@@ -329,11 +383,16 @@ Draw one image at a time, and for each one produce an actual image, not text:
   missing region.
 - Draw each missing angle (commonly the left and right sides).
 
-Condition every render on BOTH the sprite sheet in the source region AND the good
-references already in place, so it is the same character in the same style,
-proportions and colors, just corrected or turned to a new angle. One single view
-per image, no turnaround sheets, on a plain neutral background. Store each in the
-references region as you go.
+Condition every render on the sprite sheet in the source region, the good
+references already in place, and the high-resolution marketing art in the
+marketing region when it holds any - so it is the same character in the same
+style, proportions and colors, just corrected or turned to a new angle. Trust the
+marketing art for appearance (true colors, and the length and shape of features
+like a long ponytail) but never copy its action pose. Every render must use the
+same A-pose as the existing references: arms held down and out at ~45 degrees,
+identical in all views, so the set rigs cleanly. One single view per image, no
+turnaround sheets, on a plain neutral background. Store each in the references
+region as you go.
 
 Do not edit the missing region yourself; the critique stage re-checks your work
 and signs off what is truly fixed. Keep the set small enough to fit one request.
@@ -384,7 +443,7 @@ max_revisits = 2
 # full toolset's schemas are ~37k tokens - on their own larger than the context
 # window the entry stage's image model sets for the shared layout - which left no
 # room for a reply and stalled the stage in empty turns. Five tools fit easily.
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "meshy__meshy_image_to_3d", "meshy__meshy_multi_image_to_3d", "meshy__meshy_get_task_status", "meshy__meshy_rig", "meshy__meshy_download_model"]
+available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export", "read_file", "write_file", "list_dir", "shell", "meshy__meshy_image_to_3d", "meshy__meshy_multi_image_to_3d", "meshy__meshy_get_task_status", "meshy__meshy_rig", "meshy__meshy_download_model"]
 system_prompt = """
 The references region holds the good views of the character - a front, and
 usually a back and sides. Those renders are your 3D input, not the source sprite
@@ -433,7 +492,7 @@ Then use only Meshy's 3D tools:
   checking in a tight loop; the job takes minutes, and each check costs an
   inference.
 - Rig the model when the character is humanoid.
-- Download the finished file.
+- Get the finished model onto local disk (see the download step below).
 
 Model settings that matter:
 - symmetry_mode = "off". This is important: the character is symmetric except for
@@ -449,10 +508,30 @@ Model settings that matter:
 - Enable PBR, and give a texture_prompt describing the character's palette and
   materials (read the review notes and the references) so the colors match.
 
-Download the finished model to the working directory, then attach it to the model
-region with context_attach so the next stages can see and use it. Note the file's
-path in the review region. Do not end the run here; when the model is in the model
-region the run moves on to verify it. Use the scratchpad for working notes.
+GET THE MODEL ONTO DISK. Meshy's download tool does NOT write a local file in
+this environment - it returns download URLs (a .glb for the mesh, and after
+rigging a rigged .glb, plus a preview/thumbnail image). So you fetch them
+yourself with the shell tool:
+- Call the download tool (or read the finished task's JSON) to obtain the URLs.
+  Prefer the RIGGED model's .glb URL when you rigged; otherwise the mesh .glb URL.
+- Download it into the working directory with shell, quoting the URL (the signed
+  URL contains & and ? and must be quoted):
+    curl -L -o "<ABSOLUTE workdir>/model.glb" "<the .glb url>"
+- Also download the preview/thumbnail render, which is a picture of the built
+  model the verify stage needs to look at:
+    curl -L -o "<ABSOLUTE workdir>/model_preview.png" "<the thumbnail url>"
+- Run list_dir to confirm both files exist and are non-empty (a few MB for the
+  glb). If curl wrote a tiny file or an error page, the URL was wrong or expired -
+  re-read the task JSON for a fresh URL and try again.
+
+Then wire them into context so the next stages can use them:
+- context_attach model.glb to the model region (this is the run's deliverable).
+- context_attach model_preview.png to the model_preview region (this is what
+  verify looks at).
+- Note both file paths and the Meshy task ids in the review region.
+
+Do not end the run here; when the model is in the model region the run moves on to
+verify it. Use the scratchpad for working notes.
 """
 
 # Meshy is for 3D only. The five tools granted above are the only ones this stage
@@ -473,6 +552,7 @@ model = "anthropic/claude-opus-5"
 
 [stages.build-model.context]
 reset = ["conversation"]
+hide = ["marketing", "model_preview"]
 
 [stages.build-model.output_routing]
 "model/*" = "model"
@@ -501,18 +581,30 @@ Decide what happens to the model you just judged:
 - If it faithfully matches the reference views, respond with: finalize
 """
 system_prompt = """
-Look at the finished model in the model region against the reference views, the
-source, and the missing region. Judge it honestly: are the proportions right, the
-colors faithful, the accessories all present and on the correct side (including
-anything the missing region flagged), the back and sides complete rather than
-flat, the topology clean?
+The model region holds the built GLB itself, which is binary - you cannot look at
+it directly. Judge the model from the RENDERED PREVIEW image in the model_preview
+region, comparing it against the reference views, the source, the marketing art
+if present, and the missing region.
+
+Judge it honestly: are the proportions right, the colors faithful, the
+accessories all present and on the correct side (including anything the missing
+region flagged), the topology clean? Give particular attention to a long ponytail
+or tail: the image-to-3D step frequently flattens or drops one, so if the
+references show a long ponytail and the preview does not, that is a serious gap.
+
+Note the preview is usually a single front-ish angle, so it will not show
+everything on the back. Judge what it does show; do not fail the model for a
+detail the preview simply cannot depict, but DO fail it for a front-visible
+regression (missing accessory, wrong colors, a ponytail that should peek past the
+shoulder but is absent, a collapsed or deformed pose from a bad rig).
 
 Then choose one path:
-- If the model has a serious, fixable gap - a missing accessory, a flattened
-  back, colors that drifted badly - write exactly what is wrong and how to fix it
-  into the review region, then transition back to build-model to rebuild. Be
-  specific; the builder acts only on what you write. Only loop back for problems a
-  rebuild can realistically fix, and remember rebuilds are limited.
+- If the model has a serious, fixable gap - a missing accessory, a dropped
+  ponytail, colors that drifted badly, a rig that deformed the pose - write
+  exactly what is wrong and how to fix it into the review region, then transition
+  back to build-model to rebuild. Be specific; the builder acts only on what you
+  write. Only loop back for problems a rebuild can realistically fix, and remember
+  rebuilds are limited.
 - If the model faithfully matches the references, transition to finalize.
 
 Do not try to rebuild the model yourself here; your job is to judge and route.
@@ -563,6 +655,7 @@ model = "anthropic/claude-opus-5"
 
 [stages.finalize.context]
 reset = ["conversation"]
+hide = ["marketing", "model_preview", "references", "source"]
 
 # No outgoing transitions: this stage finalizes the run by submitting the model.
 [stages.finalize.transitions]
