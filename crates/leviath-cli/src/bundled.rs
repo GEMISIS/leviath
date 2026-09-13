@@ -875,6 +875,10 @@ mod tests {
                 )),
             ),
             (
+                "meshy",
+                Box::new(leviath_providers::MeshyProvider::new(client.clone(), key())),
+            ),
+            (
                 "ollama",
                 Box::new(leviath_providers::OllamaProvider::new(client)),
             ),
@@ -1213,6 +1217,9 @@ mod tests {
                     "openrouter" => std::sync::Arc::new(
                         leviath_providers::OpenRouterProvider::new(client(), key()),
                     ),
+                    "meshy" => {
+                        std::sync::Arc::new(leviath_providers::MeshyProvider::new(client(), key()))
+                    }
                     _ => std::sync::Arc::new(leviath_providers::OllamaProvider::new(client())),
                 };
                 r.register((*name).to_string(), p);
@@ -1432,6 +1439,14 @@ mod tests {
                         .any(|(n, p)| *n != "openrouter" && p.serves_model(key).is_some())
                 };
                 for (name, provider) in &providers {
+                    // A media-only provider (Meshy makes 3D models, not text) is
+                    // a supplement a machine adds alongside a text provider for
+                    // the stages that need it, never its sole provider - no one
+                    // runs an LLM stage on Meshy - so the text-portability rule
+                    // does not apply to it.
+                    if *name == "meshy" {
+                        continue;
+                    }
                     let reachable = stage.model.models.iter().any(|entry| {
                         if !entry.provider.is_empty() {
                             return entry.provider == *name;
