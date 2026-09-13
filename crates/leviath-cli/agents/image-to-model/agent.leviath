@@ -1,0 +1,101 @@
+[agent]
+name = "image-to-model"
+version = "0.1.0"
+description = "Turn one character or object image into a textured 3D model with Meshy"
+entry_stage = "build"
+
+# Meshy is a first-class provider: set MESHY_API_KEY (or `lev setup` and choose
+# Meshy) and this agent runs. Attach the picture with `--attach <file>:image`,
+# and give a short palette or material note as the task to steer the texturing.
+
+[context.regions.task]
+kind = "pinned"
+budget = "10%"
+
+# The single input picture, attached by the caller.
+[context.regions.image]
+kind = "pinned"
+budget = "40%"
+accepts = ["image/*"]
+
+# A one-turn conversation region so the produced turn has somewhere to land.
+[context.regions.conversation]
+kind = "sliding_window"
+max_items = 8
+max_tokens = 4000
+budget = "10%"
+
+# The built mesh, held as a reference plus a stand-in (not inlined bytes).
+[context.regions.model]
+kind = "sliding_window"
+max_items = 1
+budget = "15%"
+accepts = ["model/*"]
+
+# The preview render Meshy returns beside the mesh, for a look at the result.
+[context.regions.model_preview]
+kind = "clearable"
+budget = "20%"
+accepts = ["image/*"]
+
+[stages.build]
+mode = "autonomous"
+description = "Meshy turns the attached image into a textured 3D model"
+# A provider stage: one deterministic submit, poll, download. No tool loop.
+max_iterations = 3
+
+[stages.build.model]
+allow_user_default = false
+# A Meshy job runs for minutes; give the provider room to poll to completion.
+request_timeout_secs = 900
+
+[stages.build.model.parameters]
+should_remesh = true
+target_polycount = 20000
+enable_pbr = true
+texture_resolution = "2k"
+
+[[stages.build.model.models]]
+provider = "meshy"
+model = "image-to-3d"
+
+# The image region is the input; hide the preview region so nothing but the
+# input picture reaches Meshy as an image.
+[stages.build.context]
+hide = ["model_preview"]
+
+[stages.build.output_routing]
+"model/*" = "model"
+"image/*" = "model_preview"
+
+[stages.build.transitions.finalize]
+hint = "Once the built model is in the model region."
+transform = "direct"
+gate = { require_region_updated = "model", message = "The model region is empty - the Meshy build landed no mesh.", max_attempts = 2 }
+
+# ── 2. Hand the model back as the run's artifact ──────────────────────────────
+
+[stages.finalize]
+mode = "output"
+description = "Hand back the produced model as the run's artifact"
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+max_iterations = 4
+available_tools = ["context_read", "context_list"]
+system_prompt = """
+The model region holds the finished 3D model as a produced part - a .glb the
+Meshy build just made. Call context_list on the model region to read the part's
+exact name, then call submit_output with a `model` artifact whose `path` is that
+part name (submit_output resolves a produced part by its name, so you do not need
+a file on disk). In the answer, say in one line what the model is.
+"""
+
+[stages.finalize.context]
+reset = ["conversation"]
+hide = ["image", "model_preview"]
+
+[stages.finalize.transitions]
+
+[[stages.finalize.output.artifacts]]
+name = "model"
+type = "model/gltf-binary"
+required = true

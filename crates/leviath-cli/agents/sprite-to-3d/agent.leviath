@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.3.0"
+version = "0.3.1"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -625,13 +625,15 @@ description = "Submit the finished model as the run's artifact"
 max_iterations = 6
 available_tools = ["context_read", "context_list", "read_file", "list_dir"]
 system_prompt = """
-The model region holds the finished, rigged model and the review region holds the
-verifier's assessment and the model file's path in the working directory.
+The model region holds the finished, rigged model as a produced part - a .glb the
+Meshy provider made - and the review region holds the verifier's assessment.
 
-Call submit_output with the required `model` artifact pointing at that model file
-(list_dir the working directory if you need to find it - it is the downloaded
-.glb or .fbx). In the answer text, summarize briefly what the model is and note
-any caveats the verifier or the missing region raised, so the operator knows what
+Call context_list on the model region to read the produced part's exact name (it
+is `rigged.glb` when the model was rigged, otherwise `model.glb`). Then call
+submit_output with the required `model` artifact whose `path` is that part name:
+submit_output resolves a produced part by its name, so there is no file on disk
+to find. In the answer text, summarize briefly what the model is and note any
+caveats the verifier or the missing region raised, so the operator knows what
 they are getting. The run ends when you submit.
 """
 
