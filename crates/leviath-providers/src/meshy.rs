@@ -67,11 +67,20 @@ const ANIMATIONS_PATH: &str = "openapi/v1/animations";
 /// exist so a stage running Meshy sizes its regions sensibly and the catalogue
 /// invariant (context greater than output) holds. One row matches every
 /// operation because they share these limits.
+///
+/// The window is deliberately huge because a mesh input reaches Meshy as a
+/// base64 data URI, and the pre-flight token guard charges that blob its native
+/// per-byte estimate - roughly a quarter-token per byte, so a few-megabyte GLB
+/// is over a million "tokens". Meshy is a REST API with no token limit, so a
+/// small window would refuse an ordinary rig or animate before the request ever
+/// left; this covers a mesh up to the media-per-request ceiling with room to
+/// spare. The regions themselves charge a stored part its short stand-in, not
+/// this, so nothing is sized against it wastefully.
 pub(crate) const MODELS: &[Row] = &[Row {
     matches: &[Match::Contains("")],
     temperature: false,
     tools: false,
-    context: 128_000,
+    context: 64_000_000,
     output: 8_192,
 }];
 
@@ -532,9 +541,9 @@ mod tests {
         let p = MeshyProvider::new(client(), "k".into());
         assert_eq!(p.name(), "meshy");
         let caps = p.capabilities("image-to-3d");
-        assert_eq!(caps.max_context_tokens, 128_000);
+        assert_eq!(caps.max_context_tokens, 64_000_000);
         assert!(caps.max_context_tokens > caps.max_output_tokens);
-        assert_eq!(p.max_context_tokens("rig"), 128_000);
+        assert_eq!(p.max_context_tokens("rig"), 64_000_000);
         assert!(!p.capabilities("image-to-3d").supports_tools);
         // mime is per operation.
         assert!(
