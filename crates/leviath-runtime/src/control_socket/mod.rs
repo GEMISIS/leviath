@@ -73,12 +73,37 @@ pub(super) const INVALID_REQUEST: &str = "invalid request";
 /// dropped unprocessed, which makes a retry safe even for a spawn.
 pub(super) const SHUTTING_DOWN: &str = "daemon is shutting down";
 
-/// The most one connection may send before the stream is cut.
+/// The most one request may send before the stream is cut.
 ///
-/// A spawn request carries a task string and region seeds, so the cap has to be
-/// generous; 8 MiB is far past anything a real caller sends and still bounds
-/// what an unauthenticated peer can make the daemon buffer.
-const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
+/// A spawn request carries its task, its region seeds and every attached part
+/// as base64 on the one line, so the cap has to hold a file the size of
+/// `[mime] max_part_bytes` (32 MiB, which base64 grows to 43 MiB) with room
+/// for the rest of the request. It sat at 8 MiB from before parts existed,
+/// when a request was text, and a `lev run --attach` of a 7 MB mesh - an
+/// ordinary Meshy output - was cut mid-line and refused as a JSON parse
+/// error. 64 MiB is the same figure the daemon allows for the largest JSON
+/// body it buffers from a provider, and still bounds what an unauthenticated
+/// peer can make it hold. A request at or over it is refused by name (see
+/// [`over_cap_refusal`]).
+const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The reply to a request the cap cut off.
+///
+/// Its own wording rather than the parse error the truncated line produces
+/// (`EOF while parsing a string at line 1 column 8388608`), which named the
+/// symptom and not the limit. Deliberately not prefixed with
+/// [`INVALID_REQUEST`]: the client treats that prefix as "the two ends run
+/// different code", which this is not.
+fn over_cap_refusal(max_request_bytes: u64) -> ControlResponse {
+    ControlResponse::Error {
+        message: format!(
+            "request is over the control socket's {} limit and was cut off; attached files \
+             travel inside the request, so send fewer or smaller ones ([mime] max_part_bytes \
+             bounds each)",
+            leviath_core::mime::human_size(max_request_bytes)
+        ),
+    }
+}
 
 /// A shared secret that proves a control-channel caller is this same user.
 ///
@@ -661,9 +686,9 @@ fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlRespons
 
 /// [`handle_connection_as`] with the per-request cap injected.
 ///
-/// The cap is a parameter purely so a test can cross it without pushing 8 MiB
-/// through a duplex - and crossing it is the only way to tell a per-request
-/// budget from a per-connection one.
+/// The cap is a parameter purely so a test can cross it without pushing tens
+/// of MiB through a duplex - and crossing it is the only way to tell a
+/// per-request budget from a per-connection one, or to see the refusal.
 async fn handle_connection_capped<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
@@ -695,7 +720,10 @@ where
     // directly. Production always passes one.
     let mut authenticated = token.is_none();
     while let Some(line) = lines.next_line().await? {
-        // Refill this request's budget for the next one.
+        // A spent budget means `take` ended this line at the cap, not the
+        // peer: what arrived is the head of something larger. Noted before
+        // the refill, which is what makes the budget per request.
+        let over_cap = lines.get_ref().get_ref().limit() == 0;
         lines.get_mut().get_mut().set_limit(max_request_bytes);
         if line.trim().is_empty() {
             continue;
@@ -727,6 +755,14 @@ where
                 },
             )
             .await;
+            return Ok(());
+        }
+
+        // Refused by name, and the connection closed: the tail of the cut
+        // line is still inbound, and read on it would be parsed as a run of
+        // garbage requests, each answered `invalid request`.
+        if over_cap {
+            write_line(&mut write_half, &over_cap_refusal(max_request_bytes)).await;
             return Ok(());
         }
 
@@ -1076,6 +1112,69 @@ mod tests {
 
         // Close the client so the handler sees EOF and returns, rather than
         // being dropped mid-await when the test ends.
+        drop(write_half);
+        drop(lines);
+        server
+            .await
+            .expect("the handler task joins")
+            .expect("it ends cleanly");
+    }
+
+    /// A request past the cap is refused by name, and the connection closed.
+    ///
+    /// `take` cuts the stream at the cap, so before this the daemon parsed the
+    /// truncated line and answered `invalid request: EOF while parsing a string
+    /// at line 1 column 8388608` - which is what a `lev run --attach` of a 7 MB
+    /// mesh got, with nothing in it to say there was a limit or what it was.
+    /// Left open, the tail of the cut line would then be read as garbage.
+    #[tokio::test]
+    async fn a_request_over_the_cap_is_refused_by_name() {
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, _dir) = test_listener();
+        let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            handle_connection_capped(
+                stream,
+                op_tx,
+                no_events(),
+                None,
+                DaemonIdentity::this_process("test"),
+                40,
+            )
+            .await
+        });
+
+        let stream = connect(&id).await.unwrap();
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+
+        // A spawn-sized line: well past the cap before its newline.
+        let line = format!("{{\"op\":\"list\",\"pad\":\"{}\"}}\n", "x".repeat(200));
+        write_half.write_all(line.as_bytes()).await.unwrap();
+        let resp = lines
+            .next_line()
+            .await
+            .expect("the connection stays readable")
+            .expect("the refusal arrives");
+        assert!(resp.contains(r#""result":"error""#), "{resp}");
+        assert!(
+            resp.contains("over the control socket's 40 B limit"),
+            "names the cap: {resp}"
+        );
+        assert!(!resp.contains(INVALID_REQUEST), "not a parse error: {resp}");
+        // The rest of the oversized line is still inbound, so the daemon
+        // closes rather than reading it on as new requests.
+        let closed = lines.next_line().await.expect("readable");
+        assert!(
+            closed.is_none(),
+            "the connection is closed after the refusal"
+        );
+
         drop(write_half);
         drop(lines);
         server

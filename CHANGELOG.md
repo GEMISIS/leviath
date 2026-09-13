@@ -63,6 +63,17 @@ same list.
   turns a sprite sheet into a rigged, game-ready model with Meshy and declares
   the Meshy dependency (#827).
 
+### Fixed
+
+- A run could not be started with an attachment over about 6 MB: the daemon's
+  control socket capped a request at 8 MiB, a spawn carries its attached files
+  as base64 on that one request, and a 7 MB mesh - an ordinary Meshy output -
+  was cut mid-line and refused as `invalid request: EOF while parsing a string`,
+  from `lev run --attach` and from the API's multipart upload alike (which had
+  accepted the file). The cap is now 64 MiB, enough for a file at the
+  `[mime] max_part_bytes` ceiling, and a request that still exceeds it is
+  refused with a message that names the limit. (#837)
+
 ### Changed
 
 - The default ceiling on stored media carried in one model request is now 20 MiB
