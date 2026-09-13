@@ -93,15 +93,23 @@ impl EntryContent {
         out
     }
 
-    /// The tokens this content is expected to cost, without a registry: the
-    /// text heuristic for inline text and the estimate each stored part
-    /// carried out of the store.
+    /// The tokens this content is expected to cost a region, without a
+    /// registry: the text heuristic for inline text, and a stored part's
+    /// STAND-IN, not its native estimate.
+    ///
+    /// This matches [`Part::tokens`], and for the same reason: in a region a
+    /// stored blob is only a reference plus its short stand-in line, so that is
+    /// what its budget pays. The native estimate on the blob ref can be
+    /// enormous (a per-byte rule over a multi-megabyte model is over a million
+    /// tokens) and is the cost of sending the bytes to a model that can read
+    /// them, charged separately at request-build time. Charging it here dropped
+    /// a produced mesh from every region whose budget it dwarfed.
     pub fn tokens_hint(&self) -> usize {
         self.parts
             .iter()
             .map(|p| match &p.body {
                 PartBody::Inline(s) => crate::text::estimate_tokens(s),
-                PartBody::Stored(b) => b.tokens,
+                PartBody::Stored(b) => crate::text::estimate_tokens(&b.stand_in),
             })
             .sum()
     }
@@ -454,14 +462,41 @@ mod tests {
             Part::text("three"),
         ]);
         assert_eq!(c.inline_text(), "one\ntwo\nthree");
+        // A stored part costs its stand-in, not its native estimate, so a
+        // large blob does not blow a region's budget.
         assert_eq!(
             c.tokens_hint(),
             crate::text::estimate_tokens("one")
-                + stored("a.png").blob().unwrap().tokens
+                + crate::text::estimate_tokens(&stored("a.png").blob().unwrap().stand_in)
                 + crate::text::estimate_tokens("two\n")
                 + crate::text::estimate_tokens("three")
         );
         assert_eq!(EntryContent::text("").inline_text(), "");
+    }
+
+    #[test]
+    fn a_large_stored_model_costs_its_stand_in_not_its_native_estimate() {
+        // A per-byte rule over a multi-megabyte model yields a native estimate
+        // in the millions; tokens_hint must charge the short stand-in instead,
+        // or a produced mesh is dropped from every region whose budget it
+        // dwarfs (the routing path that store_routed takes).
+        let stand_in = "[model/gltf-binary, 4.8 MB] model.glb";
+        let part = Part::stored(crate::mime::BlobRef {
+            sha256: "d".repeat(64),
+            mime_type: MimeType::parse("model/gltf-binary").unwrap(),
+            size: 5_000_000,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens: 1_250_000,
+            stand_in: stand_in.into(),
+        });
+        let c = EntryContent::from_parts(vec![part]);
+        assert_eq!(c.tokens_hint(), crate::text::estimate_tokens(stand_in));
+        assert!(
+            c.tokens_hint() < 100,
+            "a mesh must fit an ordinary region budget"
+        );
     }
 
     #[test]

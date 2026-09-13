@@ -510,6 +510,12 @@ the texturing hint; the produced mesh lands in the region `output_routing` names
 stage (a `rig`, say) can see it. A Meshy job runs for minutes, so give the stage a generous
 `[stages.<name>.model] request_timeout_secs`; the provider polls to completion under it.
 
+A generated mesh is a large file: a full-resolution GLB can run to tens of megabytes, past the
+default `[mime] max_part_bytes` ceiling (32 MiB), which drops it with a note in the reply. Two
+knobs keep it in bounds - `target_polycount` with `should_remesh = true` in the stage
+parameters, which is also what makes the mesh game-ready, and a higher `[mime] max_part_bytes` in
+your config for when you do want the full-resolution model.
+
 ## OpenAI Codex (ChatGPT subscription)
 
 If you have a ChatGPT Plus, Pro, Business or Enterprise plan, Leviath can bill

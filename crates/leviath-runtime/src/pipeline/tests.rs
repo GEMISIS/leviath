@@ -18847,7 +18847,8 @@ mod typed_tool_results {
     fn a_result_with_a_stored_part_keeps_the_part_and_prices_it() {
         let mut w = ctx(&[("conversation", 1_000_000)]);
         let part = stored_png();
-        let part_tokens = part.blob().unwrap().tokens;
+        // A stored part is charged its stand-in, not its native estimate.
+        let part_tokens = leviath_core::estimate_tokens(&part.blob().unwrap().stand_in);
         let result = EntryContent::from_parts(vec![Part::text("here is the shot"), part]);
         apply_tool_results(
             &mut w,
