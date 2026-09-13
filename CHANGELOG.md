@@ -15,6 +15,17 @@ same list.
 
 ### Added
 
+- Meshy is a first-class provider for generative 3D. A stage selects it with
+  `provider = "meshy"` and one of `image-to-3d`, `multi-image-to-3d` or `rig`:
+  the stage's visible image or mesh parts go in, and it submits a Meshy REST
+  job, polls it to completion under the stage's `request_timeout_secs`, and
+  hands back the produced `.glb` (and, for a generation, its preview render) as
+  a stored part the run stores and routes like any other. `MESHY_API_KEY` is now
+  a provider credential (`[providers] meshy_api_key`, a `MESHY_API_KEY` env
+  fallback, and a `lev setup` entry) rather than a bundled agent's MCP secret.
+  A reply whose whole output is a produced part now ends its stage instead of
+  being nudged to call a tool it does not have. (#832)
+
 - Blueprints can declare what has to be in place before they run, as a top-level
   `[[dependencies]]` array: an MCP server with the env secrets it needs, an
   environment variable, a program on `PATH`, or a condition a Rhai script
