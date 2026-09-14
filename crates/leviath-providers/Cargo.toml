@@ -41,6 +41,9 @@ async-trait = { workspace = true }
 futures-core = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = "1"
+# Bedrock streams a reply as binary event-stream frames, each checked with
+# the CRC32 gzip uses. Already in the graph through flate2.
+crc32fast = "1"
 # Decoding the `exp` and plan-tier claims out of the ChatGPT id and access
 # tokens. Payload only: the signature is the issuer's to verify, not ours.
 base64 = { workspace = true }

@@ -29,7 +29,8 @@ pub enum ModelsCommand {
 /// Arguments for `lev models list`.
 #[derive(Args)]
 pub struct ListArgs {
-    /// Filter by provider name (anthropic, openai, ollama, openrouter)
+    /// Filter by provider name (anthropic, openai, google, openrouter,
+    /// bedrock, ollama)
     #[arg(short, long)]
     pub provider: Option<String>,
     /// Accepted for scripts written before the listing went live by default;

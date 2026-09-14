@@ -63,6 +63,8 @@ fn redact(
         has_openai_key: c.providers.openai_api_key.is_some(),
         has_google_key: c.providers.google_api_key.is_some(),
         has_openrouter_key: c.openrouter_api_key.is_some(),
+        has_bedrock_key: c.providers.bedrock_api_key.is_some(),
+        bedrock_region: c.providers.bedrock_region.clone(),
         ollama_base_url: c.ollama_base_url.clone(),
         // The switch or the address: either is a choice, and a console
         // drawing "Ollama is on" should not have to know which one was used.
@@ -192,6 +194,18 @@ pub(super) async fn put_config(
     }
     if let Some(v) = req.openrouter_key {
         config.openrouter_api_key = Some(v);
+    }
+    if let Some(v) = req.bedrock_key {
+        config.providers.bedrock_api_key = Some(v);
+    }
+    if let Some(v) = req.bedrock_region {
+        if v.trim().is_empty() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "bedrock_region must not be empty".to_string(),
+            ));
+        }
+        config.providers.bedrock_region = Some(v.trim().to_string());
     }
     if let Some(v) = req.ollama_base_url {
         config.ollama_base_url = Some(v);
@@ -357,7 +371,9 @@ fn validate_key_format(provider: &str, key: &str) -> (bool, Option<String>) {
                 (false, Some("OpenAI keys start with `sk-`.".to_string()))
             }
         }
-        "google" | "openrouter" => {
+        // A Bedrock key has no house prefix worth checking: long-term keys
+        // start `ABSK`, short-term ones do not.
+        "google" | "openrouter" | "bedrock" => {
             if key.trim().is_empty() {
                 (false, Some("Key must not be empty.".to_string()))
             } else {
@@ -1127,6 +1143,8 @@ mod tests {
             has_openai_key: false,
             has_google_key: false,
             has_openrouter_key: false,
+            has_bedrock_key: false,
+            bedrock_region: None,
             ollama_base_url: None,
             ollama_enabled: false,
             codex_enabled: false,
@@ -1161,6 +1179,8 @@ mod tests {
             has_openai_key: false,
             has_google_key: false,
             has_openrouter_key: false,
+            has_bedrock_key: true,
+            bedrock_region: Some("eu-west-1".to_string()),
             ollama_base_url: Some("http://localhost:11434".to_string()),
             ollama_enabled: false,
             codex_enabled: false,
@@ -1529,6 +1549,8 @@ mod tests {
             "openai_key": "sk-openai-x",
             "google_key": "g-x",
             "openrouter_key": "or-x",
+            "bedrock_key": "ABSK-x",
+            "bedrock_region": " us-west-2 ",
             "ollama_base_url": "http://ollama:11434"
         })
         .to_string();
@@ -1544,6 +1566,8 @@ mod tests {
         assert!(
             rc.has_anthropic_key && rc.has_openai_key && rc.has_google_key && rc.has_openrouter_key
         );
+        assert!(rc.has_bedrock_key);
+        assert_eq!(rc.bedrock_region.as_deref(), Some("us-west-2"));
         assert_eq!(rc.default_provider, "openai");
 
         let saved = Config::load_from_path_public(&path).unwrap();
@@ -1557,6 +1581,8 @@ mod tests {
         );
         assert_eq!(saved.providers.google_api_key.as_deref(), Some("g-x"));
         assert_eq!(saved.openrouter_api_key.as_deref(), Some("or-x"));
+        assert_eq!(saved.providers.bedrock_api_key.as_deref(), Some("ABSK-x"));
+        assert_eq!(saved.providers.bedrock_region.as_deref(), Some("us-west-2"));
         assert_eq!(saved.override_model.as_deref(), Some("gpt-5"));
         assert_eq!(
             rc.override_model.as_deref(),
@@ -1567,6 +1593,20 @@ mod tests {
             saved.ollama_base_url.as_deref(),
             Some("http://ollama:11434")
         );
+    }
+
+    /// `""` is not a region, and a stray form field must not lose the one
+    /// that was set.
+    #[tokio::test]
+    async fn a_blank_bedrock_region_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let body = serde_json::json!({ "bedrock_region": "  " }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(saved.providers.bedrock_region.is_none());
     }
 
     /// A config with `override_model` pinned to `gpt-5`, saved at `path`.
@@ -2078,6 +2118,8 @@ mod tests {
         assert_eq!(validate_key_format("google", "g"), (true, None));
         assert!(!validate_key_format("google", "  ").0);
         assert_eq!(validate_key_format("openrouter", "or"), (true, None));
+        assert_eq!(validate_key_format("bedrock", "ABSK"), (true, None));
+        assert!(!validate_key_format("bedrock", " ").0);
         // A name this build does not know is a custom gateway, not a mistake.
         // Its key has no house format, so the only judgement available is
         // whether one was given at all.

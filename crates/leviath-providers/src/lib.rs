@@ -11,6 +11,7 @@
 //! - Provider-specific features (caching, etc.)
 
 pub mod anthropic;
+pub mod bedrock;
 pub mod capabilities;
 pub mod capability_cache;
 pub mod claude_code;
@@ -41,6 +42,7 @@ pub mod tokenizer;
 mod test_support;
 
 pub use anthropic::AnthropicProvider;
+pub use bedrock::BedrockProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMime};
 pub use capability_cache::CapabilityCache;
 pub use claude_code::ClaudeCodeProvider;

@@ -77,6 +77,11 @@ pub struct Wizard {
     pub base: Config,
     /// Credentials present only in the environment. Shown, never written.
     pub env_only: HashMap<&'static str, String>,
+    /// The AWS region the environment names (`AWS_REGION`, else
+    /// `AWS_DEFAULT_REGION`), which is what Bedrock is called in when the
+    /// config says nothing. Shown as the region field's starting value and,
+    /// like a credential from the environment, never written back.
+    pub region_from_env: Option<String>,
     /// Opens a provider's signup page. Injected rather than called directly:
     /// `lev dash` once had a unit test launch a real browser, and this is the
     /// same shape of hazard.
@@ -172,6 +177,10 @@ impl Wizard {
         remembered: crate::ui_state::SetupUi,
     ) -> Self {
         let env_only = env_credentials(env_lookup);
+        let region_from_env = env_lookup("AWS_REGION")
+            .or_else(|| env_lookup("AWS_DEFAULT_REGION"))
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
 
         let providers = catalog::providers()
             .into_iter()
@@ -271,6 +280,7 @@ impl Wizard {
             message: None,
             base,
             env_only,
+            region_from_env,
             opener,
             verify_tx,
             verify_rx: Some(verify_rx),
@@ -679,6 +689,7 @@ impl Wizard {
         }
 
         let timeout = self.current_request_timeout();
+        let region = self.current_bedrock_region();
         self.defaults = vec![
             Field {
                 label: "Provider priority",
@@ -699,6 +710,26 @@ impl Wizard {
                 value: FieldValue::Bool(self.show_advanced),
             },
         ];
+        // Bedrock's hosts are regional, so a chosen Bedrock gets a region
+        // field; nobody else has one, and the form keeps its three rows.
+        if self.bedrock_selected() {
+            let current =
+                region.unwrap_or_else(|| leviath_providers::bedrock::DEFAULT_REGION.to_string());
+            let mut options: Vec<String> = Self::BEDROCK_REGIONS
+                .iter()
+                .map(|r| r.to_string())
+                .collect();
+            if !options.contains(&current) {
+                options.insert(0, current.clone());
+            }
+            let index = options.iter().position(|r| *r == current).unwrap_or(0);
+            self.defaults.push(Field {
+                label: "AWS Bedrock region",
+                help: "The region whose Bedrock endpoints are called. Starts from AWS_REGION \
+                       when that is exported; written to the config only when it differs.",
+                value: FieldValue::Choice { options, index },
+            });
+        }
         // Re-pick the concurrency default now that the provider choice is
         // settled. Doing this only on an arrow press missed the commonest
         // Ollama case entirely: when it is the *only* provider selected it is
@@ -715,6 +746,31 @@ impl Wizard {
 
     /// Where the advanced-tuning toggle sits on the Defaults screen.
     pub const ADVANCED_FIELD: usize = 2;
+
+    /// Where the Bedrock region sits on the Defaults screen, when Bedrock is
+    /// selected; the form has no fourth row otherwise.
+    pub const REGION_FIELD: usize = 3;
+
+    /// The regions the region field cycles: the commercial regions Bedrock
+    /// serves models in. One the environment or the config names that is not
+    /// here is offered first rather than refused.
+    pub const BEDROCK_REGIONS: &'static [&'static str] = &[
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+        "ca-central-1",
+        "sa-east-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "eu-central-1",
+        "eu-north-1",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-south-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+    ];
 
     /// Where the override model sits on the advanced screen: after every
     /// tuning limit, so the limits keep the indices `apply_limits_fields`
@@ -736,6 +792,28 @@ impl Wizard {
         match self.defaults.get(Self::TIMEOUT_FIELD).map(|f| &f.value) {
             Some(FieldValue::Number(n)) => *n,
             _ => self.base.request_timeout_secs,
+        }
+    }
+
+    /// Whether the Bedrock row is selected.
+    fn bedrock_selected(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|row| row.selected && row.provider.id == leviath_providers::bedrock::PROVIDER_NAME)
+    }
+
+    /// The Bedrock region in force: the field's pick while the form holds
+    /// one, else what the config file says, else what the environment says.
+    /// `None` is the provider's own default.
+    pub(crate) fn current_bedrock_region(&self) -> Option<String> {
+        match self.defaults.get(Self::REGION_FIELD).map(|f| &f.value) {
+            Some(FieldValue::Choice { options, index }) => options.get(*index).cloned(),
+            _ => self
+                .base
+                .providers
+                .bedrock_region
+                .clone()
+                .or_else(|| self.region_from_env.clone()),
         }
     }
 
@@ -912,6 +990,18 @@ impl Wizard {
             .chosen_model(Self::FALLBACK_FIELD)
             .unwrap_or_else(|| self.base.fallback_model.clone());
         config.request_timeout_secs = self.current_request_timeout();
+        // The region is written only when Bedrock is chosen and the pick
+        // says something the environment and the provider's default do not:
+        // `Config::load` folds `AWS_REGION` into `base`, and writing that
+        // back would pin a machine's environment into its config file, the
+        // same mistake the credential rows avoid.
+        config.providers.bedrock_region = match self.bedrock_selected() {
+            true => self
+                .current_bedrock_region()
+                .filter(|r| r != leviath_providers::bedrock::DEFAULT_REGION)
+                .filter(|r| Some(r) != self.region_from_env.as_ref()),
+            false => None,
+        };
 
         apply_limits_fields(&mut config, &self.limits);
 
@@ -1036,6 +1126,160 @@ pub(super) mod tests {
             std::sync::Arc::new(|_| true),
             Default::default(),
         )
+    }
+
+    // ─── the Bedrock region ───────────────────────────────────────────────
+
+    fn bedrock_row(wizard: &Wizard) -> usize {
+        wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "bedrock")
+            .expect("the catalog offers Bedrock")
+    }
+
+    #[test]
+    fn the_region_field_appears_only_when_bedrock_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.providers[0].selected = true;
+        wizard.enter(Step::Defaults);
+        assert_eq!(wizard.defaults.len(), 3);
+        assert_eq!(wizard.current_bedrock_region(), None);
+
+        let bedrock = bedrock_row(&wizard);
+        wizard.providers[bedrock].selected = true;
+        wizard.enter(Step::Defaults);
+        assert_eq!(wizard.defaults.len(), 4);
+        let field = &wizard.defaults[Wizard::REGION_FIELD];
+        assert_eq!(field.label, "AWS Bedrock region");
+        assert_eq!(field.value.display(), "us-east-1");
+        assert_eq!(
+            wizard.current_bedrock_region().as_deref(),
+            Some("us-east-1")
+        );
+        // The default region is not written; a pick is; deselecting clears.
+        assert_eq!(wizard.build_config().providers.bedrock_region, None);
+        let eu = Wizard::BEDROCK_REGIONS
+            .iter()
+            .position(|r| *r == "eu-west-1")
+            .unwrap();
+        wizard.defaults[Wizard::REGION_FIELD].value.set_index(eu);
+        assert_eq!(
+            wizard.build_config().providers.bedrock_region.as_deref(),
+            Some("eu-west-1")
+        );
+        // Rebuilding the form keeps the pick.
+        wizard.rebuild_defaults();
+        assert_eq!(
+            wizard.defaults[Wizard::REGION_FIELD].value.display(),
+            "eu-west-1"
+        );
+        wizard.providers[bedrock].selected = false;
+        wizard.rebuild_defaults();
+        assert_eq!(wizard.defaults.len(), 3);
+        assert_eq!(wizard.build_config().providers.bedrock_region, None);
+    }
+
+    #[test]
+    fn the_region_starts_from_the_file_then_the_environment_and_never_writes_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let lookup = |name: &str| match name {
+            "AWS_REGION" => Some(" ap-south-1 ".to_string()),
+            "AWS_BEARER_TOKEN_BEDROCK" => Some("ABSK-env".to_string()),
+            _ => None,
+        };
+        let mut wizard = Wizard::new(
+            Config::default(),
+            &lookup,
+            Vec::new(),
+            Vec::new(),
+            dir.path(),
+            std::sync::Arc::new(|_| true),
+            Default::default(),
+        );
+        assert_eq!(wizard.region_from_env.as_deref(), Some("ap-south-1"));
+        let bedrock = bedrock_row(&wizard);
+        assert!(
+            wizard.providers[bedrock].selected,
+            "a key in the environment selects the row"
+        );
+        wizard.enter(Step::Defaults);
+        assert_eq!(
+            wizard.defaults[Wizard::REGION_FIELD].value.display(),
+            "ap-south-1"
+        );
+        // The environment's region is left to the environment.
+        assert_eq!(wizard.build_config().providers.bedrock_region, None);
+
+        // A region the list does not carry is offered first, not refused.
+        let mut base = Config::default();
+        base.providers.bedrock_api_key = Some("ABSK".to_string());
+        base.providers.bedrock_region = Some("mx-central-1".to_string());
+        let mut wizard = Wizard::new(
+            base,
+            &lookup,
+            Vec::new(),
+            Vec::new(),
+            dir.path(),
+            std::sync::Arc::new(|_| true),
+            Default::default(),
+        );
+        assert_eq!(
+            wizard.current_bedrock_region().as_deref(),
+            Some("mx-central-1")
+        );
+        wizard.enter(Step::Defaults);
+        let field = &wizard.defaults[Wizard::REGION_FIELD];
+        assert_eq!(field.value.display(), "mx-central-1");
+        assert_eq!(
+            field.value.options().first().map(String::as_str),
+            Some("mx-central-1")
+        );
+        assert_eq!(
+            wizard.build_config().providers.bedrock_region.as_deref(),
+            Some("mx-central-1")
+        );
+        // The default-region variable is the second choice.
+        let fallback = |name: &str| match name {
+            "AWS_DEFAULT_REGION" => Some("eu-north-1".to_string()),
+            _ => None,
+        };
+        let wizard = Wizard::new(
+            Config::default(),
+            &fallback,
+            Vec::new(),
+            Vec::new(),
+            dir.path(),
+            std::sync::Arc::new(|_| true),
+            Default::default(),
+        );
+        assert_eq!(wizard.region_from_env.as_deref(), Some("eu-north-1"));
+    }
+
+    #[test]
+    fn a_bedrock_check_carries_the_region_a_run_would_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let (mut requests, _replies) = wizard.take_verify_ends().expect("first take");
+        let bedrock = bedrock_row(&wizard);
+        wizard.providers[bedrock].selected = true;
+        wizard.providers[bedrock].value = "ABSK-typed".to_string();
+        wizard.base.providers.bedrock_region = Some("eu-west-2".to_string());
+        wizard.request_verification(bedrock);
+        let request = requests.try_recv().expect("a check was requested");
+        assert_eq!(request.provider_id, "bedrock");
+        assert_eq!(request.creds.api_key.as_deref(), Some("ABSK-typed"));
+        assert_eq!(
+            request.creds.options.get("region").map(String::as_str),
+            Some("eu-west-2")
+        );
+        // No region anywhere: none is carried, and the provider's default
+        // applies to the check as it would to a run.
+        wizard.base.providers.bedrock_region = None;
+        wizard.request_verification(bedrock);
+        let request = requests.try_recv().expect("a second check");
+        assert!(!request.creds.options.contains_key("region"));
     }
 
     // ─── remembering what was turned down ─────────────────────────────────

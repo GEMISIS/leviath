@@ -299,6 +299,11 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         // top level. This is the provider that hands reasoning back as the
         // reply when the answer is empty, so it is the one that leaked.
         "openrouter" => serde_json::json!({ "reasoning": { "enabled": false } }),
+        // Claude's own switch, which the Bedrock provider passes through in
+        // `additionalModelRequestFields` for Claude and drops for every other
+        // vendor: on Bedrock the Claude 5 line thinks unless told not to, and
+        // the field is a validation error on a model that has no such switch.
+        "bedrock" => serde_json::json!({ "thinking": { "type": "disabled" } }),
         // Every model on the Codex route is a reasoning model, so a title
         // call left alone spends its whole 256-token budget thinking and
         // returns nothing. This asks for the least of it instead.
@@ -1825,6 +1830,12 @@ mod tests {
         assert_eq!(
             title_request("t", "openrouter", "deepseek/deepseek-r1").extra,
             serde_json::json!({ "reasoning": { "enabled": false } })
+        );
+        // Claude on Bedrock thinks unless told not to; the provider keeps
+        // the field to Claude.
+        assert_eq!(
+            title_request("t", "bedrock", "us.anthropic.claude-sonnet-5").extra,
+            serde_json::json!({ "thinking": { "type": "disabled" } })
         );
         // Anthropic only thinks when asked, and OpenAI never returns reasoning
         // text, so neither needs a switch and neither is sent one.

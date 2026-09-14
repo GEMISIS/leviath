@@ -150,6 +150,12 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     );
     push_if_changed(
         &mut out,
+        "AWS Bedrock region",
+        before.providers.bedrock_region.as_ref(),
+        after.providers.bedrock_region.as_ref(),
+    );
+    push_if_changed(
+        &mut out,
         "max concurrent inferences",
         before.limits.max_concurrent_inferences.as_ref(),
         after.limits.max_concurrent_inferences.as_ref(),
@@ -506,6 +512,7 @@ mod tests {
         after.default_provider = "ollama".to_string();
         after.override_model = Some("llama3".to_string());
         after.fallback_model = Some("llama3-small".to_string());
+        after.providers.bedrock_region = Some("eu-west-1".to_string());
         after.limits.max_concurrent_inferences = Some(1);
         after.limits.max_concurrent_tools = 4;
         after.limits.default_max_iterations = None;
@@ -517,6 +524,7 @@ mod tests {
         assert!(lines.contains(&"default provider: anthropic → ollama".to_string()));
         assert!(lines.contains(&"override model: (unset) → llama3".to_string()));
         assert!(lines.contains(&"fallback model: (unset) → llama3-small".to_string()));
+        assert!(lines.contains(&"AWS Bedrock region: (unset) → eu-west-1".to_string()));
         assert!(lines.contains(&"max concurrent inferences: 8 → 1".to_string()));
         assert!(lines.contains(&"max concurrent tools: 8 → 4".to_string()));
         assert!(lines.contains(&"default max iterations: 50 → (unset)".to_string()));

@@ -434,6 +434,25 @@ fn reasoning_replay_can_be_turned_off_entirely() {
 }
 
 #[test]
+fn another_providers_reasoning_is_not_replayed_as_a_sealed_token() {
+    // The Bedrock provider keeps its reasoning blocks in the same field as a
+    // JSON object; sent as `encrypted_content` the backend would refuse it.
+    let req = request(
+        vec![],
+        vec![Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text("42".to_string()),
+            cache_breakpoint: false,
+            reasoning: Some(r#"{"bedrock":[{"reasoningContent":{}}]}"#.to_string()),
+        }],
+    );
+    let body = build_default(&req);
+    let items = body["input"].as_array().unwrap();
+    assert!(items.iter().all(|i| i["type"] != "reasoning"), "{body}");
+    assert_eq!(body["input"][0]["type"], "message");
+}
+
+#[test]
 fn a_user_turn_never_carries_a_reasoning_item() {
     // Only an assistant turn owns one; replaying it against a user message
     // would be a shape the backend has never issued.

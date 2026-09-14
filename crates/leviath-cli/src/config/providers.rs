@@ -32,6 +32,19 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub meshy_api_key: Option<String>,
 
+    /// AWS Bedrock API key, sent as a bearer token. Made in the Bedrock
+    /// console under API keys; not an AWS access key. Env fallback
+    /// `AWS_BEARER_TOKEN_BEDROCK`, the name AWS's own tooling reads.
+    #[serde(default)]
+    pub bedrock_api_key: Option<String>,
+
+    /// The AWS region whose Bedrock endpoints are called. Unset falls back
+    /// to `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. Part of
+    /// the address on every Bedrock host, so the one Bedrock setting a user
+    /// has to get right.
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+
     /// Host to reach Anthropic on, when it is not Anthropic's own.
     ///
     /// For an enterprise gateway or a self-hosted proxy that speaks the same
@@ -59,6 +72,14 @@ pub struct ProviderConfig {
     /// Host to reach Meshy on. See [`Self::anthropic_base_url`].
     #[serde(default)]
     pub meshy_base_url: Option<String>,
+
+    /// Host to reach the Bedrock runtime on, replacing
+    /// `https://bedrock-runtime.<region>.amazonaws.com`. See
+    /// [`Self::anthropic_base_url`]. With this set the live model listing,
+    /// the price file and the token-count routes are not read: a gateway
+    /// that fronts inference rarely fronts the rest.
+    #[serde(default)]
+    pub bedrock_base_url: Option<String>,
 
     /// Whether the Claude Code CLI transport is enabled.
     ///
@@ -198,6 +219,9 @@ impl std::fmt::Debug for ProviderConfig {
             .field("openai_api_key", &redacted(&self.openai_api_key))
             .field("google_api_key", &redacted(&self.google_api_key))
             .field("meshy_api_key", &redacted(&self.meshy_api_key))
+            .field("bedrock_api_key", &redacted(&self.bedrock_api_key))
+            // A region is not a secret.
+            .field("bedrock_region", &self.bedrock_region)
             .field("claude_code_enabled", &self.claude_code_enabled)
             .field("claude_code_binary", &self.claude_code_binary)
             .field("claude_code_effort", &self.claude_code_effort)
@@ -226,11 +250,14 @@ impl Default for ProviderConfig {
             openai_api_key: None,
             google_api_key: None,
             meshy_api_key: None,
+            bedrock_api_key: None,
+            bedrock_region: None,
             anthropic_base_url: None,
             openai_base_url: None,
             google_base_url: None,
             openrouter_base_url: None,
             meshy_base_url: None,
+            bedrock_base_url: None,
             claude_code_enabled: false,
             claude_code_binary: None,
             claude_code_effort: None,

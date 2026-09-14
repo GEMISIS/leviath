@@ -219,6 +219,20 @@ outright, so a typo there is answered rather than shown as an empty table. Note 
 absence there is not proof of a bad name. See
 [model identifiers](/docs/providers#model-identifiers).
 
+## Bedrock answers with an access error
+
+A 403 from Bedrock says one of two things, and the message names which. `UnrecognizedClientException`
+or `ExpiredTokenException` is the key itself: it was mistyped, deactivated in the Bedrock console,
+or has expired. `AccessDeniedException` is a key that works but is not allowed this call, and that
+is nearly always a model the account has not enabled in the region the request went to, or a
+region that is not the one the key was made for. `lev models list --provider bedrock` lists what
+the key can reach where it is pointed; the region comes from `bedrock_region`, then `AWS_REGION`,
+then `us-east-1`. A 404 `ResourceNotFoundException` saying model use case details have not been
+submitted is AWS's Anthropic use case form: the account fills it in once, in the Bedrock console
+under model access, and AWS says to allow fifteen minutes after. A shell or Rhai tool does not see
+`AWS_*` variables unless `[security] allow_env_vars` names them; that is deliberate and does not
+affect the provider.
+
 ## Windows quoting and environment variables
 
 `lev` itself is the same on every platform, and the commands in these docs work unchanged in

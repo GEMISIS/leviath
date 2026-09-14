@@ -540,6 +540,8 @@ mod tests {
             openai_key: None,
             google_key: None,
             openrouter_key: None,
+            bedrock_key: None,
+            bedrock_region: None,
             ollama_url: None,
             override_model: None,
             fallback_model: None,

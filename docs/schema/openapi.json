@@ -2919,6 +2919,14 @@
                   "openrouter_key": {
                     "type": "string"
                   },
+                  "bedrock_key": {
+                    "type": "string",
+                    "description": "An AWS Bedrock API key, sent as a bearer token. Not an AWS access key."
+                  },
+                  "bedrock_region": {
+                    "type": "string",
+                    "description": "The AWS region Bedrock is called in. An empty string is a 400."
+                  },
                   "ollama_base_url": {
                     "type": "string"
                   },
@@ -4263,6 +4271,8 @@
           "has_openai_key",
           "has_google_key",
           "has_openrouter_key",
+          "has_bedrock_key",
+          "bedrock_region",
           "gateways",
           "agent_paths",
           "mcp_server_count",
@@ -4306,6 +4316,16 @@
           },
           "has_openrouter_key": {
             "type": "boolean"
+          },
+          "has_bedrock_key": {
+            "type": "boolean"
+          },
+          "bedrock_region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The AWS region Bedrock is called in, when the config pins one. `null` when unset, in which case the daemon follows AWS_REGION, then AWS_DEFAULT_REGION, then us-east-1. Always sent."
           },
           "ollama_base_url": {
             "type": [

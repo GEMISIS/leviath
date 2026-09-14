@@ -135,6 +135,11 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::anthropic::table_capabilities,
     )
     .chain(rows(
+        "bedrock",
+        &crate::bedrock::catalog::CATALOG,
+        crate::bedrock::catalog::table_capabilities,
+    ))
+    .chain(rows(
         "openai",
         crate::openai::CATALOG,
         crate::openai::table_capabilities,
@@ -563,8 +568,10 @@ mod catalog_tests {
         for entry in &catalog {
             assert!(seen.insert((entry.provider, entry.id)), "{:?}", entry.id);
             assert!(!entry.display_name.is_empty(), "{}", entry.id);
+            // Equal is allowed: three AWS cards (Llama 3 8B and 70B, Palmyra
+            // Vision) state the same figure for both.
             assert!(
-                entry.capabilities.max_context_tokens > entry.capabilities.max_output_tokens,
+                entry.capabilities.max_context_tokens >= entry.capabilities.max_output_tokens,
                 "{}",
                 entry.id
             );
@@ -608,6 +615,11 @@ mod table_tests {
                 "openrouter",
                 crate::openrouter::MODELS,
                 crate::openrouter::FALLBACK_CAPABILITIES,
+            ),
+            (
+                "bedrock",
+                crate::bedrock::catalog::MODELS,
+                crate::bedrock::catalog::FALLBACK_CAPABILITIES,
             ),
         ]
     }

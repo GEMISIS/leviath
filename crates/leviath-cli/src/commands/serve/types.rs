@@ -1291,6 +1291,8 @@ mod tests {
             has_openai_key: false,
             has_google_key: false,
             has_openrouter_key: false,
+            has_bedrock_key: false,
+            bedrock_region: None,
             ollama_base_url: None,
             ollama_enabled: false,
             codex_enabled: false,

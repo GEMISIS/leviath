@@ -65,6 +65,14 @@
         "meshy_api_key": {
           "type": "string"
         },
+        "bedrock_api_key": {
+          "description": "AWS Bedrock API key, sent as a bearer token. Env fallback AWS_BEARER_TOKEN_BEDROCK.",
+          "type": "string"
+        },
+        "bedrock_region": {
+          "description": "The AWS region whose Bedrock endpoints are called. Unset falls back to AWS_REGION, then AWS_DEFAULT_REGION, then us-east-1.",
+          "type": "string"
+        },
         "anthropic_base_url": {
           "type": "string"
         },
@@ -75,6 +83,10 @@
           "type": "string"
         },
         "meshy_base_url": {
+          "type": "string"
+        },
+        "bedrock_base_url": {
+          "description": "Host to reach the Bedrock runtime on instead of https://bedrock-runtime.<region>.amazonaws.com. With it set the live listing, price file and token-count routes are not read.",
           "type": "string"
         },
         "openrouter_base_url": {

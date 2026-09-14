@@ -13,7 +13,7 @@ use leviath_core::{CredentialStore, CredentialStoreKind};
 /// Fixed, because the OS stores offer no portable "list everything under this
 /// service" operation - the accounts to look for have to come from somewhere,
 /// and for providers that is this list.
-pub const PROVIDER_KEYS: &[&str] = &["anthropic", "openai", "google", "openrouter"];
+pub const PROVIDER_KEYS: &[&str] = &["anthropic", "openai", "google", "openrouter", "bedrock"];
 
 /// A [`CredentialStore`] backed by the OS credential store.
 ///
@@ -205,7 +205,7 @@ mod tests {
     /// migrates.
     #[test]
     fn every_provider_with_a_config_key_is_listed() {
-        for p in ["anthropic", "openai", "google", "openrouter"] {
+        for p in ["anthropic", "openai", "google", "openrouter", "bedrock"] {
             assert!(PROVIDER_KEYS.contains(&p), "{p} must be migratable");
         }
     }

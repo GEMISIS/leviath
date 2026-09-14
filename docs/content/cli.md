@@ -878,7 +878,8 @@ names onto your plan.
 |---|---|
 | `--non-interactive` | Use only flag values, ask nothing |
 | `--no-verify` | Skip checking credentials against the provider APIs |
-| `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key <KEY>` | Provider API keys |
+| `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
+| `--bedrock-region <REGION>` | AWS region for Bedrock (default `us-east-1`; also read from `AWS_REGION`) |
 | `--ollama-url <URL>` | Ollama base URL |
 | `--override-model <MODEL>` | One model every stage starts on, ahead of what its blueprint names; unset lets each blueprint decide |
 | `--fallback-model <MODEL>` | The model a stage falls back to when none of the models it names is configured here |
