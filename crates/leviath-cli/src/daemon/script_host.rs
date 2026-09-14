@@ -66,6 +66,13 @@ pub(crate) struct ScriptAllow {
 pub(crate) trait ScriptIo: Send + Sync {
     /// Perform an HTTP GET, returning the response body (or an error message).
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String>;
+    /// Perform an HTTP GET, returning the declared content type and the raw
+    /// bytes: the path for a body that is not text.
+    fn http_get_bytes(
+        &self,
+        url: &str,
+        headers: BTreeMap<String, String>,
+    ) -> Result<(String, Vec<u8>), String>;
     /// Perform an HTTP POST, returning the response body (or an error message).
     fn http_post(
         &self,
@@ -272,6 +279,14 @@ impl ScriptHost for LimitedHost {
         self.inner.http_get(url, headers)
     }
 
+    fn http_get_bytes(
+        &self,
+        url: &str,
+        headers: BTreeMap<String, String>,
+    ) -> Result<(String, Vec<u8>), String> {
+        self.inner.http_get_bytes(url, headers)
+    }
+
     fn http_post(
         &self,
         url: &str,
@@ -344,6 +359,20 @@ impl ScriptHost for DaemonScriptHost {
         }
         check_outbound(url, self.allow_local_network)?;
         self.io.http_get(url, headers)
+    }
+
+    // The same permission as `http_get`: it is the same request, read as
+    // bytes instead of text, so a stage that may fetch may fetch either way.
+    fn http_get_bytes(
+        &self,
+        url: &str,
+        headers: BTreeMap<String, String>,
+    ) -> Result<(String, Vec<u8>), String> {
+        if !self.allow.http_get {
+            return Err(denied("http_get_bytes"));
+        }
+        check_outbound(url, self.allow_local_network)?;
+        self.io.http_get_bytes(url, headers)
     }
 
     fn http_post(
@@ -663,6 +692,47 @@ impl RealScriptIo {
         }
     }
 
+    /// Send a built request and read its body as bytes, with its declared
+    /// type: the path a script takes for an image, a sound or a document it
+    /// means to store with `write_part`. No text decoding, no binary refusal;
+    /// the same size ceiling as [`send`](Self::send).
+    fn send_bytes(
+        url: &str,
+        build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<(String, Vec<u8>), String> {
+        Self::send_bytes_capped(url, build, MAX_RESPONSE_BYTES)
+    }
+
+    /// [`send_bytes`](Self::send_bytes) with the body cap injected, so the
+    /// refusals are testable against a small response.
+    fn send_bytes_capped(
+        url: &str,
+        build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
+        max: u64,
+    ) -> Result<(String, Vec<u8>), String> {
+        let resp = Self::send_with_retry(url, build)?;
+        let status = resp.status();
+        let content_type = content_type_essence(
+            resp.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default(),
+        );
+        if let Some(msg) = oversized_body_message(resp.content_length(), max) {
+            return Err(msg);
+        }
+        if !status.is_success() {
+            return Err(format!("http {status}"));
+        }
+        let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
+        // A chunked body declares no length, so the ceiling is checked again
+        // on what actually arrived.
+        if let Some(msg) = oversized_body_message(Some(bytes.len() as u64), max) {
+            return Err(msg);
+        }
+        Ok((content_type, bytes.to_vec()))
+    }
+
     /// [`send`](Self::send) with the body cap injected, so the oversized-body
     /// refusal is testable against a small response instead of a 32 MiB one.
     fn send_capped(
@@ -735,15 +805,20 @@ const BINARY_CONTENT_PREFIXES: &[&str] = &[
     "application/msword",
 ];
 
-/// Whether a `Content-Type` header names content this tool cannot render as text.
-fn is_binary_content_type(content_type: &str) -> bool {
-    // Trim parameters (`image/png; charset=binary`) and normalise case.
-    let essence = content_type
+/// The type a `Content-Type` header names, without its parameters
+/// (`image/png; charset=binary` is `image/png`), lowercased.
+fn content_type_essence(content_type: &str) -> String {
+    content_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+/// Whether a `Content-Type` header names content this tool cannot render as text.
+fn is_binary_content_type(content_type: &str) -> bool {
+    let essence = content_type_essence(content_type);
     // `application/xml`, `+json`, `+xml` etc. are structured *text* despite the
     // `application/` prefix, so match on the concrete list rather than the tree.
     BINARY_CONTENT_PREFIXES
@@ -791,7 +866,10 @@ fn non_text_body_message(content_type: &str, len: Option<u64>) -> String {
         Some(bytes) => format!(", {} KB", bytes.div_ceil(1024)),
         None => String::new(),
     };
-    format!("non-text content ({content_type}{size}) - this tool returns text only")
+    format!(
+        "non-text content ({content_type}{size}) - http_get returns text only; fetch it with \
+         http_get_bytes and store it with write_part"
+    )
 }
 
 /// Cap a host-I/O string below the tool engine's 1 MB `max_string_size`
@@ -841,6 +919,17 @@ impl ScriptIo for RealScriptIo {
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String> {
         let client = Self::client();
         Self::send(url, &|| {
+            Self::with_headers(client.get(url), headers.clone())
+        })
+    }
+
+    fn http_get_bytes(
+        &self,
+        url: &str,
+        headers: BTreeMap<String, String>,
+    ) -> Result<(String, Vec<u8>), String> {
+        let client = Self::client();
+        Self::send_bytes(url, &|| {
             Self::with_headers(client.get(url), headers.clone())
         })
     }
@@ -1304,6 +1393,14 @@ mod tests {
             self.calls.lock().unwrap().push(format!("get:{url}"));
             Ok("g".into())
         }
+        fn http_get_bytes(
+            &self,
+            url: &str,
+            _h: BTreeMap<String, String>,
+        ) -> Result<(String, Vec<u8>), String> {
+            self.calls.lock().unwrap().push(format!("get_bytes:{url}"));
+            Ok(("image/png".into(), vec![1, 2, 3]))
+        }
         fn http_post(
             &self,
             url: &str,
@@ -1708,6 +1805,19 @@ mod tests {
                     )
                 }),
             )
+            // A chunked body: no Content-Length, so the byte ceiling can only
+            // be judged on what arrives.
+            .route(
+                "/chunked",
+                get(|| async {
+                    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                        vec![Ok(b"\x89PNG".to_vec()), Ok(b"\r\n\x1a\n".to_vec())];
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "image/png; x=y")],
+                        axum::body::Body::from_stream(futures_util::stream::iter(chunks)),
+                    )
+                }),
+            )
             // Declared text, answered with bytes that are not text in any
             // charset: the shape a compressed body arrives in. `text()` decodes
             // it lossily and succeeds, so only the decoded result gives it away.
@@ -1774,6 +1884,82 @@ mod tests {
         assert!(
             !without_len.contains("KB"),
             "no size to report: {without_len}"
+        );
+    }
+
+    /// The bytes path is what `web_fetch` takes for an image: the declared
+    /// type comes back with the raw bytes, a chunked body is read whole, the
+    /// ceiling holds whether the length was declared or not, and an error
+    /// status is an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bytes_come_back_typed_whole_and_under_the_ceiling() {
+        let base = mock_http().await;
+        let (png, chunked, boom, declared_over, arrived_over) =
+            tokio::task::spawn_blocking(move || {
+                let client = RealScriptIo::client();
+                let chunked_url = format!("{base}/chunked");
+                (
+                    RealScriptIo.http_get_bytes(&format!("{base}/png"), BTreeMap::new()),
+                    RealScriptIo.http_get_bytes(&chunked_url, BTreeMap::new()),
+                    RealScriptIo.http_get_bytes(&format!("{base}/boom"), BTreeMap::new()),
+                    RealScriptIo::send_bytes_capped(
+                        &format!("{base}/png"),
+                        &|| client.get(format!("{base}/png")),
+                        4,
+                    ),
+                    RealScriptIo::send_bytes_capped(&chunked_url, &|| client.get(&chunked_url), 4),
+                )
+            })
+            .await
+            .unwrap();
+        let (mime_type, bytes) = png.unwrap();
+        assert_eq!(mime_type, "image/png");
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(&bytes[..4], b"\x89PNG");
+        let (mime_type, bytes) = chunked.unwrap();
+        assert_eq!(mime_type, "image/png", "parameters are dropped");
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\n");
+        assert!(boom.unwrap_err().starts_with("http 500"));
+        assert!(declared_over.unwrap_err().contains("declares 10 bytes"));
+        assert!(arrived_over.unwrap_err().contains("declares 8 bytes"));
+    }
+
+    /// The daemon host gates the bytes path on the same permission as
+    /// `http_get`, and a limited host passes it through.
+    #[test]
+    fn http_get_bytes_is_gated_like_http_get_and_passed_through_a_limit() {
+        let denied_host =
+            DaemonScriptHost::with_io(none_allowed(), PathBuf::from("wd"), RecordingIo::arc());
+        let err = denied_host
+            .http_get_bytes("http://example.com/a.png", BTreeMap::new())
+            .unwrap_err();
+        assert!(err.contains("http_get_bytes"), "got: {err}");
+
+        let io = RecordingIo::arc();
+        let host: Arc<dyn ScriptHost> = Arc::new(DaemonScriptHost::with_io(
+            all_allowed(),
+            PathBuf::from("wd"),
+            io.clone(),
+        ));
+        assert!(
+            host.http_get_bytes("http://localhost/a.png", BTreeMap::new())
+                .is_err(),
+            "a local address is refused before any I/O"
+        );
+        let limited = LimitedHost::new(
+            host,
+            Arc::new(StdMutex::new(Vec::new())),
+            "peek",
+            vec!["image/*".to_string()],
+        );
+        let (mime_type, bytes) = limited
+            .http_get_bytes("http://example.com/a.png", BTreeMap::new())
+            .unwrap();
+        assert_eq!(mime_type, "image/png");
+        assert_eq!(bytes, vec![1, 2, 3]);
+        assert_eq!(
+            io.calls.lock().unwrap().as_slice(),
+            ["get_bytes:http://example.com/a.png"]
         );
     }
 
@@ -2104,6 +2290,22 @@ mod tests {
         .unwrap();
         let err = out.unwrap_err();
         assert!(err.contains("read body"), "got: {err}");
+
+        // The bytes path fails the same two ways: a body cut short, and a
+        // host that never answers.
+        let base = spawn_truncated_body_server().await;
+        let (cut, dead) = tokio::task::spawn_blocking(move || {
+            (
+                RealScriptIo.http_get_bytes(&format!("{base}/x"), BTreeMap::new()),
+                RealScriptIo.http_get_bytes("http://127.0.0.1:19997/x", BTreeMap::new()),
+            )
+        })
+        .await
+        .unwrap();
+        let err = cut.unwrap_err();
+        assert!(err.contains("read body"), "got: {err}");
+        let err = dead.unwrap_err();
+        assert!(err.contains("request failed"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

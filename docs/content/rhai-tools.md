@@ -68,7 +68,8 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 
 | Function | Does |
 |---|---|
-| `http_get(url [, headers])` | An HTTP GET |
+| `http_get(url [, headers])` | An HTTP GET, as text. A body that is not text (an image, a sound, a PDF) is refused with a message naming its type, rather than decoded into noise |
+| `http_get_bytes(url [, headers])` | The same GET, as bytes: a map with `mime_type` (as the server declared it) and `bytes` (a Rhai blob), ready for `write_part`. Gated like `http_get` |
 | `http_post(url, body [, headers])` | An HTTP POST |
 | `shell(cmd)` | Runs a shell command |
 | `read_file(path)` | Reads a file, always confined to the workdir |

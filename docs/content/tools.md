@@ -279,7 +279,9 @@ result carries the page's `date` when Brave knows it, which is what lets an agen
 against the run's own clock rather than its training cutoff.
 
 `web_fetch` truncates large pages, and a blocked or oversized request comes back as a diagnostic
-rather than failing the run. So does a page whose text is rendered client-side: fetching a Reddit
+rather than failing the run. A URL that answers with a file rather than a page (an image, a
+sound, a PDF) is stored as a [part](/docs/mime) of the run and attached to the tool result, so a
+model that takes the type sees the file itself and any other sees the usual stand-in line. So does a page whose text is rendered client-side: fetching a Reddit
 thread returns HTML that strips to the single word "Reddit", so the tool names that instead of
 handing back the husk as if it were the discussion.
 
