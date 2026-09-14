@@ -141,6 +141,7 @@ fn api_router() -> Router<AppState> {
         .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
         .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
         .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
+        .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
         .route("/api/agents/{id}/stages", get(agents::agent_stages))

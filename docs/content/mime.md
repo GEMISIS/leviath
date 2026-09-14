@@ -159,8 +159,10 @@ is evicted, or the write is refused under `admission = "reject"`.
 
 When a stage lists several models, the one that takes what the stage's regions accept goes
 first, so a stage reading a storyboard lands on the model that can see it. `lev validate` says
-what each stage takes and warns (`mime-unseen`) when none of its models can see a type its
-regions take. Two keys under `[stages.<name>.input]` adjust this: `accepts` states the types
+what each stage takes and warns (`mime-unseen`) when its models can see none of the types its
+regions take; when they see some and not the rest, which is how a pipeline that draws in one
+stage and builds in the next looks, it says so as information. Two keys under
+`[stages.<name>.input]` adjust this: `accepts` states the types
 outright, and `as_text` names types whose parts reach the model as text whatever it takes,
 which is how a `model/obj` scene gets to a text model even when the registry calls it binary.
 

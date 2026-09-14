@@ -206,6 +206,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `GET /api/agents/{id}/files/raw?path=`: a workdir file's bytes under
     // their own content type, where the JSON files route wraps text.
     "runs.files.raw",
+    "runs.artifacts",
     // `artifacts` on a run's answer as `{ name, path, mime_type, size,
     // sha256 }` objects rather than paths.
     "runs.result.artifacts",

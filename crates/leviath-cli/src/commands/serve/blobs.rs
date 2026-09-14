@@ -275,25 +275,86 @@ pub(super) async fn raw_file(
             ),
         ));
     }
-    let bytes = tokio::fs::read(&resolved).await.map_err(|_| {
-        err(
-            StatusCode::NOT_FOUND,
-            format!(
-                "file '{}' not found in the run's working directory",
-                query.path
-            ),
-        )
-    })?;
     let name = resolved
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
+    let bytes = match tokio::fs::read(&resolved).await {
+        Ok(bytes) => bytes,
+        // Not on disk, but perhaps one of the run's artifacts: a file a model
+        // made lives in the blob store and was never written to the workdir,
+        // and the result route names it by exactly this path.
+        Err(_) => artifact_by_path(&id, &meta.workdir, &query.path).ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "file '{}' not found in the run's working directory",
+                    query.path
+                ),
+            )
+        })?,
+    };
     let registry = state.current_config().mime_registry_or_defaults();
     let mime_type = registry.resolve(None, Some(&name), &bytes);
     bytes_response(
         bytes,
         &mime_type,
         &name,
+        query.download,
+        range_header(&headers),
+    )
+}
+
+/// The bytes of the run's artifact recorded at `path`, when it has one and
+/// they can still be read (the store by hash, else the workdir).
+fn artifact_by_path(run_id: &str, workdir: &str, path: &str) -> Option<Vec<u8>> {
+    let output = runstate::read_final_output(run_id)?;
+    let artifact = output.artifacts.iter().find(|a| a.path == path)?;
+    crate::commands::result::export::artifact_bytes(run_id, workdir, artifact).ok()
+}
+
+/// `GET /api/agents/{id}/artifacts/{name}`: the bytes of one file the run
+/// handed back, by the name the result route lists it under.
+///
+/// The one route that follows an artifact the way the runtime does: the
+/// store by hash first, so a file a model made and nothing wrote to disk is
+/// served, then the workdir. Before it a client had the name, type and hash
+/// from the result and no route that took any of them.
+pub(super) async fn artifact(
+    AxumPath((id, name)): AxumPath<(String, String)>,
+    Query(query): Query<BytesQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let meta = runstate::read_meta(&id)
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
+    let output = runstate::read_final_output(&id).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            format!("run '{id}' has not handed back a result"),
+        )
+    })?;
+    let artifact = output
+        .artifacts
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("run '{id}' handed back no artifact named '{name}'"),
+            )
+        })?;
+    let bytes = crate::commands::result::export::artifact_bytes(&id, &meta.workdir, artifact)
+        .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+    let file_name = artifact
+        .path
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(&artifact.name)
+        .to_string();
+    bytes_response(
+        bytes,
+        &artifact.mime_type,
+        &file_name,
         query.download,
         range_header(&headers),
     )
@@ -385,6 +446,7 @@ mod tests {
             .route("/api/agents/{id}/blobs", get(list_blobs))
             .route("/api/agents/{id}/blobs/{sha256}", get(get_blob))
             .route("/api/agents/{id}/files/raw", get(raw_file))
+            .route("/api/agents/{id}/artifacts/{name}", get(artifact))
             .route("/api/mime", get(list_mime))
             .with_state(state())
     }
@@ -613,6 +675,100 @@ mod tests {
                 call(&format!("/api/agents/{run_id}/files/raw?path=missing.bin")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             let (status, _, _) = call("/api/agents/ghost/files/raw?path=x").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    /// An artifact is served by the name the answer lists it under, from the
+    /// store by hash when the working directory has no copy, and `files/raw`
+    /// falls back to the same store for a path the answer lists.
+    #[tokio::test]
+    async fn artifacts_are_served_by_name_from_the_store_or_the_workdir() {
+        crate::runstate::with_isolated_runs_dir_async("artifacts_served", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("notes.md"), "# written").unwrap();
+            let run_id = "artifact-run";
+            let mut meta = RunMeta::new(
+                run_id.to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                workdir.path().to_string_lossy().to_string(),
+                1,
+            );
+            let registry = MimeRegistry::builtin();
+            let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
+            let mesh = Blob::new(
+                MimeType::parse("model/gltf-binary").unwrap(),
+                b"glTF-bytes".to_vec(),
+            );
+            let stored = store.put(run_id, &mesh, &registry).unwrap();
+            // A mesh a model made (store only), a note the run wrote (workdir
+            // only, no hash), and a file in neither place.
+            let mut on_disk = leviath_core::output::Artifact::from_path("notes.md");
+            on_disk.mime_type = MimeType::parse("text/markdown").unwrap();
+            let mut gone = leviath_core::output::Artifact::from_path("out/gone.bin");
+            gone.sha256 = "f".repeat(64);
+            let output =
+                leviath_core::output::FinalOutput::new("built", None, "build".to_string(), 0)
+                    .with_artifacts(vec![
+                        leviath_core::output::Artifact {
+                            name: "mesh".to_string(),
+                            path: "out/scene.glb".to_string(),
+                            mime_type: MimeType::parse("model/gltf-binary").unwrap(),
+                            size: 10,
+                            sha256: stored.sha256.clone(),
+                        },
+                        on_disk,
+                        gone,
+                    ]);
+            meta.final_output = Some(output.descriptor());
+            runstate::create_run(&meta).unwrap();
+            runstate::write_final_output(&runstate::run_dir(run_id), &output.content).unwrap();
+
+            let (status, headers, body) =
+                call(&format!("/api/agents/{run_id}/artifacts/mesh")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers[header::CONTENT_TYPE], "model/gltf-binary");
+            assert_eq!(body, b"glTF-bytes");
+            let (_, headers, _) =
+                call(&format!("/api/agents/{run_id}/artifacts/mesh?download=1")).await;
+            assert_eq!(
+                headers[header::CONTENT_DISPOSITION],
+                "attachment; filename=\"scene.glb\""
+            );
+            let (status, _, body) = call(&format!("/api/agents/{run_id}/artifacts/notes.md")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, b"# written");
+            let (status, _, _) = call(&format!("/api/agents/{run_id}/artifacts/gone.bin")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (status, _, _) = call(&format!("/api/agents/{run_id}/artifacts/nope")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (status, _, _) = call("/api/agents/ghost/artifacts/mesh").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            // The raw route reaches the stored mesh by the path the answer
+            // lists, and still 404s a path that is neither on disk nor listed.
+            let (status, headers, body) = call(&format!(
+                "/api/agents/{run_id}/files/raw?path=out/scene.glb"
+            ))
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers[header::CONTENT_TYPE], "model/gltf-binary");
+            assert_eq!(body, b"glTF-bytes");
+            let (status, _, _) =
+                call(&format!("/api/agents/{run_id}/files/raw?path=out/gone.bin")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (status, _, _) =
+                call(&format!("/api/agents/{run_id}/files/raw?path=nowhere.bin")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            // A run that has not answered has no artifacts to serve.
+            let silent = "silent-run";
+            seed_run(silent, workdir.path());
+            let (status, _, _) = call(&format!("/api/agents/{silent}/artifacts/mesh")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
         })
         .await;

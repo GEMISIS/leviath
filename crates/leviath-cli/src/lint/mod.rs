@@ -463,6 +463,7 @@ pub(crate) fn lint_manifest(
         findings.extend(lint_permission_clamp(stage, &agent_permissions));
         findings.extend(lint_models(stage, env));
         findings.extend(lint_output_stage(stage));
+        findings.extend(lint_output_stage_can_answer(stage));
         findings.extend(lint_fanout_escape(stage));
         findings.extend(lint_stage_mime(blueprint, stage));
         findings.extend(lint_tool_accepts(stage));

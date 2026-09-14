@@ -427,6 +427,76 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
     findings
 }
 
+/// An output stage whose models cannot call tools and which declares no
+/// file for them to hand back.
+///
+/// `submit_output` is a tool, so a stage on an image model or a 3D generator
+/// (every compiled row for those says `supports_tools = false`) can never
+/// call it. Such a stage answers only one way: the model's produced part,
+/// routed into a region with `output_routing` and declared under
+/// `[[stages.<name>.output.artifacts]]`, is emitted as the run's answer.
+/// Without both, the runtime re-enters the stage and nudges it for text it
+/// cannot write - up to six re-submitted jobs on a paid API - and the run
+/// ends with nothing. Only providers with compiled tables are judged; an open
+/// route is taken on trust.
+pub(super) fn lint_output_stage_can_answer(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+    if !(stage.require_output || stage.mode == StageMode::Output) {
+        return Vec::new();
+    }
+    let catalog = leviath_providers::capabilities::builtin_catalog();
+    let judged: Vec<&leviath_core::blueprint::ModelEntry> = stage
+        .model
+        .models
+        .iter()
+        .filter(|e| !e.provider.is_empty())
+        .collect();
+    if judged.is_empty() || judged.len() != stage.model.models.len() {
+        return Vec::new();
+    }
+    let tool_less: Vec<String> = judged
+        .iter()
+        .filter(|e| {
+            catalog.iter().any(|row| {
+                row.provider == e.provider && row.id == e.model && !row.capabilities.supports_tools
+            })
+        })
+        .map(|e| format!("{}/{}", e.provider, e.model))
+        .collect();
+    if tool_less.len() != judged.len() {
+        return Vec::new();
+    }
+    let declares_file = stage
+        .output
+        .as_ref()
+        .is_some_and(|o| !o.artifacts.is_empty());
+    let routes_part = !stage.output_routing.is_empty();
+    if declares_file && routes_part {
+        return Vec::new();
+    }
+    let missing = match (declares_file, routes_part) {
+        (false, false) => "declares no artifact and routes no produced part",
+        (false, true) => "routes its produced part but declares no artifact for it",
+        _ => "declares an artifact but routes no produced part into a region",
+    };
+    vec![
+        LintFinding::new(
+            LintSeverity::Error,
+            "output-stage-cannot-answer",
+            format!(
+                "must produce a final output, but its models ({}) cannot call tools, so \
+                 submit_output is out of reach, and it {missing}",
+                tool_less.join(", ")
+            ),
+        )
+        .in_stage(&stage.name)
+        .with_fix(
+            "declare the file under [[stages.<name>.output.artifacts]] and route the model's \
+             part into a region with [stages.<name>.output_routing], so the runtime emits it \
+             as the answer; or list a model that calls tools",
+        ),
+    ]
+}
+
 /// Output stages nothing can reach, and the upstream `allow_complete` that is
 /// the usual reason.
 ///
@@ -1064,6 +1134,14 @@ fn widest_declared_window<'a>(blueprint: &Blueprint, env: &'a LintEnv) -> Option
         .stages
         .iter()
         .flat_map(|stage| stage.model.models.iter())
+        // A model that does not write text has no context window in the
+        // sense this check means: a 3D generator's "window" is the ceiling
+        // its REST call takes a mesh under, and one Meshy stage made every
+        // percentage region in the blueprint resolve against it.
+        .filter(|m| {
+            leviath_providers::mime_tables::builtin_mime(&m.provider, &m.model)
+                .produces(&leviath_core::mime::text_plain())
+        })
         .filter_map(|m| {
             env.model_windows
                 .get_key_value(&(m.provider.clone(), m.model.clone()))

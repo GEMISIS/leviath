@@ -2817,6 +2817,126 @@ fn every_evicting_kind_is_covered_not_just_temporary() {
     }
 }
 
+/// An output stage on a model that cannot call tools has one way to answer:
+/// a declared artifact fed by a routed produced part. Each half missing is
+/// named; a stage with both, a tool-capable model, an open route, or no
+/// output duty at all is left alone.
+#[test]
+fn an_output_stage_whose_models_cannot_call_tools_must_route_a_declared_file() {
+    let manifest = |model: &str, mode: &str, extra: &str| {
+        format!(
+            r#"
+[agent]
+name = "builder"
+version = "0.1.0"
+description = "d"
+
+[stages.build]
+mode = "{mode}"
+model = {{ models = [{model}] }}
+description = "Builds"
+max_iterations = 3
+{extra}
+
+[context.regions]
+task = {{ kind = "pinned", max_tokens = 1000 }}
+model = {{ kind = "pinned", max_tokens = 1000, accepts = ["model/*"] }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+"#
+        )
+    };
+    let meshy = r#"{ provider = "meshy", model = "image-to-3d" }"#;
+    let routing = "[stages.build.output_routing]\n\"model/*\" = \"model\"\n";
+    let artifact = "[[stages.build.output.artifacts]]\nname = \"mesh\"\ntype = \"model/*\"\n";
+    let code = "output-stage-cannot-answer";
+
+    let bare = lint(&manifest(meshy, "output", ""), &LintEnv::default());
+    let found = with_code(&bare, code);
+    assert_eq!(found.len(), 1, "{:?}", codes(&bare));
+    assert_eq!(found[0].severity, LintSeverity::Error);
+    assert_eq!(found[0].stage.as_deref(), Some("build"));
+    assert!(
+        found[0].message.contains("meshy/image-to-3d")
+            && found[0]
+                .message
+                .contains("declares no artifact and routes no produced part"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        found[0]
+            .fix
+            .as_deref()
+            .unwrap_or_default()
+            .contains("output_routing")
+    );
+
+    let routed = lint(&manifest(meshy, "output", routing), &LintEnv::default());
+    assert!(
+        with_code(&routed, code)[0]
+            .message
+            .contains("declares no artifact for it"),
+        "{:?}",
+        codes(&routed)
+    );
+    let declared = lint(&manifest(meshy, "output", artifact), &LintEnv::default());
+    assert!(
+        with_code(&declared, code)[0]
+            .message
+            .contains("routes no produced part"),
+        "{:?}",
+        codes(&declared)
+    );
+
+    let both = format!("{routing}{artifact}");
+    for (label, text) in [
+        ("both halves", manifest(meshy, "output", &both)),
+        (
+            "a tool-capable model",
+            manifest(
+                r#"{ provider = "anthropic", model = "claude-sonnet-5" }"#,
+                "output",
+                "",
+            ),
+        ),
+        (
+            "an open route",
+            manifest(r#"{ model = "something" }"#, "output", ""),
+        ),
+        ("no output duty", manifest(meshy, "autonomous", "")),
+    ] {
+        let findings = lint(&text, &LintEnv::default());
+        assert!(
+            with_code(&findings, code).is_empty(),
+            "{label}: {:?}",
+            codes(&findings)
+        );
+    }
+}
+
+/// A 3D generator's "window" is the ceiling its REST call takes a mesh under,
+/// not a context window: one Meshy stage made every percentage region resolve
+/// against 64 million tokens. The widest window is the widest among the models
+/// that write text.
+#[test]
+fn a_model_that_does_not_write_text_is_not_the_widest_window() {
+    let toml = format!(
+        "{}\n[stages.build]\nmode = \"output\"\nmodel = {{ models = [{{ provider = \"meshy\", model = \"image-to-3d\" }}] }}\ndescription = \"Builds\"\nmax_iterations = 3\n",
+        manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#)
+    );
+    let findings = lint(&toml, &LintEnv::default_with_windows());
+    let found = findings
+        .iter()
+        .find(|f| f.code == "unbounded-percentage-budget")
+        .expect("the region is still warned about, against the text model");
+    assert!(
+        found.message.contains("claude-sonnet-5") && found.message.contains("380000"),
+        "{}",
+        found.message
+    );
+    assert!(!found.message.contains("64000000"), "{}", found.message);
+}
+
 /// Without a window there is no number to report, and a warning that cannot say
 /// what "38%" comes to is one nobody acts on.
 #[test]
@@ -3445,6 +3565,15 @@ available_tools = ["read_file"]
 [stages.open_route.input]
 accepts = ["audio/*"]
 
+[stages.mixed]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Sees the pictures, not the sound"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.mixed.input]
+accepts = ["audio/*", "image/*"]
+
 [context.regions]
 task = { kind = "pinned", max_tokens = 1000 }
 storyboard = { kind = "pinned", max_tokens = 1000, accepts = ["image/*"] }
@@ -3453,7 +3582,21 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
     let findings = lint(manifest, &LintEnv::default());
     assert!(with_code(&findings, "tool-accepts-ungranted").is_empty());
     let unseen = with_code(&findings, "mime-unseen");
-    assert_eq!(unseen.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(unseen.len(), 2, "{:?}", codes(&findings));
+    // A stage whose model sees some of what it takes is a pipeline working as
+    // designed: said as a note, naming only what is unseen.
+    let mixed = unseen
+        .iter()
+        .find(|f| f.stage.as_deref() == Some("mixed"))
+        .expect("the mixed stage is noted");
+    assert_eq!(mixed.severity, LintSeverity::Note);
+    assert!(mixed.message.contains("takes audio/*"), "{}", mixed.message);
+    assert!(!mixed.message.contains("image/*"), "{}", mixed.message);
+    let unseen: Vec<&&LintFinding> = unseen
+        .iter()
+        .filter(|f| f.stage.as_deref() == Some("listen"))
+        .collect();
+    assert_eq!(unseen[0].severity, LintSeverity::Warning);
     assert_eq!(unseen[0].stage.as_deref(), Some("listen"));
     assert!(
         unseen[0].message.contains("takes audio/*"),

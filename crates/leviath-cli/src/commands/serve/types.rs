@@ -659,7 +659,8 @@ pub(crate) struct FinalOutputResp {
     /// Whether the answer hit the size cap and was cut short.
     pub truncated: bool,
     /// Files the run produced, typed and hashed. Fetch one with
-    /// `GET /api/agents/{id}/files?path=`.
+    /// `GET /api/agents/{id}/artifacts/{name}`, which reads the store by
+    /// hash and then the workdir, the way the runtime does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactResp>,
 }

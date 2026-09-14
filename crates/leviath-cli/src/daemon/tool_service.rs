@@ -501,9 +501,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         return match &state.subagent {
             Some(handle) => {
                 let limit = tool_limit(state, &tc.name);
-                crate::daemon::subagent::handle_within(handle, tc, limit.as_deref())
-                    .await
-                    .into()
+                crate::daemon::subagent::handle_content(handle, tc, limit.as_deref()).await
             }
             None => "[error] sub-agent tools are unavailable for this agent".into(),
         };

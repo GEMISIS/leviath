@@ -813,14 +813,21 @@ impl Server {
         }
         // The files the run produced, as links the host can open itself:
         // the protocol's `resource_link` block, pointing into the session's
-        // working directory where the run wrote them.
+        // working directory where the run wrote them - or, for a file that
+        // is not there (a model made it and nothing wrote it to disk), into
+        // the run's blob store, which holds it by hash.
         let cwd = self
             .session
             .as_ref()
             .map(|s| s.cwd.clone())
             .unwrap_or_default();
+        let run_id = self
+            .session
+            .as_ref()
+            .and_then(|s| s.run_id.clone())
+            .unwrap_or_default();
         for artifact in &output.artifacts {
-            let path = std::path::Path::new(&cwd).join(&artifact.path);
+            let path = artifact_location(&cwd, &run_id, artifact);
             let params = SessionUpdateParams {
                 session_id: session_id.to_string(),
                 update: SessionUpdate::AgentMessageChunk {
@@ -872,6 +879,26 @@ impl Server {
 /// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
 /// shape and tolerates a partially-written or older metadata file. Returns
 /// `None` if the file is missing or unreadable (the run hasn't persisted yet).
+/// Where a host can open one of the run's files: the workdir copy when the
+/// run wrote one, else the blob the run's store holds it as. A file in
+/// neither place is still linked at its workdir path, which is the most a
+/// link can say about it.
+fn artifact_location(
+    cwd: &str,
+    run_id: &str,
+    artifact: &leviath_core::output::Artifact,
+) -> std::path::PathBuf {
+    let in_workdir = std::path::Path::new(cwd).join(&artifact.path);
+    if in_workdir.exists() || artifact.sha256.is_empty() {
+        return in_workdir;
+    }
+    let stored = crate::blobs::blob_path(run_id, &artifact.sha256);
+    match stored.is_file() {
+        true => stored,
+        false => in_workdir,
+    }
+}
+
 fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
     #[derive(serde::Deserialize)]
     struct StatusOnly {
