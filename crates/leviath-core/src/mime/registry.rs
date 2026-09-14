@@ -49,9 +49,18 @@ pub enum TokenRule {
     },
     /// Tokens per second of mime. Needs a duration; falls back to a byte guess.
     PerSecond(u32),
+    /// Tokens per page of a document. Needs a page count; without one, a
+    /// page is assumed every [`PAGE_BYTES_GUESS`] bytes.
+    PerPage(usize),
     /// A flat charge whatever the size.
     Fixed(usize),
 }
+
+/// The bytes one page is taken to hold when a document's pages cannot be
+/// counted. A text page is a few kilobytes and a scanned one a few hundred, so
+/// 64 KiB errs high for text, the safe side for a budget, and lands near a
+/// slide deck or a scan.
+pub const PAGE_BYTES_GUESS: u64 = 64 * 1024;
 
 /// The flat table a rule is written as: exactly one of `per_byte`,
 /// `per_pixel` (with `max`), `per_second` or `fixed`.
@@ -70,6 +79,9 @@ pub struct TokenRuleWire {
     /// See [`TokenRule::PerSecond`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_second: Option<u32>,
+    /// See [`TokenRule::PerPage`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_page: Option<usize>,
     /// See [`TokenRule::Fixed`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed: Option<usize>,
@@ -82,16 +94,18 @@ impl TryFrom<TokenRuleWire> for TokenRule {
         if w.max.is_some() && w.per_pixel.is_none() {
             return Err("tokens.max only goes with per_pixel".to_string());
         }
-        match (w.per_byte, w.per_pixel, w.per_second, w.fixed) {
-            (Some(rate), None, None, None) => Ok(TokenRule::PerByte(rate)),
-            (None, Some(divisor), None, None) => Ok(TokenRule::PerPixel {
+        match (w.per_byte, w.per_pixel, w.per_second, w.per_page, w.fixed) {
+            (Some(rate), None, None, None, None) => Ok(TokenRule::PerByte(rate)),
+            (None, Some(divisor), None, None, None) => Ok(TokenRule::PerPixel {
                 divisor,
                 max: w.max.unwrap_or(1600),
             }),
-            (None, None, Some(rate), None) => Ok(TokenRule::PerSecond(rate)),
-            (None, None, None, Some(n)) => Ok(TokenRule::Fixed(n)),
+            (None, None, Some(rate), None, None) => Ok(TokenRule::PerSecond(rate)),
+            (None, None, None, Some(rate), None) => Ok(TokenRule::PerPage(rate)),
+            (None, None, None, None, Some(n)) => Ok(TokenRule::Fixed(n)),
             _ => Err(
-                "tokens needs exactly one of per_byte, per_pixel, per_second, fixed".to_string(),
+                "tokens needs exactly one of per_byte, per_pixel, per_second, per_page, fixed"
+                    .to_string(),
             ),
         }
     }
@@ -107,6 +121,7 @@ impl From<TokenRule> for TokenRuleWire {
                 w.max = Some(max);
             }
             TokenRule::PerSecond(rate) => w.per_second = Some(rate),
+            TokenRule::PerPage(rate) => w.per_page = Some(rate),
             TokenRule::Fixed(n) => w.fixed = Some(n),
         }
         w
@@ -115,7 +130,13 @@ impl From<TokenRule> for TokenRuleWire {
 
 impl TokenRule {
     /// The estimate for a part of `size` bytes with what is known about it.
-    pub fn estimate(self, size: u64, dims: Option<(u32, u32)>, duration_ms: Option<u64>) -> usize {
+    pub fn estimate(
+        self,
+        size: u64,
+        dims: Option<(u32, u32)>,
+        duration_ms: Option<u64>,
+        pages: Option<u32>,
+    ) -> usize {
         let per_byte = |rate: f64| ((size as f64) * rate).ceil() as usize;
         match self {
             TokenRule::PerByte(rate) => per_byte(rate).max(1),
@@ -133,6 +154,11 @@ impl TokenRule {
                 // per-second rule.
                 None => per_byte(1.0 / 32.0).max(1),
             },
+            TokenRule::PerPage(rate) => {
+                let pages =
+                    pages.map_or_else(|| size.div_ceil(PAGE_BYTES_GUESS) as usize, |n| n as usize);
+                pages.saturating_mul(rate).max(1)
+            }
             TokenRule::Fixed(n) => n,
         }
     }
@@ -195,10 +221,17 @@ impl MimeInfo {
         size: u64,
         dims: Option<(u32, u32)>,
         duration_ms: Option<u64>,
+        pages: Option<u32>,
     ) -> String {
         let dims_s = dims.map(|(w, h)| format!("{w}x{h}")).unwrap_or_default();
         let dur_s = duration_ms
             .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        let pages_s = pages
+            .map(|n| match n {
+                1 => "1 page".to_string(),
+                n => format!("{n} pages"),
+            })
             .unwrap_or_default();
         let size_s = super::human_size(size);
         let name_s = name.unwrap_or("");
@@ -208,7 +241,8 @@ impl MimeInfo {
                 .replace("{name}", name_s)
                 .replace("{size}", &size_s)
                 .replace("{dims}", &dims_s)
-                .replace("{duration}", &dur_s),
+                .replace("{duration}", &dur_s)
+                .replace("{pages}", &pages_s),
             None => {
                 let mut s = format!("[{}", self.mime_type);
                 if !dims_s.is_empty() {
@@ -217,6 +251,9 @@ impl MimeInfo {
                 } else if !dur_s.is_empty() {
                     s.push(' ');
                     s.push_str(&dur_s);
+                } else if !pages_s.is_empty() {
+                    s.push(' ');
+                    s.push_str(&pages_s);
                 }
                 s.push_str(", ");
                 s.push_str(&size_s);
@@ -697,7 +734,7 @@ mod tests {
         assert!(!obj.text);
         assert_eq!(obj.family, "model");
         assert_eq!(
-            obj.render_stand_in(Some("a.obj"), 10, Some((1, 2)), Some(1500)),
+            obj.render_stand_in(Some("a.obj"), 10, Some((1, 2)), Some(1500), None),
             "<model/obj a.obj 10 B 1x2 1.5s>"
         );
         assert_eq!(reg.info(&mt("chemical/x-pdb")).family, "chem");
@@ -847,22 +884,47 @@ mod tests {
 
     #[test]
     fn token_rules() {
-        assert_eq!(TokenRule::PerByte(0.25).estimate(8, None, None), 2);
-        assert_eq!(TokenRule::PerByte(0.25).estimate(0, None, None), 1);
+        assert_eq!(TokenRule::PerByte(0.25).estimate(8, None, None, None), 2);
+        assert_eq!(TokenRule::PerByte(0.25).estimate(0, None, None, None), 1);
         let px = TokenRule::PerPixel {
             divisor: 750,
             max: 1600,
         };
-        assert_eq!(px.estimate(0, Some((750, 2)), None), 2);
-        assert_eq!(px.estimate(0, Some((4000, 4000)), None), 1600);
-        assert_eq!(px.estimate(0, None, None), 1600);
-        assert_eq!(px.estimate(0, Some((0, 0)), None), 1);
+        assert_eq!(px.estimate(0, Some((750, 2)), None, None), 2);
+        assert_eq!(px.estimate(0, Some((4000, 4000)), None, None), 1600);
+        assert_eq!(px.estimate(0, None, None, None), 1600);
+        assert_eq!(px.estimate(0, Some((0, 0)), None, None), 1);
         let zero_div = TokenRule::PerPixel { divisor: 0, max: 0 };
-        assert_eq!(zero_div.estimate(0, Some((3, 3)), None), 1);
-        assert_eq!(TokenRule::PerSecond(32).estimate(0, None, Some(1500)), 64);
-        assert_eq!(TokenRule::PerSecond(32).estimate(0, None, Some(0)), 1);
-        assert_eq!(TokenRule::PerSecond(32).estimate(3200, None, None), 100);
-        assert_eq!(TokenRule::Fixed(7).estimate(99, None, None), 7);
+        assert_eq!(zero_div.estimate(0, Some((3, 3)), None, None), 1);
+        assert_eq!(
+            TokenRule::PerSecond(32).estimate(0, None, Some(1500), None),
+            64
+        );
+        assert_eq!(TokenRule::PerSecond(32).estimate(0, None, Some(0), None), 1);
+        assert_eq!(
+            TokenRule::PerSecond(32).estimate(3200, None, None, None),
+            100
+        );
+        assert_eq!(TokenRule::Fixed(7).estimate(99, None, None, None), 7);
+        // Pages when counted, a page per 64 KiB when not, never nothing.
+        assert_eq!(
+            TokenRule::PerPage(2000).estimate(0, None, None, Some(3)),
+            6000
+        );
+        assert_eq!(TokenRule::PerPage(2000).estimate(0, None, None, Some(0)), 1);
+        assert_eq!(
+            TokenRule::PerPage(2000).estimate(65_537, None, None, None),
+            4000
+        );
+        assert_eq!(TokenRule::PerPage(2000).estimate(0, None, None, None), 1);
+        let per_page: TokenRule = serde_json::from_str("{\"per_page\":2000}").unwrap();
+        assert_eq!(per_page, TokenRule::PerPage(2000));
+        assert_eq!(
+            serde_json::to_string(&per_page).unwrap(),
+            "{\"per_page\":2000}"
+        );
+        let two: Result<TokenRule, _> = serde_json::from_str("{\"per_page\":1,\"fixed\":2}");
+        assert!(two.unwrap_err().to_string().contains("per_page"));
         let json = serde_json::to_string(&TokenRule::PerSecond(32)).unwrap();
         assert_eq!(json, "{\"per_second\":32}");
         let px: TokenRule = serde_json::from_str("{\"per_pixel\":750,\"max\":1600}").unwrap();
@@ -1001,17 +1063,27 @@ mod tests {
         let reg = MimeRegistry::builtin();
         let png = reg.info(&mt("image/png"));
         assert_eq!(
-            png.render_stand_in(Some("hero.png"), 240 * 1024, Some((1024, 768)), None),
+            png.render_stand_in(Some("hero.png"), 240 * 1024, Some((1024, 768)), None, None),
             "[image/png 1024x768, 240 KB] hero.png"
         );
         let wav = reg.info(&mt("audio/wav"));
         assert_eq!(
-            wav.render_stand_in(None, 2048, None, Some(2500)),
+            wav.render_stand_in(None, 2048, None, Some(2500), None),
             "[audio/wav 2.5s, 2 KB]"
+        );
+        // A document's stand-in counts its pages, singular included.
+        let pdf = reg.info(&MimeType::parse("application/pdf").unwrap());
+        assert_eq!(
+            pdf.render_stand_in(Some("brief.pdf"), 2048, None, None, Some(1)),
+            "[application/pdf 1 page, 2 KB] brief.pdf"
+        );
+        assert_eq!(
+            pdf.render_stand_in(None, 2048, None, None, Some(12)),
+            "[application/pdf 12 pages, 2 KB]"
         );
         assert_eq!(
             reg.info(&mt("model/stl"))
-                .render_stand_in(Some("a"), 1, None, None),
+                .render_stand_in(Some("a"), 1, None, None, None),
             "[model/stl, 1 B] a"
         );
     }

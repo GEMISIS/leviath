@@ -62,10 +62,10 @@ stand_in = "[{type} {size}] {name}"
 |---|---|
 | `family` | What providers key their encoders on: `text`, `image`, `audio`, `video`, `document`, `model`, `binary`, or a name of your own |
 | `text` | The bytes are UTF-8 and may travel inline and reach any text model as text |
-| `tokens` | One of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ fixed = 1000 }` |
+| `tokens` | One of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ per_page = 2000 }`, `{ fixed = 1000 }` |
 | `extensions` | Extensions, without the dot, that imply this type |
 | `magic` | A hex prefix that identifies the bytes. `??` stands for any one byte, so a tag past a length field can be named: `52494646????????57454250` is RIFF, four bytes of size, WEBP |
-| `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
+| `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` `{pages}` |
 | `check` | A [Rhai script](/docs/rhai-mime-checks) that refuses bytes which are not what they claim; `""` lifts a broader row's check |
 
 Rows layer. The compiled defaults come first, then a `[mime_types]` table in your config, then

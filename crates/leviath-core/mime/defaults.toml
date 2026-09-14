@@ -12,11 +12,11 @@
 #              as text
 #   tokens     how to estimate a part's cost before a provider bills it:
 #              { per_byte = 0.25 } | { per_pixel = 750, max = 1600 }
-#              | { per_second = 32 } | { fixed = 1000 }
+#              | { per_second = 32 } | { per_page = 2000 } | { fixed = 1000 }
 #   extensions file extensions that imply this type
 #   magic      a hex prefix that identifies the bytes
 #   stand_in   the text a consumer that cannot take the type sees; supports
-#              {type} {name} {size} {dims} {duration}
+#              {type} {name} {size} {dims} {duration} {pages}
 
 ["*/*"]
 family = "binary"
@@ -131,9 +131,11 @@ extensions = ["webm"]
 ["video/quicktime"]
 extensions = ["mov"]
 
+# A page of text and layout costs a model about what a page-sized image
+# does; the providers that read PDFs natively bill roughly this per page.
 ["application/pdf"]
 family = "document"
-tokens = { per_byte = 0.5 }
+tokens = { per_page = 2000 }
 extensions = ["pdf"]
 magic = "25504446"
 

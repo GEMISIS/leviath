@@ -27,6 +27,62 @@ pub fn duration_ms(mime_type: &MimeType, bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// Page count, for the document types a probe can read.
+pub fn pages(mime_type: &MimeType, bytes: &[u8]) -> Option<u32> {
+    match mime_type.as_str() {
+        "application/pdf" => pdf_pages(bytes),
+        _ => None,
+    }
+}
+
+/// PDF: every page is an object whose dictionary says `/Type /Page`, and the
+/// page tree's root says `/Count N`. Both are read off the raw bytes, and the
+/// larger wins: a file whose page objects sit inside compressed object streams
+/// shows only the count (or, with the tree compressed too, nothing at all,
+/// and the caller falls back to a size guess), while a file that was updated
+/// in place can carry a stale root beside its live pages. `/Pages` is the tree
+/// node, not a page, so the byte after `/Page` has to end the name.
+fn pdf_pages(b: &[u8]) -> Option<u32> {
+    if !b.starts_with(b"%PDF") {
+        return None;
+    }
+    let mut page_objects: u32 = 0;
+    let mut count: u32 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'/' {
+            i += 1;
+            continue;
+        }
+        let rest = &b[i..];
+        if let Some(after) = rest.strip_prefix(b"/Type") {
+            let name = after.trim_ascii_start();
+            if let Some(tail) = name.strip_prefix(b"/Page")
+                && !tail.first().is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                page_objects = page_objects.saturating_add(1);
+            }
+        } else if let Some(after) = rest.strip_prefix(b"/Count") {
+            let digits = after.trim_ascii_start();
+            let end = digits
+                .iter()
+                .position(|c| !c.is_ascii_digit())
+                .unwrap_or(digits.len());
+            if let Some(n) = std::str::from_utf8(&digits[..end])
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                count = count.max(n);
+            }
+        }
+        i += 1;
+    }
+    match page_objects.max(count) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
 fn be32(b: &[u8], at: usize) -> Option<u32> {
     let s = b.get(at..at + 4)?;
     Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
@@ -279,6 +335,36 @@ mod tests {
         v.extend_from_slice(b"data");
         v.extend_from_slice(&data_len.to_le_bytes());
         v
+    }
+
+    /// Three page objects under a root that counts them; the count alone
+    /// when the pages are inside object streams; a stale root beside four
+    /// live pages; and nothing for a file with neither, or that is not a PDF.
+    #[test]
+    fn pdf_pages_from_page_objects_or_the_tree_count() {
+        let three =
+            b"%PDF-1.7\n1 0 obj << /Type /Pages /Count 3 /Kids [2 0 R 3 0 R 4 0 R] >> endobj\n\
+                      2 0 obj << /Type /Page /Parent 1 0 R >> endobj\n\
+                      3 0 obj <</Type/Page/Parent 1 0 R>> endobj\n\
+                      4 0 obj << /Type\n/Page >> endobj\n";
+        assert_eq!(pages(&mt("application/pdf"), three), Some(3));
+        let count_only = b"%PDF-1.5\n1 0 obj << /Type /Pages /Count 12 >> endobj\n2 0 obj << /Type /ObjStm >> stream ... endstream endobj\n";
+        assert_eq!(pages(&mt("application/pdf"), count_only), Some(12));
+        let stale_root = b"%PDF-1.4\n<< /Type /Pages /Count 2 >>\n<< /Type /Page >> << /Type /Page >> << /Type /Page >> << /Type /Page >>\n";
+        assert_eq!(pages(&mt("application/pdf"), stale_root), Some(4));
+        // `/Count` also sizes other things (an outline, say); a bad value is skipped.
+        let junk_count = b"%PDF-1.4\n<< /Count x >> << /Type /Page >> << /Count 99999999999 >>\n";
+        assert_eq!(pages(&mt("application/pdf"), junk_count), Some(1));
+        assert_eq!(
+            pages(&mt("application/pdf"), b"%PDF-1.7\n<< /Type /Font >>"),
+            None
+        );
+        assert_eq!(pages(&mt("application/pdf"), b"%PDF"), None);
+        assert_eq!(
+            pages(&mt("application/pdf"), b"not a pdf /Type /Page"),
+            None
+        );
+        assert_eq!(pages(&mt("image/png"), three), None);
     }
 
     #[test]

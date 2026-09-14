@@ -48,6 +48,8 @@ pub(crate) enum TokenSpec {
     },
     /// `per_second=32`.
     PerSecond(i64),
+    /// `per_page=2000`.
+    PerPage(i64),
     /// `fixed=1000`.
     Fixed(i64),
 }
@@ -71,23 +73,25 @@ impl TokenSpec {
                             .map_err(|_| format!("max must be a whole number, got '{value}'"))?,
                     );
                 }
-                "per_byte" | "per_pixel" | "per_second" | "fixed" => {
+                "per_byte" | "per_pixel" | "per_second" | "per_page" | "fixed" => {
                     if rule.is_some() {
-                        return Err("name exactly one of per_byte, per_pixel, per_second, fixed"
-                            .to_string());
+                        return Err(
+                            "name exactly one of per_byte, per_pixel, per_second, per_page, fixed"
+                                .to_string(),
+                        );
                     }
                     rule = Some((key.to_string(), value.to_string()));
                 }
                 other => {
                     return Err(format!(
                         "'{other}' is not a token rule: per_byte, per_pixel (with max), \
-                         per_second or fixed"
+                         per_second, per_page or fixed"
                     ));
                 }
             }
         }
         let Some((key, value)) = rule else {
-            return Err("name one of per_byte, per_pixel, per_second, fixed".to_string());
+            return Err("name one of per_byte, per_pixel, per_second, per_page, fixed".to_string());
         };
         let whole = |value: &str| {
             value
@@ -105,6 +109,7 @@ impl TokenSpec {
                 max,
             },
             "per_second" => TokenSpec::PerSecond(whole(&value)?),
+            "per_page" => TokenSpec::PerPage(whole(&value)?),
             _ => TokenSpec::Fixed(whole(&value)?),
         };
         if max.is_some() && !matches!(spec, TokenSpec::PerPixel { .. }) {
@@ -128,6 +133,9 @@ impl TokenSpec {
             }
             TokenSpec::PerSecond(rate) => {
                 table.insert("per_second", Value::from(*rate));
+            }
+            TokenSpec::PerPage(rate) => {
+                table.insert("per_page", Value::from(*rate));
             }
             TokenSpec::Fixed(n) => {
                 table.insert("fixed", Value::from(*n));
@@ -303,6 +311,10 @@ mod tests {
             Ok(TokenSpec::PerSecond(32))
         );
         assert_eq!(TokenSpec::parse("fixed=1000"), Ok(TokenSpec::Fixed(1000)));
+        assert_eq!(
+            TokenSpec::parse("per_page=2000"),
+            Ok(TokenSpec::PerPage(2000))
+        );
         for (bad, needle) in [
             ("", "name one of"),
             ("max=3", "name one of"),
@@ -311,6 +323,7 @@ mod tests {
             ("per_pixel=x", "per_pixel must be a whole number"),
             ("per_pixel=1,max=x", "max must be a whole number"),
             ("per_second=x", "per_second must be a whole number"),
+            ("per_page=x", "per_page must be a whole number"),
             ("fixed=x", "fixed must be a whole number"),
             ("fixed=1,per_second=2", "exactly one of"),
             ("fixed=1,max=2", "max only goes with per_pixel"),
@@ -323,6 +336,7 @@ mod tests {
         for (spec, key) in [
             (TokenSpec::PerByte(0.5), "per_byte"),
             (TokenSpec::PerSecond(1), "per_second"),
+            (TokenSpec::PerPage(4), "per_page"),
             (TokenSpec::Fixed(2), "fixed"),
             (
                 TokenSpec::PerPixel {

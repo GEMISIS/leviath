@@ -119,6 +119,7 @@ impl Blob {
         let info = reg.info(&self.mime_type);
         let dims = super::probe::dimensions(&self.mime_type, &self.bytes);
         let duration_ms = super::probe::duration_ms(&self.mime_type, &self.bytes);
+        let pages = super::probe::pages(&self.mime_type, &self.bytes);
         let size = self.bytes.len() as u64;
         BlobRef {
             sha256: super::store::sha256_hex(&self.bytes),
@@ -127,8 +128,8 @@ impl Blob {
             width: dims.map(|d| d.0),
             height: dims.map(|d| d.1),
             duration_ms,
-            tokens: info.tokens.estimate(size, dims, duration_ms),
-            stand_in: info.render_stand_in(self.name.as_deref(), size, dims, duration_ms),
+            tokens: info.tokens.estimate(size, dims, duration_ms, pages),
+            stand_in: info.render_stand_in(self.name.as_deref(), size, dims, duration_ms, pages),
         }
     }
 }
@@ -262,7 +263,7 @@ impl Part {
                     super::TokenRule::PerByte(rate) if (rate - 0.25).abs() < f64::EPSILON => {
                         crate::text::estimate_tokens(s)
                     }
-                    rule => rule.estimate(s.len() as u64, None, None),
+                    rule => rule.estimate(s.len() as u64, None, None, None),
                 }
             }
             PartBody::Stored(b) => crate::text::estimate_tokens(&b.stand_in),
@@ -408,6 +409,26 @@ mod tests {
         let p = Part::stored(r).named("hero.png");
         assert_eq!(p.stand_in(), "[image/png 1024x768, 24 B] hero.png");
         let unnamed = Blob::new(mt("audio/wav"), vec![1, 2, 3]).describe(&reg);
+        // A document is billed by its pages, not its bytes: a 2 MB brochure
+        // was charged over a million tokens under a per-byte rule and could
+        // not be sent to any model.
+        let mut pdf =
+            b"%PDF-1.7\n<< /Type /Pages /Count 2 >> << /Type /Page >> << /Type /Page >>".to_vec();
+        pdf.extend(std::iter::repeat_n(b' ', 2 * 1024 * 1024));
+        let brochure = Blob::new(mt("application/pdf"), pdf)
+            .named("brochure.pdf")
+            .describe(&reg);
+        assert_eq!(brochure.tokens, 4000);
+        assert!(
+            brochure.stand_in.contains("2 pages"),
+            "{}",
+            brochure.stand_in
+        );
+        assert!(
+            brochure.stand_in.contains("brochure.pdf"),
+            "{}",
+            brochure.stand_in
+        );
         assert_eq!(Part::stored(unnamed).stand_in(), "[audio/wav, 3 B]");
     }
 

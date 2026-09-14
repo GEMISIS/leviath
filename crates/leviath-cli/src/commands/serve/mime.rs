@@ -20,7 +20,7 @@ use leviath_core::mime::MimeType;
 use super::types::*;
 use crate::commands::mime_rows::{Added, RowEdit, TokenSpec, add_row, remove_row};
 
-/// A token rule as JSON: exactly one of the four rates, `max` only beside
+/// A token rule as JSON: exactly one of the five rates, `max` only beside
 /// `per_pixel`, the shape a `[mime_types]` row's `tokens` table takes.
 #[derive(Debug, Deserialize)]
 pub(super) struct TokenRuleReq {
@@ -30,6 +30,8 @@ pub(super) struct TokenRuleReq {
     per_pixel: Option<i64>,
     /// `{ per_second = 32 }`.
     per_second: Option<i64>,
+    /// `{ per_page = 2000 }`.
+    per_page: Option<i64>,
     /// `{ fixed = 1000 }`.
     fixed: Option<i64>,
     /// The cap, only alongside `per_pixel`.
@@ -43,13 +45,16 @@ impl TokenRuleReq {
             self.per_byte.is_some(),
             self.per_pixel.is_some(),
             self.per_second.is_some(),
+            self.per_page.is_some(),
             self.fixed.is_some(),
         ]
         .iter()
         .filter(|set| **set)
         .count();
         if named != 1 {
-            return Err("name exactly one of per_byte, per_pixel, per_second, fixed".into());
+            return Err(
+                "name exactly one of per_byte, per_pixel, per_second, per_page, fixed".into(),
+            );
         }
         if self.max.is_some() && self.per_pixel.is_none() {
             return Err("max only goes with per_pixel".into());
@@ -63,6 +68,8 @@ impl TokenRuleReq {
             })
         } else if let Some(rate) = self.per_second {
             Ok(TokenSpec::PerSecond(rate))
+        } else if let Some(rate) = self.per_page {
+            Ok(TokenSpec::PerPage(rate))
         } else {
             Ok(TokenSpec::Fixed(self.fixed.unwrap_or_default()))
         }
@@ -266,6 +273,7 @@ mod tests {
         for (i, tokens) in [
             serde_json::json!({ "per_byte": 0.25 }),
             serde_json::json!({ "per_second": 32 }),
+            serde_json::json!({ "per_page": 2000 }),
             serde_json::json!({ "fixed": 1000 }),
             serde_json::json!({ "per_pixel": 750 }),
         ]

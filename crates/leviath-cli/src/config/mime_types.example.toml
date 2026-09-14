@@ -15,5 +15,5 @@ text = true                      # UTF-8 under the hood: may reach a text model 
 family = "model"                 # text | image | audio | video | document | model | binary | a name of your own
 extensions = ["scene"]
 magic = "41434D45"               # a hex prefix that identifies the bytes
-tokens = { per_byte = 0.1 }      # or { per_pixel = 750, max = 1600 }, { per_second = 32 }, { fixed = 1000 }
+tokens = { per_byte = 0.1 }      # or { per_pixel = 750, max = 1600 }, { per_second = 32 }, { per_page = 2000 }, { fixed = 1000 }
 stand_in = "[{type} {size}] {name}"   # what a model that cannot take the type sees

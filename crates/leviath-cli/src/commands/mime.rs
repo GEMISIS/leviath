@@ -100,7 +100,7 @@ pub struct AddArgs {
     #[arg(long)]
     pub binary: bool,
     /// How to estimate tokens: `per_byte=0.25`, `per_pixel=750,max=1600`,
-    /// `per_second=32` or `fixed=1000`.
+    /// `per_second=32`, `per_page=2000` or `fixed=1000`.
     #[arg(long, value_name = "RULE")]
     pub tokens: Option<String>,
     /// File extensions that imply the type, comma-separated, without dots.
@@ -331,6 +331,7 @@ fn show_lines(registry: &MimeRegistry, mime_type: &MimeType) -> String {
             format!("one per {divisor} pixels, at most {max}")
         }
         leviath_core::mime::TokenRule::PerSecond(rate) => format!("{rate} per second"),
+        leviath_core::mime::TokenRule::PerPage(rate) => format!("{rate} per page"),
         leviath_core::mime::TokenRule::Fixed(n) => format!("{n}, whatever the size"),
     };
     let mut out = format!("{mime_type}\n");
@@ -543,6 +544,8 @@ mod tests {
         );
         let wav = render_show(&registry, "audio/wav", false).unwrap();
         assert!(wav.contains("per second"), "{wav}");
+        let pdf = render_show(&registry, "application/pdf", false).unwrap();
+        assert!(pdf.contains("tokens      2000 per page"), "{pdf}");
         let fixed: toml::Table = toml::from_str("[\"x/y\"]\ntokens = { fixed = 7 }\n").unwrap();
         registry.layer(&fixed, "t").unwrap();
         let xy = render_show(&registry, "x/y", false).unwrap();
