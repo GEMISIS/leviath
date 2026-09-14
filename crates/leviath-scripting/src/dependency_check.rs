@@ -22,7 +22,9 @@
 //! and `path_exists(path)`. A check reads the machine, it never changes it;
 //! anything that installs is a separate, explicit `lev deps install`.
 
-use rhai::{AST, Dynamic, Engine, Scope};
+use rhai::AST;
+
+use crate::script_check::{self, Outcome};
 
 /// Operation budget for a check: a handful of probes and some string work.
 const CHECK_MAX_OPERATIONS: u64 = 1_000_000;
@@ -35,20 +37,20 @@ pub struct DependencyCheck {
     ast: AST,
 }
 
-/// Build the hardened engine every check runs on, with the read-only probes.
-fn build_engine() -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, CHECK_MAX_OPERATIONS);
-    crate::functions::register_functions(&mut engine);
-    crate::types::register_types(&mut engine);
-    // Read-only probes. A check inspects the machine and never mutates it, so
-    // there is deliberately no shell, no write and no network here.
+/// The read-only probes a check gets, and nothing else. A check inspects the
+/// machine and never mutates it, so there is deliberately no shell, no write
+/// and no network here.
+fn register_probes(engine: &mut rhai::Engine) {
     engine.register_fn("has_env", |name: &str| std::env::var_os(name).is_some());
     engine.register_fn("env", |name: &str| std::env::var(name).unwrap_or_default());
     engine.register_fn("path_exists", |path: &str| {
         std::path::Path::new(path).exists()
     });
-    engine
+}
+
+/// The hardened engine every check runs on, with the read-only probes.
+fn build_engine() -> rhai::Engine {
+    script_check::build_engine(CHECK_MAX_OPERATIONS, register_probes)
 }
 
 /// Compile a dependency check and check its shape.
@@ -57,26 +59,12 @@ fn build_engine() -> Engine {
 /// or defines it with the wrong arity, is refused here rather than silently
 /// never running.
 pub fn compile(path: &str, source: &str) -> crate::Result<DependencyCheck> {
-    let engine = build_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|e| crate::Error::CompilationFailed(format!("{path}: {e}")))?;
-    let arity = ast
-        .iter_functions()
-        .find(|f| f.name == "check")
-        .map(|f| f.params.len());
-    match arity {
-        Some(0) => Ok(DependencyCheck {
-            path: path.to_string(),
-            ast,
-        }),
-        Some(n) => Err(crate::Error::ValidationFailed(format!(
-            "{path}: fn check must take no parameters, found {n}"
-        ))),
-        None => Err(crate::Error::ValidationFailed(format!(
-            "{path}: script must define fn check()"
-        ))),
-    }
+    let check =
+        script_check::compile(&build_engine(), path, source, 0, "no parameters", "check()")?;
+    Ok(DependencyCheck {
+        path: check.path,
+        ast: check.ast,
+    })
 }
 
 /// What a check said about a dependency.
@@ -93,24 +81,10 @@ pub enum Verdict {
 
 /// Run a compiled `check()`.
 pub fn run(check: &DependencyCheck) -> Verdict {
-    let engine = build_engine();
-    let result: Result<Dynamic, _> = engine.call_fn(&mut Scope::new(), &check.ast, "check", ());
-    let value = match result {
-        Ok(v) => v,
-        Err(e) => return Verdict::Unusable(format!("{}: check: {e}", check.path)),
-    };
-    if value.is_unit() {
-        return Verdict::Satisfied;
-    }
-    match value.into_string() {
-        // An empty string is easy to write by accident and unambiguous, so it
-        // reads as "satisfied" rather than as a blank remedy.
-        Ok(remedy) if remedy.trim().is_empty() => Verdict::Satisfied,
-        Ok(remedy) => Verdict::Unmet(remedy),
-        Err(actual) => Verdict::Unusable(format!(
-            "{}: check must return () or a string, got {actual}",
-            check.path
-        )),
+    match script_check::run(&build_engine(), &check.path, &check.ast, ()) {
+        Outcome::Fine => Verdict::Satisfied,
+        Outcome::Complaint(remedy) => Verdict::Unmet(remedy),
+        Outcome::Unusable(error) => Verdict::Unusable(error),
     }
 }
 

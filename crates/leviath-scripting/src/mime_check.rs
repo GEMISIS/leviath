@@ -31,7 +31,9 @@
 //! and the bytes are refused with that report, since a check that cannot
 //! run is not a check that passed.
 
-use rhai::{AST, Dynamic, Engine, Scope};
+use rhai::AST;
+
+use crate::script_check::{self, Outcome};
 
 /// Operation budget for a check: a pass over one file's bytes, with room
 /// for a byte-by-byte scan of a large one.
@@ -49,13 +51,10 @@ pub struct MimeCheck {
     ast: AST,
 }
 
-/// Build the hardened engine every check runs on.
-fn build_engine() -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, CHECK_MAX_OPERATIONS);
-    crate::functions::register_functions(&mut engine);
-    crate::types::register_types(&mut engine);
-    engine
+/// The hardened engine every check runs on: the crate's functions and types,
+/// and nothing that reaches past the bytes it is handed.
+fn build_engine() -> rhai::Engine {
+    script_check::build_engine(CHECK_MAX_OPERATIONS, |_| {})
 }
 
 /// Compile a mime check and check its shape.
@@ -64,27 +63,18 @@ fn build_engine() -> Engine {
 /// script that defines nothing, or defines it with the wrong arity, is
 /// refused here rather than silently never running.
 pub fn compile(path: &str, source: &str) -> crate::Result<MimeCheck> {
-    let engine = build_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|e| crate::Error::CompilationFailed(format!("{path}: {e}")))?;
-
-    let arity = ast
-        .iter_functions()
-        .find(|f| f.name == "check")
-        .map(|f| f.params.len());
-    match arity {
-        Some(2) => Ok(MimeCheck {
-            path: path.to_string(),
-            ast,
-        }),
-        Some(n) => Err(crate::Error::ValidationFailed(format!(
-            "{path}: fn check must take exactly two parameters (bytes, mime_type), found {n}"
-        ))),
-        None => Err(crate::Error::ValidationFailed(format!(
-            "{path}: script must define fn check(bytes, mime_type)"
-        ))),
-    }
+    let check = script_check::compile(
+        &build_engine(),
+        path,
+        source,
+        2,
+        "exactly two parameters (bytes, mime_type)",
+        "check(bytes, mime_type)",
+    )?;
+    Ok(MimeCheck {
+        path: check.path,
+        ast: check.ast,
+    })
 }
 
 /// What a check said about some bytes.
@@ -102,32 +92,16 @@ pub enum Verdict {
 
 /// Run `check` over `bytes` claiming `mime_type`.
 pub fn check(check: &MimeCheck, mime_type: &str, bytes: &[u8]) -> Verdict {
-    let engine = build_engine();
     let blob: rhai::Blob = bytes.to_vec();
-    let result: Result<Dynamic, _> = engine.call_fn(
-        &mut Scope::new(),
+    match script_check::run(
+        &build_engine(),
+        &check.path,
         &check.ast,
-        "check",
         (blob, mime_type.to_string()),
-    );
-    let value = match result {
-        Ok(v) => v,
-        Err(e) => {
-            return Verdict::Unusable(format!("{}: check: {e}", check.path));
-        }
-    };
-    if value.is_unit() {
-        return Verdict::Valid;
-    }
-    match value.into_string() {
-        // An empty string is easy to write by accident and unambiguous in
-        // meaning, so it reads as "fine" rather than as a blank complaint.
-        Ok(reason) if reason.trim().is_empty() => Verdict::Valid,
-        Ok(reason) => Verdict::Invalid(reason),
-        Err(actual) => Verdict::Unusable(format!(
-            "{}: check must return () or a string, got {actual}",
-            check.path
-        )),
+    ) {
+        Outcome::Fine => Verdict::Valid,
+        Outcome::Complaint(reason) => Verdict::Invalid(reason),
+        Outcome::Unusable(error) => Verdict::Unusable(error),
     }
 }
 

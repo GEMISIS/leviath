@@ -369,7 +369,7 @@ fn mime_data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Ve
                 && !data.is_empty()
                 && want(part.mime_type.as_str())
             {
-                uris.push(format!("data:{};base64,{}", part.mime_type.as_str(), data));
+                uris.push(crate::mime::data_uri(&part.mime_type, data));
             }
         }
     }

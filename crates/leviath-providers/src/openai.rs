@@ -4,7 +4,7 @@ use crate::capabilities::{Match, Row};
 use crate::learned::{LearnedModel, LearnedModels};
 use crate::openai_compat::{
     TokenLimitField, build_openai_request_body_with, openai_sse_stream, parse_openai_response,
-    send_chat_request, temperature_refused, tools_refused_over_reasoning_effort,
+    tools_refused_over_reasoning_effort,
 };
 use crate::provider::{
     InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
@@ -237,7 +237,7 @@ impl OpenAIProvider {
         // to protect these models was what broke them. Omitting is what the
         // OpenRouter provider has always done for the same models.
         if !self.capabilities(&request.model).supports_temperature {
-            body = drop_temperature(body);
+            crate::provider::drop_temperature(&mut body);
         }
 
         // Already learned for this model: pay nothing and send it up front.
@@ -245,7 +245,7 @@ impl OpenAIProvider {
             set_reasoning_effort_none(&mut body);
         }
         if self.temperature_is_unsupported(&request.model) {
-            body = drop_temperature(body);
+            crate::provider::drop_temperature(&mut body);
         }
         // A caller who set `reasoning_effort` themselves (via the manifest's
         // `[model.parameters]`) has said what they want. Overriding it, or
@@ -253,16 +253,15 @@ impl OpenAIProvider {
         // only for a body that never mentioned the field.
         let ours_to_set = body.get("reasoning_effort").is_none();
 
-        let sent = send_chat_request(
-            &self.client,
-            "openai",
-            &url,
-            &headers,
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await;
+        let target = crate::provider::ChatTarget {
+            client: &self.client,
+            provider: "openai",
+            url: &url,
+            headers: &headers,
+            limiter: self.rate_limiter.as_ref(),
+            timeout_secs: request.request_timeout_secs,
+        };
+        let sent = target.send(&body).await;
 
         match sent {
             Err(ProviderError::ApiError(detail))
@@ -274,47 +273,24 @@ impl OpenAIProvider {
                 );
                 self.remember_reasoning_effort_none(&request.model);
                 set_reasoning_effort_none(&mut body);
-                send_chat_request(
-                    &self.client,
-                    "openai",
-                    &url,
-                    &headers,
-                    &body,
-                    self.rate_limiter.as_ref(),
-                    request.request_timeout_secs,
-                )
-                .await
+                target.send(&body).await
             }
-            Err(ProviderError::ApiError(detail)) if temperature_refused(&detail) => {
-                tracing::debug!(
-                    model = %request.model,
-                    "the API refused the temperature we sent; retrying without it"
-                );
-                self.remember_temperature_unsupported(&request.model);
-                body = drop_temperature(body);
-                send_chat_request(
-                    &self.client,
-                    "openai",
-                    &url,
-                    &headers,
-                    &body,
-                    self.rate_limiter.as_ref(),
-                    request.request_timeout_secs,
-                )
-                .await
+            other => {
+                target
+                    .retry_without_temperature(
+                        other,
+                        &mut body,
+                        &request.model,
+                        &self.temperature_unsupported,
+                    )
+                    .await
             }
-            other => other,
         }
     }
 
     /// Whether this model has already refused a temperature.
     fn temperature_is_unsupported(&self, model: &str) -> bool {
         self.temperature_unsupported.contains(model)
-    }
-
-    /// Record that it did, for the rest of this process.
-    fn remember_temperature_unsupported(&self, model: &str) {
-        self.temperature_unsupported.insert(model);
     }
 
     /// Whether this model has already refused tools over a reasoning effort.
@@ -325,25 +301,6 @@ impl OpenAIProvider {
     /// Record that it did, for the rest of this process.
     fn remember_reasoning_effort_none(&self, model: &str) {
         self.reasoning_effort_none.insert(model);
-    }
-}
-
-/// Take `temperature` out of a request body.
-///
-/// "Not supported" is not a value: a model that takes only its default rejects
-/// `0.0` exactly as firmly as `0.7`, so the field has to be absent rather than
-/// zeroed. One function because three callers want it - the capability says
-/// so, the API said so once already, or the API is saying so right now - and a
-/// body that is not an object is not a case any of them can produce.
-fn drop_temperature(body: serde_json::Value) -> serde_json::Value {
-    match body {
-        serde_json::Value::Object(mut fields) => {
-            fields.remove("temperature");
-            serde_json::Value::Object(fields)
-        }
-        // Not a shape any caller here produces, and returned untouched rather
-        // than panicked over: dropping a field is not worth a crash.
-        other => other,
     }
 }
 
@@ -729,16 +686,13 @@ mod tests {
     /// Both arms of the removal, including the shape no caller produces.
     #[test]
     fn dropping_a_temperature_leaves_everything_else_alone() {
-        let body = serde_json::json!({"model": "m", "temperature": 0.7, "max_tokens": 8});
-        assert_eq!(
-            super::drop_temperature(body),
-            serde_json::json!({"model": "m", "max_tokens": 8})
-        );
-        // A body that is not an object comes back untouched.
-        assert_eq!(
-            super::drop_temperature(serde_json::json!(7)),
-            serde_json::json!(7)
-        );
+        let mut body = serde_json::json!({"model": "m", "temperature": 0.7, "max_tokens": 8});
+        crate::provider::drop_temperature(&mut body);
+        assert_eq!(body, serde_json::json!({"model": "m", "max_tokens": 8}));
+        // A body that is not an object is left untouched.
+        let mut scalar = serde_json::json!(7);
+        crate::provider::drop_temperature(&mut scalar);
+        assert_eq!(scalar, serde_json::json!(7));
     }
 
     /// The provider recovers from the refusal instead of failing the run, and

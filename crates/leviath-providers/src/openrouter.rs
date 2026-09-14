@@ -7,9 +7,7 @@ mod catalog;
 
 use crate::capabilities::{Match, Row};
 use crate::learned::LearnedModels;
-use crate::openai_compat::{
-    openai_sse_stream, parse_openai_response, send_chat_request, temperature_refused,
-};
+use crate::openai_compat::{openai_sse_stream, parse_openai_response};
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
     ModelInfo, Provider, ProviderError, Result, StreamChunk,
@@ -482,11 +480,6 @@ impl OpenRouterProvider {
         self.temperature_unsupported.contains(model)
     }
 
-    /// Record that it did, for the rest of this process.
-    fn remember_temperature_unsupported(&self, model: &str) {
-        self.temperature_unsupported.insert(model);
-    }
-
     /// Send a chat request, retrying without temperature if the model refuses
     /// it, for both the buffered and the streaming paths so they cannot drift.
     ///
@@ -505,70 +498,29 @@ impl OpenRouterProvider {
         body: &mut serde_json::Value,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response> {
-        let mut sent = send_chat_request(
-            &self.client,
-            "openrouter",
+        crate::provider::ChatTarget {
+            client: &self.client,
+            provider: "openrouter",
             url,
             headers,
-            body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await;
-        if let Err(crate::ProviderError::ApiError(detail)) = &sent
-            && temperature_refused(detail)
-        {
-            tracing::debug!(
-                model = %request.model,
-                "the API refused the temperature we sent; retrying without it"
-            );
-            self.remember_temperature_unsupported(&request.model);
-            body.as_object_mut()
-                .expect("an OpenAI request body is always a JSON object")
-                .remove("temperature");
-            sent = send_chat_request(
-                &self.client,
-                "openrouter",
-                url,
-                headers,
-                body,
-                self.rate_limiter.as_ref(),
-                request.request_timeout_secs,
-            )
-            .await;
+            limiter: self.rate_limiter.as_ref(),
+            timeout_secs: request.request_timeout_secs,
         }
-        sent
+        .send_dropping_refused_temperature(body, &request.model, &self.temperature_unsupported)
+        .await
     }
 
     /// GET `/models`, shared by [`Provider::list_models`] and
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
-        let response = crate::provider::apply_request_timeout(
-            self.client
-                .get(format!("{}/models", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key)),
+        crate::provider::fetch_listing(
+            &self.client,
+            &format!("{}/models", self.base_url),
+            &[("Authorization", format!("Bearer {}", self.api_key))],
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
-        .send()
         .await
-        .map_err(|e| ProviderError::transport("listing models", &e))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = leviath_net::read_caps::read_text_capped(
-                response,
-                leviath_net::read_caps::JSON_BODY_CAP,
-            )
-            .await
-            .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        crate::provider::decode_json(response).await
     }
 
     /// Say so when a model falls through to [`FALLBACK_CAPABILITIES`].
@@ -2418,7 +2370,7 @@ mod learned_tests {
             None,
         );
         assert!(provider.capabilities("x/model").supports_temperature);
-        provider.remember_temperature_unsupported("x/model");
+        provider.temperature_unsupported.insert("x/model");
         assert!(!provider.capabilities("x/model").supports_temperature);
     }
 }

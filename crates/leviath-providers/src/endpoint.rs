@@ -15,10 +15,7 @@
 //! than guessing, so a blueprint that pins a model on it is never refused.
 
 use crate::learned::{LearnedModel, LearnedModels};
-use crate::openai_compat::{
-    build_openai_request_body, openai_sse_stream, parse_openai_response, send_chat_request,
-    temperature_refused,
-};
+use crate::openai_compat::{build_openai_request_body, openai_sse_stream, parse_openai_response};
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
     ModelInfo, Provider, ProviderError, Result, StreamChunk,
@@ -200,7 +197,7 @@ impl EndpointProvider {
     fn build_body(&self, request: &InferenceRequest) -> serde_json::Value {
         let mut body = build_openai_request_body(request);
         if !self.capabilities(&request.model).supports_temperature {
-            drop_temperature(&mut body);
+            crate::provider::drop_temperature(&mut body);
         }
         body
     }
@@ -214,67 +211,27 @@ impl EndpointProvider {
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let headers = self.request_headers();
-        let sent = send_chat_request(
-            &self.client,
-            &self.name,
-            &url,
-            &headers,
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await;
-        match sent {
-            Err(ProviderError::ApiError(detail)) if temperature_refused(&detail) => {
-                tracing::debug!(
-                    provider = %self.name,
-                    model = %request.model,
-                    "the endpoint refused the temperature we sent; retrying without it"
-                );
-                self.temperature_unsupported.insert(&request.model);
-                drop_temperature(&mut body);
-                send_chat_request(
-                    &self.client,
-                    &self.name,
-                    &url,
-                    &headers,
-                    &body,
-                    self.rate_limiter.as_ref(),
-                    request.request_timeout_secs,
-                )
-                .await
-            }
-            other => other,
+        crate::provider::ChatTarget {
+            client: &self.client,
+            provider: &self.name,
+            url: &url,
+            headers: &headers,
+            limiter: self.rate_limiter.as_ref(),
+            timeout_secs: request.request_timeout_secs,
         }
+        .send_dropping_refused_temperature(&mut body, &request.model, &self.temperature_unsupported)
+        .await
     }
 
     /// GET `/models`, as the server answers it.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
-        let mut builder = crate::provider::apply_request_timeout(
-            self.client.get(format!("{}/models", self.base_url)),
+        crate::provider::fetch_listing(
+            &self.client,
+            &format!("{}/models", self.base_url),
+            &self.request_headers(),
             self.listing_timeout_secs(),
-        );
-        for (name, value) in self.request_headers() {
-            builder = builder.header(name, value);
-        }
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing models", &e))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = leviath_net::read_caps::read_text_capped(
-                response,
-                leviath_net::read_caps::JSON_BODY_CAP,
-            )
-            .await
-            .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {status}: {error_body}"
-            )));
-        }
-        crate::provider::decode_json(response).await
+        )
+        .await
     }
 
     /// Say so, once per model, when a model is running on the assumed window.
@@ -308,16 +265,6 @@ impl EndpointProvider {
                 .map(|id| ModelInfo::new(id.clone(), self.name.clone(), self.capabilities(id)))
                 .collect()
         })
-    }
-}
-
-/// Take the `temperature` out of a request body.
-///
-/// A body that is not an object is left alone: every caller here builds one,
-/// and dropping a field is not worth a panic.
-fn drop_temperature(body: &mut serde_json::Value) {
-    if let Some(fields) = body.as_object_mut() {
-        fields.remove("temperature");
     }
 }
 
@@ -620,10 +567,10 @@ mod tests {
     #[test]
     fn dropping_the_temperature_leaves_a_non_object_alone() {
         let mut body = serde_json::json!({"temperature": 0.1, "model": "m"});
-        drop_temperature(&mut body);
+        crate::provider::drop_temperature(&mut body);
         assert_eq!(body, serde_json::json!({"model": "m"}));
         let mut text = serde_json::json!("not an object");
-        drop_temperature(&mut text);
+        crate::provider::drop_temperature(&mut text);
         assert_eq!(text, "not an object");
     }
 
