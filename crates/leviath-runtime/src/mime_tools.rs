@@ -56,6 +56,7 @@ pub(crate) fn handle_mime_tool(
         registry: &registry,
         run_id: ctx.run_id,
         max_part_bytes: ctx.mime.max_part_bytes(),
+        inline_text_bytes: ctx.mime.inline_text_bytes(),
     };
     match name {
         "context_attach" => attach(args, window, &sink, workdir),

@@ -23,9 +23,41 @@ pub(crate) struct PartSink<'a> {
     pub run_id: &'a str,
     /// The largest part accepted, in bytes.
     pub max_part_bytes: u64,
+    /// The most text an entry carries inline; past it the text is stored.
+    pub inline_text_bytes: u64,
 }
 
-impl PartSink<'_> {
+impl<'a> PartSink<'a> {
+    /// The sink for `run_id` over what the world holds: `None` when it has no
+    /// store or no registry, in which case nothing typed can be stored.
+    pub(crate) fn over(
+        sources: &'a crate::blob_store::HydrationSources,
+        run_id: &'a str,
+        mime: &crate::blob_store::MimeParams<'_, '_>,
+    ) -> Option<Self> {
+        sources.as_ref().map(|(store, registry)| PartSink {
+            store: store.as_ref(),
+            registry,
+            run_id,
+            max_part_bytes: mime.max_part_bytes(),
+            inline_text_bytes: mime.inline_text_bytes(),
+        })
+    }
+
+    /// `text` as the part an entry carries: inline while it is within
+    /// `[mime] inline_text_bytes`, otherwise stored as `text/plain` under
+    /// `name` so the region holds a reference and a stand-in rather than the
+    /// whole transcript, and the bytes are reachable by hash like any other
+    /// part's.
+    pub(crate) fn admit_text(&self, name: &str, text: &str) -> Result<Part, String> {
+        if text.len() as u64 <= self.inline_text_bytes {
+            return Ok(Part::text(text));
+        }
+        let inbound = InboundPart::from_bytes(name, text.as_bytes().to_vec())
+            .typed(leviath_core::mime::text_plain());
+        self.store_part(&inbound)
+    }
+
     /// Type and store one inbound part, returning the region part for it.
     pub(crate) fn store_part(&self, inbound: &InboundPart) -> Result<Part, String> {
         if inbound.data.len() as u64 > self.max_part_bytes {
@@ -72,6 +104,20 @@ impl PartSink<'_> {
             .map(|p| p.tokens(self.registry))
             .sum()
     }
+}
+
+/// `text` as a part: through [`PartSink::admit_text`] when a sink is at hand,
+/// inline otherwise. A store that refuses the text keeps it inline and says
+/// so, since a reply or a result the model must see is not something to
+/// lose over a full store.
+pub(crate) fn text_part(sink: Option<&PartSink<'_>>, name: &str, text: &str) -> Part {
+    let Some(sink) = sink else {
+        return Part::text(text);
+    };
+    sink.admit_text(name, text).unwrap_or_else(|e| {
+        tracing::warn!(part = name, error = %e, "text stays inline: the store refused it");
+        Part::text(text)
+    })
 }
 
 /// Write every attached part into its region, after the seeds are in.
@@ -170,6 +216,7 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 1024,
+            inline_text_bytes: 1024,
         };
         let mut window = window();
         let png =
@@ -213,6 +260,7 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 4,
+            inline_text_bytes: 1024,
         };
         let mut window = window();
         let big = InboundPart::from_bytes("big.bin", vec![0; 5]);
@@ -223,6 +271,7 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 1024,
+            inline_text_bytes: 1024,
         };
         let wrong_type = InboundPart::from_bytes("song.wav", vec![1, 2, 3]).in_region("art");
         let err = ingest_parts(&mut window, &blueprint(), vec![wrong_type], &sink).unwrap_err();
@@ -291,10 +340,39 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 1024,
+            inline_text_bytes: 1024,
         };
         let err = broken
             .entry_for(&InboundPart::from_bytes("x.png", vec![1]))
             .unwrap_err();
         assert!(err.contains("could not store part 'x.png'"), "{err}");
+        // Text past the inline ceiling that the store refuses stays inline
+        // rather than being lost; with no sink at all it never leaves.
+        let long = "y".repeat(2048);
+        assert!(!text_part(Some(&broken), "reply.txt", &long).is_stored());
+        assert!(!text_part(None, "reply.txt", &long).is_stored());
+    }
+
+    /// Text within the inline ceiling stays inline; past it, it is stored as
+    /// `text/plain` under its name, and past the part ceiling the store
+    /// refuses it like any other part.
+    #[test]
+    fn text_is_stored_past_the_inline_ceiling() {
+        let store = MemoryBlobStore::new();
+        let registry = MimeRegistry::builtin();
+        let sink = PartSink {
+            store: &store,
+            registry: &registry,
+            run_id: "run-1",
+            max_part_bytes: 64,
+            inline_text_bytes: 8,
+        };
+        assert!(!sink.admit_text("r.txt", "short").unwrap().is_stored());
+        let stored = sink.admit_text("r.txt", "well past eight bytes").unwrap();
+        assert!(stored.is_stored());
+        assert_eq!(stored.mime_type.as_str(), "text/plain");
+        assert_eq!(stored.name.as_deref(), Some("r.txt"));
+        let err = sink.admit_text("r.txt", &"z".repeat(65)).unwrap_err();
+        assert!(err.contains("over the 64 byte ceiling"), "{err}");
     }
 }

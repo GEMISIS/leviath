@@ -280,6 +280,7 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 32,
+            inline_text_bytes: 1024,
         };
         let args = json!({"artifacts": [
             {"name": "final", "path": "cut.mp4", "type": "video/mp4"},
@@ -391,6 +392,7 @@ mod tests {
             registry: &registry,
             run_id: "run-1",
             max_part_bytes: 1024,
+            inline_text_bytes: 1024,
         };
         let out = resolve(
             &json!({"artifacts": ["notes.md"]}),

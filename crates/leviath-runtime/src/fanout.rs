@@ -891,13 +891,16 @@ fn hand_up_artifacts(world: &World, parent: Entity, worker: &ActiveWorker) -> Ve
         .get::<crate::persistence::RunMetadata>(parent)
         .map(|m| m.run_id.clone())
         .unwrap_or_default();
+    let limits = world
+        .get_resource::<MimeLimits>()
+        .copied()
+        .unwrap_or_default();
     let sink = PartSink {
         store: store.0.as_ref(),
         registry: &registry,
         run_id: &parent_run,
-        max_part_bytes: world
-            .get_resource::<MimeLimits>()
-            .map_or(MimeLimits::default().max_part_bytes, |l| l.max_part_bytes),
+        max_part_bytes: limits.max_part_bytes,
+        inline_text_bytes: limits.inline_text_bytes,
     };
     artifacts
         .into_iter()
@@ -966,6 +969,9 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
             report.into(),
             routing.as_ref(),
             sensitivities.as_ref(),
+            // Already cut to the region's budget above, so the report never
+            // reaches the inline text ceiling.
+            None,
         );
     }
     set_status(world, parent, AgentStatus::Active);

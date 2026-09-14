@@ -289,12 +289,10 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         .get_resource::<crate::blob_store::BlobStoreHandle>()
         .map(|s| s.0.clone())
         .zip(run_registry.as_ref().map(|r| r.registry()));
-    let max_part_bytes = world
+    let limits = world
         .get_resource::<crate::blob_store::MimeLimits>()
-        .map_or(
-            crate::blob_store::MimeLimits::default().max_part_bytes,
-            |l| l.max_part_bytes,
-        );
+        .copied()
+        .unwrap_or_default();
     // Everything below indexes `blueprint.stages`, `stages` and the per-stage
     // vectors built from them by position. `parse_manifest` guarantees at
     // least one stage, but this is `pub` and an embedder can hand-build a
@@ -436,7 +434,8 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
                 store: store.as_ref(),
                 registry: &registry,
                 run_id: &agent_id,
-                max_part_bytes,
+                max_part_bytes: limits.max_part_bytes,
+                inline_text_bytes: limits.inline_text_bytes,
             },
         )?;
     }
