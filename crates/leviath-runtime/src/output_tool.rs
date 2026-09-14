@@ -245,7 +245,12 @@ pub(crate) fn handle_output_tool(
         now,
     )
     .with_artifacts(ingested.records);
-    mirror_into_region(window, &output.content, ingested.parts);
+    mirror_into_region(
+        window,
+        &output.content,
+        ingested.parts,
+        ctx.sink.map(|s| s.registry),
+    );
 
     let mut ack = "Recorded as this run's final output.".to_string();
     if !output.artifacts.is_empty() {
@@ -277,6 +282,7 @@ fn mirror_into_region(
     window: &mut ContextWindow,
     content: &str,
     parts: Vec<leviath_core::mime::Part>,
+    registry: Option<&leviath_core::mime::MimeRegistry>,
 ) {
     // Read the budget and clear in one borrow. Asking for the region twice
     // leaves a second "what if it is missing" branch that the first check has
@@ -303,7 +309,7 @@ fn mirror_into_region(
             leviath_core::mime::Part::text(format!("artifact '{name}':")),
             part,
         ]);
-        let tokens = content.tokens_hint();
+        let tokens = content.tokens(registry);
         let _ = window.add_content_entry(
             FINAL_OUTPUT_REGION,
             leviath_core::EntryKind::Text,

@@ -8390,7 +8390,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     .named("hero.glb");
     let part = leviath_core::mime::Part::stored(blob.describe(&reg)).named("hero.glb");
     let content = leviath_core::region::EntryContent::from_parts(vec![part]);
-    let tokens = content.tokens_hint();
+    let tokens = content.tokens(None);
     window
         .add_content_entry("model", leviath_core::EntryKind::Text, content, tokens)
         .unwrap();

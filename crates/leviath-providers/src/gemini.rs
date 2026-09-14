@@ -400,10 +400,11 @@ impl Provider for GeminiProvider {
         let base = self
             .learned
             .mime_corrected(model, crate::mime_tables::gemini(model));
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::OpenAi.carried(mime)
     }
 
     /// Every id the native listing named, once primed.

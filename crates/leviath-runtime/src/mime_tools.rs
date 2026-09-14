@@ -252,24 +252,13 @@ fn export(
     }
 }
 
-/// The most recent stored part whose name is `wanted` or whose hash starts
-/// with it: its name and its reference.
+/// The stored part `wanted` names: its name and its reference.
 fn find_part(
     window: &ContextWindow,
     wanted: &str,
 ) -> Option<(Option<String>, leviath_core::mime::BlobRef)> {
-    let wanted_lower = wanted.to_ascii_lowercase();
-    window
-        .regions
-        .iter()
-        .flat_map(|r| r.content.iter())
-        .rev()
-        .flat_map(|e| e.content.stored())
-        .filter_map(|p| p.blob().map(|b| (p.name.clone(), b.clone())))
-        .find(|(name, b)| {
-            name.as_deref() == Some(wanted)
-                || (wanted_lower.len() >= 6 && b.sha256.starts_with(&wanted_lower))
-        })
+    let part = window.find_stored_part(wanted)?;
+    Some((part.name.clone(), part.blob()?.clone()))
 }
 
 #[cfg(test)]

@@ -425,10 +425,11 @@ impl Provider for OpenAIProvider {
         // The listing says nothing about mime either, so the table answers
         // and the operator's entry corrects it.
         let base = crate::mime_tables::openai(model);
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::OpenAi.carried(mime)
     }
 
     /// The chat and reasoning models the listing named, once primed.

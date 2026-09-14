@@ -64,7 +64,7 @@ stand_in = "[{type} {size}] {name}"
 | `text` | The bytes are UTF-8 and may travel inline and reach any text model as text |
 | `tokens` | One of `{ per_byte = 0.25 }`, `{ per_pixel = 750, max = 1600 }`, `{ per_second = 32 }`, `{ fixed = 1000 }` |
 | `extensions` | Extensions, without the dot, that imply this type |
-| `magic` | A hex prefix that identifies the bytes |
+| `magic` | A hex prefix that identifies the bytes. `??` stands for any one byte, so a tag past a length field can be named: `52494646????????57454250` is RIFF, four bytes of size, WEBP |
 | `stand_in` | What a consumer that cannot take the type sees; `{type}` `{name}` `{size}` `{dims}` `{duration}` |
 | `check` | A [Rhai script](/docs/rhai-mime-checks) that refuses bytes which are not what they claim; `""` lifts a broader row's check |
 
@@ -97,7 +97,8 @@ what they claim. Without one, a declared type is taken at its word, as every pro
 ## What a model sees
 
 A model declares what it takes, as mime types. Anthropic and OpenAI models list `image/*` and
-`application/pdf`; Gemini adds `audio/*` and `video/*`; a local model you describe in
+`application/pdf`; Gemini adds `audio/*` (it takes video too, but the request shape Leviath sends
+it has no slot for one, so a video reaches it as its stand-in); a local model you describe in
 `[model_capabilities]` lists whatever it can do. Where a provider publishes this per model,
 Leviath reads it: OpenRouter's catalogue carries each model's input and output modalities and
 Ollama's `/api/show` reports vision, and both win over the built-in tables. The vendors whose

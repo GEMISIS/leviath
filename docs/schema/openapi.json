@@ -4490,18 +4490,30 @@
           },
           "family": {
             "type": "string",
-            "description": "The family the row sets, when it sets one."
+            "description": "The family: resolved through broader rows for a type, as written for a pattern."
           },
           "text": {
             "type": "boolean",
-            "description": "Whether the row calls the bytes text, when it says."
+            "description": "Whether the bytes are text: resolved for a type, as written for a pattern."
+          },
+          "tokens": {
+            "type": "object",
+            "description": "How the bytes are counted in tokens, the same way: one of per_byte, per_pixel, per_second or fixed, with an optional max."
           },
           "extensions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "The extensions the row names, when it names any."
+            "description": "The extensions the type is known by, the same way."
+          },
+          "stand_in": {
+            "type": "string",
+            "description": "The stand-in template a row set, when one applies."
+          },
+          "check": {
+            "type": "string",
+            "description": "The check script the bytes must pass, when one applies."
           }
         }
       },

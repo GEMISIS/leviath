@@ -26,7 +26,7 @@ impl Delivery {
             "text" => Ok(Self::Text),
             "stand_in" => Ok(Self::StandIn),
             other => Err(format!(
-                "deliver must be native, text or stand_in, not '{other}'"
+                "'deliver' must be native, text or stand_in, not '{other}'"
             )),
         }
     }
@@ -222,6 +222,29 @@ impl Part {
         matches!(self.body, PartBody::Stored(_))
     }
 
+    /// Whether `needle`, as a model or a person would type it, names this
+    /// stored part: its exact name, the file name of a path-shaped needle
+    /// (`out/hero.png` for `hero.png`), or at least six characters of its
+    /// hash in either case. One rule for every tool that takes a part by
+    /// name, so `context_export` and `submit_output` cannot disagree about
+    /// which part `hero` means. An inline part is never named.
+    pub fn is_named(&self, needle: &str) -> bool {
+        let Some(blob) = self.blob() else {
+            return false;
+        };
+        if self.name.as_deref() == Some(needle) {
+            return true;
+        }
+        let basename = std::path::Path::new(needle)
+            .file_name()
+            .and_then(|n| n.to_str());
+        if basename.is_some_and(|b| b != needle && self.name.as_deref() == Some(b)) {
+            return true;
+        }
+        let lower = needle.to_ascii_lowercase();
+        lower.len() >= 6 && blob.sha256.starts_with(&lower)
+    }
+
     /// What this part costs a region.
     ///
     /// A stored part is charged its STAND-IN, not its native token estimate. In
@@ -268,6 +291,22 @@ impl Part {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one naming rule: exact name, the file name of a path, or six or
+    /// more hash characters in either case. An inline part is never named.
+    #[test]
+    fn a_part_is_named_by_its_name_its_file_name_or_its_hash() {
+        let reg = MimeRegistry::builtin();
+        let blob = Blob::new(mt("image/png"), b"\x89PNG\r\n\x1a\nbytes".to_vec()).describe(&reg);
+        let sha = blob.sha256.clone();
+        let part = Part::stored(blob).named("hero.png");
+        assert!(part.is_named("hero.png"));
+        assert!(part.is_named("out/hero.png"));
+        assert!(!part.is_named("hero"));
+        assert!(part.is_named(&sha.get(..6).unwrap().to_ascii_uppercase()));
+        assert!(!part.is_named(sha.get(..5).unwrap()));
+        assert!(!Part::text("hero.png").is_named("hero.png"));
+    }
 
     fn mt(s: &str) -> MimeType {
         MimeType::parse(s).unwrap()

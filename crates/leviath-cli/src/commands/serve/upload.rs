@@ -126,7 +126,7 @@ pub(super) fn inline_parts(
     workdir: &Path,
     max_bytes: u64,
 ) -> Result<(String, Vec<InboundPart>), ApiError> {
-    let (text, parts, _unresolved) = leviath_core::mime::inline_refs::parts_from_text(
+    let (text, parts, unresolved) = leviath_core::mime::inline_refs::parts_from_text(
         text,
         region,
         &mut |path| {
@@ -135,6 +135,14 @@ pub(super) fn inline_parts(
         },
         &mut |path| read_within(path, workdir, max_bytes),
     )?;
+    // The command line warns the person typing; over HTTP the daemon's log is
+    // where a typo'd path can be seen, since the request still goes through.
+    if !unresolved.is_empty() {
+        tracing::warn!(
+            tokens = ?unresolved,
+            "@path tokens named no file inside the working directory and were left as text"
+        );
+    }
     Ok((text, parts))
 }
 

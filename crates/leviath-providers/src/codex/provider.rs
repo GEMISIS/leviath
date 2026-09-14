@@ -387,10 +387,11 @@ impl Provider for CodexProvider {
 
     fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         let base = crate::mime_tables::codex(model);
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(over) => over.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::Codex.carried(mime)
     }
 
     async fn prime_capabilities(&self) -> Result<()> {

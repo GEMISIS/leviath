@@ -510,8 +510,9 @@ pub(crate) fn protected_path_refusal(
 }
 
 /// The protected place `word` names, if any, once `~` is expanded, a
-/// relative path is joined to `cwd`, and symlinks are followed as far as the
-/// path exists.
+/// relative path is joined to `cwd`, `..` is folded, and symlinks are
+/// followed as far as the path exists: the same resolution a yolo rule
+/// gives a word, so the two cannot read one path two ways.
 fn protected_hit<'a>(
     word: &str,
     cwd: &std::path::Path,
@@ -523,10 +524,13 @@ fn protected_hit<'a>(
         true => expanded,
         false => cwd.join(expanded),
     };
-    // Both sides through the same resolution: a protected file that does not
-    // exist yet (`yolo.toml` before `lev yolo init`) still has an existing
-    // parent whose symlinks decide what it really names.
-    let target = leviath_core::canonicalize_for_match(&joined)?;
+    // Folded before canonicalising, so a `..` in a tail that does not exist
+    // yet cannot survive into the comparison. Both sides then go through the
+    // same resolution: a protected file that does not exist yet (`yolo.toml`
+    // before `lev yolo init`) still has an existing parent whose symlinks
+    // decide what it really names.
+    let folded = leviath_core::paths::fold_dot_dot(&joined)?;
+    let target = leviath_core::canonicalize_for_match(&folded)?;
     // A protected place nothing along which exists cannot be named by any
     // real path either, so it matches nothing.
     protected.iter().find(|p| {

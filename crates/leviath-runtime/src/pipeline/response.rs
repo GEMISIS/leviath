@@ -1108,7 +1108,7 @@ fn store_reply(
     // regions as separate entries.
     let routed = super::part_routing::split(stage, &infer.parts);
     if let Some(content) = reply_content(&infer.response, &routed.kept, sink) {
-        let tokens = content.tokens_hint();
+        let tokens = content.tokens(sink.map(|s| s.registry));
         let _ = window.add_assistant_turn_content(
             "conversation",
             leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },

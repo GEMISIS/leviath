@@ -83,9 +83,9 @@ fn listed(args: &serde_json::Value) -> Result<Vec<Named>, String> {
 
 /// Resolve `name_or_sha` against the parts the run has already produced and,
 /// when it names one, write that part's bytes to `dest` so the submission has a
-/// real file to record. Matches the part's name (exact, then its file name),
-/// then a sha256 prefix. Returns the bytes written, or the same shape of error
-/// the caller gives for a missing workdir file.
+/// real file to record. Named by the one rule every tool uses
+/// ([`Part::is_named`]), newest match first. Returns the bytes written, or the
+/// same shape of error the caller gives for a missing workdir file.
 fn materialize_produced(
     name_or_sha: &str,
     dest: &std::path::Path,
@@ -98,17 +98,11 @@ fn materialize_produced(
              part this run produced. Write the file before naming it, or name a produced part."
         )
     };
-    let basename = std::path::Path::new(name_or_sha)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string());
-    let is_match = |p: &&Part| {
-        let by_name = p.name.as_deref() == Some(name_or_sha)
-            || (basename.is_some() && p.name.as_deref() == basename.as_deref());
-        let by_sha =
-            name_or_sha.len() >= 8 && p.blob().is_some_and(|b| b.sha256.starts_with(name_or_sha));
-        by_name || by_sha
-    };
-    let blob = produced.iter().find(is_match).and_then(Part::blob);
+    let blob = produced
+        .iter()
+        .rev()
+        .find(|p| p.is_named(name_or_sha))
+        .and_then(Part::blob);
     let (Some(blob), Some(sink)) = (blob, sink) else {
         return Err(missing());
     };

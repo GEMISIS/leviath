@@ -55,7 +55,7 @@ pub(crate) fn try_emit(
     .with_artifacts(records);
     // The parts already live in their routed region, so mirror only the
     // one-line answer: re-storing them here would duplicate the entry.
-    super::mirror_into_region(window, &output.content, Vec::new());
+    super::mirror_into_region(window, &output.content, Vec::new(), None);
     Some(output)
 }
 
@@ -153,7 +153,7 @@ mod tests {
         let blob = Blob::new(MimeType::parse(mime).unwrap(), vec![1, 2, 3, 4]).named(name);
         let part = Part::stored(blob.describe(&reg)).named(name);
         let content = leviath_core::region::EntryContent::from_parts(vec![part]);
-        let tokens = content.tokens_hint();
+        let tokens = content.tokens(None);
         window
             .add_content_entry(region, leviath_core::EntryKind::Text, content, tokens)
             .unwrap();
@@ -280,7 +280,7 @@ mod tests {
         let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![9, 9]).named("look.png");
         let part = Part::stored(blob.describe(&reg)).named("look.png");
         let content = leviath_core::region::EntryContent::from_parts(vec![part]);
-        let tokens = content.tokens_hint();
+        let tokens = content.tokens(None);
         window
             .add_content_entry("preview", leviath_core::EntryKind::Text, content, tokens)
             .unwrap();

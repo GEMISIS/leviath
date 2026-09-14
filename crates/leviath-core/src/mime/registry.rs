@@ -324,8 +324,10 @@ impl MimeRegistry {
                         key: key.clone(),
                         message: e.message().to_string(),
                     })?;
-            if let Some(magic) = &row.magic
-                && (magic.is_empty() || !magic.chars().all(|c| c.is_ascii_hexdigit()))
+            if row
+                .magic
+                .as_deref()
+                .is_some_and(|m| decode_magic(m).is_none())
             {
                 return Err(RegistryError::Magic(key.clone()));
             }
@@ -514,18 +516,20 @@ impl MimeRegistry {
     }
 
     /// The type the leading bytes identify, if a row's `magic` matches.
-    /// The longest matching prefix wins.
+    /// The longest matching prefix wins, so a RIFF container with a `WEBP`
+    /// tag beats a row that only knows `RIFF`.
     pub fn sniff(&self, bytes: &[u8]) -> Option<MimeType> {
         let mut best: Option<(usize, MimeType)> = None;
         for (key, l) in &self.rows {
-            let Some(magic) = &l.row.magic else {
+            let Some(prefix) = l.row.magic.as_deref().and_then(decode_magic) else {
                 continue;
             };
-            let Some(prefix) = decode_hex(magic) else {
-                continue;
-            };
-            if bytes.len() >= prefix.len()
-                && bytes[..prefix.len()] == prefix[..]
+            let matches = bytes.len() >= prefix.len()
+                && prefix
+                    .iter()
+                    .zip(bytes)
+                    .all(|(want, have)| want.is_none_or(|w| w == *have));
+            if matches
                 && best.as_ref().is_none_or(|(len, _)| prefix.len() > *len)
                 && let Ok(t) = MimeType::parse(key)
             {
@@ -588,17 +592,24 @@ fn merge_rows(under: MimeRow, over: MimeRow) -> MimeRow {
     }
 }
 
-/// Hex digits to bytes; an odd length or a non-hex character is `None`.
-fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+/// A `magic` string as the bytes it matches: two hex digits per byte, or
+/// `??` for a byte that may be anything, so a container format can be told
+/// by a tag past its length field (`52494646????????57454250` is `RIFF`,
+/// four bytes of size, `WEBP`). Empty, odd-length, or holding anything else
+/// is `None`.
+fn decode_magic(s: &str) -> Option<Vec<Option<u8>>> {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
     }
     s.as_bytes()
         .chunks(2)
-        .map(|pair| {
-            let hi = (pair[0] as char).to_digit(16)?;
-            let lo = (pair[1] as char).to_digit(16)?;
-            Some((hi * 16 + lo) as u8)
+        .map(|pair| match pair {
+            b"??" => Some(None),
+            _ => {
+                let hi = (pair[0] as char).to_digit(16)?;
+                let lo = (pair[1] as char).to_digit(16)?;
+                Some(Some((hi * 16 + lo) as u8))
+            }
         })
         .collect()
 }
@@ -746,6 +757,33 @@ mod tests {
         assert_eq!(reg.from_extension("obj").unwrap().as_str(), "model/obj");
     }
 
+    /// The RIFF containers open with the same four letters and are told
+    /// apart by the tag after the length field, which `??` skips.
+    #[test]
+    fn wildcard_magic_tells_riff_containers_apart_and_a_bad_magic_is_refused() {
+        let reg = MimeRegistry::builtin();
+        assert_eq!(reg.sniff(b"GIF89a\x01\x00").unwrap().as_str(), "image/gif");
+        assert_eq!(
+            reg.sniff(b"RIFF\x24\x08\x00\x00WAVEfmt ").unwrap().as_str(),
+            "audio/wav"
+        );
+        assert_eq!(
+            reg.sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 ").unwrap().as_str(),
+            "image/webp"
+        );
+        assert!(reg.sniff(b"RIFF\x00\x00\x00\x00AVI LIST").is_none());
+        assert!(reg.sniff(b"RIFF\x00\x00").is_none());
+        for bad in ["474946383", "?A", "", "GG"] {
+            let mut reg = MimeRegistry::empty();
+            let table: toml::Table =
+                toml::from_str(&format!("[\"x/y\"]\nmagic = \"{bad}\"\n")).unwrap();
+            assert!(
+                matches!(reg.layer(&table, "t"), Err(RegistryError::Magic(k)) if k == "x/y"),
+                "{bad:?} should be refused"
+            );
+        }
+    }
+
     #[test]
     fn sniffing_prefers_the_longest_magic() {
         let reg = MimeRegistry::builtin();
@@ -767,17 +805,17 @@ mod tests {
             magic = "AB"
             ["x/long"]
             magic = "ABCD"
-            ["x/odd"]
-            magic = "ABC"
             "#,
         )
         .unwrap();
         reg.layer(&table, "t").unwrap();
         assert_eq!(reg.sniff(&[0xab, 0xcd, 0x01]).unwrap().as_str(), "x/long");
         assert_eq!(reg.sniff(&[0xab, 0x00]).unwrap().as_str(), "x/short");
-        assert_eq!(decode_hex("ABC"), None);
-        assert_eq!(decode_hex("GG"), None);
-        assert_eq!(decode_hex("AG"), None);
+        assert_eq!(decode_magic("ABC"), None);
+        assert_eq!(decode_magic("GG"), None);
+        assert_eq!(decode_magic("AG"), None);
+        assert_eq!(decode_magic("?A"), None);
+        assert_eq!(decode_magic("AB??"), Some(vec![Some(0xAB), None]));
     }
 
     #[test]

@@ -133,7 +133,7 @@ pub(super) fn inject_results(
     // and a sliding one renders them beside the text they belong to. Each is
     // charged its stand-in, like every stored part.
     let content = leviath_core::region::EntryContent::text(fitted).with_parts(parts);
-    let tokens = content.tokens_hint();
+    let tokens = content.tokens(None);
     let _ = window.add_assistant_turn_content(
         region,
         leviath_core::EntryKind::UserMessage,
