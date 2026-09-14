@@ -13,13 +13,15 @@ use super::MimeType;
 /// One `@path` token found in a text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineRef {
-    /// The token as written, with its `@` and any `:type` suffix.
+    /// The token as written, with its `@` and any `:type` suffix, for a caller
+    /// that highlights or echoes it back exactly as the user typed it.
     pub token: String,
     /// The path part, without `@` or the suffix.
     pub path: String,
     /// A `:type/subtype` suffix, when one was written.
     pub mime_type: Option<MimeType>,
-    /// Byte offset of the token's `@` in the cleaned text.
+    /// Byte offset of the token's `@` in the cleaned text, for the same
+    /// highlighting caller.
     pub start: usize,
 }
 

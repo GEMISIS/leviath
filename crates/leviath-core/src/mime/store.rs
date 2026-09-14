@@ -70,8 +70,11 @@ pub trait BlobStore: Send + Sync {
     /// The bytes stored under `sha256` for `run_id`.
     fn read(&self, run_id: &str, sha256: &str) -> io::Result<Arc<[u8]>>;
 
-    /// Copy one blob from a run to another, so a child or a fan-out worker
-    /// can reference it without the parent's directory.
+    /// Copy one blob from a run to another as-is, for an embedder sharing one
+    /// store across runs. The pipeline does not take this route: a part that
+    /// crosses runs is re-ingested through the receiving run's registry and
+    /// ceiling so it comes back typed and referenced, which a raw copy cannot
+    /// give it.
     fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> io::Result<()>;
 
     /// Every hash stored for `run_id`, in no particular order.
@@ -140,10 +143,7 @@ impl BlobStore for MemoryBlobStore {
     }
 
     fn list(&self, run_id: &str) -> io::Result<Vec<String>> {
-        Ok(self
-            .runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        Ok(crate::sync::lock(&self.runs)
             .get(run_id)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default())

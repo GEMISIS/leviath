@@ -32,7 +32,9 @@ pub struct CapabilityCache {
     /// The format version; a file whose version is not [`CACHE_VERSION`] is
     /// treated as absent.
     version: u32,
-    /// When it was written, Unix seconds, so a reader can judge staleness.
+    /// When it was written, Unix seconds. The daemon reloads a cache of any
+    /// age and re-primes on its own schedule; [`Self::is_fresh`] is for an
+    /// embedder that wants an age bound.
     saved_at: i64,
     /// provider name -> (model id -> what that provider's listing said).
     providers: BTreeMap<String, BTreeMap<String, LearnedModel>>,

@@ -208,6 +208,21 @@ On Windows the agent's shell is `cmd.exe`, not a POSIX shell, and Leviath tells 
 [Troubleshooting](/docs/troubleshooting#windows-quoting-and-environment-variables) for PowerShell
 quoting and environment-variable syntax.
 
+## Keep it up to date
+
+One command brings everything current: the binary, the bundled agents, and the config file.
+
+```bash
+lev update --check        # show what would change, touch nothing
+lev update                # do it
+```
+
+The binary is upgraded with whatever installed it (Homebrew, Scoop, the install script), and then
+the agents in `~/.leviath/agents` and the config beside them are offered the same treatment. That
+second half is the reason to use `lev update` rather than `brew upgrade` alone: a package manager
+hands you a new binary and says nothing about blueprints written for the old one. The full flag
+list is under [`lev update`](/docs/cli#lev-update).
+
 ## Create your own
 
 ```bash

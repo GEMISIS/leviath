@@ -170,7 +170,9 @@ pub struct ArtifactSpec {
 pub struct Artifact {
     /// The name the stage declared, or the file name when it declared none.
     pub name: String,
-    /// The file, relative to the working directory.
+    /// The file, relative to the working directory. An answer emitted from
+    /// routed parts alone never wrote a file, and carries the part's name here
+    /// instead; its bytes are reachable only through `sha256`.
     pub path: String,
     /// The file's type.
     pub mime_type: crate::mime::MimeType,

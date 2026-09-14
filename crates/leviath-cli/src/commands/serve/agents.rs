@@ -2371,21 +2371,22 @@ system_prompt = "Plan the work"
     }
 
     #[tokio::test]
-    async fn agent_logs_falls_back_to_the_run_level_file_when_no_stages_exist() {
+    async fn agent_logs_is_empty_when_no_stages_exist() {
         crate::runstate::with_isolated_runs_dir_async(
-            "agent_logs_no_stages_fallback",
+            "agent_logs_no_stages",
             |_d| async move {
-                let run_id = unique_run_id("logs-fallback");
+                let run_id = unique_run_id("logs-no-stages");
                 let meta = make_run(&run_id);
                 create_run(&meta).unwrap();
-                // No stages.json at all - a run whose stage dirs were pruned.
+                // No stages.json at all. A stray run-level file is not a log
+                // source either: only stage files are.
                 std::fs::write(
                     runstate::run_dir(&run_id).join("output.log"),
-                    "legacy output",
+                    "not a log source",
                 )
                 .unwrap();
 
-                assert!(logs_body(&run_id, "").await.contains("legacy output"));
+                assert_eq!(logs_body(&run_id, "").await, "");
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },
@@ -3189,11 +3190,8 @@ system_prompt = "Plan the work"
                 meta.final_output = Some(answer.descriptor());
                 create_run(&meta).unwrap();
                 runstate::write_final_output(&runstate::run_dir(&run_id), &answer.content).unwrap();
-                std::fs::write(
-                    runstate::run_dir(&run_id).join("output.log"),
-                    "ran some tools\n",
-                )
-                .unwrap();
+                runstate::write_stages_index(&run_id, &[stage_rec(0, "summary")]).unwrap();
+                runstate::append_stage_output(&run_id, 0, "ran some tools\n");
 
                 let app = Router::new()
                     .route("/api/agents/{id}/result", get(agent_result))
@@ -3295,9 +3293,6 @@ system_prompt = "Plan the work"
                 meta.status = RunStatus::Complete;
                 create_run(&meta).unwrap();
 
-                let log_path = runstate::run_dir(&run_id).join("output.log");
-                std::fs::write(&log_path, "task complete\n").unwrap();
-
                 let app = Router::new()
                     .route("/api/agents/{id}/result", get(agent_result))
                     .with_state(test_state());
@@ -3312,6 +3307,8 @@ system_prompt = "Plan the work"
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(result["run_id"].as_str().unwrap(), run_id);
+                // A run with no stage recorded has no log tail.
+                assert_eq!(result["output"].as_str().unwrap(), "");
                 // The word every other route uses, not `Display`'s `Complete`.
                 assert_eq!(result["status"].as_str().unwrap(), "complete");
 

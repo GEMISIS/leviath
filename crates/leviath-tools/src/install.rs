@@ -6,8 +6,8 @@
 //! run's workdir, so before this nothing an agent could do reached
 //! `~/.leviath/tools/`. The function is deliberately pure over its inputs: the
 //! destination directory, the reserved-name set, the provenance and the
-//! filesystem predicates are all parameters, so the built-in tool, the MCP
-//! server and the tests call the same code with nothing ambient.
+//! filesystem predicates are all parameters, so the built-in tool and the
+//! tests call the same code with nothing ambient.
 //!
 //! Every refusal happens before anything is written. A script that does not
 //! compile, a name that collides with a built-in, a name that is not a plain

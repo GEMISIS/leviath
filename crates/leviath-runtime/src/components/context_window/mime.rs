@@ -26,11 +26,6 @@ impl super::ContextWindow {
             .collect()
     }
 
-    /// Every stored part in the named regions, in the order the regions are
-    /// given and entries within each. What the auto-emit output path reads to
-    /// find the parts a stage routed as its produced answer: only its
-    /// `output_routing` targets, never the whole window, so an input mesh sat
-    /// in some other region is never mistaken for the one this stage made.
     /// Name the entry most recently written to `region`, unless the write
     /// already named it (a custom region's `on_write` hook may). How a routed
     /// produced part gets its file name as the key `context_delete` and
@@ -46,6 +41,11 @@ impl super::ContextWindow {
         }
     }
 
+    /// Every stored part in the named regions, in the order the regions are
+    /// given and entries within each. What the auto-emit output path reads to
+    /// find the parts a stage routed as its produced answer: only its
+    /// `output_routing` targets, never the whole window, so an input mesh sat
+    /// in some other region is never mistaken for the one this stage made.
     pub(crate) fn stored_parts_in(&self, regions: &[&str]) -> Vec<Part> {
         regions
             .iter()
