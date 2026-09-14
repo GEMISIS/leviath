@@ -96,6 +96,7 @@ fn deliver_with_parts(
         registry: &registry,
         run_id,
         max_part_bytes: mime.max_part_bytes(),
+        inline_text_bytes: mime.inline_text_bytes(),
     };
     let (mine, elsewhere): (Vec<_>, Vec<_>) = msg
         .parts

@@ -145,8 +145,10 @@ const DAEMON_DEFAULTS: leviath_runtime::blob_store::MimeLimits =
 ///
 /// Three ceilings on typed content. `max_part_bytes` is applied wherever a
 /// part arrives: an upload, a tool result, a `read_file`, a model reply.
-/// `inline_text_bytes` is where a text part stops travelling inside the entry
-/// and is stored by hash like any other. `max_media_bytes_per_request` bounds
+/// `inline_text_bytes` is applied to a model reply and to a tool result: past
+/// it the text is stored by hash like any other part and the entry carries
+/// its stand-in, so one enormous transcript cannot fill a region on its own.
+/// `max_media_bytes_per_request` bounds
 /// the bytes of stored media one request carries, a backstop for the vendor
 /// request-size limits that a token budget cannot see: a token estimate for an
 /// image is a few thousand tokens whatever its byte size, so a request can sit

@@ -140,6 +140,7 @@ pub(crate) fn apply_tool_results(
             parts: &[],
             // No produced parts here, so there is nothing to route.
             stage: None,
+            sink: None,
         },
         tool_calls,
         tool_results,
@@ -160,6 +161,10 @@ pub(crate) struct Reply<'a> {
     /// some produced parts to regions of their own. `None` keeps every part
     /// in the conversation.
     pub(crate) stage: Option<&'a leviath_core::blueprint::Stage>,
+    /// Where text over `[mime] inline_text_bytes` is stored, for the reply
+    /// and for each tool result. `None` keeps every text inline: the restore
+    /// path replays a batch with no store at hand.
+    pub(crate) sink: Option<&'a crate::context_setup::PartSink<'a>>,
 }
 
 /// [`apply_tool_results`] for a reply that produced mime beside its tool
@@ -179,7 +184,7 @@ pub(crate) fn apply_tool_results_with_parts(
     // regions as separate entries (written after the turn, since they go
     // elsewhere than the conversation).
     let routed = super::part_routing::split(reply.stage, reply.parts);
-    let content = super::response::reply_content(reply.text, &routed.kept)
+    let content = super::response::reply_content(reply.text, &routed.kept, reply.sink)
         .unwrap_or_else(|| leviath_core::region::EntryContent::text(reply.text));
     let response_tokens = content.tokens_hint();
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
@@ -215,6 +220,7 @@ pub(crate) fn apply_tool_results_with_parts(
             result.clone(),
             routing,
             sensitivities,
+            reply.sink,
         );
     }
 }
@@ -234,6 +240,7 @@ pub(crate) fn apply_one_tool_result(
     result: leviath_core::region::EntryContent,
     routing: Option<&leviath_core::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
+    sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
     // The cap below is about text. A stored part is priced by its own
     // estimate and kept whole: cutting an image in half is not a smaller
@@ -265,14 +272,15 @@ pub(crate) fn apply_one_tool_result(
             result_text.push_str("\n[...truncated]");
         }
     }
-    let result_content = match stored.is_empty() {
-        true => leviath_core::region::EntryContent::text(result_text),
-        false => {
-            let mut parts = vec![leviath_core::mime::Part::text(result_text)];
-            parts.extend(stored);
-            leviath_core::region::EntryContent::from_parts(parts)
-        }
-    };
+    // The text over the inline ceiling is stored by hash like the parts
+    // beside it; a result the cap already cut is under the ceiling.
+    let mut parts = vec![crate::context_setup::text_part(
+        sink,
+        &format!("{tool_name}-result.txt"),
+        &result_text,
+    )];
+    parts.extend(stored);
+    let result_content = leviath_core::region::EntryContent::from_parts(parts);
     let result_tokens = result_content.tokens_hint();
 
     let base_region = match routing {
@@ -798,6 +806,7 @@ pub(crate) fn collect_tools(
         Without<AwaitingTools>,
     >,
     sink: Option<Res<crate::host::WorldEventSink>>,
+    mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -917,9 +926,20 @@ pub(crate) fn collect_tools(
                 ));
             }
         }
-        apply_tool_results(
+        // Where a result over the inline text ceiling is stored, when the
+        // world has a store and this run is known.
+        let (sources, _) = mime.hydration_inputs(outcome.entity);
+        let part_sink = agent_state.and_then(|state| {
+            crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
+        });
+        apply_tool_results_with_parts(
             &mut window,
-            &infer.response,
+            Reply {
+                text: &infer.response,
+                parts: &[],
+                stage: None,
+                sink: part_sink.as_ref(),
+            },
             &infer.tool_calls,
             &merged,
             routing.map(|c| &c.routing),

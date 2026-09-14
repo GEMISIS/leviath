@@ -19490,14 +19490,80 @@ mod model_parts {
         let stored =
             Part::stored(png("a.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("a.png");
-        assert!(reply_content("  ", &[]).is_none());
-        let text = reply_content("hi", &[]).unwrap();
+        assert!(reply_content("  ", &[], None).is_none());
+        let text = reply_content("hi", &[], None).unwrap();
         assert_eq!(text.parts().len(), 1);
-        let both = reply_content("hi", std::slice::from_ref(&stored)).unwrap();
+        let both = reply_content("hi", std::slice::from_ref(&stored), None).unwrap();
         assert_eq!(both.parts().len(), 2);
         assert_eq!(both.stored_count(), 1);
-        let alone = reply_content("", std::slice::from_ref(&stored)).unwrap();
+        let alone = reply_content("", std::slice::from_ref(&stored), None).unwrap();
         assert_eq!(alone.parts().len(), 1);
+    }
+
+    /// A reply over `[mime] inline_text_bytes` is stored and the turn carries
+    /// its stand-in; one under it stays inline.
+    #[test]
+    fn a_long_reply_is_stored_by_hash_and_a_short_one_stays_inline() {
+        let store = leviath_core::mime::MemoryBlobStore::new();
+        let registry = leviath_core::mime::MimeRegistry::builtin();
+        let sink = crate::context_setup::PartSink {
+            store: &store,
+            registry: &registry,
+            run_id: "run-1",
+            max_part_bytes: 1024,
+            inline_text_bytes: 16,
+        };
+        let short = reply_content("brief", &[], Some(&sink)).unwrap();
+        assert_eq!(short.stored_count(), 0);
+        assert_eq!(short.as_str(), "brief");
+        let long = reply_content(&"x".repeat(40), &[], Some(&sink)).unwrap();
+        assert_eq!(long.stored_count(), 1);
+        let part = long.stored().next().unwrap();
+        assert_eq!(part.mime_type.as_str(), "text/plain");
+        assert_eq!(part.name.as_deref(), Some("reply.txt"));
+        let sha = &part.blob().unwrap().sha256;
+        assert_eq!(
+            leviath_core::mime::BlobStore::read(&store, "run-1", sha)
+                .unwrap()
+                .len(),
+            40
+        );
+    }
+
+    /// A tool result over the inline ceiling lands in its region as a stored
+    /// `text/plain` part named after the tool, and the model's own turn is
+    /// untouched.
+    #[test]
+    fn a_long_tool_result_is_stored_by_hash() {
+        let store = leviath_core::mime::MemoryBlobStore::new();
+        let registry = leviath_core::mime::MimeRegistry::builtin();
+        let sink = crate::context_setup::PartSink {
+            store: &store,
+            registry: &registry,
+            run_id: "run-1",
+            max_part_bytes: 1024,
+            inline_text_bytes: 16,
+        };
+        let mut w = ctx(&[("conversation", 100_000)]);
+        apply_tool_results_with_parts(
+            &mut w,
+            Reply {
+                text: "listing",
+                parts: &[],
+                stage: None,
+                sink: Some(&sink),
+            },
+            &[tc("c1", "shell")],
+            &[("c1".to_string(), "line\n".repeat(20).into())],
+            None,
+            None,
+            None,
+        );
+        let entries = &w.get_region("conversation").unwrap().content;
+        assert_eq!(entries[0].content.stored_count(), 0);
+        let result = entries[1].content.stored().next().unwrap();
+        assert_eq!(result.mime_type.as_str(), "text/plain");
+        assert_eq!(result.name.as_deref(), Some("shell-result.txt"));
     }
 
     #[test]
@@ -19512,6 +19578,7 @@ mod model_parts {
                 text: "drawn",
                 parts: std::slice::from_ref(&stored),
                 stage: None,
+                sink: None,
             },
             &[tc("c1", "render")],
             &[("c1".to_string(), "ok".to_string().into())],
@@ -19549,6 +19616,7 @@ mod model_parts {
                 text: "drawn",
                 parts: std::slice::from_ref(&stored),
                 stage: Some(&stage),
+                sink: None,
             },
             &[tc("c1", "render")],
             &[("c1".to_string(), "ok".to_string().into())],

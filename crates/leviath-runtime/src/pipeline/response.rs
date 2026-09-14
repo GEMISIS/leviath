@@ -81,6 +81,7 @@ pub(crate) fn store_model_parts(
         registry: &registry,
         run_id,
         max_part_bytes: mime.max_part_bytes(),
+        inline_text_bytes: mime.inline_text_bytes(),
     };
     blobs
         .into_iter()
@@ -860,6 +861,7 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
 /// lifetimes: the borrow is bound when the query is fetched.
 type EmptyResponseQuery = (
     Entity,
+    &'static crate::components::AgentState,
     &'static mut ContextWindow,
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
@@ -884,12 +886,15 @@ type EmptyResponseQuery = (
 /// for itself. The text supports `{stage}` and `{regions}` placeholders.
 pub(crate) fn handle_empty_response(
     mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
+    mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
+    for (entity, state, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         let stage = bp.0.stages.get(cursor.index);
+        let (sources, _) = mime.hydration_inputs(entity);
+        let sink = crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime);
         let nudge = leviath_core::resolve_nudge(
             global.map(|g| &g.0),
             bp.0.nudge.as_ref(),
@@ -907,7 +912,13 @@ pub(crate) fn handle_empty_response(
             && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
         {
             progress.cut_off_nudges += 1;
-            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
+            store_reply(
+                &mut window,
+                infer,
+                infer.reasoning.clone(),
+                stage,
+                sink.as_ref(),
+            );
             inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
             commands
                 .entity(entity)
@@ -930,7 +941,13 @@ pub(crate) fn handle_empty_response(
                     stage = stage.map(|s| s.name.as_str()).unwrap_or(""),
                     "image stage returned text and no image; likely an image-generation failure"
                 );
-                store_reply(&mut window, infer, infer.reasoning.clone(), stage);
+                store_reply(
+                    &mut window,
+                    infer,
+                    infer.reasoning.clone(),
+                    stage,
+                    sink.as_ref(),
+                );
                 inject_system_nudge(&mut window, &no_image_nudge(&infer.response));
                 commands
                     .entity(entity)
@@ -958,14 +975,26 @@ pub(crate) fn handle_empty_response(
             // told "you have not written the file yet" with its own unwritten
             // draft in front of it can split it; one with nothing in front of
             // it drafts the whole thing again.
-            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
+            store_reply(
+                &mut window,
+                infer,
+                infer.reasoning.clone(),
+                stage,
+                sink.as_ref(),
+            );
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            store_reply(&mut window, infer, infer.reasoning.clone(), stage);
+            store_reply(
+                &mut window,
+                infer,
+                infer.reasoning.clone(),
+                stage,
+                sink.as_ref(),
+            );
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
                 .and_then(|s| s.context_layout.as_ref())
@@ -1071,13 +1100,14 @@ fn store_reply(
     infer: &crate::components::InferenceResult,
     reasoning: Option<String>,
     stage: Option<&leviath_core::blueprint::Stage>,
+    sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
     // The stage may send some produced parts to regions of their own
     // (`output_routing`). The reply's text and any unrouted part stay in the
     // conversation as the assistant turn; the routed parts land in their
     // regions as separate entries.
     let routed = super::part_routing::split(stage, &infer.parts);
-    if let Some(content) = reply_content(&infer.response, &routed.kept) {
+    if let Some(content) = reply_content(&infer.response, &routed.kept, sink) {
         let tokens = content.tokens_hint();
         let _ = window.add_assistant_turn_content(
             "conversation",
@@ -1091,14 +1121,17 @@ fn store_reply(
 }
 
 /// A reply's text and produced parts as one entry's content, or `None` when
-/// there is nothing to record.
+/// there is nothing to record. Text over `[mime] inline_text_bytes` is stored
+/// through `sink` and the entry carries its stand-in; with no sink it stays
+/// inline.
 pub(crate) fn reply_content(
     text: &str,
     parts: &[leviath_core::mime::Part],
+    sink: Option<&crate::context_setup::PartSink<'_>>,
 ) -> Option<leviath_core::region::EntryContent> {
     let mut all = Vec::with_capacity(parts.len() + 1);
     if !text.trim().is_empty() {
-        all.push(leviath_core::mime::Part::text(text));
+        all.push(crate::context_setup::text_part(sink, "reply.txt", text));
     }
     all.extend(parts.iter().cloned());
     (!all.is_empty()).then(|| leviath_core::region::EntryContent::from_parts(all))

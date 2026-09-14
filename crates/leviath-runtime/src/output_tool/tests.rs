@@ -1009,6 +1009,7 @@ fn stored_artifacts_are_mirrored_beside_the_answer() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let mut w = win();
     let (ack, output) = handle_output_tool(
@@ -1079,6 +1080,7 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     assert!(
         !dir.path().join("image-1.png").exists(),
@@ -1123,6 +1125,7 @@ fn an_artifact_that_is_neither_a_file_nor_a_produced_part_is_refused() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let mut w = win();
     let (message, output) = handle_output_tool(
@@ -1195,6 +1198,7 @@ fn a_produced_part_resolves_by_its_file_name() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let (_, output) = handle_output_tool(
         &json!({
@@ -1227,6 +1231,7 @@ fn a_produced_part_resolves_by_sha_prefix() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let prefix = reference
         .sha256
@@ -1279,6 +1284,7 @@ fn a_produced_part_whose_store_read_fails_is_refused() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let (message, output) = handle_output_tool(
         &json!({
@@ -1314,6 +1320,7 @@ fn a_produced_part_written_to_a_missing_directory_is_refused() {
         registry: &registry,
         run_id: "run-1",
         max_part_bytes: 1024,
+        inline_text_bytes: 1024,
     };
     let (message, output) = handle_output_tool(
         &json!({

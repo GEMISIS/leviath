@@ -176,6 +176,15 @@ impl MimeParams<'_, '_> {
             .as_deref()
             .map_or(MimeLimits::default().max_part_bytes, |l| l.max_part_bytes)
     }
+
+    /// The most text an entry carries inline before it is stored by hash.
+    pub fn inline_text_bytes(&self) -> u64 {
+        self.limits
+            .as_deref()
+            .map_or(MimeLimits::default().inline_text_bytes, |l| {
+                l.inline_text_bytes
+            })
+    }
 }
 
 /// The operator's ceilings on typed parts, from `[mime]` in the config.
