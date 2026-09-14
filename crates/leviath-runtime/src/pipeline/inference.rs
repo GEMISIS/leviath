@@ -130,6 +130,44 @@ const MIN_OUTPUT_TOKENS: usize = 1;
 /// slack - and it is proportional because the error it covers is.
 const PROMPT_ESTIMATE_HEADROOM: usize = 16;
 
+/// The tokens a provider will bill for the stored parts a request sends as
+/// bytes, over what the window charged for them.
+///
+/// The window charges a stored part its one-line stand-in; a model that takes
+/// the bytes is billed the part's real cost, which the registry estimated at
+/// ingest. Only the parts this model takes count, and not one the stage sends
+/// as text (`as_text`), which is billed as the text it is. Hydration may still
+/// cap or drop a part, in which case the bill comes in under this figure and
+/// the calibration simply sees no shortfall - the safe direction to miss in.
+pub(super) fn native_media_tokens(
+    request: &leviath_providers::InferenceRequest,
+    mime: &leviath_providers::capabilities::ModelMime,
+    as_text: &[String],
+) -> usize {
+    request
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+            leviath_providers::MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            leviath_providers::ContentBlock::Mime { part, deliver, .. }
+                if mime.accepts(&part.mime_type)
+                    && *deliver != Some(leviath_core::mime::Delivery::Text)
+                    && !part.mime_type.matches_any(as_text) =>
+            {
+                Some(
+                    part.tokens
+                        .saturating_sub(leviath_core::estimate_tokens(&part.stand_in)),
+                )
+            }
+            _ => None,
+        })
+        .sum()
+}
+
 /// What earlier calls in this run taught us, carried into the next request.
 ///
 /// Three pieces of evidence with one thing in common: none of them can be
@@ -576,13 +614,21 @@ pub(crate) fn dispatch_inference(
                     commands
                         .entity(entity)
                         .insert(SystemBlockHashes(block_hashes.clone()));
-                    // What the window believes this call will cost. The response
-                    // says what it really cost, and the two together are the
-                    // only measurement of the estimator's drift the runtime
-                    // gets.
+                    // What the window believes this call will cost, and what
+                    // its stored parts will be billed over that. The response
+                    // says what it really cost, and the three together are
+                    // the only measurement of the estimator's drift the
+                    // runtime gets.
                     commands
                         .entity(entity)
-                        .insert(crate::pipeline::PromptEstimate(window.current_tokens));
+                        .insert(crate::pipeline::PromptEstimate(
+                            window.current_tokens,
+                            native_media_tokens(
+                                &request,
+                                &provider.mime(&si.model),
+                                config.map(|c| c.as_text.as_slice()).unwrap_or_default(),
+                            ),
+                        ));
                 });
                 // A provider that does not advertise streaming for this model
                 // is called non-streaming whatever the config says: `infer_stream`

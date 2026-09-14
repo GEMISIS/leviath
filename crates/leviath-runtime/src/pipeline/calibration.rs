@@ -41,14 +41,25 @@
 
 use bevy_ecs::prelude::Component;
 
-/// What the window believed the request just dispatched would cost.
+/// What the window believed the request just dispatched would cost, and how
+/// much of the provider's bill will be stored parts sent as bytes.
 ///
 /// Written at dispatch and read when the response lands, which is the only
 /// place both halves of the comparison exist at once. Kept as its own component
 /// rather than folded into [`PromptCalibration`] because dispatch overwrites it
 /// wholesale on every call while the calibration accumulates across them.
+///
+/// The second figure is what keeps a picture from poisoning the calibration.
+/// The window charges a stored part its one-line stand-in (ten tokens or so);
+/// a model that takes the bytes is billed the image's real cost (a thousand
+/// and more). That gap is not estimator drift - it is known at dispatch, and
+/// it belongs to the request that sent the bytes, not to the run. Left in,
+/// one stage that showed a model four renders taught the run a 25k-token
+/// "shortfall", and the text-only stage after it was budgeted as if its
+/// prompt filled the window: every reply capped near zero, a `submit_output`
+/// cut off mid-argument three times, and the run failed.
 #[derive(Component, Debug, Clone, Copy)]
-pub(crate) struct PromptEstimate(pub usize);
+pub(crate) struct PromptEstimate(pub usize, pub usize);
 
 /// How many tokens a request costs beyond what the window accounted for.
 ///
@@ -288,9 +299,9 @@ mod tests {
 
     #[test]
     fn the_estimate_component_carries_what_was_believed() {
-        let estimate = PromptEstimate(4_096);
+        let estimate = PromptEstimate(4_096, 0);
         assert_eq!(estimate.0, 4_096);
-        assert_eq!(format!("{estimate:?}"), "PromptEstimate(4096)");
+        assert_eq!(format!("{estimate:?}"), "PromptEstimate(4096, 0)");
     }
 
     #[test]

@@ -604,6 +604,10 @@ pub(crate) fn calibrate(
     let Some(estimate) = estimate else {
         return;
     };
+    // The bytes this request sent are billed at their real cost and charged
+    // to the window as stand-ins; that difference is this request's alone,
+    // not the estimator's, so it comes off before the comparison.
+    let reported = reported.saturating_sub(estimate.1);
     let (moved, shortfall) = match calibration {
         Some(calibration) => (
             calibration.observe(estimate.0, reported),

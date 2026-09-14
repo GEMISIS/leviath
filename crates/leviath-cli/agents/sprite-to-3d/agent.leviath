@@ -218,9 +218,10 @@ gate = { require_region_updated = "references", message = "You have not stored a
 
 [stages.filter-references]
 mode = "autonomous"
-description = "Delete off-model, malformed, or multi-view renders; keep the good single views"
-max_iterations = 10
-max_revisits = 2
+description = "Delete off-model, malformed, or multi-view renders; keep the best four single views"
+# One delete per call, and a busy pass can leave twenty renders to prune.
+max_iterations = 24
+max_revisits = 4
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 The references region holds the view renders drawn so far. Compare them against
@@ -250,6 +251,15 @@ old or superseded.
 Keep the good single views: ideally a clean front, back, left and right. Write
 into the review region which views you kept, for which angles. Then hand off to
 critique-references.
+
+ONLY THE FIRST FOUR COUNT. The model builder takes at most four images, and it
+takes the first four in the references region, in the order context_list shows
+them. Anything after the fourth is never seen. So by the end of this stage the
+region must hold AT MOST FOUR renders, and the four it holds must be the ones
+you want built from, ideally one per angle. Each render is its own entry, keyed
+by its file name (image-<sha>.png), so delete exactly the one you mean with
+context_delete and its key; deleting is cheap and drawing again is not, so
+never leave a bad or redundant render in place because it sits among good ones.
 """
 
 [stages.filter-references.model]
@@ -273,7 +283,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Critically compare the views to the source and maintain the missing-details list"
 max_iterations = 8
-max_revisits = 2
+max_revisits = 4
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 system_prompt = """
 You are the critical reviewer. Compare the reference views in the references
@@ -338,7 +348,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Decide whether the views are complete enough to build, or more are needed"
 max_iterations = 8
-max_revisits = 2
+max_revisits = 4
 available_tools = ["context_read", "context_list", "context_write", "context_append"]
 transition_prompt = """
 Decide what happens next with the reference views:
@@ -403,7 +413,7 @@ transform = "direct"
 mode = "autonomous"
 description = "Draw views that fix the missing details and fill the missing angles"
 max_iterations = 10
-max_revisits = 2
+max_revisits = 4
 available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 system_prompt = """
 You draw images. Your only job here is to DRAW the corrected and missing views
@@ -575,7 +585,7 @@ available_tools = ["context_read", "context_list", "context_write", "context_app
 transition_prompt = """
 Decide what happens to the model you just judged:
 - If it has a serious, fixable gap you have written into the review region,
-  respond with: build-model
+  respond with: generate-more
 - If it faithfully matches the reference views, respond with: finalize
 """
 system_prompt = """
@@ -600,9 +610,13 @@ Then choose one path:
 - If the model has a serious, fixable gap - a missing accessory, a dropped
   ponytail, colors that drifted badly, a rig that deformed the pose - write
   exactly what is wrong and how to fix it into the review region, then transition
-  back to build-model to rebuild. Be specific; the builder acts only on what you
-  write. Only loop back for problems a rebuild can realistically fix, and remember
-  rebuilds are limited.
+  back to generate-more. The builder works only from the reference views, and
+  rebuilding from the same four views with the same settings gives the same
+  model back; what changes the model is a corrected view, so the fix goes
+  through drawing, filtering and critique again before the next build. Be
+  specific about which view must change and how; the drawing stage acts only on
+  what you write. Only loop back for problems a corrected view can realistically
+  fix, and remember the loop is limited.
 - If the model faithfully matches the references, transition to finalize.
 
 Do not try to rebuild the model yourself here; your job is to judge and route.
@@ -618,8 +632,11 @@ model = "anthropic/claude-opus-5"
 [stages.verify-model.context]
 reset = ["conversation"]
 
-[stages.verify-model.transitions.build-model]
-hint = "If the model has a serious gap you have written into the review region for the builder to fix."
+# Back through the reference loop, not straight to the builder: the builder only
+# sees the four reference views, so a rebuild from the same views is a lottery.
+# A corrected view is what changes the model.
+[stages.verify-model.transitions.generate-more]
+hint = "If the model has a serious gap you have written into the review region: corrected views get drawn, filtered and critiqued, then the model is rebuilt from them."
 transform = "direct"
 
 [stages.verify-model.transitions.finalize]
