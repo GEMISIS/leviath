@@ -89,7 +89,7 @@ pub(crate) fn match_transition_choice(
     // models that reason first and answer last without matching a stage name
     // buried in a prose summary ("the approved plan was implemented").
     let words_in = |line: &str| {
-        line.split(|c: char| !c.is_alphanumeric() && c != '_')
+        line.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
             .filter(|w| !w.is_empty())
             .count()
     };
@@ -99,7 +99,7 @@ pub(crate) fn match_transition_choice(
         .copied()
         .filter(|l| lines.len() > 1 && words_in(l) <= 3);
     for line in first.into_iter().chain(last) {
-        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
             if word.is_empty() {
                 continue;
             }

@@ -74,6 +74,12 @@ same list.
 
 ### Fixed
 
+- A stage whose name carries a hyphen could never be chosen by the router: the
+  routing reply was split on every non-word character, so `generate-more`
+  became `generate` and `more`, matched no edge, and the run advanced along
+  the first edge declared instead - silently, and on every decision. A hyphen
+  now stays part of the word, the way an underscore always did. (#840)
+
 - A stage that showed a model pictures starved every stage after it of output.
   The window's prompt calibration compared the provider's bill with the
   window's estimate, but the window charges a stored part its one-line
