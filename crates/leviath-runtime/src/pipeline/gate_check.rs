@@ -50,6 +50,7 @@ pub(crate) fn gate_blocks(
             gate,
             stage,
             progress,
+            "region updated",
             gate.message.clone().unwrap_or_else(|| {
                 format!(
                     "The `{name}` region is unchanged since this stage began. Whatever sent \
@@ -73,6 +74,7 @@ pub(crate) fn gate_blocks(
                     gate,
                     stage,
                     progress,
+                    "region entries",
                     gate.message.clone().unwrap_or_else(|| {
                         format!(
                             "The `{name}` region holds {have} of the {} entries this stage \
@@ -102,30 +104,24 @@ pub(crate) fn gate_blocks(
     {
         let open = region.open_checklist_items();
         if !open.is_empty() {
-            let cap = gate
-                .max_attempts
-                .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
-            if progress.gate_reentries >= cap {
-                tracing::warn!(
-                    stage = %stage.name,
-                    open = open.len(),
-                    attempts = cap,
-                    "stage still has open checklist items after re-run attempts; proceeding"
-                );
-                return GateDecision::Forced;
-            }
             let listed = open
                 .iter()
                 .map(|i| format!("{} {}", i.id, i.text))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return GateDecision::Block(gate.message.clone().unwrap_or_else(|| {
-                format!(
-                    "{} item(s) are still open in `{name}`: {listed}. Finish them, or use \
-                     todo_done to drop the ones that no longer apply, before moving on.",
-                    open.len()
-                )
-            }));
+            return spend_gate_attempt(
+                gate,
+                stage,
+                progress,
+                "open checklist items",
+                gate.message.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} item(s) are still open in `{name}`: {listed}. Finish them, or use \
+                         todo_done to drop the ones that no longer apply, before moving on.",
+                        open.len()
+                    )
+                }),
+            );
         }
     }
     // Conjunctive, and checked before `require_modifications` so it holds
@@ -161,6 +157,7 @@ pub(crate) fn gate_blocks(
             gate,
             stage,
             progress,
+            "regions filled",
             gate.message.clone().unwrap_or_else(|| {
                 format!(
                     "This stage is not finished: the `{listed}` region is still empty. \
@@ -207,6 +204,7 @@ pub(crate) fn gate_blocks(
         gate,
         stage,
         progress,
+        "file modifications",
         gate.message.clone().unwrap_or_else(|| {
             "No file modifications were recorded in this stage. Changes made through the shell \
              (sed -i, tee, >, >>) are not tracked by the framework. Re-apply your changes with \
@@ -221,11 +219,13 @@ pub(crate) fn gate_blocks(
 ///
 /// Shared by every gate condition so one blueprint key (`max_attempts`) bounds
 /// all of them: a gate that could block forever would strand the run, which is
-/// worse than letting a questionable transition through with a warning.
+/// worse than letting a questionable transition through with a warning that
+/// names the `condition` given up on.
 fn spend_gate_attempt(
     gate: &leviath_core::blueprint::TransitionGate,
     stage: &leviath_core::Stage,
     progress: &StageProgress,
+    condition: &'static str,
     nudge: String,
 ) -> GateDecision {
     let cap = gate
@@ -234,6 +234,7 @@ fn spend_gate_attempt(
     if progress.gate_reentries >= cap {
         tracing::warn!(
             stage = %stage.name,
+            condition,
             attempts = cap,
             "transition gate still unsatisfied after re-run attempts; proceeding"
         );

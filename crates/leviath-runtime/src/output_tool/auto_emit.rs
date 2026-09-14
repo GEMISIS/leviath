@@ -96,21 +96,10 @@ fn match_artifacts(specs: &[ArtifactSpec], produced: &[Part]) -> Option<Vec<Arti
 
 /// A one-line description of what the run produced, for the answer's text.
 ///
-/// The stage handed back files, not prose, so the answer says what they are -
-/// the same shape `submit_output` acknowledges, so `lev result` reads the same
-/// either way.
+/// The stage handed back files, not prose, so the answer says what they are,
+/// in the shape `submit_output` acknowledges them.
 fn describe(records: &[Artifact]) -> String {
-    let listed: Vec<String> = records
-        .iter()
-        .map(|a| {
-            format!(
-                "{} ({}, {})",
-                a.name,
-                a.mime_type,
-                leviath_core::mime::human_size(a.size)
-            )
-        })
-        .collect();
+    let listed: Vec<String> = records.iter().map(Artifact::short_label).collect();
     format!("Produced {}.", listed.join(", "))
 }
 

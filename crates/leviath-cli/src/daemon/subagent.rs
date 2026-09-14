@@ -385,11 +385,8 @@ fn finished(
     status_line: String,
     report: &SubAgentReport,
 ) -> EntryContent {
-    let mut content = EntryContent::text(format!("{status_line}{}", describe_result(report)));
-    for part in handed_back(h, agent_id, report) {
-        content = content.with_part(part);
-    }
-    content
+    EntryContent::text(format!("{status_line}{}", describe_result(report)))
+        .with_parts(handed_back(h, agent_id, report))
 }
 
 /// The child's artifacts, stored again under the parent's run as parts
@@ -544,14 +541,7 @@ fn describe_result(report: &SubAgentReport) -> String {
             let files: String = output
                 .artifacts
                 .iter()
-                .map(|a| {
-                    format!(
-                        "\n- {} ({}, {})",
-                        a.name,
-                        a.mime_type,
-                        leviath_core::mime::human_size(a.size)
-                    )
-                })
+                .map(|a| format!("\n- {}", a.short_label()))
                 .collect();
             let files = match files.is_empty() {
                 true => String::new(),

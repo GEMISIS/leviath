@@ -252,14 +252,7 @@ pub(crate) fn handle_output_tool(
         let listed: Vec<String> = output
             .artifacts
             .iter()
-            .map(|a| {
-                format!(
-                    "{} ({}, {})",
-                    a.name,
-                    a.mime_type,
-                    leviath_core::mime::human_size(a.size)
-                )
-            })
+            .map(leviath_core::output::Artifact::short_label)
             .collect();
         ack.push_str(&format!(" Artifacts: {}.", listed.join(", ")));
     }

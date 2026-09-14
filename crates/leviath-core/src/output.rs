@@ -186,6 +186,34 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// `name (type, size)`: how a produced file reads in a sentence.
+    pub fn short_label(&self) -> String {
+        format!(
+            "{} ({}, {})",
+            self.name,
+            self.mime_type,
+            crate::mime::human_size(self.size)
+        )
+    }
+
+    /// The columns after the name in a listing: path, type, size, and the
+    /// hash prefix when the bytes are stored.
+    pub fn detail_columns(&self) -> String {
+        let sha = match self.sha256.is_empty() {
+            true => String::new(),
+            false => format!(
+                "  sha256:{}",
+                self.sha256.chars().take(12).collect::<String>()
+            ),
+        };
+        format!(
+            "{}  {}  {}{sha}",
+            self.path,
+            self.mime_type,
+            crate::mime::human_size(self.size)
+        )
+    }
+
     /// An artifact known only by its path: the shape every answer recorded
     /// before artifacts were typed carried.
     pub fn from_path(path: &str) -> Self {
