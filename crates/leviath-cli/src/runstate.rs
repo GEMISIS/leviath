@@ -962,10 +962,14 @@ fn make_runs_base_dir(unique: &str) -> tempfile::TempDir {
 
 /// The env overrides that point run-state I/O at `base_dir` instead of the
 /// real `~/.leviath/`. Handed to `temp_env` for scoped set-and-restore.
+///
+/// The config path comes along: a daemon host booted in this scope builds its
+/// reloader from `Config::config_path()`, and left to the environment that
+/// would be whatever file a concurrently isolated test is pointing at.
 #[cfg(test)]
 fn runs_dir_isolation_vars(
     base_dir: &std::path::Path,
-) -> [(&'static str, Option<std::ffi::OsString>); 2] {
+) -> [(&'static str, Option<std::ffi::OsString>); 3] {
     [
         (
             "LEVIATH_RUNS_DIR",
@@ -974,6 +978,10 @@ fn runs_dir_isolation_vars(
         (
             "LEVIATH_DASHBOARD_LOG_PATH",
             Some(base_dir.join("dashboard.log").into_os_string()),
+        ),
+        (
+            "LEVIATH_CONFIG_PATH",
+            Some(base_dir.join("config.toml").into_os_string()),
         ),
     ]
 }
