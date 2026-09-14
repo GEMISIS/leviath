@@ -493,13 +493,14 @@ impl Dashboard {
                 self.new_run_focus = self.new_run_pane_after_agents();
             }
             KeyCode::BackTab => self.new_run_focus = NewRunPane::Start,
-            KeyCode::Up => {
-                self.new_run_selected = self.new_run_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                if self.new_run_selected + 1 < self.filtered_new_run_agents().len() {
-                    self.new_run_selected += 1;
-                }
+            KeyCode::Up | KeyCode::Down => {
+                let delta = if key_code == KeyCode::Up { -1 } else { 1 };
+                let len = self.filtered_new_run_agents().len();
+                self.new_run_selected = crate::tui::widgets::list_cursor::move_cursor(
+                    self.new_run_selected,
+                    delta,
+                    len,
+                );
             }
             KeyCode::Backspace => {
                 self.new_run_filter.pop();
@@ -570,13 +571,13 @@ impl Dashboard {
         match key.code {
             KeyCode::Esc => self.close_file_ref(),
             KeyCode::Enter | KeyCode::Tab => self.accept_file_ref(),
-            KeyCode::Up => {
-                self.new_run_file_selected = self.new_run_file_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                if self.new_run_file_selected + 1 < matches {
-                    self.new_run_file_selected += 1;
-                }
+            KeyCode::Up | KeyCode::Down => {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                self.new_run_file_selected = crate::tui::widgets::list_cursor::move_cursor(
+                    self.new_run_file_selected,
+                    delta,
+                    matches,
+                );
             }
             KeyCode::Backspace => {
                 self.new_run_task.area_mut().delete_char();

@@ -1,6 +1,9 @@
 //! Pure utility functions used across the dashboard.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use ratatui::style::Color;
+use unicode_width::UnicodeWidthStr;
+
+use super::theme::{C_BORDER, C_BORDER_FOCUS};
 
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
 pub(super) fn relative_time(ts: i64) -> String {
@@ -37,31 +40,20 @@ pub(super) fn relative_time(ts: i64) -> String {
 /// Fit `s` into `max` terminal columns, ending in an ellipsis when it had to
 /// be cut. The ellipsis is part of the budget, so the result never draws wider
 /// than `max`.
-///
-/// Measured in display columns, not bytes: counting bytes cuts a title full of
-/// long dashes or emoji at a third of the room it was given, and a wide
-/// character counts for the two cells it occupies.
+/// [`crate::tui::text::truncate`] over the trimmed text. What the dashboard
+/// fits into a column is user data (a run title, a model name, a task line)
+/// that arrives with stray whitespace, which would otherwise take cells from
+/// the words.
 pub(super) fn truncate(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.width() <= max {
-        return s.to_string();
+    crate::tui::text::truncate(s.trim(), max)
+}
+
+/// The border and title colour of a pane, lit when it has the keys.
+pub(super) fn focus_colour(focused: bool) -> Color {
+    match focused {
+        true => C_BORDER_FOCUS,
+        false => C_BORDER,
     }
-    if max == 0 {
-        return String::new();
-    }
-    let keep = max - 1;
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in s.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > keep {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
 }
 
 /// The fewest columns a shrinkable part keeps before the next one is touched.
@@ -91,14 +83,24 @@ pub(super) fn fit_parts(parts: &[String], width: usize, shrink_order: &[usize]) 
     out
 }
 
-/// Format a token count in compact style: ≥1000 → "21k", else raw.
+/// A token count shortened for a label: exact under a thousand, one decimal
+/// into the thousands and the millions (`1.5k`, `1.5M`), whole units from ten
+/// up (`21k`, `117k`, `12M`). Every token figure on the dashboard reads this
+/// way, so a window, a budget and a usage counter cannot spell the same
+/// number three ways.
 pub(super) fn format_tokens(n: usize) -> String {
-    if n >= 1_000_000 {
-        format!("{}M", n / 1_000_000)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        n.to_string()
+    let scaled = |value: f64, unit: &str| {
+        let text = match value >= 10.0 {
+            true => format!("{:.0}", value.round()),
+            false => format!("{value:.1}"),
+        };
+        format!("{}{unit}", text.trim_end_matches(".0"))
+    };
+    // The band edge sits where rounding would otherwise print `1000k`.
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_499 => scaled(n as f64 / 1_000.0, "k"),
+        _ => scaled(n as f64 / 1_000_000.0, "M"),
     }
 }
 
@@ -207,15 +209,19 @@ mod tests {
     #[test]
     fn test_format_tokens_thousands() {
         assert_eq!(format_tokens(1000), "1k");
-        assert_eq!(format_tokens(1500), "1k");
+        assert_eq!(format_tokens(1500), "1.5k");
+        assert_eq!(format_tokens(15500), "16k");
         assert_eq!(format_tokens(21000), "21k");
-        assert_eq!(format_tokens(999_999), "999k");
+        assert_eq!(format_tokens(100_000), "100k");
+        assert_eq!(format_tokens(200_000), "200k");
     }
 
     #[test]
     fn test_format_tokens_millions() {
         assert_eq!(format_tokens(1_000_000), "1M");
-        assert_eq!(format_tokens(2_500_000), "2M");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
+        assert_eq!(format_tokens(12_000_000), "12M");
     }
 
     #[test]
@@ -237,7 +243,8 @@ mod tests {
 
     #[test]
     fn test_format_tokens_boundary_999999() {
-        assert_eq!(format_tokens(999_999), "999k");
+        assert_eq!(format_tokens(999_000), "999k");
+        assert_eq!(format_tokens(999_999), "1M");
     }
 
     #[test]

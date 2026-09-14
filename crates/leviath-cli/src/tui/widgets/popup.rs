@@ -29,6 +29,31 @@ pub(crate) fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+/// [`centered`], but never smaller than `min_width` by `min_height` cells
+/// (bounded by `area`), for a popup whose content has a fixed minimum shape:
+/// a file list with a two-line header and a footer is unreadable at three
+/// rows, whatever percentage of a small terminal that is.
+pub(crate) fn centered_at_least(
+    percent_x: u16,
+    percent_y: u16,
+    area: Rect,
+    min_width: u16,
+    min_height: u16,
+) -> Rect {
+    let fitted = centered(percent_x, percent_y, area);
+    if fitted.width >= min_width && fitted.height >= min_height {
+        return fitted;
+    }
+    let width = fitted.width.max(min_width).min(area.width);
+    let height = fitted.height.max(min_height).min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
 /// Clear `area`, draw a bordered block titled ` {title} ` in `border_color`,
 /// and return the inner rect for the caller's content.
 pub(crate) fn popup_frame(frame: &mut Frame, area: Rect, title: &str, border_color: Color) -> Rect {
