@@ -2904,6 +2904,14 @@ mod policy_tests {
         protected_path_refusal(tool, &args, &rig.workdir, Some(&rig.home), &rig.protected)
     }
 
+    /// A word whose `..` climbs out of the start of a relative workdir names
+    /// nothing, on every platform, before any protected place is consulted.
+    #[test]
+    fn a_word_that_climbs_out_names_no_protected_place() {
+        let word = format!("{}x", "../".repeat(6));
+        assert!(protected_hit(&word, std::path::Path::new("a/b"), None, &[]).is_none());
+    }
+
     #[test]
     fn the_file_tools_may_not_write_a_permission_file() {
         let rig = lock_rig();
