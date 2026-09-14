@@ -86,6 +86,17 @@ same list.
   whole region; it now returns the named entry, or `[not found]`, and takes an
   `index` for an unkeyed entry the way `context_delete` does. (#839)
 
+- The bundled `sprite-to-3d` reference stages judge likeness, not just parts. A
+  render could carry every accessory and still be the wrong character: the prep
+  stage now checks its anchor view against the art for face, expression,
+  proportions and outfit before drawing the views that must match it; the
+  critique stage logs a wrong likeness or a changed garment as a serious item;
+  assess-coverage builds only from four usable views (the builder symmetrises
+  what it cannot see) and cannot leave without writing the build hints; long
+  hair, tails and capes are drawn clear of the body so the builder does not
+  fuse them to it; and the verify stage rejects a model missing a one-sided
+  signature part the source shows. (#840)
+
 - The bundled `sprite-to-3d` filter stage is told what the builder actually
   uses - the first four images in its region, in listing order - and keeps at
   most four, with the iteration room to prune a busy pass one render at a
