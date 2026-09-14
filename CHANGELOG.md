@@ -21,11 +21,11 @@ same list.
   answers with an image, a sound or a PDF is stored as a part of the run and
   attached to the tool result instead of coming back as a refusal, so a model
   that takes the type sees the file. (researcher, deep-researcher,
-  wide-researcher and data-analyst bumped.)
+  wide-researcher and data-analyst bumped.) (#842)
 
 - The Gemini provider's offline listing (what `lev models list` and the
   picker show before a live listing is read) names the 2.5 models, including
-  `gemini-2.5-flash-image`, beside the 3.x ones.
+  `gemini-2.5-flash-image`, beside the 3.x ones. (#842)
 
 - A fan-out worker's files travel up with its answer. Each artifact a worker
   hands back is stored again under the parent's run and rides on the merge
