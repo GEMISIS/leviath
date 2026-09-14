@@ -170,16 +170,11 @@ pub(crate) fn production_runner(
 ) -> SeedToolRunner {
     Arc::new(move |name: &str, args: &serde_json::Value| {
         let is_builtin = ctx.builtin_names.contains(name);
-        // The same three fences the tool lane applies to a mid-run call, in the
-        // same order. A seed needs them most: it is the one call that runs
-        // before anyone could have been asked.
-        let policy = resolve(name, is_builtin, args);
-        let policy = crate::tools::clamp_by_effect(name, args, policy, &|| {
-            resolve("write_file", true, &serde_json::Value::Null)
-        });
-        if let Some(refusal) = seed_policy_refusal(name, policy) {
-            return Err(refusal);
-        }
+        // The same three containment fences the tool lane applies to a mid-run
+        // call, ahead of policy as there: no policy makes any of them allowed,
+        // so a call that is both denied and escaping is refused for escaping.
+        // A seed needs them most: it is the one call that runs before anyone
+        // could have been asked.
         let workdir = ctx.builtins.workdir();
         if let Some(refusal) = crate::tools::escaping_write_refusal(name, args, workdir) {
             return Err(refusal);
@@ -195,6 +190,13 @@ pub(crate) fn production_runner(
         }
         if let Some(refusal) = crate::tools::write_budget_refusal(name, args, workdir, &ctx.writes)
         {
+            return Err(refusal);
+        }
+        let policy = resolve(name, is_builtin, args);
+        let policy = crate::tools::clamp_by_effect(name, args, policy, &|| {
+            resolve("write_file", true, &serde_json::Value::Null)
+        });
+        if let Some(refusal) = seed_policy_refusal(name, policy) {
             return Err(refusal);
         }
         if let Some(declared) = crate::tools::declared_write_bytes(name, args) {

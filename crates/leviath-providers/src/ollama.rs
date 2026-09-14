@@ -764,10 +764,11 @@ impl Provider for OllamaProvider {
         let base = self
             .learned
             .mime_corrected(model, crate::mime_tables::ollama(model));
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::OpenAi.carried(mime)
     }
 
     /// Learn every installed model's real window, so percentage region budgets

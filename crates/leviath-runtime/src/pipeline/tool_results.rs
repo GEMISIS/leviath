@@ -186,7 +186,7 @@ pub(crate) fn apply_tool_results_with_parts(
     let routed = super::part_routing::split(reply.stage, reply.parts);
     let content = super::response::reply_content(reply.text, &routed.kept, reply.sink)
         .unwrap_or_else(|| leviath_core::region::EntryContent::text(reply.text));
-    let response_tokens = content.tokens_hint();
+    let response_tokens = content.tokens(reply.sink.map(|s| s.registry));
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
         .iter()
         .map(|tc| leviath_core::SerializedToolCall {
@@ -281,7 +281,7 @@ pub(crate) fn apply_one_tool_result(
     )];
     parts.extend(stored);
     let result_content = leviath_core::region::EntryContent::from_parts(parts);
-    let result_tokens = result_content.tokens_hint();
+    let result_tokens = result_content.tokens(sink.map(|s| s.registry));
 
     let base_region = match routing {
         Some(r) => {

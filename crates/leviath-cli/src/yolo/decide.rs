@@ -355,24 +355,4 @@ fn expand_pattern(pattern: &str, workdir: &Path, home: Option<&Path>) -> Option<
     })
 }
 
-/// Fold `.` and `..` lexically. `None` when a `..` would climb past the root,
-/// which is a path that names nothing a rule should vouch for.
-fn fold_dot_dot(path: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                // Nothing to climb out of: the root, or the start of a
-                // relative path.
-                _ => return None,
-            },
-            other => out.push(other.as_os_str()),
-        }
-    }
-    Some(out)
-}
+use leviath_core::paths::fold_dot_dot;

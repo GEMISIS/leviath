@@ -410,7 +410,17 @@ fn handed_back(
     output
         .artifacts
         .iter()
-        .filter(|a| !a.sha256.is_empty())
+        .filter(|a| {
+            let stored = !a.sha256.is_empty();
+            if !stored {
+                tracing::warn!(
+                    child = %agent_id,
+                    part = %a.name,
+                    "[mime] sub-agent artifact not handed up: the child never stored it"
+                );
+            }
+            stored
+        })
         .filter_map(|artifact| {
             let name = format!("{agent_id}/{}", artifact.name);
             let stored = mime

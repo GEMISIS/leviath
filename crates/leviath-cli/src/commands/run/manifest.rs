@@ -34,8 +34,26 @@ pub(crate) fn retired_check_warnings_at(
 /// Resolve an agent argument to the `agent.leviath` file it names.
 ///
 /// Accepts the file itself, a directory containing one, or an installed
-/// agent's name.
+/// agent's name, and falls back to the manifest in the current directory.
+/// The installed tree is the shared `LEVIATH_HOME`-aware one, so `lev run
+/// <name>` finds what `lev add` wrote when the override is set.
 pub(crate) fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
+    find_manifest_in(
+        path,
+        leviath_core::paths::agents_dir().as_deref(),
+        Path::new(""),
+    )
+}
+
+/// [`find_manifest`] against a given installed-agents directory and a given
+/// current directory, so every command that takes an agent name-or-path
+/// resolves it by one rule and a test can point both somewhere of its own.
+/// `cwd` may be empty, which leaves the fallback path relative as typed.
+pub(crate) fn find_manifest_in(
+    path: &str,
+    agents_dir: Option<&Path>,
+    cwd: &Path,
+) -> anyhow::Result<PathBuf> {
     let p = Path::new(path);
 
     // 1. Explicit agent.leviath file
@@ -53,18 +71,16 @@ pub(crate) fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
         }
     }
 
-    // 3. Installed agent by name: <agents_dir>/<name>/agent.leviath. Resolved
-    //    through the shared LEVIATH_HOME-aware helper, so `lev run <name>`
-    //    finds the same install tree `lev add` writes when the override is set.
-    if let Some(installed) = leviath_core::paths::agents_dir()
+    // 3. Installed agent by name: <agents_dir>/<name>/agent.leviath
+    if let Some(installed) = agents_dir
         .map(|d| d.join(path).join(leviath_core::files::MANIFEST_FILENAME))
         .filter(|p| p.exists())
     {
         return Ok(installed);
     }
 
-    // 4. agent.leviath in current directory (for `lev run` with no path)
-    let current_manifest = PathBuf::from(leviath_core::files::MANIFEST_FILENAME);
+    // 4. agent.leviath in the current directory (for `lev run` with no path)
+    let current_manifest = cwd.join(leviath_core::files::MANIFEST_FILENAME);
     if current_manifest.exists() {
         return Ok(current_manifest);
     }

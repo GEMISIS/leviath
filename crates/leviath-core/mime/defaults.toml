@@ -81,11 +81,13 @@ magic = "FFD8FF"
 
 ["image/gif"]
 extensions = ["gif"]
-magic = "474946383"
+magic = "47494638"
 
+# RIFF, four bytes of size, then the WEBP tag: the tag is what tells a WebP
+# from a WAV or an AVI, which open with the same four letters.
 ["image/webp"]
 extensions = ["webp"]
-magic = "52494646"
+magic = "52494646????????57454250"
 
 ["image/svg+xml"]
 family = "text"
@@ -99,6 +101,7 @@ tokens = { per_second = 32 }
 
 ["audio/wav"]
 extensions = ["wav"]
+magic = "52494646????????57415645"
 
 ["audio/mpeg"]
 extensions = ["mp3"]

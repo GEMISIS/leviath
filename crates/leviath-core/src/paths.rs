@@ -137,6 +137,27 @@ pub fn expand_home(text: &str, home: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
+/// Fold `.` and `..` lexically. `None` when a `..` would climb past the root
+/// or the start of a relative path, which is a path that names nothing a
+/// rule should vouch for.
+pub fn fold_dot_dot(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                _ => return None,
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
 /// The same machinery [`resolves_within`] uses, exposed for the `[read_paths]`
 /// resolver in `leviath-tools`: the deepest existing ancestor is
 /// canonicalized (which is where any symlink lives) and the unresolved tail

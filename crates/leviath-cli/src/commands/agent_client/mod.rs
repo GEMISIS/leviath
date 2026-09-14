@@ -873,24 +873,28 @@ impl Server {
     }
 }
 
-/// Where a host can open one of the run's files: the workdir copy when the
-/// run wrote one, else the blob the run's store holds it as. A file in
-/// neither place is still linked at its workdir path, which is the most a
-/// link can say about it.
+/// Where a host can open one of the run's files: the bytes the run stored,
+/// written under the run's export directory with the name and extension a
+/// host can open it by, which a bare hash in the blob store has neither of.
+/// The store comes first for the same reason `lev result` reads it first:
+/// a later stage may have overwritten the workdir copy. A file the run never
+/// stored is linked at its workdir path, which is the most a link can say.
 fn artifact_location(
     cwd: &str,
     run_id: &str,
     artifact: &leviath_core::output::Artifact,
 ) -> std::path::PathBuf {
+    use crate::commands::result::export;
     let in_workdir = std::path::Path::new(cwd).join(&artifact.path);
-    if in_workdir.exists() || artifact.sha256.is_empty() {
+    if artifact.sha256.is_empty() {
         return in_workdir;
     }
-    let stored = crate::blobs::blob_path(run_id, &artifact.sha256);
-    match stored.is_file() {
-        true => stored,
-        false => in_workdir,
-    }
+    crate::blobs::read(run_id, &artifact.sha256)
+        .ok()
+        .and_then(|bytes| {
+            export::write_into(&export::export_dir(run_id), &artifact.name, &bytes).ok()
+        })
+        .unwrap_or(in_workdir)
 }
 
 /// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.

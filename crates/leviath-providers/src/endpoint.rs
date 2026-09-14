@@ -364,10 +364,11 @@ impl Provider for EndpointProvider {
         let base = self
             .learned
             .mime_corrected(model, crate::mime_tables::by_prefix(model));
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::OpenAi.carried(mime)
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {

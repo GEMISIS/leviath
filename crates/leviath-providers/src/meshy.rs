@@ -21,12 +21,13 @@ use serde_json::Value;
 use tokio::time::{Duration, Instant, sleep};
 
 use leviath_core::mime::{Blob, MimeType};
+use leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped};
 
 use crate::capabilities::{Match, ModelCapabilities, ModelCapabilityOverride, ModelMime, Row};
 use crate::pricing::TokenUsage;
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, ModelInfo, Provider, ProviderError,
-    RateLimitConfig, Result, StreamChunk, UnavailableReason, apply_request_timeout,
+    RateLimitConfig, Result, StreamChunk, apply_request_timeout,
 };
 use crate::rate_limit::RateLimiter;
 
@@ -159,70 +160,67 @@ impl MeshyProvider {
         format!("{}/{}", self.base_url, path)
     }
 
-    /// Turn a non-success HTTP response into the right kind of error.
-    ///
-    /// A bad key or an empty account is [`ProviderError::Unavailable`], which
-    /// tells the runtime not to retry; anything else is an [`ProviderError::ApiError`],
-    /// which the retry loop treats as transient when the status warrants.
-    async fn status_error(context: &str, response: reqwest::Response) -> ProviderError {
-        let status = response.status().as_u16();
-        let detail = response.text().await.unwrap_or_default();
-        match UnavailableReason::classify(status, &detail) {
-            Some(reason) => ProviderError::Unavailable { reason, detail },
-            None => ProviderError::ApiError(format!("Meshy {context}: HTTP {status} {detail}")),
-        }
+    /// Send `builder` within `timeout_secs` and hand back its response, on
+    /// the same path every other provider's requests take: a dead socket is
+    /// a transient transport error, a 429 paces the limiter and carries its
+    /// `Retry-After`, a bad key or an empty account is [`ProviderError::Unavailable`],
+    /// and any other non-2xx is an [`ProviderError::ApiError`] with the body.
+    async fn send(
+        &self,
+        builder: reqwest::RequestBuilder,
+        timeout_secs: u64,
+        doing: &str,
+    ) -> Result<reqwest::Response> {
+        let response = apply_request_timeout(builder, Some(timeout_secs))
+            .send()
+            .await
+            .map_err(|e| ProviderError::transport(doing, &e))?;
+        crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await
     }
 
-    /// POST a create body and read the JSON response, or map the failure.
+    /// [`Self::send`], then the JSON body: capped, with a malformed body the
+    /// API's own fault rather than something to retry.
+    async fn send_json(
+        &self,
+        builder: reqwest::RequestBuilder,
+        timeout_secs: u64,
+        doing: &str,
+    ) -> Result<Value> {
+        let response = self.send(builder, timeout_secs, doing).await?;
+        crate::provider::decode_json(response).await
+    }
+
+    /// POST a create body and read the JSON response.
     async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
         let builder = self.client.post(url).bearer_auth(&self.api_key).json(body);
-        let response = apply_request_timeout(builder, Some(SHORT_REQUEST_SECS))
-            .send()
+        self.send_json(builder, SHORT_REQUEST_SECS, "creating a Meshy task")
             .await
-            .map_err(|e| ProviderError::transport("creating a Meshy task", &e))?;
-        if !response.status().is_success() {
-            return Err(Self::status_error("create", response).await);
-        }
-        response
-            .json::<Value>()
-            .await
-            .map_err(|e| ProviderError::transport("reading a Meshy create response", &e))
     }
 
-    /// GET a task's status body, or map the failure.
+    /// GET a task's status body.
     async fn get_json(&self, url: &str) -> Result<Value> {
         let builder = self.client.get(url).bearer_auth(&self.api_key);
-        let response = apply_request_timeout(builder, Some(SHORT_REQUEST_SECS))
-            .send()
+        self.send_json(builder, SHORT_REQUEST_SECS, "polling a Meshy task")
             .await
-            .map_err(|e| ProviderError::transport("polling a Meshy task", &e))?;
-        if !response.status().is_success() {
-            return Err(Self::status_error("poll", response).await);
-        }
-        response
-            .json::<Value>()
-            .await
-            .map_err(|e| ProviderError::transport("reading a Meshy status", &e))
     }
 
-    /// Download the bytes at a signed asset URL.
+    /// Download the bytes at a signed asset URL, up to the same ceiling every
+    /// provider body has.
     ///
     /// No bearer token: the URL is already signed, and the asset host is a
     /// different origin from the API.
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let builder = self.client.get(url);
-        let response = apply_request_timeout(builder, Some(DOWNLOAD_REQUEST_SECS))
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("downloading a Meshy asset", &e))?;
-        if !response.status().is_success() {
-            return Err(Self::status_error("download", response).await);
-        }
-        response
-            .bytes()
+        let response = self
+            .send(
+                self.client.get(url),
+                DOWNLOAD_REQUEST_SECS,
+                "downloading a Meshy asset",
+            )
+            .await?;
+        read_body_capped(response, JSON_BODY_CAP)
             .await
             .map(|b| b.to_vec())
-            .map_err(|e| ProviderError::transport("reading Meshy asset bytes", &e))
+            .map_err(ProviderError::from)
     }
 
     /// The absolute deadline for a whole operation, from its stage timeout.
@@ -354,17 +352,8 @@ impl MeshyProvider {
             query_encode(search)
         ));
         let builder = self.client.get(&url).bearer_auth(&self.api_key);
-        let response = apply_request_timeout(builder, Some(SHORT_REQUEST_SECS))
-            .send()
+        self.send_json(builder, SHORT_REQUEST_SECS, "listing Meshy animations")
             .await
-            .map_err(|e| ProviderError::transport("listing Meshy animations", &e))?;
-        if !response.status().is_success() {
-            return Err(Self::status_error("library", response).await);
-        }
-        response
-            .json::<Value>()
-            .await
-            .map_err(|e| ProviderError::transport("reading the Meshy animation library", &e))
     }
 }
 
@@ -894,10 +883,7 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("poll") && err.to_string().contains("HTTP 500"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("HTTP 500"), "{err}");
 
         // Download non-2xx: a 404 at the signed asset url.
         let dl = spawn_mock_server(404, "Not Found", b"gone".to_vec()).await;
@@ -1009,6 +995,24 @@ mod tests {
         assert_eq!(p.serves_model("custom-op").as_deref(), Some("custom-op"));
     }
 
+    /// A 429 is a rate limit, not an API error: the runtime paces on it and
+    /// retries after the wait, where a plain error would end the run.
+    #[tokio::test]
+    async fn a_rate_limit_is_reported_as_one() {
+        let url = spawn_mock_server(429, "Too Many Requests", b"slow down".to_vec()).await;
+        let err = provider_at(&url)
+            .infer(&request_with(
+                "image-to-3d",
+                vec![image_block("image/png", "QQ")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProviderError::RateLimitExceeded { .. }),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn an_unreadable_create_or_status_body_is_an_error() {
         // A 200 that is not JSON fails when the create response is parsed.
@@ -1020,10 +1024,9 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("reading a Meshy create response"),
-            "{err}"
-        );
+        // Malformed JSON is the API's own fault and permanent, never retried
+        // as a transport blip would be.
+        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
         // A poll body that is not JSON fails the same way.
         let (api, _b) = spawn_mock_sequence(vec![
             (200, "OK", br#"{"result":"t"}"#.to_vec()),
@@ -1037,7 +1040,7 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("reading a Meshy status"), "{err}");
+        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
     }
 
     #[tokio::test]
@@ -1059,10 +1062,8 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("reading Meshy asset bytes"),
-            "{err}"
-        );
+        // Bytes that never arrived are a transport failure, which is retried.
+        assert!(matches!(err, ProviderError::RequestFailed(_)), "{err}");
     }
 
     fn text_block(text: &str) -> ContentBlock {
@@ -1221,11 +1222,7 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("reading the Meshy animation library"),
-            "{err}"
-        );
+        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
 
         // The library endpoint unreachable (server gone after the rig).
         let (api, _b) = spawn_mock_sequence(vec![

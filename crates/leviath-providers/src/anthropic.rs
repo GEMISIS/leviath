@@ -962,10 +962,11 @@ impl Provider for AnthropicProvider {
         let base = self
             .learned
             .mime_corrected(model, crate::mime_tables::anthropic(model));
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::Anthropic.carried(mime)
     }
 
     /// Every id the listing named, once primed.

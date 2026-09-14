@@ -50,6 +50,103 @@ pub fn family_of(mime_type: &MimeType) -> Family {
     }
 }
 
+/// The request shapes this crate encodes a mime block into, and so what each
+/// can carry beside text.
+///
+/// A vendor may take video, and its published modality table says so, but a
+/// request shape with no slot for a family can only send the stand-in. A
+/// model's mime is passed through its shape so the runtime never base64s,
+/// charges and caps bytes that the encoder would throw away at the last step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireShape {
+    /// OpenAI Chat Completions: `image_url`, `input_audio`, `file`.
+    OpenAi,
+    /// Anthropic Messages: `image`, `document`.
+    Anthropic,
+    /// Codex Responses: `input_image`, `input_file`.
+    Codex,
+}
+
+impl WireShape {
+    /// Whether this shape has a block for `family`.
+    fn carries(self, family: Family) -> bool {
+        matches!(
+            (self, family),
+            (_, Family::Image | Family::Document) | (WireShape::OpenAi, Family::Audio)
+        )
+    }
+
+    /// `mime` with every input this shape has no block for taken out. Text is
+    /// not a family and always travels; outputs are left alone, since what a
+    /// model hands back is the reply's business, not the request's.
+    pub fn carried(
+        self,
+        mut mime: crate::capabilities::ModelMime,
+    ) -> crate::capabilities::ModelMime {
+        mime.input
+            .retain(|pattern| family_of_pattern(pattern).is_none_or(|f| self.carries(f)));
+        mime
+    }
+}
+
+/// The family a mime pattern names: `None` for text and for `*/*`, which
+/// every shape carries; a pattern that names no built-in family is `Other`.
+fn family_of_pattern(pattern: &str) -> Option<Family> {
+    let (kind, _) = pattern.split_once('/')?;
+    match kind {
+        "text" | "*" => None,
+        "image" => Some(Family::Image),
+        "audio" => Some(Family::Audio),
+        "video" => Some(Family::Video),
+        _ => Some(
+            MimeType::parse(pattern)
+                .map(|t| family_of(&t))
+                .unwrap_or(Family::Other),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use crate::capabilities::ModelMime;
+
+    fn everything() -> ModelMime {
+        ModelMime::new(
+            &[
+                "text/*",
+                "image/*",
+                "audio/*",
+                "video/*",
+                "application/pdf",
+                "model/*",
+            ],
+            &["text/*", "video/*"],
+        )
+    }
+
+    #[test]
+    fn a_shape_keeps_only_the_inputs_it_has_a_block_for() {
+        let open_ai = WireShape::OpenAi.carried(everything());
+        assert_eq!(
+            open_ai.input,
+            ["text/*", "image/*", "audio/*", "application/pdf"]
+        );
+        let anthropic = WireShape::Anthropic.carried(everything());
+        assert_eq!(anthropic.input, ["text/*", "image/*", "application/pdf"]);
+        assert_eq!(
+            WireShape::Codex.carried(everything()).input,
+            anthropic.input
+        );
+        // Outputs are the reply's business and are left alone.
+        assert_eq!(anthropic.output, ["text/*", "video/*"]);
+        // A wildcard input, and a pattern that names no family, read the
+        // same way whatever the shape.
+        let odd = WireShape::Anthropic.carried(ModelMime::new(&["*/*", "x-thing/*"], &["text/*"]));
+        assert_eq!(odd.input, ["*/*"]);
+    }
+}
+
 /// `data:<type>;base64,<bytes>` for a hydrated mime block.
 pub fn data_uri(mime_type: &MimeType, data: &str) -> String {
     format!("data:{mime_type};base64,{data}")

@@ -26,6 +26,18 @@ impl super::ContextWindow {
             .collect()
     }
 
+    /// The stored part `needle` names (see [`Part::is_named`]), the most
+    /// recently written one when several match, so a name a newer render
+    /// reused finds the newer render.
+    pub(crate) fn find_stored_part(&self, needle: &str) -> Option<&Part> {
+        self.regions
+            .iter()
+            .flat_map(|r| r.content.iter())
+            .rev()
+            .flat_map(|e| e.content.stored())
+            .find(|p| p.is_named(needle))
+    }
+
     /// Name the entry most recently written to `region`, unless the write
     /// already named it (a custom region's `on_write` hook may). How a routed
     /// produced part gets its file name as the key `context_delete` and

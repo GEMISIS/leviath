@@ -140,7 +140,8 @@ pub(crate) fn by_prefix(model: &str) -> ModelMime {
 /// to prefer when an instance exists, since it also reads the listing and the
 /// operator's overrides.
 pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
-    match provider {
+    use crate::mime::WireShape;
+    let published = match provider {
         "anthropic" => anthropic(model),
         "openai" => openai(model),
         "google" | "gemini" => gemini(model),
@@ -150,6 +151,19 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
         "meshy" => crate::meshy::mime_for(model),
         "bedrock" => crate::bedrock::catalog::mime_for(model),
         _ => ModelMime::text_only(),
+    };
+    // What the vendor takes, narrowed to what the request shape Leviath sends
+    // it can carry: Gemini takes video, the Chat Completions body has no slot
+    // for it. Meshy has a shape of its own and is not narrowed.
+    let shape = match provider {
+        "anthropic" => Some(WireShape::Anthropic),
+        "codex" => Some(WireShape::Codex),
+        "openai" | "google" | "gemini" | "ollama" | "openrouter" => Some(WireShape::OpenAi),
+        _ => None,
+    };
+    match shape {
+        Some(shape) => shape.carried(published),
+        None => published,
     }
 }
 
@@ -338,8 +352,14 @@ mod tests {
     fn builtin_mime_dispatches_by_provider_name() {
         assert!(builtin_mime("anthropic", "claude-sonnet-5").accepts(&mt("image/png")));
         assert!(builtin_mime("openai", "gpt-5.5").accepts(&mt("image/png")));
-        assert!(builtin_mime("google", "gemini-3.5-flash").accepts(&mt("video/mp4")));
+        // The published table says Gemini takes video; the Chat Completions
+        // shape Leviath sends it has no slot for one, so a video is not
+        // offered as bytes. Audio has a slot and stays.
+        assert!(!builtin_mime("google", "gemini-3.5-flash").accepts(&mt("video/mp4")));
         assert!(builtin_mime("gemini", "gemini-3.5-flash").accepts(&mt("audio/wav")));
+        assert!(!builtin_mime("anthropic", "claude-sonnet-5").accepts(&mt("audio/wav")));
+        // A shape of its own is not narrowed.
+        assert!(builtin_mime("meshy", "image-to-3d").accepts(&mt("image/png")));
         assert!(builtin_mime("codex", "gpt-5.5-codex").accepts(&mt("image/png")));
         assert!(builtin_mime("ollama", "llava").accepts(&mt("image/png")));
         assert!(builtin_mime("openrouter", "openai/gpt-5.5").accepts(&mt("image/png")));

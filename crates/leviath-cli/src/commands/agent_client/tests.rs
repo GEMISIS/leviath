@@ -1639,12 +1639,13 @@ mod run_status_helpers {
             let cwd = cwd.path().to_string_lossy().to_string();
             let mut written = leviath_core::output::Artifact::from_path("notes.md");
             written.sha256 = "a".repeat(64);
-            // On disk: the workdir copy, whatever the store holds.
+            // On disk and never stored: the workdir copy.
             assert_eq!(
                 artifact_location(&cwd, "run-a", &written),
                 std::path::Path::new(&cwd).join("notes.md")
             );
-            // Not on disk but in the store: the stored file.
+            // In the store: an exported copy the host can open by name, whatever
+            // the workdir holds under that path by now.
             let store = leviath_runtime::blob_store::FsBlobStore::new(crate::runstate::runs_dir());
             let stored = store
                 .put(
@@ -1658,10 +1659,12 @@ mod run_status_helpers {
                 .unwrap();
             let mut made = leviath_core::output::Artifact::from_path("out/scene.glb");
             made.sha256 = stored.sha256.clone();
+            let linked = artifact_location(&cwd, "run-a", &made);
             assert_eq!(
-                artifact_location(&cwd, "run-a", &made),
-                crate::blobs::blob_path("run-a", &stored.sha256)
+                linked,
+                crate::commands::result::export::export_dir("run-a").join("scene.glb")
             );
+            assert_eq!(std::fs::read(&linked).unwrap(), b"glTF");
             // In neither place, or never stored: the workdir path, which is
             // the most a link can say.
             made.sha256 = "b".repeat(64);

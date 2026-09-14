@@ -8,11 +8,11 @@ use leviath_core::mime::MimeType;
 #[test]
 fn the_family_table_then_the_listing_then_the_override() {
     let mut provider = GeminiProvider::new(reqwest::Client::new(), "k".to_string());
-    assert!(
-        provider
-            .mime("gemini-3.5-flash")
-            .accepts(&MimeType::parse("video/mp4").unwrap())
-    );
+    // The table says the model takes audio and video; the Chat Completions
+    // shape the requests go out in has a slot for audio only.
+    let table = provider.mime("gemini-3.5-flash");
+    assert!(table.accepts(&MimeType::parse("audio/wav").unwrap()));
+    assert!(!table.accepts(&MimeType::parse("video/mp4").unwrap()));
     provider.learned.replace(std::collections::HashMap::from([(
         "gemini-3.5-flash".to_string(),
         LearnedModel {

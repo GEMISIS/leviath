@@ -116,32 +116,21 @@ pub fn execute_with(args: DepsArgs, env: &DepsEnv) -> anyhow::Result<()> {
     }
 }
 
-/// Resolve an agent name-or-path to its parsed blueprint and its directory.
-///
-/// The read is the existence check (an agent that resolves to no readable
-/// manifest is "not found"), so there is one error path per real failure -
-/// missing, unparseable, invalid - and no unreachable guard.
+/// Resolve an agent name-or-path to its parsed blueprint and its directory,
+/// by the rule `lev run` resolves one: the manifest file, a directory
+/// holding one, an installed name, or the manifest in the current directory.
 fn resolve_agent(agent: &str, env: &DepsEnv) -> anyhow::Result<(Blueprint, PathBuf)> {
-    let as_path = Path::new(agent);
-    let (manifest, dir) = if as_path.is_file() {
-        let dir = as_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        (as_path.to_path_buf(), dir)
-    } else if as_path.is_dir() {
-        (
-            as_path.join(leviath_core::files::MANIFEST_FILENAME),
-            as_path.to_path_buf(),
-        )
-    } else if let Some(dir) = &env.agents_dir {
-        let base = dir.join(agent);
-        (base.join(leviath_core::files::MANIFEST_FILENAME), base)
-    } else {
-        bail!("no such path '{agent}', and no installed-agents directory to look it up in");
-    };
-    let content = std::fs::read_to_string(&manifest).map_err(|_| {
-        anyhow::anyhow!(
-            "could not find agent '{agent}': no manifest at {}",
-            manifest.display()
-        )
+    let manifest = crate::commands::run::manifest::find_manifest_in(
+        agent,
+        env.agents_dir.as_deref(),
+        Path::new(""),
+    )?;
+    let dir = manifest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let content = std::fs::read_to_string(&manifest).map_err(|e| {
+        anyhow::anyhow!("could not read the manifest at {}: {e}", manifest.display())
     })?;
     let blueprint = leviath_core::manifest::parse_manifest(&content)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", manifest.display()))?;
@@ -601,7 +590,18 @@ mod tests {
         assert!(resolve_agent(manifest.to_str().unwrap(), &env).is_ok());
         // Missing.
         let err = resolve_agent("nope", &env).unwrap_err().to_string();
-        assert!(err.contains("could not find agent 'nope'"), "{err}");
+        assert!(err.contains("agent manifest for 'nope'"), "{err}");
+        // Resolves, but is not a readable file: an installed name whose
+        // manifest path is a directory.
+        std::fs::create_dir_all(
+            dir.path()
+                .join("agents")
+                .join("hollow")
+                .join(leviath_core::files::MANIFEST_FILENAME),
+        )
+        .unwrap();
+        let err = resolve_agent("hollow", &env).unwrap_err().to_string();
+        assert!(err.contains("could not read the manifest at"), "{err}");
     }
 
     #[test]
@@ -653,7 +653,7 @@ mod tests {
         );
         env.agents_dir = None;
         let err = resolve_agent("bare-name", &env).unwrap_err().to_string();
-        assert!(err.contains("no such path"), "{err}");
+        assert!(err.contains("agent manifest for 'bare-name'"), "{err}");
     }
 
     #[test]

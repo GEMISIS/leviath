@@ -95,14 +95,9 @@ impl<'a> PartSink<'a> {
         Ok(EntryContent::from_parts(parts))
     }
 
-    /// The tokens an entry costs its region: inline text by the registry's
-    /// rule for its type, a stored part by its stand-in (see [`Part::tokens`]).
+    /// The tokens an entry costs its region, charged by this sink's registry.
     pub(crate) fn tokens_for(&self, content: &EntryContent) -> usize {
-        content
-            .parts()
-            .iter()
-            .map(|p| p.tokens(self.registry))
-            .sum()
+        content.tokens(Some(self.registry))
     }
 }
 

@@ -1065,7 +1065,7 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
         100_000,
     ));
     let content = leviath_core::region::EntryContent::from_parts(vec![part]);
-    let tokens = content.tokens_hint();
+    let tokens = content.tokens(None);
     w.add_assistant_turn_content(
         "artwork",
         leviath_core::EntryKind::Text,
@@ -1175,7 +1175,7 @@ fn window_with_produced_png(
     let content = leviath_core::region::EntryContent::from_parts(vec![
         Part::stored(reference.clone()).named(name),
     ]);
-    let tokens = content.tokens_hint();
+    let tokens = content.tokens(None);
     w.add_assistant_turn_content(
         "artwork",
         leviath_core::EntryKind::Text,

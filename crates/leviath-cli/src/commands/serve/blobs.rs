@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use leviath_core::mime::{MimeRegistry, MimeType, is_sha256_hex};
+use leviath_core::mime::{MimeRegistry, MimeType, TokenRule, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -220,9 +220,12 @@ pub(super) async fn get_blob(
         .as_ref()
         .and_then(|b| MimeType::parse(&b.mime_type).ok())
         .unwrap_or_else(|| registry.resolve(None, None, &bytes));
-    let name = known
-        .and_then(|b| b.name)
-        .unwrap_or_else(|| sha256.chars().take(12).collect());
+    let name = crate::blobs::export_name(
+        known.as_ref().and_then(|b| b.name.as_deref()),
+        &sha256,
+        mime_type.as_str(),
+        &registry,
+    );
     bytes_response(
         bytes,
         &mime_type,
@@ -361,44 +364,77 @@ pub(super) async fn artifact(
 }
 
 /// One row of the effective mime registry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// A type's row is resolved: what `image/png` inherits from `image/*` is
+/// filled in, as `lev mime list` shows it. A pattern's row is as written,
+/// since a pattern resolves to nothing on its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct MimeTypeEntry {
     /// The row's key: a type, or a pattern such as `image/*`.
     pub(super) mime_type: String,
     /// Where the row came from: `builtin`, `config`, or a blueprint or
     /// provider name.
     pub(super) source: String,
-    /// The family the row sets, when it sets one.
+    /// The family: resolved for a type, as written for a pattern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) family: Option<String>,
-    /// Whether the row calls the bytes text, when it says.
+    /// Whether the bytes are text: resolved for a type, as written for a
+    /// pattern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) text: Option<bool>,
-    /// The extensions the row names, when it names any.
+    /// How the bytes are counted in tokens, the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tokens: Option<TokenRule>,
+    /// The extensions the type is known by, the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) extensions: Option<Vec<String>>,
+    /// The stand-in template a row set, when one applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) stand_in: Option<String>,
+    /// The check script the bytes must pass, when one applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) check: Option<String>,
 }
 
 /// The registry listing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct MimeListing {
     /// Every row, keys sorted.
     pub(super) types: Vec<MimeTypeEntry>,
 }
 
-/// The rows of `registry`, keys sorted.
+/// The rows of `registry`, keys sorted: every type resolved through the
+/// broader rows it inherits from, every pattern as written.
 pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
     let mut keys = registry.keys();
     keys.sort();
     keys.into_iter()
-        .map(|(key, source)| {
-            let row = registry.row(&key).cloned().unwrap_or_default();
-            MimeTypeEntry {
-                mime_type: key,
-                source,
-                family: row.family,
-                text: row.text,
-                extensions: row.extensions,
+        .map(|(key, source)| match MimeType::parse(&key) {
+            Ok(mime_type) => {
+                let info = registry.info(&mime_type);
+                MimeTypeEntry {
+                    mime_type: key,
+                    source,
+                    family: Some(info.family),
+                    text: Some(info.text),
+                    tokens: Some(info.tokens),
+                    extensions: Some(info.extensions),
+                    stand_in: info.stand_in,
+                    check: info.check,
+                }
+            }
+            Err(_) => {
+                let row = registry.row(&key).cloned().unwrap_or_default();
+                MimeTypeEntry {
+                    mime_type: key,
+                    source,
+                    family: row.family,
+                    text: row.text,
+                    tokens: row.tokens,
+                    extensions: row.extensions,
+                    stand_in: row.stand_in,
+                    check: row.check,
+                }
             }
         })
         .collect()
@@ -611,12 +647,11 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "image/png");
-            assert!(
-                headers[header::CONTENT_DISPOSITION]
-                    .to_str()
-                    .unwrap()
-                    .contains(&orphan_sha.chars().take(12).collect::<String>())
-            );
+            // Named the way `lev blobs --out` writes it: the short hash with
+            // the extension its type gives, so a browser saves a typed file.
+            let disposition = headers[header::CONTENT_DISPOSITION].to_str().unwrap();
+            let expected = format!("{}.png", orphan_sha.chars().take(12).collect::<String>());
+            assert!(disposition.contains(&expected), "{disposition}");
             // A run with no snapshot has no listing but still serves a blob.
             std::fs::remove_file(runstate::run_dir(run_id).join(leviath_core::files::CONTEXT_FILE))
                 .unwrap();
@@ -786,6 +821,23 @@ mod tests {
             .expect("the built-in rows are there");
         assert_eq!(png.source, "builtin");
         assert_eq!(png.extensions.as_deref(), Some(&["png".to_string()][..]));
+        // Resolved, as `lev mime list` shows it: the family and the token rule
+        // come from the `image/*` row the type inherits from.
+        assert_eq!(png.family.as_deref(), Some("image"));
+        assert_eq!(png.text, Some(false));
+        assert!(png.tokens.is_some());
+        let pattern = listing
+            .types
+            .iter()
+            .find(|t| t.mime_type == "image/*")
+            .expect("pattern rows are listed as written");
+        assert_eq!(pattern.family.as_deref(), Some("image"));
+        assert!(
+            pattern
+                .extensions
+                .as_deref()
+                .is_none_or(<[String]>::is_empty)
+        );
         assert!(listing.types.iter().any(|t| t.mime_type == "*/*"));
         let names: Vec<&str> = listing.types.iter().map(|t| t.mime_type.as_str()).collect();
         let mut sorted = names.clone();
