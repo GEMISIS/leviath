@@ -2307,11 +2307,115 @@ async fn dispatch_records_what_it_believed_the_request_would_cost() {
     );
 }
 
+/// Only the parts the model takes as bytes count, at their real cost over the
+/// stand-in the window charged. One the model does not take, one sent as
+/// text, and one the stage marks `as_text` all cost the window what it
+/// already charged, and a plain text message is not a part at all.
+#[test]
+fn native_media_tokens_counts_only_the_bytes_the_model_takes() {
+    use leviath_core::mime::{BlobRef, Delivery, MimeType};
+    use leviath_providers::{ContentBlock, InferenceRequest, Message, MessageContent};
+    let blob = |mime: &str, tokens: usize| BlobRef {
+        sha256: "a".repeat(64),
+        mime_type: MimeType::parse(mime).unwrap(),
+        size: 10,
+        width: None,
+        height: None,
+        duration_ms: None,
+        tokens,
+        stand_in: "[x] a".to_string(),
+    };
+    let mime_block = |mime: &str, tokens: usize, deliver: Option<Delivery>| ContentBlock::Mime {
+        part: blob(mime, tokens),
+        data: String::new(),
+        name: None,
+        deliver,
+    };
+    let request = InferenceRequest {
+        system: Vec::new(),
+        messages: vec![
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("hi".into()),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "look".into(),
+                    },
+                    mime_block("image/png", 1_500, None),
+                    mime_block("model/gltf-binary", 9_000, None),
+                    mime_block("image/png", 1_500, Some(Delivery::Text)),
+                    mime_block("audio/wav", 800, None),
+                ]),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+        ],
+        model: "m".into(),
+        max_tokens: 0,
+        temperature: 0.0,
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+        request_timeout_secs: None,
+    };
+    let mime = leviath_providers::capabilities::ModelMime {
+        input: vec!["text/*".into(), "image/*".into(), "audio/*".into()],
+        output: vec!["text/*".into()],
+    };
+    let stand_in = leviath_core::estimate_tokens("[x] a");
+    let counted = super::inference::native_media_tokens(&request, &mime, &["audio/*".to_string()]);
+    assert_eq!(
+        counted,
+        1_500 - stand_in,
+        "one image taken as bytes, nothing else"
+    );
+}
+
+/// The bytes a request sent are billed at their real cost and charged to the
+/// window as stand-ins. That gap belongs to the request, not the estimator:
+/// counted as drift, one stage that showed a model four renders taught the
+/// run a shortfall the size of the window, and the text-only stage after it
+/// had no room left to answer.
+#[test]
+fn collect_does_not_learn_the_cost_of_the_bytes_a_request_sent() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            PromptEstimate(1_000, 20_000),
+        ))
+        .id();
+    let mut response = resp("done");
+    response.tokens_used.prompt_tokens = 21_500;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let shortfall = world
+        .get::<PromptCalibration>(e)
+        .map_or(0, PromptCalibration::shortfall);
+    assert_eq!(
+        shortfall, 500,
+        "only the text drift is drift; the 20,000 tokens of pictures were known at dispatch"
+    );
+}
+
 #[test]
 fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
     let (mut world, tx) = world_with_results();
     let e = world
-        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000)))
+        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000, 0)))
         .id();
     let mut response = resp("done");
     response.tokens_used.prompt_tokens = 1_200;
@@ -2343,7 +2447,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         .spawn((
             agent_state(),
             AwaitingInference,
-            PromptEstimate(1_000),
+            PromptEstimate(1_000, 0),
             existing,
         ))
         .id();
@@ -2377,7 +2481,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
 fn collect_learns_from_a_refused_request_too() {
     let (mut world, tx) = world_with_results();
     let e = world
-        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000)))
+        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000, 0)))
         .id();
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,

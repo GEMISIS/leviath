@@ -50,25 +50,40 @@ pub(crate) fn split(stage: Option<&Stage>, parts: &[Part]) -> RoutedParts {
     }
 }
 
-/// Write each routed group into its region as one entry. Text belongs to the
-/// conversation turn, so a routed entry carries only produced parts and is
-/// plain [`EntryKind::Text`](leviath_core::EntryKind::Text): a pinned region
-/// lifts its stored parts into the leading user turn, and a sliding window
-/// renders them as a user message, so either way the next stage's model sees
-/// the bytes. A region the write cannot reach (unknown, over budget) is
-/// skipped rather than fatal - the conversation still recorded the reply.
+/// Write each routed part into its region as its own entry, keyed by the
+/// part's name. Text belongs to the conversation turn, so a routed entry
+/// carries only a produced part and is plain
+/// [`EntryKind::Text`](leviath_core::EntryKind::Text): a pinned region lifts
+/// its stored parts into the leading user turn, and a sliding window renders
+/// them as a user message, so either way the next stage's model sees the
+/// bytes.
+///
+/// One entry per part rather than one per reply, because an entry is the
+/// unit `context_delete` and `context_read` address. A reply that drew nine
+/// views used to land as one entry, so a stage asked to drop the one bad
+/// render among them could only drop all nine - and kept a stock photo in
+/// the set a mesh was built from rather than do that. Keyed by name so the
+/// stage can name the render it means, the way `context_list` shows it.
+///
+/// A region the write cannot reach (unknown, over budget) is skipped rather
+/// than fatal - the conversation still recorded the reply.
 pub(crate) fn store_routed(window: &mut ContextWindow, routed: &RoutedParts) {
     for (region, parts) in &routed.routed {
-        let content = leviath_core::region::EntryContent::from_parts(parts.clone());
-        let tokens = content.tokens_hint();
-        if let Err(e) = window.add_assistant_turn_content(
-            region,
-            leviath_core::EntryKind::Text,
-            content,
-            tokens,
-            None,
-        ) {
-            tracing::warn!(region = %region, "[mime] produced parts not routed: {e}");
+        for part in parts {
+            let key = part.name.clone();
+            let content = leviath_core::region::EntryContent::from_parts(vec![part.clone()]);
+            let tokens = content.tokens_hint();
+            if let Err(e) = window.add_assistant_turn_content(
+                region,
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+                None,
+            ) {
+                tracing::warn!(region = %region, "[mime] produced part not routed: {e}");
+                continue;
+            }
+            window.key_last_entry(region, key.as_deref());
         }
     }
 }
@@ -125,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn store_routed_writes_each_group_into_its_region() {
+    fn store_routed_writes_each_part_as_its_own_keyed_entry() {
         use leviath_core::region::{Region, RegionKind};
         let mut window = ContextWindow::new(100_000);
         window.add_region(Region::new(
@@ -133,17 +148,64 @@ mod tests {
             RegionKind::Pinned,
             100_000,
         ));
+        // A reply that drew two views: two entries, each named after its
+        // file, so a stage can delete or read one without the other.
         let routed = RoutedParts {
             kept: Vec::new(),
             routed: vec![(
                 "artwork".to_string(),
-                vec![stored_part("image/png", "a.png")],
+                vec![
+                    stored_part("image/png", "a.png"),
+                    stored_part("image/png", "b.png"),
+                ],
             )],
         };
         store_routed(&mut window, &routed);
         let region = window.get_region("artwork").unwrap();
-        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.content.len(), 2);
         assert_eq!(region.content[0].content.stored_count(), 1);
+        assert_eq!(region.content[0].key.as_deref(), Some("a.png"));
+        assert_eq!(region.content[1].key.as_deref(), Some("b.png"));
+        assert!(region.get_by_key("b.png").is_some());
+    }
+
+    #[test]
+    fn a_nameless_part_lands_unkeyed_and_a_keyed_entry_keeps_its_key() {
+        use leviath_core::mime::{Blob, MimeRegistry, MimeType};
+        use leviath_core::region::{Region, RegionKind};
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "artwork".to_string(),
+            RegionKind::Pinned,
+            100_000,
+        ));
+        let reg = MimeRegistry::builtin();
+        let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]);
+        let nameless = Part::stored(blob.describe(&reg));
+        let routed = RoutedParts {
+            kept: Vec::new(),
+            routed: vec![("artwork".to_string(), vec![nameless])],
+        };
+        store_routed(&mut window, &routed);
+        assert_eq!(window.get_region("artwork").unwrap().content[0].key, None);
+        // Naming again leaves a key already set alone, and a region that does
+        // not exist is a no-op rather than a panic.
+        window.key_last_entry("artwork", Some("late.png"));
+        assert_eq!(
+            window.get_region("artwork").unwrap().content[0]
+                .key
+                .as_deref(),
+            Some("late.png")
+        );
+        window.key_last_entry("artwork", Some("later.png"));
+        assert_eq!(
+            window.get_region("artwork").unwrap().content[0]
+                .key
+                .as_deref(),
+            Some("late.png")
+        );
+        window.key_last_entry("ghost", Some("x.png"));
+        assert!(window.get_region("ghost").is_none());
     }
 
     #[test]

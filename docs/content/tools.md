@@ -124,7 +124,7 @@ back into the system prompt on later turns.
 | --- | --- | --- |
 | `context_write` | Store or replace a keyed entry in a named section. | `region`, `content`, `key` (optional) |
 | `context_append` | Add to a section without replacing existing content. | `region`, `content`, `key` (optional) |
-| `context_read` | Read a section, or a specific keyed entry within it. | `region`, `key` (optional) |
+| `context_read` | Read a section, or one entry of it: by `key` on any region kind, or by the `index` `context_list` shows. | `region`, `key` (optional), `index` (optional) |
 | `context_delete` | Release an entry the agent is finished with, freeing its tokens. See [letting the agent decide what to forget](/docs/context#letting-the-agent-decide-what-to-forget). | `region`, and one of `key` / `index` / `oldest` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
 | `context_attach` | Put a file from the working directory into a section as a typed [part](/docs/mime): an image, a recording, a document. A `key` makes a newer version replace the older one; a `caption` is stored beside it. | `region`, `path`, `key`, `caption`, `type`, `deliver` (all but the first two optional) |

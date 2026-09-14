@@ -65,6 +65,35 @@ same list.
 
 ### Fixed
 
+- A stage that showed a model pictures starved every stage after it of output.
+  The window's prompt calibration compared the provider's bill with the
+  window's estimate, but the window charges a stored part its one-line
+  stand-in while a model that takes the bytes is billed the image's real cost;
+  the gap was learned as a permanent "shortfall", and a later text-only stage
+  was then budgeted as if its prompt filled the window - replies capped near
+  zero, a `submit_output` cut off mid-argument three times, the run failed. The
+  cost of the parts a request sends as bytes is now known at dispatch and comes
+  off the bill before the comparison. (#839)
+
+- The parts a reply produced landed in their routed region as one entry, so a
+  stage that had to drop one bad render among nine could only drop all nine -
+  and kept a stock photo in the set a mesh was built from rather than do that.
+  Each routed part is now its own entry, keyed by the part's name, so
+  `context_delete` and `context_read` can name it the way `context_list` shows
+  it. (#839)
+
+- `context_read` with a `key` on any region other than a hashmap returned the
+  whole region; it now returns the named entry, or `[not found]`, and takes an
+  `index` for an unkeyed entry the way `context_delete` does. (#839)
+
+- The bundled `sprite-to-3d` filter stage is told what the builder actually
+  uses - the first four images in its region, in listing order - and keeps at
+  most four, with the iteration room to prune a busy pass one render at a
+  time. A model the verify stage rejects goes back through the reference loop
+  (draw, filter, critique) rather than straight to a rebuild: the builder only
+  sees the reference views, so a rebuild from the same four with the same
+  settings returned the same model, twice, at ultra-mode cost. (#839)
+
 - A run could not be started with an attachment over about 6 MB: the daemon's
   control socket capped a request at 8 MiB, a spawn carries its attached files
   as base64 on that one request, and a 7 MB mesh - an ordinary Meshy output -

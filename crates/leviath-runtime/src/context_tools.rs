@@ -260,6 +260,31 @@ pub(crate) fn handle_context_tool(
                         format!("Section '{region_name}' entries:\n{}", lines.join("\n"))
                     }
                 }
+            } else if let Some(k) = key {
+                // A key names one entry on every region kind, the same way
+                // `context_delete` finds it: a routed image is keyed by its
+                // file name, and a write can name its entry. Read whole, a
+                // region of sixteen renders answered a question about one of
+                // them with all sixteen, which is what made the filter stage
+                // in the bundled sprite agent delete blind.
+                match region.get_by_key(k) {
+                    Some(entry) => entry.content.to_string(),
+                    None => {
+                        format!("[not found] No entry with key '{k}' in region '{region_name}'")
+                    }
+                }
+            } else if let Some(i) = args.get("index").and_then(serde_json::Value::as_u64) {
+                // An unkeyed entry is named by the index `context_list` shows.
+                let at = usize::try_from(i).unwrap_or(usize::MAX);
+                match region.content.get(at) {
+                    Some(entry) => entry.content.to_string(),
+                    None => format!(
+                        "[not found] Region '{}' has {} entries, so there is none at {}",
+                        region_name,
+                        region.content.len(),
+                        at
+                    ),
+                }
             } else {
                 let text = region
                     .content
@@ -742,6 +767,62 @@ mod tests {
                 json!({"region": "notes", "content": "line"})
             )
             .contains("Appended to 'notes'")
+        );
+    }
+
+    /// A key names one entry on every region kind, and an index names an
+    /// unkeyed one. Read whole, a pinned region of many renders answered a
+    /// question about one of them with all of them.
+    #[test]
+    fn read_by_key_and_by_index_on_a_pinned_region() {
+        let mut w = ContextWindow::new(100_000);
+        w.add_region(Region::new("refs".to_string(), RegionKind::Pinned, 10_000));
+        w.add_to_region_keyed(
+            crate::components::WriteOrigin::System,
+            "refs",
+            Some("front.png"),
+            "the front view".to_string(),
+            3,
+        )
+        .unwrap();
+        w.add_to_region("refs", "an unkeyed note".to_string(), 3)
+            .unwrap();
+
+        let by_key = call(
+            &mut w,
+            "context_read",
+            json!({"region": "refs", "key": "front.png"}),
+        );
+        assert_eq!(by_key, "the front view");
+        let by_index = call(
+            &mut w,
+            "context_read",
+            json!({"region": "refs", "index": 1}),
+        );
+        assert_eq!(by_index, "an unkeyed note");
+        let missing_key = call(
+            &mut w,
+            "context_read",
+            json!({"region": "refs", "key": "back.png"}),
+        );
+        assert!(
+            missing_key.contains("[not found] No entry with key 'back.png'"),
+            "{missing_key}"
+        );
+        let missing_index = call(
+            &mut w,
+            "context_read",
+            json!({"region": "refs", "index": 9}),
+        );
+        assert!(
+            missing_index.contains("has 2 entries, so there is none at 9"),
+            "{missing_index}"
+        );
+        // Neither selector: the whole region, as before.
+        let whole = call(&mut w, "context_read", json!({"region": "refs"}));
+        assert!(
+            whole.contains("the front view") && whole.contains("an unkeyed note"),
+            "{whole}"
         );
     }
 

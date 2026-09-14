@@ -477,7 +477,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_read".to_string(),
-                description: "Read what's currently stored in a section of your context window. If no key is specified and the section contains keyed entries, returns a summary of all keys and their sizes.".to_string(),
+                description: "Read what's currently stored in a section of your context window. Name one entry by 'key' (on any section kind) or by 'index' as shown in context_list; with neither, a keyed section returns a summary of all keys and their sizes, and any other section returns its whole text.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -488,6 +488,10 @@ impl BuiltinTools {
                         "key": {
                             "type": "string",
                             "description": "Key of a specific entry to read"
+                        },
+                        "index": {
+                            "type": "integer",
+                            "description": "Position of a specific entry to read, as shown in context_list"
                         }
                     },
                     "required": ["region"]

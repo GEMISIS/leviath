@@ -31,6 +31,21 @@ impl super::ContextWindow {
     /// find the parts a stage routed as its produced answer: only its
     /// `output_routing` targets, never the whole window, so an input mesh sat
     /// in some other region is never mistaken for the one this stage made.
+    /// Name the entry most recently written to `region`, unless the write
+    /// already named it (a custom region's `on_write` hook may). How a routed
+    /// produced part gets its file name as the key `context_delete` and
+    /// `context_read` find it by. A missing region or an empty one is a
+    /// no-op: the write that would have preceded this already failed.
+    pub(crate) fn key_last_entry(&mut self, region: &str, key: Option<&str>) {
+        if let Some(key) = key
+            && let Some(region) = self.get_region_mut(region)
+            && let Some(entry) = region.content.last_mut()
+            && entry.key.is_none()
+        {
+            entry.key = Some(key.to_string());
+        }
+    }
+
     pub(crate) fn stored_parts_in(&self, regions: &[&str]) -> Vec<Part> {
         regions
             .iter()
