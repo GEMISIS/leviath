@@ -501,6 +501,22 @@ impl WorldHost {
                     .map(|o| o.0.clone());
                 let _ = reply.send(output);
             }
+            ControlOp::Blob {
+                run_id,
+                sha256,
+                reply,
+            } => {
+                // The store is content-addressed per run and outlives the
+                // entity, so a finished run's artifact is still readable here
+                // after the daemon has unloaded it.
+                let bytes = self
+                    .world
+                    .world()
+                    .get_resource::<crate::blob_store::BlobStoreHandle>()
+                    .and_then(|store| store.0.read(&run_id, &sha256).ok())
+                    .map(|bytes| bytes.to_vec());
+                let _ = reply.send(bytes);
+            }
             ControlOp::Status { run_id, reply } => {
                 // A run the daemon has unloaded still has an answer for a
                 // while, so a caller that asks a moment too late learns how the

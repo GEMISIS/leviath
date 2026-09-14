@@ -452,6 +452,31 @@ impl AgentWorld {
         .flatten()
     }
 
+    /// The bytes of one file a run handed back: an entry of
+    /// [`result`](Self::result)'s `artifacts`.
+    ///
+    /// `None` for an artifact the run's store does not hold (one too large to
+    /// store, or from a run this world never ran). An embedder used to get the
+    /// artifact's name, type and hash from `result` and no way to read it
+    /// short of knowing where the world keeps its files.
+    pub async fn artifact_bytes(
+        &self,
+        id: &RunId,
+        artifact: &leviath_core::output::Artifact,
+    ) -> Option<Vec<u8>> {
+        if artifact.sha256.is_empty() {
+            return None;
+        }
+        self.ask(|reply| ControlOp::Blob {
+            run_id: id.0.clone(),
+            sha256: artifact.sha256.clone(),
+            reply,
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Subscribe to the world's events, from this moment on.
     pub fn events(&self) -> EventStream {
         EventStream::new(self.events.subscribe())
@@ -1051,6 +1076,12 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let ghost = RunId("no-such-run".to_string());
         assert_eq!(world.status(&ghost).await, None);
         assert_eq!(world.result(&ghost).await, None);
+        // An artifact the store never held, and one that was never stored at
+        // all (no hash), both answer nothing rather than erroring.
+        let mut artifact = leviath_core::output::Artifact::from_path("out/scene.glb");
+        assert_eq!(world.artifact_bytes(&ghost, &artifact).await, None);
+        artifact.sha256 = "ab".repeat(32);
+        assert_eq!(world.artifact_bytes(&ghost, &artifact).await, None);
         assert!(!world.pause(&ghost).await);
         assert!(!world.resume(&ghost).await);
         assert!(!world.cancel(&ghost).await);

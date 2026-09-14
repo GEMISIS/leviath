@@ -65,11 +65,14 @@ pub(crate) fn store_model_parts(
         return blobs
             .into_iter()
             .map(|blob| {
-                leviath_core::mime::Part::text(format!(
-                    "[{} of {} from the model dropped: this run has no blob store]",
-                    blob.mime_type,
-                    leviath_core::mime::human_size(blob.bytes.len() as u64)
-                ))
+                dropped_part(
+                    run_id,
+                    &format!(
+                        "{} of {}, this run has no blob store",
+                        blob.mime_type,
+                        leviath_core::mime::human_size(blob.bytes.len() as u64)
+                    ),
+                )
             })
             .collect();
     };
@@ -89,10 +92,33 @@ pub(crate) fn store_model_parts(
                 .unwrap_or_else(|| format!("model-{}", i + 1));
             let mut inbound = leviath_core::mime::InboundPart::from_bytes(name, blob.bytes);
             inbound.mime_type = Some(blob.mime_type);
-            sink.store_part(&inbound).unwrap_or_else(|e| {
-                leviath_core::mime::Part::text(format!("[model output dropped: {e}]"))
-            })
+            sink.store_part(&inbound)
+                .unwrap_or_else(|e| dropped_part(run_id, &e))
         })
+        .collect()
+}
+
+/// The text every part the run could not keep begins with, so a stage log or
+/// a test can pick the notes out of a reply's parts.
+pub(crate) const DROPPED_PART_PREFIX: &str = "[model output dropped: ";
+
+/// The text part that stands where a produced part should be, and the
+/// warning that goes with it. A file over `[mime] max_part_bytes` used to
+/// vanish into this note alone: nothing in the run's log said a model had
+/// made something the run threw away, so a stage that then had "nothing to
+/// hand back" looked like a model failure rather than a ceiling.
+fn dropped_part(run_id: &str, why: &str) -> leviath_core::mime::Part {
+    tracing::warn!(run = %run_id, "[mime] produced part dropped: {why}");
+    leviath_core::mime::Part::text(format!("{DROPPED_PART_PREFIX}{why}]"))
+}
+
+/// The notes [`dropped_part`] left among a reply's parts, for the stage log.
+pub(crate) fn dropped_part_notes(parts: &[leviath_core::mime::Part]) -> Vec<String> {
+    parts
+        .iter()
+        .filter_map(|p| p.inline_text())
+        .filter(|t| t.starts_with(DROPPED_PART_PREFIX))
+        .map(|t| format!("[mime] {}", t.trim_matches(['[', ']'])))
         .collect()
 }
 
@@ -371,7 +397,15 @@ pub(crate) fn collect_inference(
                     estimate,
                     response.tokens_used.prompt_tokens,
                 );
-                // Buffer the readable output + a token line for the stage's logs.
+                let parts = store_model_parts(
+                    response.parts.clone(),
+                    outcome.entity,
+                    &state.agent_id,
+                    &mime,
+                );
+                // Buffer the readable output + a token line for the stage's
+                // logs, and a line for each produced part the run could not
+                // keep, so the log says why a stage has nothing to hand back.
                 if let Some(mut buffer) = buffer {
                     if !response.content.trim().is_empty() {
                         buffer.output.push((idx, response.content.clone()));
@@ -384,13 +418,10 @@ pub(crate) fn collect_inference(
                             response.tokens_used.completion_tokens
                         ),
                     ));
+                    for note in dropped_part_notes(&parts) {
+                        buffer.logs.push((idx, note));
+                    }
                 }
-                let parts = store_model_parts(
-                    response.parts.clone(),
-                    outcome.entity,
-                    &state.agent_id,
-                    &mime,
-                );
                 let result = to_inference_result(&response, parts);
                 commands
                     .entity(outcome.entity)

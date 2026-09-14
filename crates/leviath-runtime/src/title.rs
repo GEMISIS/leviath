@@ -257,11 +257,23 @@ pub fn title_chain(
     let mut chain: Vec<(String, String)> = Vec::new();
     let head = resolve_title_model(settings, run_model_label);
     for pair in head.into_iter().chain(stage_candidates.iter().cloned()) {
-        if !chain.contains(&pair) {
+        if !chain.contains(&pair) && writes_text(&pair.0, &pair.1) {
             chain.push(pair);
         }
     }
     chain
+}
+
+/// Whether a provider's model answers in text at all.
+///
+/// A run whose entry stage is a Meshy operation or an image model put that
+/// model at the head of the title chain, and the title call spent a failover
+/// step (and, for Meshy, a real job submission) learning it cannot write a
+/// sentence. The compiled tables know; a model they have never heard of is
+/// text-only by their own default, so an unknown pair stays in the chain.
+fn writes_text(provider: &str, model: &str) -> bool {
+    leviath_providers::mime_tables::builtin_mime(provider, model)
+        .produces(&leviath_core::mime::text_plain())
 }
 
 /// The provider's own "do not think about this one" switch.
@@ -1566,6 +1578,25 @@ mod tests {
                 ("anthropic".to_string(), "claude-x".to_string()),
                 ("openrouter".to_string(), "anthropic/claude-x".to_string()),
             ]
+        );
+    }
+
+    /// A model that makes files, not sentences, never enters the chain: a
+    /// mesh generator at the head of a run used to be asked for a title first.
+    #[test]
+    fn the_chain_skips_models_that_do_not_write_text() {
+        let stage = [
+            ("meshy".to_string(), "image-to-3d".to_string()),
+            ("anthropic".to_string(), "claude-x".to_string()),
+            ("nowhere".to_string(), "unheard-of".to_string()),
+        ];
+        assert_eq!(
+            title_chain(&config(None, None), Some("meshy/image-to-3d"), &stage),
+            vec![
+                ("anthropic".to_string(), "claude-x".to_string()),
+                ("nowhere".to_string(), "unheard-of".to_string()),
+            ],
+            "the run's own Meshy head and the Meshy candidate are skipped; an unknown pair is kept"
         );
     }
 

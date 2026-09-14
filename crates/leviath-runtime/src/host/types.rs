@@ -480,6 +480,17 @@ pub enum ControlOp {
         /// one the world no longer holds).
         reply: oneshot::Sender<Option<leviath_core::output::FinalOutput>>,
     },
+    /// Read one stored part of a run by its sha256: the bytes behind an
+    /// artifact [`Result`](Self::Result) named. Reply is `None` when the
+    /// run's store holds no such blob.
+    Blob {
+        /// The run whose store holds the bytes.
+        run_id: String,
+        /// The store's key for them.
+        sha256: String,
+        /// Reply channel.
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
     /// Pause a run. Reply is `false` if there is no such (live) run.
     Pause {
         /// The run to pause.

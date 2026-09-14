@@ -1153,6 +1153,44 @@ async fn status_and_list_reflect_registered_runs() {
     assert_eq!(none, None);
 }
 
+/// The bytes behind an artifact come from the run's store by hash, so an
+/// embedder can read what a run made without knowing where the world keeps
+/// its files; a hash the store never held answers nothing.
+#[tokio::test]
+async fn blob_reads_a_stored_part_by_its_hash() {
+    let mut host = host_with(vec![]);
+    let stored = host
+        .world_mut()
+        .world()
+        .get_resource::<crate::blob_store::BlobStoreHandle>()
+        .expect("every world has a store")
+        .0
+        .put(
+            "run-a",
+            &leviath_core::mime::Blob {
+                mime_type: leviath_core::mime::MimeType::parse("model/gltf-binary").unwrap(),
+                bytes: b"glTF-bytes".to_vec(),
+                name: Some("scene.glb".to_string()),
+            },
+            &leviath_core::mime::MimeRegistry::builtin(),
+        )
+        .expect("the memory store takes a blob");
+    let bytes = ask(&mut host, |reply| ControlOp::Blob {
+        run_id: "run-a".to_string(),
+        sha256: stored.sha256.clone(),
+        reply,
+    })
+    .await;
+    assert_eq!(bytes.as_deref(), Some(&b"glTF-bytes"[..]));
+    let missing = ask(&mut host, |reply| ControlOp::Blob {
+        run_id: "run-a".to_string(),
+        sha256: "00".repeat(32),
+        reply,
+    })
+    .await;
+    assert_eq!(missing, None);
+}
+
 /// The counterpart to `Status`: that says whether a run is done, this says
 /// what it concluded. An embedder watching only for a `Completed` event had
 /// no way to read a result except by scraping the log stream.
@@ -4028,6 +4066,7 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
             parent.entity(),
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
+                parts: Vec::new(),
                 config: leviath_core::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),
@@ -4110,6 +4149,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
             parent.entity(),
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
+                parts: Vec::new(),
                 config: leviath_core::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),

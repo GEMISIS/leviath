@@ -15,6 +15,20 @@ same list.
 
 ### Added
 
+- A fan-out worker's files travel up with its answer. Each artifact a worker
+  hands back is stored again under the parent's run and rides on the merge
+  report's entry as a part named `<item>/<artifact>`, so a merge stage whose
+  model takes images or meshes sees the files themselves rather than each
+  worker's description of them. A file the store lost or one over the part
+  ceiling is left out with a warning.
+
+- `AgentWorld::artifact_bytes` reads one of a run's artifacts back from its
+  blob store, so an embedder that has the name, type and hash from `result`
+  no longer needs to know where the world keeps its files.
+
+- The Meshy provider lists its six operations, so a configured key shows them
+  on `GET /api/models` and `lev models list` like any other provider's models.
+
 - A transition gate can require a count: `require_region_entries = { region =
   "views", at_least = 4 }` holds the stage and re-runs it with the gate's
   message until the region holds that many entries. It is what lets a stage
@@ -73,6 +87,17 @@ same list.
   the Meshy dependency (#827).
 
 ### Fixed
+
+- A produced part the run could not keep (over `[mime] max_part_bytes`, or a
+  world with no store) vanished into a line in the reply and nothing else; the
+  stage log and the daemon log now say what was dropped and why, so a stage
+  left with nothing to hand back reads as a ceiling rather than a model that
+  made nothing.
+
+- The title call no longer tries a model that does not write text. A run whose
+  entry stage is a Meshy operation or an image model put that model at the
+  head of the title chain and spent a failover step (for Meshy, a real job
+  submission) learning it cannot write a sentence.
 
 - A stage whose name carries a hyphen could never be chosen by the router: the
   routing reply was split on every non-word character, so `generate-more`
