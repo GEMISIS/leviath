@@ -125,20 +125,21 @@ pub(crate) fn rows_in_file(path: &Path) -> Result<Option<toml::Table>, MimeTypes
 }
 
 /// Bytes one part may be before every ingress refuses it.
-pub(crate) const DEFAULT_MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_PART_BYTES: u64 = DAEMON_DEFAULTS.max_part_bytes;
 
 /// Bytes of text a part may carry inline before it is stored like a blob.
-pub(crate) const DEFAULT_INLINE_TEXT_BYTES: u64 = 1024 * 1024;
+pub(crate) const DEFAULT_INLINE_TEXT_BYTES: u64 = DAEMON_DEFAULTS.inline_text_bytes;
 
 /// Bytes of stored media one model request may carry before the oldest are
-/// sent as stand-ins instead.
-///
-/// This is the raw part size, not the base64 on the wire. Several vendors reject
-/// a request whose image content exceeds about 30 MB (OpenRouter says so
-/// outright), and base64 inflates bytes by roughly a third, so the ceiling sits
-/// at 20 MiB raw (about 27 MB encoded) to stay under that with margin. An
-/// operator whose provider allows more can raise it in `[mime]`.
-pub(crate) const DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST: u64 = 20 * 1024 * 1024;
+/// sent as stand-ins instead. The daemon's defaults say why the value sits
+/// where it does; an operator whose provider allows more raises it in `[mime]`.
+pub(crate) const DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST: u64 =
+    DAEMON_DEFAULTS.max_media_bytes_per_request;
+
+/// The daemon's ceilings when `[mime]` says nothing: the one place the
+/// numbers are written, so the config file and the runtime cannot disagree.
+const DAEMON_DEFAULTS: leviath_runtime::blob_store::MimeLimits =
+    leviath_runtime::blob_store::MimeLimits::DEFAULT;
 
 /// `[mime]` in `~/.leviath/config.toml`.
 ///

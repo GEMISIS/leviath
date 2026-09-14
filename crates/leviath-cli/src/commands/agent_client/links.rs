@@ -12,7 +12,7 @@ use leviath_core::mime::{InboundPart, MimeType};
 /// The most a linked file may weigh before it is left as a name: the
 /// daemon's default part ceiling, so the bridge never reads what the run
 /// would refuse.
-const MAX_LINK_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_LINK_BYTES: u64 = leviath_runtime::blob_store::MimeLimits::DEFAULT.max_part_bytes;
 
 /// The parts a prompt's `file://` links yield, and the URIs that yielded
 /// them, so the text can say which links were followed.

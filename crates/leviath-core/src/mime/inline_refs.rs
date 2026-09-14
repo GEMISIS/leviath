@@ -37,6 +37,33 @@ pub struct Extracted {
     pub unresolved: Vec<String>,
 }
 
+/// Every `@path` reference in `text` as a part bound for `region`: a token
+/// `exists` accepts is read through `read`, and a `:type` suffix declares the
+/// part's type. Returns the text as [`extract`] cleans it, the parts in text
+/// order, and the tokens that looked like files but `exists` refused.
+///
+/// The two policies a caller has (where a path may point, how large a file
+/// may be) live in its `exists` and `read`, so the command line and the HTTP
+/// API share the walk and differ only there.
+pub fn parts_from_text<E>(
+    text: &str,
+    region: Option<&str>,
+    exists: &mut dyn FnMut(&str) -> bool,
+    read: &mut dyn FnMut(&str) -> Result<super::InboundPart, E>,
+) -> Result<(String, Vec<super::InboundPart>, Vec<String>), E> {
+    let extracted = extract(text, exists);
+    let mut parts = Vec::with_capacity(extracted.refs.len());
+    for r in &extracted.refs {
+        let mut part = read(&r.path)?;
+        if let Some(t) = &r.mime_type {
+            part.mime_type = Some(t.clone());
+        }
+        part.region = region.map(str::to_string);
+        parts.push(part);
+    }
+    Ok((extracted.text, parts, extracted.unresolved))
+}
+
 /// Characters that end a token.
 fn ends_token(c: char) -> bool {
     c.is_whitespace()

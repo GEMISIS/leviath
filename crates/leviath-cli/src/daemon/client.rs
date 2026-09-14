@@ -347,10 +347,9 @@ fn warn_ungranted_read_paths(spawn_args: &SpawnArgs) {
 /// Empty when there is nothing to say, and empty when either file cannot be
 /// read: see [`warn_ungranted_read_paths`] for why that is not an error here.
 fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
-        return Vec::new();
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(std::path::Path::new(
+        &spawn_args.blueprint_path,
+    )) else {
         return Vec::new();
     };
     let Ok(config) = crate::config::Config::load() else {
@@ -466,10 +465,7 @@ fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
 /// using an old blueprint long after the fix had shipped.
 fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
     let path = std::path::Path::new(&spawn_args.blueprint_path);
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(path) else {
         return Vec::new();
     };
     let mut lines: Vec<String> =
@@ -502,20 +498,12 @@ fn warn_retired_output_checks(spawn_args: &SpawnArgs) {
 }
 
 /// The retirement warning for a spawn request, read from the real manifest.
-/// Empty when nothing is retired, and empty when the manifest cannot be read
-/// or parsed: best-effort for the same reason as
-/// [`warn_ungranted_read_paths`].
+/// Best-effort for the same reason as [`warn_ungranted_read_paths`].
 fn retired_check_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    if spawn_args.output.is_none() {
-        return Vec::new();
-    }
-    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
-        return Vec::new();
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
-        return Vec::new();
-    };
-    leviath_core::output::retired_check_warnings(&blueprint, spawn_args.output.as_ref())
+    crate::commands::run::manifest::retired_check_warnings_at(
+        std::path::Path::new(&spawn_args.blueprint_path),
+        spawn_args.output.as_ref(),
+    )
 }
 
 /// What `lev run --json` prints on a successful spawn.

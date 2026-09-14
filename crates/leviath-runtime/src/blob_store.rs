@@ -190,15 +190,24 @@ pub struct MimeLimits {
     pub max_media_bytes_per_request: u64,
 }
 
+impl MimeLimits {
+    /// The ceilings when `[mime]` says nothing. The config's own defaults read
+    /// from here, so the file's documented values and the daemon's cannot
+    /// drift apart.
+    pub const DEFAULT: Self = Self {
+        max_part_bytes: 32 * 1024 * 1024,
+        inline_text_bytes: 1024 * 1024,
+        // The raw part size, not the base64 on the wire. Several vendors
+        // reject a request whose image content exceeds about 30 MB, and
+        // base64 inflates by roughly a third, so 20 MiB raw (about 27 MB
+        // encoded) stays under that with margin.
+        max_media_bytes_per_request: 20 * 1024 * 1024,
+    };
+}
+
 impl Default for MimeLimits {
     fn default() -> Self {
-        Self {
-            max_part_bytes: 32 * 1024 * 1024,
-            inline_text_bytes: 1024 * 1024,
-            // Under the ~30 MB image-content limit several vendors enforce, once
-            // base64 inflation is allowed for; see the config default's note.
-            max_media_bytes_per_request: 20 * 1024 * 1024,
-        }
+        Self::DEFAULT
     }
 }
 

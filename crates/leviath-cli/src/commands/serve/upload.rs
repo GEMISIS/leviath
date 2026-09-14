@@ -14,7 +14,6 @@ use std::path::Path;
 
 use axum::extract::multipart::Multipart;
 use axum::http::StatusCode;
-use leviath_core::mime::inline_refs::extract;
 use leviath_core::mime::{Delivery, InboundPart, MimeType};
 use serde::{Deserialize, Serialize};
 
@@ -44,15 +43,7 @@ pub(super) struct PartRef {
 
 /// The `deliver` word a request used, as the runtime's choice.
 fn delivery(word: &str) -> Result<Delivery, ApiError> {
-    match word {
-        "native" => Ok(Delivery::Native),
-        "text" => Ok(Delivery::Text),
-        "stand_in" => Ok(Delivery::StandIn),
-        other => Err(err(
-            StatusCode::BAD_REQUEST,
-            format!("deliver must be native, text or stand_in, not '{other}'"),
-        )),
-    }
+    Delivery::from_arg(word).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 /// A file inside `workdir` as a part, refused when the path escapes, the
@@ -135,20 +126,16 @@ pub(super) fn inline_parts(
     workdir: &Path,
     max_bytes: u64,
 ) -> Result<(String, Vec<InboundPart>), ApiError> {
-    let extracted = extract(text, &mut |path| {
-        let full = workdir.join(path);
-        leviath_core::resolves_within(&full, workdir) && full.is_file()
-    });
-    let mut parts = Vec::new();
-    for r in &extracted.refs {
-        let mut part = read_within(&r.path, workdir, max_bytes)?;
-        if let Some(t) = &r.mime_type {
-            part.mime_type = Some(t.clone());
-        }
-        part.region = region.map(str::to_string);
-        parts.push(part);
-    }
-    Ok((extracted.text, parts))
+    let (text, parts, _unresolved) = leviath_core::mime::inline_refs::parts_from_text(
+        text,
+        region,
+        &mut |path| {
+            let full = workdir.join(path);
+            leviath_core::resolves_within(&full, workdir) && full.is_file()
+        },
+        &mut |path| read_within(path, workdir, max_bytes),
+    )?;
+    Ok((text, parts))
 }
 
 /// A multipart body, split into the JSON the route takes and the files it

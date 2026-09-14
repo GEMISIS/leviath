@@ -91,6 +91,15 @@ pub struct DependencyStatus {
     pub state: DependencyState,
 }
 
+/// Whether `var` is set to a non-empty value, via `probe`.
+///
+/// Only presence is examined; the value never travels further than this
+/// `bool`, so a secret is never returned or logged by the code that checks
+/// for it.
+pub(crate) fn env_is_set(probe: &dyn Probe, var: &str) -> bool {
+    probe.env(var).filter(|v| !v.trim().is_empty()).is_some()
+}
+
 impl DependencyStatus {
     /// A one-line human status, shared by `lev deps check` and `lev validate`:
     /// `[ok  ] name (kind)`, or `[MISS] name (kind) - remedy`.
@@ -190,7 +199,7 @@ fn evaluate_one(
                 ));
             }
             for var in env {
-                if probe.env(var).filter(|v| !v.trim().is_empty()).is_none() {
+                if !env_is_set(probe, var) {
                     return DependencyState::Unmet(remedy_or(
                         dep,
                         format!("set {var} (the '{server}' server needs it)"),
@@ -200,7 +209,7 @@ fn evaluate_one(
             DependencyState::Satisfied
         }
         DependencyKind::Env { var } => {
-            if probe.env(var).filter(|v| !v.trim().is_empty()).is_some() {
+            if env_is_set(probe, var) {
                 DependencyState::Satisfied
             } else {
                 DependencyState::Unmet(remedy_or(

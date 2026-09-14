@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::mime::inline_refs::extract;
 use leviath_core::mime::{Delivery, InboundPart, MimeRegistry, MimeType};
 
 /// The registry the CLI reads files with.
@@ -49,10 +48,11 @@ pub fn parse_attach(spec: &str, cwd: &Path) -> anyhow::Result<InboundPart> {
     }
     let mut part = read_part(&path, cwd)?;
     for segment in rest {
+        if let Ok(deliver) = Delivery::from_arg(&segment) {
+            part.deliver = Some(deliver);
+            continue;
+        }
         match segment.as_str() {
-            "text" => part.deliver = Some(Delivery::Text),
-            "native" => part.deliver = Some(Delivery::Native),
-            "stand_in" => part.deliver = Some(Delivery::StandIn),
             s if s.contains('/') => {
                 part.mime_type =
                     Some(MimeType::parse(s).map_err(|e| anyhow::anyhow!("--attach {spec}: {e}"))?);
@@ -119,17 +119,12 @@ pub fn inline_parts(
     region: Option<&str>,
     cwd: &Path,
 ) -> anyhow::Result<(String, Vec<InboundPart>, Vec<String>)> {
-    let extracted = extract(text, &mut |path| resolve_against(path, cwd).is_file());
-    let mut parts = Vec::new();
-    for r in &extracted.refs {
-        let mut part = read_part(&r.path, cwd)?;
-        if let Some(t) = &r.mime_type {
-            part.mime_type = Some(t.clone());
-        }
-        part.region = region.map(str::to_string);
-        parts.push(part);
-    }
-    Ok((extracted.text, parts, extracted.unresolved))
+    leviath_core::mime::inline_refs::parts_from_text(
+        text,
+        region,
+        &mut |path| resolve_against(path, cwd).is_file(),
+        &mut |path| read_part(path, cwd),
+    )
 }
 
 /// What a `--<region>` flag value carries once read: text, a file's bytes as
