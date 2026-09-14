@@ -873,12 +873,6 @@ impl Server {
     }
 }
 
-/// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.
-///
-/// Deserializes into a minimal projection that reads only the `status` field, so
-/// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
-/// shape and tolerates a partially-written or older metadata file. Returns
-/// `None` if the file is missing or unreadable (the run hasn't persisted yet).
 /// Where a host can open one of the run's files: the workdir copy when the
 /// run wrote one, else the blob the run's store holds it as. A file in
 /// neither place is still linked at its workdir path, which is the most a
@@ -899,6 +893,12 @@ fn artifact_location(
     }
 }
 
+/// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.
+///
+/// Deserializes into a minimal projection that reads only the `status` field, so
+/// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
+/// shape and tolerates a partially-written or older metadata file. Returns
+/// `None` if the file is missing or unreadable (the run hasn't persisted yet).
 fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
     #[derive(serde::Deserialize)]
     struct StatusOnly {

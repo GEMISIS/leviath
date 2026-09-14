@@ -103,18 +103,6 @@ pub fn resolve_stage_model(
     (first.provider, first.model)
 }
 
-/// Every provider/model this stage may run on, best first.
-///
-/// [`resolve_stage_model`] is this list's head. The tail is what the runtime
-/// fails over to when a provider turns out to be unusable mid-run. Consult the
-/// ordered list in `ModelConfig.models` only for *registration* at spawn time
-/// and a provider that is configured but out of credits gets picked and then
-/// never abandoned.
-///
-/// Order: the stage's own registered entries, then the user default, then the
-/// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
-/// list twice would spend a failover step going nowhere. Never empty: with
-/// nothing registered it yields the blueprint's own first entry, exactly as
 /// A model's identity, independent of the route it is reached by.
 ///
 /// The same model is spelled differently depending on the provider serving it:
@@ -135,7 +123,18 @@ pub fn model_key(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// before, and `resolve_stages` rejects that unusable case with a clear error.
+/// Every provider/model this stage may run on, best first.
+///
+/// [`resolve_stage_model`] is this list's head. The tail is what the runtime
+/// fails over to when a provider turns out to be unusable mid-run, so a
+/// provider that is configured but out of credits is abandoned for the next
+/// entry instead of being pinned for the whole run.
+///
+/// Order: the stage's own registered entries, then the user default, then the
+/// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
+/// list twice would spend a failover step going nowhere. Never empty: with
+/// nothing registered it yields the blueprint's own first entry, and
+/// `resolve_stages` rejects that unusable case with a clear error.
 pub(crate) fn resolve_stage_candidates(
     model_cfg: &ModelConfig,
     model_override: Option<&str>,

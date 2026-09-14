@@ -216,8 +216,10 @@ impl ProviderRegistry {
     ///
     /// Lets a freshly built registry answer a model's real limits without its own
     /// network prime, as long as some process (the daemon) has primed and written
-    /// the cache. A missing or stale-versioned file loads nothing and returns
-    /// false, which is the pre-cache behaviour: fall back to priming or the table.
+    /// the cache. A missing file, or one written by another format version,
+    /// loads nothing and returns false: the registry then primes over the
+    /// network or answers from the compiled table. The cache's age is not
+    /// checked; a listing learned last month is still closer than the table.
     pub fn load_capability_cache(&self, path: &std::path::Path) -> bool {
         let Some(cache) = leviath_providers::CapabilityCache::load(path) else {
             return false;

@@ -92,8 +92,8 @@ pub struct DependencyStatus {
 }
 
 impl DependencyStatus {
-    /// A one-line human status, shared by `lev deps check`, `lev validate` and
-    /// `lev doctor`: `[ok  ] name (kind)`, or `[MISS] name (kind) - remedy`.
+    /// A one-line human status, shared by `lev deps check` and `lev validate`:
+    /// `[ok  ] name (kind)`, or `[MISS] name (kind) - remedy`.
     pub fn line(&self) -> String {
         let mark = match &self.state {
             DependencyState::Satisfied => "ok  ",

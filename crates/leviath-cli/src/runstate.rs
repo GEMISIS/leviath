@@ -889,12 +889,9 @@ pub(crate) enum LogStream {
 
 /// Read a run's logs, choosing the stage and the stream.
 ///
-/// Exists because there were two answers in the codebase to "where is a run's
-/// output", and one of them was wrong: `GET /api/agents/{id}/logs` read
-/// `<run_dir>/output.log`, which nothing has ever written, so it returned an
-/// empty string for every run there has ever been. The real logs are per-stage,
-/// under `stages/<idx>/`. Routing both that handler and `agent_result` through
-/// here leaves one answer.
+/// The one answer to "where is a run's output" for `GET /api/agents/{id}/logs`
+/// and `agent_result` alike: logs live per stage under `stages/<idx>/`, and a
+/// run with no stage recorded yet has none.
 ///
 /// Stages come from `stages.json` rather than a `read_dir` of `stages/`, because
 /// that index is the record of which stages exist and in what order - the
@@ -916,13 +913,7 @@ pub(crate) fn tail_run_logs(
     let stages = read_stages_index(run_id);
     match selector {
         StageSelector::Index(idx) => read(idx),
-        StageSelector::Current => match stages.len().checked_sub(1) {
-            Some(last) => read(last),
-            // No stages recorded yet. Fall back to the legacy run-level file:
-            // nothing writes it today, but a run whose stage dirs were pruned
-            // still reads honestly instead of claiming it produced nothing.
-            None => tail_file(&run_dir(run_id).join("output.log"), max_bytes),
-        },
+        StageSelector::Current => stages.len().checked_sub(1).map(read).unwrap_or_default(),
         StageSelector::All => {
             let joined = stages
                 .iter()

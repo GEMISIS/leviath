@@ -63,8 +63,8 @@ impl PartSink<'_> {
         Ok(EntryContent::from_parts(parts))
     }
 
-    /// The tokens an entry costs its region: text by the byte heuristic, a
-    /// stored part by its registry estimate.
+    /// The tokens an entry costs its region: inline text by the registry's
+    /// rule for its type, a stored part by its stand-in (see [`Part::tokens`]).
     pub(crate) fn tokens_for(&self, content: &EntryContent) -> usize {
         content
             .parts()
