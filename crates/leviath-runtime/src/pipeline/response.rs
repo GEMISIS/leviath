@@ -860,7 +860,7 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
 /// lifetimes: the borrow is bound when the query is fetched.
 type EmptyResponseQuery = (
     Entity,
-    &'static crate::components::AgentState,
+    Option<&'static crate::components::AgentState>,
     &'static mut ContextWindow,
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
@@ -892,8 +892,12 @@ pub(crate) fn handle_empty_response(
     for (entity, state, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         let stage = bp.0.stages.get(cursor.index);
+        // Where a long reply is stored, when the world has a store and this
+        // run is known by id.
         let (sources, _) = mime.hydration_inputs(entity);
-        let sink = crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime);
+        let sink = state.and_then(|state| {
+            crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
+        });
         let nudge = leviath_core::resolve_nudge(
             global.map(|g| &g.0),
             bp.0.nudge.as_ref(),

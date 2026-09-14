@@ -2913,6 +2913,10 @@ mod policy_tests {
         assert!(refusal.contains("[denied]"), "{refusal}");
         assert!(refusal.contains("is yolo.toml"), "{refusal}");
         assert!(refusal.contains("lock_permission_files"), "{refusal}");
+        // A `..` that climbs out of the root names nothing, so it names no
+        // protected place either.
+        let climbs_out = format!("{}etc/x", "../".repeat(40));
+        assert!(lock_check(&rig, "write_file", serde_json::json!({"path": climbs_out})).is_none());
         // Relative to the workdir, through the data dir, and by `~`.
         assert!(
             lock_check(

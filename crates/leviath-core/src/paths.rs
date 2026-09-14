@@ -199,6 +199,37 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_tilde_expands_against_home_or_names_nothing() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand_home("~", Some(home)), Some(home.to_path_buf()));
+        assert_eq!(expand_home("~/x", Some(home)), Some(home.join("x")));
+        assert_eq!(expand_home("~/x", None), None);
+        assert_eq!(expand_home("~", None), None);
+        assert_eq!(expand_home("plain/x", None), Some(PathBuf::from("plain/x")));
+        assert_eq!(expand_home("~user/x", None), Some(PathBuf::from("~user/x")));
+    }
+
+    #[test]
+    fn dot_dot_folds_lexically_and_never_climbs_out() {
+        assert_eq!(
+            fold_dot_dot(Path::new("a/./b/../c")),
+            Some(PathBuf::from("a/c"))
+        );
+        assert_eq!(fold_dot_dot(Path::new("/a/..")), Some(PathBuf::from("/")));
+        // A leading `./` is the one `.` the component walk hands over.
+        assert_eq!(
+            fold_dot_dot(Path::new("./a/../b")),
+            Some(PathBuf::from("b"))
+        );
+        assert_eq!(fold_dot_dot(Path::new("../x")), None);
+        assert_eq!(fold_dot_dot(Path::new("/..")), None);
+        assert_eq!(
+            fold_dot_dot(Path::new("~/x/../y")),
+            Some(PathBuf::from("~/y"))
+        );
+    }
+
     /// Everything Leviath persists sits under one root, and `LEVIATH_HOME`
     /// moves all of it together. One resolver, because several with their own
     /// readings of that variable let a run that believes it is isolated write

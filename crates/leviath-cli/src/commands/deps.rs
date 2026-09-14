@@ -123,12 +123,9 @@ fn resolve_agent(agent: &str, env: &DepsEnv) -> anyhow::Result<(Blueprint, PathB
     let manifest = crate::commands::run::manifest::find_manifest_in(
         agent,
         env.agents_dir.as_deref(),
-        Path::new(""),
+        Path::new("."),
     )?;
-    let dir = manifest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
     let content = std::fs::read_to_string(&manifest).map_err(|e| {
         anyhow::anyhow!("could not read the manifest at {}: {e}", manifest.display())
     })?;

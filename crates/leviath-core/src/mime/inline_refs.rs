@@ -161,6 +161,34 @@ fn split_type(raw: &str) -> (String, Option<MimeType>) {
 mod tests {
     use super::*;
 
+    /// The walk is shared; the caller decides what exists and how a file is
+    /// read, and its first read error is the answer.
+    #[test]
+    fn parts_from_text_reads_each_reference_through_the_caller() {
+        let (text, parts, unresolved) = parts_from_text(
+            "see @a.png then @missing.txt and @b.txt:text/markdown",
+            Some("art"),
+            &mut |path| path != "missing.txt",
+            &mut |path| Ok::<_, String>(super::super::InboundPart::from_bytes(path, b"x".to_vec())),
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "a.png");
+        assert_eq!(parts[0].region.as_deref(), Some("art"));
+        assert_eq!(parts[0].mime_type, None);
+        assert_eq!(
+            parts[1].mime_type.as_ref().map(MimeType::as_str),
+            Some("text/markdown")
+        );
+        assert_eq!(unresolved, ["missing.txt"]);
+        assert!(text.contains("@a.png"), "{text}");
+        let err = parts_from_text("@a.png", None, &mut |_| true, &mut |path| {
+            Err::<super::super::InboundPart, _>(format!("no {path}"))
+        })
+        .unwrap_err();
+        assert_eq!(err, "no a.png");
+    }
+
     fn all(text: &str) -> Extracted {
         extract(text, &mut |_| true)
     }

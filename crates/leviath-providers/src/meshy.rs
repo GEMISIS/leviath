@@ -1007,10 +1007,8 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, ProviderError::RateLimitExceeded { .. }),
-            "{err}"
-        );
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("RateLimitExceeded"), "{kind}");
     }
 
     #[tokio::test]
@@ -1026,7 +1024,8 @@ mod tests {
             .unwrap_err();
         // Malformed JSON is the API's own fault and permanent, never retried
         // as a transport blip would be.
-        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("InvalidResponse("), "{kind}");
         // A poll body that is not JSON fails the same way.
         let (api, _b) = spawn_mock_sequence(vec![
             (200, "OK", br#"{"result":"t"}"#.to_vec()),
@@ -1040,7 +1039,8 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("InvalidResponse("), "{kind}");
     }
 
     #[tokio::test]
@@ -1063,7 +1063,8 @@ mod tests {
             .await
             .unwrap_err();
         // Bytes that never arrived are a transport failure, which is retried.
-        assert!(matches!(err, ProviderError::RequestFailed(_)), "{err}");
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("RequestFailed("), "{kind}");
     }
 
     fn text_block(text: &str) -> ContentBlock {
@@ -1222,7 +1223,8 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err}");
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("InvalidResponse("), "{kind}");
 
         // The library endpoint unreachable (server gone after the rig).
         let (api, _b) = spawn_mock_sequence(vec![
