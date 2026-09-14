@@ -140,6 +140,27 @@ same list.
 
 ### Fixed
 
+- The bundled reviewer's parallel review never ran: a fan-out worker is
+  spawned with its work item as its task, and the reviewer declared no region
+  to hold one, so every `review_worker` was refused at spawn and the deep
+  review quietly covered for all of them. The reviewer (0.2.7) now has a
+  `task` region, `lev validate` reports the shape as
+  `fanout-worker-task-unheld` for any blueprint that repeats it, and a worker
+  of its own blueprint is no longer asked for the caller inputs the parent
+  was started with (the reviewer's required `--diff`), since its share of
+  them travels in the work item. `lev run reviewer --diff @x.patch` still
+  needs no task: a blueprint whose task region is optional is not asked for
+  one when a region or an attachment was handed in.
+- `web_fetch` failed on nearly every non-text file it was handed (an image, a
+  PDF) with "Size of array/BLOB too large": the script engine's array ceiling
+  of ten thousand elements applies to blobs too, so the bytes `http_get_bytes`
+  fetched never reached the script. The ceiling is now the same 32 MiB the
+  host caps a fetched body at.
+- A run title that came back as a markdown heading kept its `#`; the marker is
+  stripped like the quotes around a title are.
+- `lev run --help` said the bundled coder's plan approval holds an unattended
+  run for a person; it resolves as approved, and the help now says so.
+
 - A produced part the run could not keep (over `[mime] max_part_bytes`, or a
   world with no store) vanished into a line in the reply and nothing else; the
   stage log and the daemon log now say what was dropped and why, so a stage

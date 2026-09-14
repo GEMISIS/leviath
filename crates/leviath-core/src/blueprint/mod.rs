@@ -389,6 +389,17 @@ impl Blueprint {
             .any(|r| matches!(&r.seed, Some(RegionSeed::CallerInput { name }) if name == "task"))
     }
 
+    /// Whether a run cannot start without a task: the region seeded from it is
+    /// `required`. An optional task region is what lets a blueprint driven by
+    /// its other inputs (`--diff`, an attachment) run with no task at all, and
+    /// still take one from a fan-out that spawns it as its own worker.
+    pub fn requires_task(&self) -> bool {
+        self.context_layout.regions.iter().any(|r| {
+            r.required
+                && matches!(&r.seed, Some(RegionSeed::CallerInput { name }) if name == "task")
+        })
+    }
+
     /// The caller input keys this blueprint does read, in declaration order.
     ///
     /// The mime type patterns `stage` takes as parts: its own
@@ -1075,11 +1086,28 @@ model = {{ provider = "anthropic", model = "m" }}
         assert!(bp_with_regions(r#"task = { kind = "pinned", max_tokens = 10 }"#).accepts_task());
     }
 
+    /// `requires_task` is the `required` flag on the task region, and nothing
+    /// else: an optional task region takes one without insisting.
+    #[test]
+    fn a_blueprint_requires_a_task_only_when_its_task_region_is_required() {
+        assert!(
+            bp_with_regions(r#"task = { kind = "pinned", max_tokens = 10, required = true }"#)
+                .requires_task()
+        );
+        let optional = bp_with_regions(
+            r#"task = { kind = "pinned", max_tokens = 10 }
+diff = { kind = "pinned", max_tokens = 10, seed = "diff", required = true }"#,
+        );
+        assert!(optional.accepts_task());
+        assert!(!optional.requires_task());
+    }
+
     #[test]
     fn a_blueprint_taking_other_caller_input_does_not_accept_a_task() {
         let bp = bp_with_regions(r#"diff = { kind = "pinned", max_tokens = 10, seed = "diff" }"#);
         assert!(!bp.accepts_task());
         assert_eq!(bp.caller_inputs(), ["diff"]);
+        assert!(!bp.requires_task());
     }
 
     #[test]

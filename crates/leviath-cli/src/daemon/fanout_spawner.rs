@@ -153,6 +153,9 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
         args.parent_run_id = Some(parent_run_id);
+        // A worker of this blueprint is not a caller: the seed resolver reads
+        // this to leave the parent's required inputs empty rather than refuse.
+        args.worker_stage = entry_stage.clone();
 
         // Per-agent MCP: advertise the worker blueprint's servers that
         // are already connected in the shared pool (a `worker_stage` worker shares
@@ -467,7 +470,16 @@ mod tests {
         manifest_path: &str,
         yolo: bool,
     ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_args(manifest_path, yolo, None)
+        world_with_parent_args(manifest_path, yolo, None, HashMap::new())
+    }
+
+    /// [`world_with_parent`], with the caller's named regions, for a parent
+    /// whose blueprint requires one.
+    fn world_with_parent_regions(
+        manifest_path: &str,
+        regions: HashMap<String, String>,
+    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        world_with_parent_args(manifest_path, false, None, regions)
     }
 
     /// [`world_with_parent_yolo`], with the run's `--model` override too.
@@ -475,13 +487,19 @@ mod tests {
         manifest_path: &str,
         model: &str,
     ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_args(manifest_path, false, Some(model.to_string()))
+        world_with_parent_args(
+            manifest_path,
+            false,
+            Some(model.to_string()),
+            HashMap::new(),
+        )
     }
 
     fn world_with_parent_args(
         manifest_path: &str,
         yolo: bool,
         model: Option<String>,
+        regions: HashMap<String, String>,
     ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
         let cli = Arc::new(CliToolService::new());
         let mut registry = leviath_runtime::ProviderRegistry::new();
@@ -499,7 +517,7 @@ mod tests {
             run_id: "parent".to_string(),
             blueprint_path: manifest_path.to_string(),
             task: "parent task".to_string(),
-            regions: HashMap::new(),
+            regions,
             model,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
@@ -511,6 +529,7 @@ mod tests {
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            worker_stage: None,
             output: None,
             parts: Vec::new(),
         };
@@ -555,6 +574,40 @@ mod tests {
             world.agent_status(world.own_agent(child)),
             Some(AgentStatus::Active)
         );
+    }
+
+    /// The parent was started with a `--diff` its blueprint requires; its
+    /// workers get their share of that diff inside the work item, so the
+    /// requirement is not put to them again. This is the bundled reviewer's
+    /// shape, whose workers were refused at spawn every run.
+    #[tokio::test]
+    async fn spawn_worker_is_not_held_to_the_parents_required_caller_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let requiring = two_stage_manifest().replace(
+            "[context.regions]\n",
+            "[context.regions]\ndiff = { kind = \"pinned\", max_tokens = 2000, seed = \"diff\", required = true }\n",
+        );
+        assert!(
+            requiring.contains("seed = \"diff\""),
+            "fixture gained the region"
+        );
+        std::fs::write(&manifest, requiring).unwrap();
+        let (mut world, spawner, parent) = world_with_parent_regions(
+            &manifest.to_string_lossy(),
+            HashMap::from([("diff".to_string(), "- a\n+ b".to_string())]),
+        );
+
+        let child = spawner
+            .spawn_worker(
+                world.world_mut(),
+                parent,
+                &cfg(Some("second"), None, None),
+                "item-1",
+                &serde_json::json!({"code": "- a\n+ b"}),
+            )
+            .expect("a worker is spawned without the parent's --diff");
+        assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
     }
 
     /// A worker of an unattended parent is unattended. An attended worker under

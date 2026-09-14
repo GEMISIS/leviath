@@ -375,10 +375,20 @@ fn sanitize_title(raw: &str) -> String {
     // Compared in bytes, which is what the cap is in. Counting chars here and
     // cutting bytes afterwards lets a title of 80 CJK characters pass the check
     // and then be sliced mid-title.
+    //
+    // A model asked for a title often answers with a markdown heading, and
+    // `#` is not part of the name; nor are the quotes some wrap it in.
     stripped
         .lines()
         .map(strip_control_tokens)
-        .map(|l| l.trim_matches(['"', '\'', '`']).trim().to_string())
+        .map(|l| {
+            l.trim()
+                .trim_start_matches('#')
+                .trim()
+                .trim_matches(['"', '\'', '`'])
+                .trim()
+                .to_string()
+        })
         .filter(|l| !l.is_empty())
         .find(|l| l.len() <= TITLE_MAX_LEN && !is_degenerate(l) && !echoes_the_instruction(l))
         .unwrap_or_default()
@@ -2088,6 +2098,14 @@ mod tests {
             sanitize_title("\n\n  'Tidy: workspace'  \n"),
             "Tidy: workspace"
         );
+        // A model that answers with a heading has still named the run.
+        assert_eq!(
+            sanitize_title("# Playdate Crank: Hardware and SDK Mechanics"),
+            "Playdate Crank: Hardware and SDK Mechanics"
+        );
+        assert_eq!(sanitize_title("## \"Retry Backoff\""), "Retry Backoff");
+        // A line that is only markers is no title at all.
+        assert_eq!(sanitize_title("###\n"), "");
         assert_eq!(sanitize_title("   \n\t\n"), "");
         // One long line and nothing shorter behind it: no title here.
         let long = "word ".repeat(40);

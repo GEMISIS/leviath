@@ -18,6 +18,27 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
     )
 }
 
+/// [`manifest`] with a region seeded from the task, which a blueprint that runs
+/// its own fan-out workers must have: each worker is spawned with its work
+/// item as the task.
+fn manifest_taking_task(stages_toml: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "lint-fixture"
+version = "0.1.0"
+description = "a fixture"
+
+{stages_toml}
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+task = {{ kind = "pinned", max_tokens = 1000, seed = "task" }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+"#
+    )
+}
+
 impl LintEnv {
     /// A default env that also knows how big the shipped models' windows are,
     /// which is what the percentage-budget check needs to say a number.
@@ -194,7 +215,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 /// to cap and must not be nagged for one.
 #[test]
 fn a_fan_out_stage_needs_no_max_iterations() {
-    let toml = manifest(
+    let toml = manifest_taking_task(
         r#"
 [stages.split]
 mode = "fan_out"
@@ -222,7 +243,7 @@ max_iterations = 5
 /// `fail_all` with nowhere to go means one flaky worker ends the run.
 #[test]
 fn a_fail_all_fan_out_without_an_escape_is_warned_about() {
-    let toml = manifest(
+    let toml = manifest_taking_task(
         r#"
 [stages.split]
 mode = "fan_out"
@@ -241,11 +262,66 @@ allow_as_worker = true
     assert_eq!(codes(&findings), ["fanout-no-escape"]);
 }
 
+/// A worker is spawned with its work item as the task, so a blueprint that
+/// runs its own workers and declares no region seeded from the task refuses
+/// every one of them - and the run still completes, which is why the lint is
+/// an error rather than a warning.
+#[test]
+fn a_fan_out_on_a_blueprint_with_no_task_region_is_an_error() {
+    let toml = manifest(
+        r#"
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+allow_as_worker = true
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["fanout-worker-task-unheld"]);
+    let finding = &findings[0];
+    assert_eq!(finding.severity, LintSeverity::Error);
+    assert_eq!(finding.stage.as_deref(), Some("split"));
+    assert!(finding.message.contains("stage 'work'"), "{finding:?}");
+    assert!(
+        finding
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("seed = \"task\"")),
+        "{finding:?}"
+    );
+}
+
+/// `worker_agent` names another blueprint, linted when it is validated itself;
+/// whether *this* one takes a task says nothing about it.
+#[test]
+fn a_fan_out_onto_another_agent_is_not_held_to_this_blueprints_regions() {
+    let toml = manifest(
+        r#"
+[stages.split]
+mode = "fan_out"
+worker_agent = "some-other-agent"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        !codes(&findings).contains(&"fanout-worker-task-unheld"),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
 /// The default policy merges what succeeded, so there is nothing to escape from
 /// and nothing to say.
 #[test]
 fn a_continuing_fan_out_needs_no_escape() {
-    let toml = manifest(
+    let toml = manifest_taking_task(
         r#"
 [stages.split]
 mode = "fan_out"
@@ -267,7 +343,7 @@ allow_as_worker = true
 /// go on" - so it satisfies the check too.
 #[test]
 fn a_dead_end_edge_satisfies_the_fan_out_escape_check() {
-    let toml = manifest(
+    let toml = manifest_taking_task(
         r#"
 [stages.split]
 mode = "fan_out"
@@ -2175,7 +2251,7 @@ max_iterations = 5
 /// orphans in a correctly wired blueprint.
 #[test]
 fn fan_out_worker_and_merge_stages_are_reachable() {
-    let toml = manifest(
+    let toml = manifest_taking_task(
         r#"
 [stages.split]
 mode = "fan_out"

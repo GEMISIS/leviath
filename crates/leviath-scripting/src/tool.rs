@@ -1173,6 +1173,10 @@ mod tests {
         last_post: Mutex<PostCall>,
     }
 
+    /// Larger than the array ceiling the engine used to apply to blobs, and
+    /// the size of an ordinary PDF: the body `http://x/big` answers with.
+    const BIG_BODY_BYTES: usize = 300 * 1024;
+
     impl FakeHost {
         fn arc() -> Arc<FakeHost> {
             Arc::new(FakeHost {
@@ -1202,6 +1206,12 @@ mod tests {
             headers: BTreeMap<String, String>,
         ) -> std::result::Result<(String, Vec<u8>), String> {
             *self.last_get.lock().unwrap() = Some((url.to_string(), headers));
+            // A path ending in `/big` answers with a body the size of a real
+            // datasheet, so a test can prove the blob crosses into the script
+            // whole rather than tripping the engine's array ceiling.
+            if url.ends_with("/big") {
+                return Ok(("application/pdf".to_string(), vec![0x25; BIG_BODY_BYTES]));
+            }
             Ok(("image/png".to_string(), b"\x89PNG".to_vec()))
         }
         fn http_post(
@@ -1909,6 +1919,20 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
             }),
         );
         assert!(out.contains("cannot fetch bytes"), "got: {out}");
+    }
+
+    /// A datasheet-sized body arrives whole. The engine's array ceiling is
+    /// also the blob ceiling, and at ten thousand elements it refused nearly
+    /// every real PDF or image `web_fetch` handed it, from inside the call.
+    #[test]
+    fn http_get_bytes_carries_a_body_larger_than_the_old_array_cap() {
+        let host = FakeHost::arc();
+        let tool = tool_from(
+            "// @tool t\nlet r = http_get_bytes(\"http://x/big\");\n\
+             r.mime_type + \":\" + r.bytes.len()",
+        );
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert_eq!(out, format!("application/pdf:{BIG_BODY_BYTES}"));
     }
 
     #[test]

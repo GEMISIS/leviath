@@ -43,8 +43,9 @@ pub struct RunArgs {
     ///
     /// One exception, and it is the one that looks like a hang: an interaction
     /// point declaring `unattended = "ask"` still holds for a person. The
-    /// bundled coder's plan approval can, deliberately, because
-    /// everything after it writes code. Such a run parks in `Waiting` until
+    /// bundled coder's plan approval does not (it resolves as approved, so CI
+    /// can run it), but a blueprint whose checkpoint guards something that
+    /// cannot be undone may well set it. Such a run parks in `Waiting` until
     /// somebody answers; set `[limits] interaction_timeout_secs` to bound the
     /// wait.
     ///

@@ -331,6 +331,7 @@ fn reload_one(
         allow: Vec::new(),
         max_depth: None,
         parent_run_id: meta.parent_run_id.clone(),
+        worker_stage: None,
         // Restored for the same reason `yolo` is: a reload that dropped the
         // caller's requested shape would silently revert the run to the
         // blueprint's partway through, and the caller would never see why.

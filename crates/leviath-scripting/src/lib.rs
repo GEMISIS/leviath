@@ -18,6 +18,11 @@ pub mod stage_hook;
 pub mod tool;
 pub mod types;
 
+/// The largest blob a script may hold, in bytes: the same 32 MiB the host
+/// caps a fetched body at, so a body the host accepts is one the script can
+/// take.
+pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+
 /// Apply the sandbox limits every Leviath Rhai engine shares.
 ///
 /// One function rather than a block copied into each engine constructor. This
@@ -31,7 +36,13 @@ pub fn harden(engine: &mut rhai::Engine, max_operations: u64) {
     // Bound runaway loops. The only wall-clock limit on pure computation.
     engine.set_max_operations(max_operations);
     engine.set_max_string_size(1_000_000);
-    engine.set_max_array_size(10_000);
+    // Rhai applies the array ceiling to blobs as well, and a blob is what
+    // `http_get_bytes` hands a script: a PDF or an image, on its way to
+    // `write_part`. The ceiling therefore matches the largest body the host
+    // will fetch, or every real file fails inside the call. Arrays of values
+    // are still bounded, by the operation budget: a script builds one an
+    // element at a time, and no host function returns one this large.
+    engine.set_max_array_size(MAX_BLOB_BYTES);
     engine.set_max_map_size(10_000);
     // Bound *recursion*: without a call-depth cap, a script recursing to
     // exhaustion overflows the native stack, which aborts the process rather

@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.6"
+version = "0.2.7"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -342,6 +342,13 @@ If nothing blocking turned up, say so plainly - a clean review is a result.
 # never reaches is free, and they may sum past 100% because regions rarely fill
 # together.
 [context.regions]
+# What the caller asked for, if anything (`--task`), and - when this blueprint
+# is running as one of its own fan-out workers - the work item `split_review`
+# packed for it: the area, its diff hunks, the focus, and the conventions. A
+# worker is spawned with that item as its task, and a blueprint with no region
+# seeded from the task refuses the spawn, so this region is what lets the
+# parallel review run at all. Sized for the hunks it carries.
+task            = { kind = "pinned", budget = "15%", seed = "task", volatility = "stable" }
 # The code/diff to review - required. Supply via `--diff <text|@file>` (CLI),
 # a ---region:diff--- block (ACP), or the API `regions` field.
 diff            = { kind = "pinned", budget = "20%", required = true, seed = "diff", required_message = "Provide the code or diff to review via --diff <text|@file>.", volatility = "stable" }

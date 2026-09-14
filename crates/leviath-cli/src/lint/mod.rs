@@ -465,6 +465,7 @@ pub(crate) fn lint_manifest(
         findings.extend(lint_output_stage(stage));
         findings.extend(lint_output_stage_can_answer(stage));
         findings.extend(lint_fanout_escape(stage));
+        findings.extend(lint_fanout_worker_task(blueprint, stage));
         findings.extend(lint_stage_mime(blueprint, stage));
         findings.extend(lint_tool_accepts(stage));
     }
@@ -611,8 +612,10 @@ impl Declared {
 // than re-exported: `lint_manifest` is the only caller and the only entry point
 // anyone outside this module needs, so the individual checks stay internal.
 mod checks;
+mod fanout;
 mod mime;
 use checks::*;
+use fanout::*;
 use mime::*;
 mod security;
 use security::*;

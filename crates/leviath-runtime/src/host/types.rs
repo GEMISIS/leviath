@@ -96,6 +96,12 @@ pub struct SpawnArgs {
     /// tree) can nest children under their parent. `None` for a top-level run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
+    /// The stage this run enters as one of its own blueprint's fan-out
+    /// workers. Its input is the work item in `task`, so the caller inputs
+    /// the blueprint requires of a run started from the outside (a `--diff`)
+    /// are not demanded of it: the parent met that contract.
+    #[serde(default)]
+    pub worker_stage: Option<String>,
     /// The shape this caller wants the run's final output in, overriding what
     /// the blueprint declares.
     ///
@@ -137,6 +143,7 @@ impl std::fmt::Debug for SpawnArgs {
             .field("allow", &self.allow)
             .field("max_depth", &self.max_depth)
             .field("parent_run_id", &self.parent_run_id)
+            .field("worker_stage", &self.worker_stage)
             .field("output", &self.output)
             .finish()
     }

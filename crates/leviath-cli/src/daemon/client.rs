@@ -269,7 +269,15 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     // nor opening an editor to write one would make sense - `lev run reviewer
     // --diff @x.patch` is a complete command line. Handing it one anyway is the
     // error, and it is the same message the daemon would give.
+    //
+    // The same command line stays complete when the blueprint *can* take a
+    // task but does not insist on one: a caller who named a region or attached
+    // a file has said what the run is for, and the reviewer's task region
+    // exists so its own fan-out workers can be handed their work item, not to
+    // make every `--diff` run stop for a prompt.
+    let handed_in = !resolved_regions.is_empty() || !parts.is_empty();
     let task = match source.blueprint.accepts_task() {
+        true if task.is_none() && handed_in && !source.blueprint.requires_task() => String::new(),
         true => resolve_task(
             task,
             &source.blueprint.name,
@@ -322,6 +330,7 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         max_depth,
         // A top-level run (sub-agents/fan-out set this on the host side).
         parent_run_id: None,
+        worker_stage: None,
         output: output_request,
     })
 }
@@ -864,6 +873,94 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         )
         .unwrap();
         dir.join("agent.leviath")
+    }
+
+    /// A blueprint that takes a task without insisting on one, and a `diff`
+    /// region: the bundled reviewer's shape, whose task region exists for the
+    /// fan-out workers it spawns from itself.
+    fn write_optional_task_manifest(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "diff-or-task"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000, seed = "task" }
+diff = { kind = "pinned", max_tokens = 4000, seed = "diff" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#,
+        )
+        .unwrap();
+        dir.join("agent.leviath")
+    }
+
+    fn launch<'a>(
+        manifest: &'a std::path::Path,
+        task: Option<&'a str>,
+        regions: HashMap<String, String>,
+    ) -> LaunchRequest<'a> {
+        LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task,
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            yolo_profile: None,
+            allow: Vec::new(),
+            max_depth: None,
+            regions,
+            no_seed_commands: false,
+            output_request: None,
+            parts: Vec::new(),
+        }
+    }
+
+    /// `--diff` with no `--task` on a blueprint whose task is optional spawns
+    /// with an empty task; the same blueprint given nothing at all is still
+    /// asked, and a task it is given still goes through.
+    #[test]
+    fn an_optional_task_is_not_demanded_when_a_region_was_handed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_optional_task_manifest(&dir.path().join("diff-or-task"));
+        let diff = HashMap::from([("diff".to_string(), "- a\n+ b".to_string())]);
+
+        let args = resolve_spawn_args(launch(&manifest, None, diff.clone())).unwrap();
+        assert_eq!(args.task, "");
+        assert_eq!(
+            args.regions.get("diff").map(String::as_str),
+            Some("- a\n+ b")
+        );
+
+        let err = resolve_spawn_args(launch(&manifest, None, HashMap::new())).unwrap_err();
+        assert!(err.to_string().contains("No task provided"), "got: {err}");
+
+        let args = resolve_spawn_args(launch(&manifest, Some("look at b"), diff)).unwrap();
+        assert_eq!(args.task, "look at b");
+    }
+
+    /// A `required` task region is a demand, and a region on the side does not
+    /// waive it: the run would only be refused at spawn with the same ask.
+    #[test]
+    fn a_required_task_is_still_demanded_beside_a_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_optional_task_manifest(&dir.path().join("insists"));
+        let insisting = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("seed = \"task\" }", "seed = \"task\", required = true }");
+        std::fs::write(&manifest, insisting).unwrap();
+        let regions = HashMap::from([("diff".to_string(), "x".to_string())]);
+        let err = resolve_spawn_args(launch(&manifest, None, regions)).unwrap_err();
+        assert!(err.to_string().contains("No task provided"), "got: {err}");
     }
 
     /// `lev run diffonly --diff ...` is a complete command line, so no task is
