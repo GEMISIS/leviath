@@ -92,6 +92,7 @@ pub(super) const GATE_KEYS: &[&str] = &[
     "region",
     "require_modifications",
     "require_no_open_items",
+    "require_region_entries",
     "require_region_updated",
     "require_regions",
     "tools",
@@ -1092,6 +1093,26 @@ pub(super) fn parse_transition_gate(
     }
     if let Some(region) = str_of(table, "require_no_open_items") {
         gate.require_no_open_items = Some(region.to_string());
+    }
+    // An inline table, `{ region = "views", at_least = 4 }`. Both halves are
+    // required and the count must be positive: a count of zero is a gate that
+    // passes every time, which is a typo, not a wish.
+    if let Some(count) = table_of(table, "require_region_entries") {
+        let Some(region) = str_of(count, "region") else {
+            return Err(Error::Other(format!(
+                "{where_}: require_region_entries needs a `region`"
+            )));
+        };
+        let at_least = count_of(count, where_, "at_least")?.unwrap_or(0);
+        if at_least == 0 {
+            return Err(Error::Other(format!(
+                "{where_}: require_region_entries needs `at_least` of 1 or more"
+            )));
+        }
+        gate.require_region_entries = Some(crate::blueprint::RegionCount {
+            region: region.to_string(),
+            at_least,
+        });
     }
     if let Some(tools) = array_of(table, "tools") {
         gate.tools = tools

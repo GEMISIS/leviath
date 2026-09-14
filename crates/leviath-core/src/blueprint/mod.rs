@@ -761,6 +761,10 @@ impl Blueprint {
                         gate.require_region_updated.as_ref(),
                     ),
                     ("require_no_open_items", gate.require_no_open_items.as_ref()),
+                    (
+                        "require_region_entries",
+                        gate.require_region_entries.as_ref().map(|c| &c.region),
+                    ),
                 ] {
                     let Some(region) = region else { continue };
                     if !known.contains(region.as_str()) {

@@ -59,6 +59,38 @@ pub(crate) fn gate_blocks(
             }),
         );
     }
+    // A count, for a stage whose work is a set: a drawing stage that must
+    // deliver four views. Held and re-run with the message, so a model that
+    // cannot call tools - an image model that returns as many pictures as it
+    // likes per reply - gets another reply to add to the set. A region the
+    // window does not hold passes with a warning, as the presence gates do.
+    if let Some(count) = &gate.require_region_entries {
+        match window.get_region(&count.region) {
+            Some(region) if region.content.len() < count.at_least => {
+                let have = region.content.len();
+                let name = &count.region;
+                return spend_gate_attempt(
+                    gate,
+                    stage,
+                    progress,
+                    gate.message.clone().unwrap_or_else(|| {
+                        format!(
+                            "The `{name}` region holds {have} of the {} entries this stage \
+                             must leave in it. Add the rest before moving on.",
+                            count.at_least
+                        )
+                    }),
+                );
+            }
+            Some(_) => {}
+            None => tracing::warn!(
+                stage = %stage.name,
+                region = %count.region,
+                "gate counts a region this stage's window does not hold; letting the \
+                 transition through"
+            ),
+        }
+    }
     // Checked before `require_modifications` and independently of it: a stage
     // whose work is a set of items usually has no file write to require.
     //

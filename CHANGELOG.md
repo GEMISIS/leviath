@@ -15,6 +15,15 @@ same list.
 
 ### Added
 
+- A transition gate can require a count: `require_region_entries = { region =
+  "views", at_least = 4 }` holds the stage and re-runs it with the gate's
+  message until the region holds that many entries. It is what lets a stage
+  whose model cannot call tools - an image model, which returns however many
+  pictures it likes per reply - draw until its set is complete, and it makes
+  "build from four views" a rule the runtime keeps rather than a wish in a
+  prompt. The bundled `sprite-to-3d` uses it on its drawing stage and on the
+  edge into the build. (#840)
+
 - An output stage whose model makes a file - a 3D generator, an image model -
   can hand that file back as the run's answer with no `submit_output` call and
   no text turn. Route the produced part into a region with `output_routing` and

@@ -209,6 +209,7 @@ gate = { require_modifications = true, max_attempts = 3 }
 | `require_regions` | `[]` | Regions that must **all** hold content. ANDed with every other condition here |
 | `require_region_updated` | unset | Require that a named region **changed** during this stage, rather than only holding content. See below |
 | `require_no_open_items` | unset | Name a [checklist region](/docs/context) that must have no open items before this edge is taken |
+| `require_region_entries` | unset | `{ region = "views", at_least = 4 }`: the region must hold at least that many entries. The gate re-runs the stage with the message until it does, which is how a stage whose model cannot call tools (an image model that returns however many pictures it likes per reply) draws until its set is complete |
 | `message` | generated | The nudge shown when the gate blocks |
 | `region` | unset | An **alternative** way to satisfy `require_modifications`: the gate also passes if this region is non-empty. See below |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |

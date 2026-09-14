@@ -4883,6 +4883,68 @@ notes = { kind = "pinned", max_tokens = 1000 }
         .expect("a cross-stage region reference is fine for a gate");
 }
 
+/// The count gate parses as an inline table, both halves required and the
+/// count positive; the validator holds its region to the same rule as every
+/// other gate's.
+#[test]
+fn a_count_gate_parses_and_refuses_the_typos() {
+    let good = r#"
+[agent]
+name = "t"
+entry_stage = "draw"
+
+[stages.draw]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.draw.transitions.build]
+condition = "always"
+gate = { require_region_entries = { region = "views", at_least = 4 } }
+
+[stages.build]
+mode = "autonomous"
+system_prompt = "go"
+
+[context.regions]
+views = { kind = "pinned", max_tokens = 1000 }
+"#;
+    let bp = parse_manifest(good).expect("parses");
+    let edge = &bp.stages[0].transitions.as_ref().unwrap()["build"];
+    let count = edge
+        .gate
+        .as_ref()
+        .unwrap()
+        .require_region_entries
+        .as_ref()
+        .unwrap();
+    assert_eq!(count.region, "views");
+    assert_eq!(count.at_least, 4);
+    bp.validate().expect("a declared region is fine");
+
+    let no_region = good.replace(r#"region = "views", "#, "");
+    let err = parse_manifest(&no_region).unwrap_err().to_string();
+    assert!(err.contains("needs a `region`"), "{err}");
+
+    let zero = good.replace("at_least = 4", "at_least = 0");
+    let err = parse_manifest(&zero).unwrap_err().to_string();
+    assert!(err.contains("1 or more"), "{err}");
+
+    let negative = good.replace("at_least = 4", "at_least = -2");
+    let err = parse_manifest(&negative).unwrap_err().to_string();
+    assert!(err.contains("must not be negative"), "{err}");
+
+    let ghost = good.replace(r#"region = "views""#, r#"region = "ghost""#);
+    let err = parse_manifest(&ghost)
+        .expect("parses")
+        .validate()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("gate.require_region_entries names region 'ghost'"),
+        "{err}"
+    );
+}
+
 #[test]
 fn validate_rejects_a_default_region_naming_no_region() {
     let bp = parse_manifest(&keys_fixture(

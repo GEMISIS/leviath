@@ -1004,6 +1004,21 @@
               "type": "string",
               "description": "A checklist region that must have no open items before this edge is taken."
             },
+            "require_region_entries": {
+              "type": "object",
+              "description": "A region that must hold at least so many entries before this edge is taken. The gate holds the stage and re-runs it with the message until the count is met, so a stage whose model cannot call tools (an image model) draws until its set is complete.",
+              "additionalProperties": false,
+              "required": ["region", "at_least"],
+              "properties": {
+                "region": {
+                  "type": "string"
+                },
+                "at_least": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
             "message": {
               "type": "string"
             },
