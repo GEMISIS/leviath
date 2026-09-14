@@ -154,6 +154,16 @@ The same character rotating in place, viewed from each corner:
    the left side at once.
 4. BACK THREE-QUARTER, RIGHT - turned about 135 degrees the other way.
 
+CHECK THE ANCHOR BEFORE DRAWING THE REST. Everything else matches the anchor, so
+a wrong anchor becomes four wrong views. After drawing it, compare it against
+the source and the marketing art on likeness, not just parts: the face and head
+shape, the expression, the body proportions, and the outfit - every garment and
+piece of gear the art shows, in its shape and colour, and nothing the art does
+not show. If the face reads as a different character, the expression is wrong,
+or a garment is missing, changed or invented, draw the anchor again before
+drawing any other view. Only an anchor you would accept as the character is
+worth matching.
+
 NEVER MIRROR - ROTATE. These are one character turning in place, NOT mirror
 images. An asymmetric feature - a ponytail worn to one side, an arm cannon, a
 single shoulder pad, a side bag - stays on its OWN physical side in every view;
@@ -170,6 +180,13 @@ it hangs), and with all four corners covered nothing thin can be flattened away
 and no single flat view dominates. Show any long ponytail, tail or hair at its
 FULL length in all four views. The two front three-quarters together cover the
 front symmetrically, so no straight front is needed.
+
+KEEP TRAILING PARTS CLEAR OF THE BODY. The 3D builder fuses any two surfaces
+that touch in a view, so long hair, a ponytail, a tail, a cape or a scarf must
+hang with a visible gap between it and the body - not pressed against the back,
+not draped over the legs or the seat, not tucked behind an arm. Where the
+design lets it, a slight sway away from the body in every view is what keeps it
+a separate part in the model.
 
 ASSEMBLE THE CHARACTER LOGICALLY. Draw every part attached where it physically
 connects: a hat resting on the head, hair emerging from the scalp, straps, belts
@@ -302,6 +319,17 @@ view whose arms or stance differ - a mixed-pose set rigs badly. Give special
 attention to a long ponytail or tail: it is the detail the downstream 3D step
 most often drops, so if any view weakens or omits it, log that.
 
+JUDGE LIKENESS FIRST, BEFORE ANY PART. A render can carry every accessory and
+still be the wrong character. Compare the face and head shape, the expression,
+the body proportions and the outfit against the marketing art when there is
+any, else against the source: is this recognisably the same character, wearing
+what the art shows, and nothing the art does not show? A face that reads as a
+different character, an expression the art never wears, a garment that is
+missing, changed or invented, a colour that drifted - each is a SERIOUS item,
+logged in the missing region as such, naming the view and what the art shows
+instead. A set whose anchor is off-model must be redrawn from the anchor, and
+your note should say so; parts checked onto a wrong likeness are wasted work.
+
 Judge MATERIAL and TEXTURE CONSISTENCY too, not just shape and color. The goal is
 not to match any one art style exactly - it is that the surfaces read the SAME
 across the set: the ponytail should be the same kind of hair in every view, the
@@ -363,9 +391,12 @@ the review notes.
 
 Decide whether the views are ready to build into a model. They are ready when two
 things hold: the four three-quarter (diagonal) views are covered - front-left,
-front-right, back-left and back-right - and the missing region lists no serious
-detail still absent or wrong. A single view, or a set that still drops the arm
-cannon, is not ready.
+front-right, back-left and back-right - by FOUR usable renders, one per angle,
+and the missing region lists no serious detail still absent or wrong. Fewer
+than four is not ready: the builder takes up to four views and symmetrises
+whatever it cannot see, so a two-view set loses a one-sided feature the views
+plainly show. A set that still drops a signature part the source shows, or
+whose likeness the critique flagged, is not ready either.
 
 Then choose one path:
 - If ready, WRITE THE BUILD HINTS into the build_spec region (context_write),
@@ -399,9 +430,12 @@ model = "anthropic/claude-opus-5"
 reset = ["conversation"]
 hide = ["marketing", "model_preview"]
 
+# The build hints are the builder's only texturing steer, so writing them is a
+# condition of leaving, not a suggestion.
 [stages.assess-coverage.transitions.build-model]
-hint = "If the angles are covered and the missing region lists no serious detail."
+hint = "If four usable views cover the angles and the missing region lists no serious detail."
 transform = "direct"
+gate = { require_region_updated = "build_spec", message = "Write the build hints into the build_spec region (texture_prompt, negative_prompt, art_style) before building - the builder textures from nothing else.", max_attempts = 2 }
 
 [stages.assess-coverage.transitions.generate-more]
 hint = "If an angle is missing or the missing region still lists a serious detail to fix."
@@ -447,6 +481,11 @@ region as you go.
 
 Do not edit the missing region yourself; the critique stage re-checks your work
 and signs off what is truly fixed. Keep the set small enough to fit one request.
+Keep any long hair, ponytail, tail, cape or scarf hanging clear of the body with
+a visible gap, the way the prep stage does: the builder fuses surfaces that
+touch. Match the kept views' pose, style and likeness exactly - a corrected view
+that reads as a different character is worse than the one it replaces.
+
 Once you have drawn the fixes and the missing angles, stop; the run moves back to
 the filter.
 """
@@ -599,6 +638,12 @@ accessories all present and on the correct side (including anything the missing
 region flagged), the topology clean? Give particular attention to a long ponytail
 or tail: the image-to-3D step frequently flattens or drops one, so if the
 references show a long ponytail and the preview does not, that is a serious gap. Judge material CONSISTENCY with the references too: the built surfaces (hair, fur, fabric) should read as the same materials the reference views agree on, not a different look.
+
+A signature part the source shows on one side - a weapon, a cannon, a pad, a
+tail, a bag - that the model lacks, or shows on both sides, is a SERIOUS gap
+whenever the preview's angle would show it: the builder tends to symmetrise
+what its views under-specify, and a character without its defining part is not
+the character. Do not accept that as "the base mesh".
 
 Note the preview is usually a single front-ish angle, so it will not show
 everything on the back. Judge what it does show; do not fail the model for a
