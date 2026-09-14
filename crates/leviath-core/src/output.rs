@@ -1,14 +1,11 @@
 //! An agent's final output: the one value a run hands back to whoever asked.
 //!
-//! Before this existed, the only way an agent could return something was to
-//! write a file. Every surface that should have reported a result reported
-//! something else - `GET /api/agents/{id}/result` tailed a log file, the
-//! completion webhook's `result` field carried the *error* string, and
-//! `wait_for_agent`, whose schema promises "return its final result", returned
-//! `"Sub-agent 'x' finished with status: Complete"`. A fan-out worker's
-//! contribution to its merge stage was whatever text happened to sit in its last
-//! assistant message, so a worker whose final turn was a tool call contributed
-//! an empty string.
+//! Every surface that reports a result reads this and nothing else:
+//! `GET /api/agents/{id}/result`, the completion webhook's `result` field,
+//! `wait_for_agent`'s answer to a parent, and a fan-out worker's contribution
+//! to its merge stage. None of them has to guess at a log tail or at whatever
+//! text sat in a last assistant message, which for a worker whose final turn
+//! was a tool call is nothing at all.
 //!
 //! # The format rule
 //!
