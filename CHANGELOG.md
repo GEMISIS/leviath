@@ -20,14 +20,14 @@ same list.
   report's entry as a part named `<item>/<artifact>`, so a merge stage whose
   model takes images or meshes sees the files themselves rather than each
   worker's description of them. A file the store lost or one over the part
-  ceiling is left out with a warning.
+  ceiling is left out with a warning. (#841)
 
 - `AgentWorld::artifact_bytes` reads one of a run's artifacts back from its
   blob store, so an embedder that has the name, type and hash from `result`
-  no longer needs to know where the world keeps its files.
+  no longer needs to know where the world keeps its files. (#841)
 
 - The Meshy provider lists its six operations, so a configured key shows them
-  on `GET /api/models` and `lev models list` like any other provider's models.
+  on `GET /api/models` and `lev models list` like any other provider's models. (#841)
 
 - `GET /api/agents/{id}/artifacts/{name}` serves one file a run handed back,
   by the name its answer lists, from the blob store by hash first and the
@@ -36,19 +36,19 @@ same list.
   file a model made and nothing wrote to disk was unreachable over HTTP.
   `files/raw?path=` now falls back to the same store for a path the answer
   lists as an artifact, and an Agent Client Protocol host's `resource_link`
-  points at the stored file when the working directory has no copy.
+  points at the stored file when the working directory has no copy. (#841)
 
 - A sub-agent's files reach its parent. `wait_for_agent` and `check_agent`
   list the child's artifacts under its answer and hand them up as parts of
   the tool result, stored again under the parent's run and named
   `<child>/<artifact>`, so a parent whose model takes the type sees the
-  file itself.
+  file itself. (#841)
 
 - A new lint, `output-stage-cannot-answer`: an output stage whose models
   cannot call tools (an image model, a 3D generator) can never reach
   `submit_output`, so unless it declares an artifact and routes the produced
   part the run ends with nothing after re-submitting the job up to six times.
-  Said at validate time, as an error.
+  Said at validate time, as an error. (#841)
 
 - A transition gate can require a count: `require_region_entries = { region =
   "views", at_least = 4 }` holds the stage and re-runs it with the gate's
@@ -113,27 +113,27 @@ same list.
   world with no store) vanished into a line in the reply and nothing else; the
   stage log and the daemon log now say what was dropped and why, so a stage
   left with nothing to hand back reads as a ceiling rather than a model that
-  made nothing.
+  made nothing. (#841)
 
 - `mime-unseen` fired on every stage of a media pipeline, since a drawing
   stage cannot see the mesh region and the build stage cannot see the images:
   that is the runtime handing each model its stand-ins, as designed. It is
   now information when a stage's models see some of what it takes, and a
-  warning only when they see none of it.
+  warning only when they see none of it. (#841)
 
 - `unbounded-percentage-budget` measured every percentage region against the
   Meshy provider's 64-million-token "window", which is the ceiling its REST
   call takes a mesh under, not a context window. A model that does not write
-  text no longer counts toward the widest declared window.
+  text no longer counts toward the widest declared window. (#841)
 
 - `lev blobs` and `GET /api/agents/{id}/blobs` reported a stored part's
   native token estimate (2.4 million for a 9 MB mesh) as its `tokens`; the
-  figure is now what the region charges it, its stand-in.
+  figure is now what the region charges it, its stand-in. (#841)
 
 - The title call no longer tries a model that does not write text. A run whose
   entry stage is a Meshy operation or an image model put that model at the
   head of the title chain and spent a failover step (for Meshy, a real job
-  submission) learning it cannot write a sentence.
+  submission) learning it cannot write a sentence. (#841)
 
 - A stage whose name carries a hyphen could never be chosen by the router: the
   routing reply was split on every non-word character, so `generate-more`
