@@ -892,25 +892,13 @@ fn final_output_lines(answer: &leviath_core::FinalOutput, width: u16) -> Vec<Lin
             Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
         )));
         for artifact in &answer.artifacts {
-            let sha = match artifact.sha256.is_empty() {
-                true => String::new(),
-                false => format!(
-                    "  sha256:{}",
-                    artifact.sha256.chars().take(12).collect::<String>()
-                ),
-            };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("   {}", artifact.name),
                     Style::default().fg(C_WHITE),
                 ),
                 Span::styled(
-                    format!(
-                        "  {}  {}  {}{sha}",
-                        artifact.path,
-                        artifact.mime_type,
-                        leviath_core::mime::human_size(artifact.size)
-                    ),
+                    format!("  {}", artifact.detail_columns()),
                     Style::default().fg(C_DIM),
                 ),
             ]));

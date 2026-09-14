@@ -132,10 +132,7 @@ pub(super) fn inject_results(
     // pinned results region lifts them into the merge model's first user turn
     // and a sliding one renders them beside the text they belong to. Each is
     // charged its stand-in, like every stored part.
-    let mut content = leviath_core::region::EntryContent::text(fitted);
-    for part in parts {
-        content = content.with_part(part);
-    }
+    let content = leviath_core::region::EntryContent::text(fitted).with_parts(parts);
     let tokens = content.tokens_hint();
     let _ = window.add_assistant_turn_content(
         region,

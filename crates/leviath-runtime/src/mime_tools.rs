@@ -126,15 +126,9 @@ fn attach(
         }
     }
     if let Some(d) = arg(args, "deliver") {
-        inbound.deliver = match d {
-            "native" => Some(leviath_core::mime::Delivery::Native),
-            "text" => Some(leviath_core::mime::Delivery::Text),
-            "stand_in" => Some(leviath_core::mime::Delivery::StandIn),
-            other => {
-                return format!(
-                    "[error] 'deliver' must be native, text or stand_in, not '{other}'"
-                );
-            }
+        inbound.deliver = match leviath_core::mime::Delivery::from_arg(d) {
+            Ok(d) => Some(d),
+            Err(e) => return format!("[error] {e}"),
         };
     }
     let content = match sink.entry_for(&inbound) {
@@ -162,18 +156,12 @@ fn attach(
     if let Err(e) = written {
         return format!("[error] region '{region}' refused '{name}': {e}");
     }
-    if let Some(k) = key
-        && let Some(entry) = window
-            .get_region_mut(region)
-            .and_then(|r| r.content.last_mut())
-    {
-        entry.key = Some(k.to_string());
-    }
+    window.key_last_entry(region, key);
     let sha = content
         .stored()
         .next()
         .and_then(|p| p.blob())
-        .map(|b| short(&b.sha256).to_string())
+        .map(|b| b.short_sha().to_string())
         .unwrap_or_default();
     format!(
         "Attached '{name}' to region '{region}'{} as {} ({tokens} tokens, sha256 {sha}). It is in \
@@ -238,7 +226,7 @@ fn export(
                 .first()
                 .map(|e| format!(".{e}"))
                 .unwrap_or_default();
-            format!("{}{ext}", short(&blob.sha256))
+            format!("{}{ext}", blob.short_sha())
         });
     let full = match resolve(&target, workdir) {
         Ok(p) => p,
@@ -261,12 +249,6 @@ fn export(
         ),
         Err(e) => format!("[error] could not write '{target}': {e}"),
     }
-}
-
-/// The first twelve characters of a hash: enough to name it, short enough
-/// to read.
-fn short(sha256: &str) -> &str {
-    sha256.get(..12).unwrap_or(sha256)
 }
 
 /// The most recent stored part whose name is `wanted` or whose hash starts
@@ -507,7 +489,8 @@ mod tests {
                 entity,
                 Some(dir.path()),
             );
-            assert!(out.contains(&format!("to '{}.png'", short(&sha))), "{out}");
+            let short = sha.get(..12).unwrap_or(&sha);
+            assert!(out.contains(&format!("to '{short}.png'")), "{out}");
             // Text-only entries are not stored parts.
             w.get_region_mut("sprites").unwrap().content[0].content = EntryContent::text("x");
             let out = call(
@@ -665,7 +648,7 @@ mod tests {
                 .sha256
                 .clone();
             let broken = ContextWindow::new(10);
-            assert!(find_part(&broken, short(&sha)).is_none());
+            assert!(find_part(&broken, sha.get(..12).unwrap_or(&sha)).is_none());
         });
         with_world(true, &mut |mime, entity| {
             let mut w = window();

@@ -142,17 +142,7 @@ fn render(
     if !output.artifacts.is_empty() {
         out.push_str(&format!("\nFiles produced ({}):\n", output.artifacts.len()));
         for a in &output.artifacts {
-            let sha = match a.sha256.is_empty() {
-                true => String::new(),
-                false => format!("  sha256:{}", a.sha256.chars().take(12).collect::<String>()),
-            };
-            out.push_str(&format!(
-                "  {}  {}  {}  {}{sha}\n",
-                a.name,
-                a.path,
-                a.mime_type,
-                leviath_core::mime::human_size(a.size)
-            ));
+            out.push_str(&format!("  {}  {}\n", a.name, a.detail_columns()));
         }
     }
     Some(out)

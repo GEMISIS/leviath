@@ -17,6 +17,21 @@ pub enum Delivery {
     StandIn,
 }
 
+impl Delivery {
+    /// The word a tool argument, an `--attach` segment or an upload request
+    /// uses: `native`, `text` or `stand_in`.
+    pub fn from_arg(word: &str) -> Result<Self, String> {
+        match word {
+            "native" => Ok(Self::Native),
+            "text" => Ok(Self::Text),
+            "stand_in" => Ok(Self::StandIn),
+            other => Err(format!(
+                "deliver must be native, text or stand_in, not '{other}'"
+            )),
+        }
+    }
+}
+
 /// What a stored part carries instead of its bytes.
 ///
 /// Small and serialisable, so a journal record, a snapshot or an event holds

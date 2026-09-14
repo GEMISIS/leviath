@@ -25,6 +25,16 @@ fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+/// The reply when `key` names no entry in `region`.
+fn no_such_key(key: &str, region: &str) -> String {
+    format!("[not found] No entry with key '{key}' in region '{region}'")
+}
+
+/// The reply when `region`, holding `len` entries, has none at `at`.
+fn no_such_index(region: &str, len: usize, at: usize) -> String {
+    format!("[not found] Region '{region}' has {len} entries, so there is none at {at}")
+}
+
 /// The reply for a tool call that left out `key`.
 fn missing(key: &str) -> String {
     format!("[error] missing '{key}' argument")
@@ -239,51 +249,33 @@ pub(crate) fn handle_context_tool(
                 Some(r) => r,
                 None => return region_not_found(region_name, window),
             };
-            if matches!(region.kind, RegionKind::HashMap { .. }) {
-                if let Some(k) = key {
-                    match region.get_by_key(k) {
-                        Some(entry) => entry.content.to_string(),
-                        None => {
-                            format!("[not found] No entry with key '{k}' in region '{region_name}'")
-                        }
-                    }
-                } else {
-                    let mut lines = Vec::new();
-                    for entry in &region.content {
-                        if let Some(k) = &entry.key {
-                            lines.push(format!("  {} ({} tokens)", k, entry.tokens));
-                        }
-                    }
-                    if lines.is_empty() {
-                        format!("Section '{region_name}' is empty.")
-                    } else {
-                        format!("Section '{region_name}' entries:\n{}", lines.join("\n"))
-                    }
-                }
-            } else if let Some(k) = key {
+            if let Some(k) = key {
                 // A key names one entry on every region kind, the same way
                 // `context_delete` finds it: a routed image is keyed by its
-                // file name, and a write can name its entry. Read whole, a
-                // region of sixteen renders answered a question about one of
-                // them with all sixteen, which is what made the filter stage
-                // in the bundled sprite agent delete blind.
+                // file name, and a write can name its entry. Reading one
+                // render out of sixteen must not hand back all sixteen.
                 match region.get_by_key(k) {
                     Some(entry) => entry.content.to_string(),
-                    None => {
-                        format!("[not found] No entry with key '{k}' in region '{region_name}'")
+                    None => no_such_key(k, region_name),
+                }
+            } else if matches!(region.kind, RegionKind::HashMap { .. }) {
+                let mut lines = Vec::new();
+                for entry in &region.content {
+                    if let Some(k) = &entry.key {
+                        lines.push(format!("  {} ({} tokens)", k, entry.tokens));
                     }
+                }
+                if lines.is_empty() {
+                    format!("Section '{region_name}' is empty.")
+                } else {
+                    format!("Section '{region_name}' entries:\n{}", lines.join("\n"))
                 }
             } else if let Some(i) = args.get("index").and_then(serde_json::Value::as_u64) {
                 // An unkeyed entry is named by the index `context_list` shows.
                 let at = usize::try_from(i).unwrap_or(usize::MAX);
                 match region.content.get(at) {
                     Some(entry) => entry.content.to_string(),
-                    None => format!(
-                        "[not found] Region '{}' has {} entries, so there is none at {}",
-                        region_name,
-                        region.content.len(),
-                        at
-                    ),
+                    None => no_such_index(region_name, region.content.len(), at),
                 }
             } else {
                 let text = region
@@ -319,7 +311,7 @@ pub(crate) fn handle_context_tool(
                     if region.remove_by_key(k) {
                         format!("Released '{k}' from '{region_name}'.")
                     } else {
-                        format!("[not found] No entry with key '{k}' in region '{region_name}'")
+                        no_such_key(k, region_name)
                     }
                 }
                 (None, Some(i), _) => {
@@ -327,12 +319,7 @@ pub(crate) fn handle_context_tool(
                     if region.remove_at(at) {
                         format!("Released entry {at} from '{region_name}'.")
                     } else {
-                        format!(
-                            "[not found] Region '{}' has {} entries, so there is none at {}",
-                            region_name,
-                            region.content.len(),
-                            at
-                        )
+                        no_such_index(region_name, region.content.len(), at)
                     }
                 }
                 (None, None, Some(n)) => {

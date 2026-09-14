@@ -115,8 +115,13 @@ impl EntryContent {
     }
 
     /// The same content with `part` appended.
-    pub fn with_part(mut self, part: Part) -> Self {
-        self.parts.push(part);
+    pub fn with_part(self, part: Part) -> Self {
+        self.with_parts(std::iter::once(part))
+    }
+
+    /// The same content with every part of `parts` appended, rendered once.
+    pub fn with_parts(mut self, parts: impl IntoIterator<Item = Part>) -> Self {
+        self.parts.extend(parts);
         self.text = render(&self.parts);
         self
     }
