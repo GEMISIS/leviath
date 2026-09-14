@@ -11211,6 +11211,82 @@ fn a_zero_baseline_cannot_run_away() {
     assert!(!rec.runaway_warned);
 }
 
+// ── transition gates: require_region_entries ─────────
+
+/// A window whose `views` region holds `n` entries.
+fn counted_window(n: usize) -> ContextWindow {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new("views".to_string(), RegionKind::Pinned, 5000));
+    for i in 0..n {
+        w.add_to_region("views", format!("view {i}"), 2).unwrap();
+    }
+    w
+}
+
+fn count_gate(at_least: usize, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
+    leviath_core::blueprint::TransitionGate {
+        require_region_entries: Some(leviath_core::blueprint::RegionCount {
+            region: "views".to_string(),
+            at_least,
+        }),
+        message: message.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+/// Too few entries hold the stage, and the nudge says how many there are and
+/// how many it takes - what a drawing model needs to know to draw the rest.
+#[test]
+fn too_few_entries_block_the_edge_and_the_nudge_counts() {
+    let w = counted_window(1);
+    let stage = stage_named("draw", None, false, None);
+    let GateDecision::Block(nudge) = gate_blocks(
+        Some(&count_gate(4, None)),
+        &stage,
+        &StageProgress::default(),
+        &w,
+    ) else {
+        panic!("one of four must hold the stage");
+    };
+    assert!(nudge.contains("holds 1 of the 4"), "{nudge}");
+    // The gate's own message wins when it has one.
+    let GateDecision::Block(nudge) = gate_blocks(
+        Some(&count_gate(4, Some("draw the rest"))),
+        &stage,
+        &StageProgress::default(),
+        &w,
+    ) else {
+        panic!("still held");
+    };
+    assert_eq!(nudge, "draw the rest");
+}
+
+#[test]
+fn enough_entries_pass_and_a_missing_region_passes_with_a_warning() {
+    let stage = stage_named("draw", None, false, None);
+    assert!(matches!(
+        gate_blocks(
+            Some(&count_gate(4, None)),
+            &stage,
+            &StageProgress::default(),
+            &counted_window(4)
+        ),
+        GateDecision::Pass
+    ));
+    // No `views` region in this window at all: nothing could ever satisfy
+    // the count, so the transition goes through rather than stranding.
+    let bare = ContextWindow::new(10_000);
+    assert!(matches!(
+        gate_blocks(
+            Some(&count_gate(4, None)),
+            &stage,
+            &StageProgress::default(),
+            &bare
+        ),
+        GateDecision::Pass
+    ));
+}
+
 // ── transition gates: require_no_open_items ─────────
 
 /// A window whose checklist holds `open` open items and `done` closed ones.
@@ -11446,6 +11522,7 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
         require_region_updated: None,
         require_regions: Vec::new(),
         require_no_open_items: None,
+        require_region_entries: None,
     }
 }
 

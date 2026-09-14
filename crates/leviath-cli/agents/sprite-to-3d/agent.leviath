@@ -154,15 +154,18 @@ The same character rotating in place, viewed from each corner:
    the left side at once.
 4. BACK THREE-QUARTER, RIGHT - turned about 135 degrees the other way.
 
-CHECK THE ANCHOR BEFORE DRAWING THE REST. Everything else matches the anchor, so
-a wrong anchor becomes four wrong views. After drawing it, compare it against
-the source and the marketing art on likeness, not just parts: the face and head
-shape, the expression, the body proportions, and the outfit - every garment and
-piece of gear the art shows, in its shape and colour, and nothing the art does
-not show. If the face reads as a different character, the expression is wrong,
-or a garment is missing, changed or invented, draw the anchor again before
-drawing any other view. Only an anchor you would accept as the character is
-worth matching.
+CHECK THE ANCHOR BEFORE DRAWING THE REST - IN THIS SAME REPLY. You get ONE
+reply in this stage: every image you produce in it is kept, and the stage ends
+when it is sent, so do not stop after the anchor to report on it. Draw the
+anchor, look at it against the source and the marketing art on likeness, not
+just parts - the face and head shape, the expression, the body proportions, and
+the outfit: every garment and piece of gear the art shows, in its shape and
+colour, and nothing the art does not show. If the face reads as a different
+character, the expression is wrong, or a garment is missing, changed or
+invented, draw the anchor again, then draw the other three views to match the
+anchor you accept - all of it in this one reply. A wrong anchor becomes four
+wrong views; only an anchor you would accept as the character is worth
+matching.
 
 NEVER MIRROR - ROTATE. These are one character turning in place, NOT mirror
 images. An asymmetric feature - a ponytail worn to one side, an arm cannon, a
@@ -201,8 +204,9 @@ mixed-pose set deforms when rigged. Consistency with the anchor render matters
 more than anything: it is the same character, in the same pose, turning in space.
 
 Draw ONE single view per image. Do not pack several angles into one turnaround
-sheet: the later stages need each view on its own. Draw one at a time and store
-each in the references region.
+sheet: the later stages need each view on its own. Produce the images one after
+another in this same reply - one image per view - and each lands in the
+references region on its own.
 
 Keep the set small: at most two candidates for any one angle, and no more than
 EIGHT renders in all. A larger set will not fit in a single request downstream,
@@ -228,8 +232,10 @@ format = "image/*"
 [stages.prep-references.transitions.filter-references]
 hint = "Once the references region holds view renders of the character to filter."
 transform = "direct"
-# Do not leave until at least one render has actually been drawn and stored.
-gate = { require_region_updated = "references", message = "You have not stored any reference render yet. Draw the front A-pose (and the other views) and let them land in the references region before moving on." }
+# Do not leave until four renders are actually stored. An image model returns
+# as many pictures as it likes per reply, so the gate holds the stage and asks
+# again until the set is complete.
+gate = { require_region_updated = "references", require_region_entries = { region = "references", at_least = 4 }, max_attempts = 4, message = "The references region does not hold four renders yet. Draw the views still missing - one image per view, matching the anchor's pose, style and likeness - and let them land in the references region before moving on." }
 
 # ── 2. Filter: drop the bad renders, keep the good single views ──────────────
 
@@ -380,10 +386,11 @@ max_revisits = 4
 available_tools = ["context_read", "context_list", "context_write", "context_append"]
 transition_prompt = """
 Decide what happens next with the reference views:
-- If the angles are covered and the missing region lists no serious detail still
+- If the references region holds FOUR usable renders covering the four
+  three-quarter angles, and the missing region lists no serious detail still
   absent or wrong, respond with: build-model
-- If an angle is missing or the missing region still lists a serious detail to
-  fix, respond with: generate-more
+- If it holds fewer than four renders, an angle is missing, or the missing
+  region still lists a serious detail to fix, respond with: generate-more
 """
 system_prompt = """
 Look at the good views in the references region, the missing region's list, and
@@ -435,7 +442,7 @@ hide = ["marketing", "model_preview"]
 [stages.assess-coverage.transitions.build-model]
 hint = "If four usable views cover the angles and the missing region lists no serious detail."
 transform = "direct"
-gate = { require_region_updated = "build_spec", message = "Write the build hints into the build_spec region (texture_prompt, negative_prompt, art_style) before building - the builder textures from nothing else.", max_attempts = 2 }
+gate = { require_region_updated = "build_spec", require_region_entries = { region = "references", at_least = 4 }, message = "Not ready to build: the references region must hold four usable renders (route to generate-more if it holds fewer), and the build hints must be written into the build_spec region (texture_prompt, negative_prompt, art_style) - the builder textures from nothing else.", max_attempts = 2 }
 
 [stages.assess-coverage.transitions.generate-more]
 hint = "If an angle is missing or the missing region still lists a serious detail to fix."

@@ -205,6 +205,29 @@ pub struct TransitionGate {
     /// a mechanical question rather than one the model answers about itself.
     #[serde(default)]
     pub require_no_open_items: Option<String>,
+
+    /// A region that must hold at least so many entries before this edge is
+    /// taken.
+    ///
+    /// The presence gates ask whether a region has *anything*; this asks how
+    /// much. It is what turns a stage whose model cannot call tools - an image
+    /// model that returns however many pictures it likes per reply - into one
+    /// that draws until the set is complete: the gate holds the stage and
+    /// re-runs it with the message, and the next reply adds to the region.
+    /// It is also the honest form of "build from four views": a rule the
+    /// runtime keeps rather than a wish in a prompt.
+    #[serde(default)]
+    pub require_region_entries: Option<RegionCount>,
+}
+
+/// A region and how many entries it must hold, for
+/// [`TransitionGate::require_region_entries`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionCount {
+    /// The region counted.
+    pub region: String,
+    /// The fewest entries that satisfy the gate.
+    pub at_least: usize,
 }
 
 /// Default re-run budget for an unsatisfied [`TransitionGate`].

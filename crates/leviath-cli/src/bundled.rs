@@ -1165,7 +1165,8 @@ mod tests {
             for stage in &blueprint.stages {
                 for (target, edge) in stage.transitions.iter().flatten() {
                     let Some(gate) = &edge.gate else { continue };
-                    let checks = gate.require_modifications
+                    let checks = gate.require_region_entries.is_some()
+                        || gate.require_modifications
                         || gate.region.is_some()
                         || gate.require_region_updated.is_some();
                     assert!(
