@@ -1,0 +1,111 @@
+name: Bedrock windows (Weekly Monday)
+
+# Refresh crates/leviath-providers/bedrock/windows.toml by running
+# `cargo xtask bedrock-windows`, which reads every model card in the AWS
+# Bedrock user guide and rewrites the file from the context and output
+# limits they state. When the file moves, this opens a PR and sets it to
+# auto-merge, so the required checks gate it exactly as they gate a person's
+# PR.
+#
+# TOKEN: the same as the prices refresh. `PRICES_PAT` if set, else
+# `RELEASE_TOKEN`; it cannot be `GITHUB_TOKEN`, since a PR opened with that
+# token gets no CI run here and could never merge.
+#
+# Nothing in ci.yml runs `cargo xtask bedrock-windows --check`. CI must not
+# depend on a third-party site being up; this workflow is the only network
+# path.
+
+on:
+  schedule:
+    # Every Monday at 10am PST (5pm UTC), alongside the prices refresh.
+    - cron: '0 17 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: bedrock-windows-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh the Bedrock limits table
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          token: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
+
+      - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: prices
+
+      - name: Refresh the table
+        id: refresh
+        run: |
+          set -euo pipefail
+          # Exit 2 is "could not reach the documentation": nothing to do this
+          # week. Any other failure is a refusal (the page layout changed, a
+          # limit would move implausibly far) and the job stays red so
+          # somebody looks.
+          set +e
+          cargo xtask bedrock-windows | tee bedrock-windows.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "The documentation was unreachable; the table is untouched."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          date="$(date -u +%Y-%m-%d)"
+          branch="chore/bedrock-windows-${date}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add crates/leviath-providers/bedrock/windows.toml
+
+          {
+            echo "chore(bedrock): refresh model token limits ${date}"
+            echo
+            echo "Produced by \`cargo xtask bedrock-windows\` from the model cards in"
+            echo "the AWS Bedrock user guide."
+            echo
+            echo '```'
+            cat bedrock-windows.log
+            echo '```'
+          } > commit-message.txt
+          git commit -F commit-message.txt
+          git push -u origin "$branch"
+
+          {
+            echo "Weekly refresh of \`crates/leviath-providers/bedrock/windows.toml\`"
+            echo "by \`cargo xtask bedrock-windows\`. Auto-merges once the required checks pass."
+            echo
+            echo '```'
+            cat bedrock-windows.log
+            echo '```'
+          } > pr-body.txt
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore(bedrock): refresh model token limits ${date}" \
+            --body-file pr-body.txt
+
+          gh pr merge "$branch" --auto --rebase

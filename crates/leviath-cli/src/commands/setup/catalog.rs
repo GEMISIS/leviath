@@ -197,6 +197,21 @@ pub(crate) fn providers() -> Vec<Provider> {
             },
         },
         Provider {
+            id: "bedrock",
+            display: "AWS Bedrock",
+            blurb: "Claude, Nova, Llama, Mistral and more, billed to an AWS account. \
+                    Takes a Bedrock API key; the region defaults to us-east-1.",
+            credential: Credential::ApiKey,
+            hint: "ABSK...",
+            env_var: Some("AWS_BEARER_TOKEN_BEDROCK"),
+            signup_url: Some("https://console.aws.amazon.com/bedrock/home#/api-keys"),
+            preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.bedrock_api_key.clone(),
+                write: |c, v| c.providers.bedrock_api_key = v,
+            },
+        },
+        Provider {
             id: "codex",
             display: "OpenAI Codex (ChatGPT subscription)",
             blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \

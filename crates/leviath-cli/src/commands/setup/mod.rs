@@ -80,6 +80,15 @@ pub struct SetupArgs {
     #[arg(long)]
     pub openrouter_key: Option<String>,
 
+    /// AWS Bedrock API key (a Bedrock API key, sent as a bearer token; not
+    /// an AWS access key)
+    #[arg(long)]
+    pub bedrock_key: Option<String>,
+
+    /// AWS region for Bedrock (default: us-east-1; also read from AWS_REGION)
+    #[arg(long)]
+    pub bedrock_region: Option<String>,
+
     /// Ollama base URL (default: http://localhost:11434)
     #[arg(long)]
     pub ollama_url: Option<String>,
@@ -210,6 +219,12 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
     if let Some(ref k) = args.openrouter_key {
         config.openrouter_api_key = Some(k.clone());
+    }
+    if let Some(ref k) = args.bedrock_key {
+        config.providers.bedrock_api_key = Some(k.clone());
+    }
+    if let Some(ref r) = args.bedrock_region {
+        config.providers.bedrock_region = Some(r.clone());
     }
     if let Some(ref u) = args.ollama_url {
         config.ollama_base_url = Some(u.clone());
@@ -508,6 +523,8 @@ mod tests {
             openai_key: None,
             google_key: None,
             openrouter_key: None,
+            bedrock_key: None,
+            bedrock_region: None,
             ollama_url: None,
             override_model: None,
             fallback_model: None,
@@ -887,6 +904,8 @@ mod tests {
             openai_key: Some("sk-oai".to_string()),
             google_key: Some("goog".to_string()),
             openrouter_key: Some("sk-or".to_string()),
+            bedrock_key: Some("ABSK-x".to_string()),
+            bedrock_region: Some("eu-west-1".to_string()),
             ollama_url: Some("http://box:11434".to_string()),
             override_model: Some("m".to_string()),
             fallback_model: Some("f".to_string()),
@@ -905,6 +924,11 @@ mod tests {
         assert_eq!(written.providers.openai_api_key.as_deref(), Some("sk-oai"));
         assert_eq!(written.providers.google_api_key.as_deref(), Some("goog"));
         assert_eq!(written.openrouter_api_key.as_deref(), Some("sk-or"));
+        assert_eq!(written.providers.bedrock_api_key.as_deref(), Some("ABSK-x"));
+        assert_eq!(
+            written.providers.bedrock_region.as_deref(),
+            Some("eu-west-1")
+        );
         assert_eq!(written.ollama_base_url.as_deref(), Some("http://box:11434"));
         assert_eq!(written.override_model.as_deref(), Some("m"));
         assert_eq!(written.fallback_model.as_deref(), Some("f"));

@@ -94,10 +94,13 @@ the file empty in CI.
 anthropic_api_key   = "sk-ant-..."   # env fallback: ANTHROPIC_API_KEY
 openai_api_key      = "sk-..."       # env fallback: OPENAI_API_KEY
 google_api_key      = "..."          # env fallback: GOOGLE_API_KEY
+bedrock_api_key     = "ABSK..."      # env fallback: AWS_BEARER_TOKEN_BEDROCK (a Bedrock API key)
+bedrock_region      = "us-east-1"    # env fallback: AWS_REGION, then AWS_DEFAULT_REGION
 anthropic_base_url  = "https://gw.corp/v1"   # env fallback: ANTHROPIC_BASE_URL
 openai_base_url     = "https://gw.corp/v1"   # env fallback: OPENAI_BASE_URL
 google_base_url     = "https://gw.corp/v1"   # env fallback: GOOGLE_BASE_URL
 openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
+bedrock_base_url    = "https://gw.corp/bedrock"   # env fallback: BEDROCK_BASE_URL
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
@@ -148,6 +151,10 @@ else.
 
 `HTTP_PROXY` and `HTTPS_PROXY` are honoured independently of this, so a gateway that is itself
 behind a proxy needs nothing extra here.
+
+`bedrock_base_url` replaces the Bedrock runtime origin only. With it set, the live model listing,
+the price file and the token-count routes are not read, and `lev models list` shows this build's
+table for Bedrock; see [AWS Bedrock](/docs/providers#aws-bedrock).
 
 `claude_code_enabled` is off unless you turn it on. See
 [Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
@@ -691,7 +698,7 @@ by the sandbox. Details in [Security and sandboxing](/docs/security#sandboxes).
 ## `[rate_limits.<provider>]`
 
 Client-side limits enforced before every call, for the built-in providers (`anthropic`, `openai`,
-`google`, `openrouter`).
+`google`, `openrouter`, `bedrock`).
 
 ```toml
 [rate_limits.anthropic]
@@ -795,6 +802,9 @@ provider already reports for that model, so the common case is one line:
 [model_capabilities."moonshotai/kimi-k3"]
 max_context_tokens = 1048576
 ```
+
+The quotes are TOML's, needed for any id with a `/`, a `.` or a `:` in it, which every Bedrock id
+has: `[model_capabilities."us.amazon.nova-pro-v1:0"]`.
 
 A misspelled key is refused at load rather than ignored, so a typo cannot look like a working
 override. The full set, when you do want to state all of it:

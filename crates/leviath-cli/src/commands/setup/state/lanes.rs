@@ -54,11 +54,19 @@ impl Wizard {
         // to guess where that grant lives. Built the same way a run builds it,
         // so the wizard cannot report a sign-in working that a run would not
         // find.
-        let options = if signin {
+        let mut options = if signin {
             crate::commands::run::session::codex_options(&self.base)
         } else {
             HashMap::new()
         };
+        // Bedrock is checked in the region a run would use, so a key that
+        // works in one region and not another is reported as a run would
+        // find it.
+        if id == leviath_providers::bedrock::PROVIDER_NAME
+            && let Some(region) = self.current_bedrock_region()
+        {
+            options.insert("region".to_string(), region);
+        }
         let creds = leviath_runtime::provider_creds::ProviderCreds {
             name: id.clone(),
             api_key: base_url.is_none().then_some(key).flatten(),

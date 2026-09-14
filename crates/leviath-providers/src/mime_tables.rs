@@ -148,6 +148,7 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
         "ollama" => ollama(model),
         "openrouter" => by_prefix(model),
         "meshy" => crate::meshy::mime_for(model),
+        "bedrock" => crate::bedrock::catalog::mime_for(model),
         _ => ModelMime::text_only(),
     }
 }
@@ -228,6 +229,12 @@ pub(crate) fn published_modality(provider: &str, model: &str) -> Option<ModelMim
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bedrock_id_is_typed_by_its_vendor_table() {
+        assert!(builtin_mime("bedrock", "us.amazon.nova-pro-v1:0").takes_mime());
+        assert!(!builtin_mime("bedrock", "openai.gpt-oss-120b-1:0").takes_mime());
+    }
     use leviath_core::mime::MimeType;
 
     fn mt(s: &str) -> MimeType {

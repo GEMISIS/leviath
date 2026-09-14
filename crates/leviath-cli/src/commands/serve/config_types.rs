@@ -58,6 +58,11 @@ pub(super) struct RedactedConfig {
     pub(super) has_openai_key: bool,
     pub(super) has_google_key: bool,
     pub(super) has_openrouter_key: bool,
+    pub(super) has_bedrock_key: bool,
+    /// The AWS region Bedrock is called in, when the config pins one. Always
+    /// sent, `null` when unset, so a console can tell "unset" from a daemon
+    /// too old to report it.
+    pub(super) bedrock_region: Option<String>,
     pub(super) ollama_base_url: Option<String>,
     /// Whether Ollama is on.
     ///
@@ -498,6 +503,12 @@ pub(super) struct WriteConfigReq {
     pub(super) openai_key: Option<String>,
     pub(super) google_key: Option<String>,
     pub(super) openrouter_key: Option<String>,
+    /// A Bedrock API key, sent as a bearer token.
+    pub(super) bedrock_key: Option<String>,
+    /// The AWS region Bedrock is called in. An empty string is refused with
+    /// a 400: `""` is not a region, and losing the setting to a stray form
+    /// field is worse than an error.
+    pub(super) bedrock_region: Option<String>,
     pub(super) ollama_base_url: Option<String>,
     /// Turn the Codex transport on or off.
     ///

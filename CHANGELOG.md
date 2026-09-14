@@ -15,6 +15,25 @@ same list.
 
 ### Added
 
+- AWS Bedrock is a built-in provider. Set `AWS_BEARER_TOKEN_BEDROCK` (a
+  Bedrock API key, not an AWS access key) or choose it in `lev setup`
+  (`--bedrock-key`, `--bedrock-region`, and a region picker on the Defaults
+  screen), and name models by their inference-profile id:
+  `bedrock/us.anthropic.claude-sonnet-5`. Requests go over Converse and
+  ConverseStream, so streaming, tools, images and PDFs work; Claude's
+  extended thinking and Nova 2's reasoning pass through a stage's parameters,
+  and a Claude's signed reasoning is replayed on the next turn. Token counts
+  are exact where Bedrock counts them (its CountTokens, or Anthropic's route
+  on `bedrock-mantle` for the newest Claude). Each model's context window and
+  output cap come from AWS's model cards, kept current by the new
+  `cargo xtask bedrock-windows` and its weekly workflow, and prices from
+  AWS's public price list at start-up, with the Marketplace-billed Claude
+  models priced from Anthropic's rates. The region follows `AWS_REGION`, then
+  `AWS_DEFAULT_REGION`, then `us-east-1`; `bedrock_base_url` points inference
+  at a gateway. `GET /api/config` reports `has_bedrock_key` and
+  `bedrock_region`, and `PUT /api/config` takes `bedrock_key` and
+  `bedrock_region`. (#844)
+
 - Rhai tools can fetch a file: `http_get_bytes(url [, headers])` returns the
   declared `mime_type` and the raw `bytes`, ready for `write_part`, under the
   same permission as `http_get`. The bundled `web_fetch` uses it: a URL that

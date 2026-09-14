@@ -119,6 +119,21 @@ async fn openrouter_calls_the_gateway_it_was_given() {
     );
 }
 
+#[tokio::test]
+async fn bedrock_calls_the_gateway_it_was_given() {
+    let url = mock().await;
+    let provider =
+        crate::BedrockProvider::with_overrides(client(), "k".to_string(), Default::default(), None)
+            .with_base_url(Some(url));
+
+    let err = reached(&provider).await;
+
+    assert!(
+        err.contains("418"),
+        "the gateway answered, not the vendor: {err}"
+    );
+}
+
 /// Saying nothing leaves the host alone rather than clearing it. That is the
 /// branch a config without a gateway takes, so it has to mean "unchanged" and
 /// not "reset" - on every provider, since each carries its own copy.
@@ -148,8 +163,18 @@ async fn no_gateway_leaves_the_host_as_it_was() {
     )
     .with_base_url(Some(mock().await))
     .with_base_url(None);
+    let bedrock =
+        crate::BedrockProvider::with_overrides(client(), "k".to_string(), Default::default(), None)
+            .with_base_url(Some(mock().await))
+            .with_base_url(None);
 
-    for provider in [&anthropic as &dyn Provider, &openai, &google, &openrouter] {
+    for provider in [
+        &anthropic as &dyn Provider,
+        &openai,
+        &google,
+        &openrouter,
+        &bedrock,
+    ] {
         let err = reached(provider).await;
         assert!(
             err.contains("418"),

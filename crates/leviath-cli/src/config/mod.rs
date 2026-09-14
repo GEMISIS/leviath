@@ -765,6 +765,20 @@ impl Config {
         if config.providers.meshy_api_key.is_none() {
             config.providers.meshy_api_key = std::env::var("MESHY_API_KEY").ok();
         }
+        if config.providers.bedrock_api_key.is_none() {
+            config.providers.bedrock_api_key =
+                std::env::var(leviath_providers::bedrock::KEY_ENV).ok();
+        }
+        // The region AWS's own tooling reads, so a machine set up for the AWS
+        // CLI is set up for this. Blank is unset: an exported empty variable
+        // is not a region.
+        if config.providers.bedrock_region.is_none() {
+            config.providers.bedrock_region = std::env::var("AWS_REGION")
+                .ok()
+                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty());
+        }
         if config.openrouter_api_key.is_none() {
             config.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
         }
@@ -789,6 +803,9 @@ impl Config {
         }
         if config.providers.meshy_base_url.is_none() {
             config.providers.meshy_base_url = std::env::var("MESHY_BASE_URL").ok();
+        }
+        if config.providers.bedrock_base_url.is_none() {
+            config.providers.bedrock_base_url = std::env::var("BEDROCK_BASE_URL").ok();
         }
 
         config.fill_from_credential_store();
@@ -843,11 +860,13 @@ impl Config {
         let openai = take("openai");
         let google = take("google");
         let openrouter = take("openrouter");
+        let bedrock = take("bedrock");
 
         self.providers.anthropic_api_key = self.providers.anthropic_api_key.take().or(anthropic);
         self.providers.openai_api_key = self.providers.openai_api_key.take().or(openai);
         self.providers.google_api_key = self.providers.google_api_key.take().or(google);
         self.openrouter_api_key = self.openrouter_api_key.take().or(openrouter);
+        self.providers.bedrock_api_key = self.providers.bedrock_api_key.take().or(bedrock);
     }
 
     /// This config with every provider API key removed.
@@ -863,6 +882,7 @@ impl Config {
         copy.providers.openai_api_key = None;
         copy.providers.google_api_key = None;
         copy.openrouter_api_key = None;
+        copy.providers.bedrock_api_key = None;
         copy
     }
 
@@ -873,6 +893,7 @@ impl Config {
             ("openai", self.providers.openai_api_key.as_deref()),
             ("google", self.providers.google_api_key.as_deref()),
             ("openrouter", self.openrouter_api_key.as_deref()),
+            ("bedrock", self.providers.bedrock_api_key.as_deref()),
         ]
         .into_iter()
         .filter_map(|(name, key)| {
@@ -1100,6 +1121,12 @@ const PROVIDER_KEY_ENV_VARS: &[&str] = &[
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
     "MESHY_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    // Not keys, but read the same way: a developer with a region exported
+    // would otherwise see it in a config the test expects blank.
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "BEDROCK_BASE_URL",
 ];
 
 /// Create a fresh, empty temp directory to stand in for the config directory.
@@ -2997,6 +3024,149 @@ meshy_api_key = "msy-existing"
             }
         );
         assert!(empty.contains("<unset>"), "{empty}");
+    }
+
+    /// The Bedrock key rides every keychain path the other keys do, and the
+    /// region, which is not a secret, is printed.
+    #[test]
+    fn the_bedrock_key_travels_through_the_credential_store_like_the_others() {
+        use leviath_core::{CredentialStore, MemoryStore};
+
+        let store = MemoryStore::new();
+        store
+            .set(&leviath_core::provider_account("bedrock"), "ABSK-keychain")
+            .unwrap();
+        let mut config = Config::default();
+        config.apply_credential_store(&store);
+        assert_eq!(
+            config.providers.bedrock_api_key.as_deref(),
+            Some("ABSK-keychain")
+        );
+
+        config.providers.bedrock_region = Some("eu-west-1".to_string());
+        let secrets = config.provider_secrets();
+        assert_eq!(secrets.len(), 1);
+        assert!(secrets.contains(&("provider/bedrock".to_string(), "ABSK-keychain".to_string())));
+        let stripped = config.without_secrets();
+        assert!(stripped.providers.bedrock_api_key.is_none());
+        assert_eq!(
+            stripped.providers.bedrock_region.as_deref(),
+            Some("eu-west-1")
+        );
+        assert!(
+            config.providers.bedrock_api_key.is_some(),
+            "the original keeps its key"
+        );
+
+        let rendered = format!("{:?}", config.providers);
+        assert!(!rendered.contains("ABSK-keychain"), "{rendered}");
+        assert!(
+            rendered.contains("bedrock_api_key: \"<set>\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("bedrock_region: Some(\"eu-west-1\")"),
+            "{rendered}"
+        );
+    }
+
+    /// The Bedrock settings follow AWS's own variables when the file is
+    /// silent, the file wins when it is not, and a blank region is no region.
+    #[test]
+    fn bedrock_settings_come_from_the_environment_when_the_file_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let silent = dir.path().join("silent.toml");
+        std::fs::write(
+            &silent,
+            "default_provider = \"anthropic\"\nagent_paths = []\n",
+        )
+        .unwrap();
+        let spoken = dir.path().join("spoken.toml");
+        std::fs::write(
+            &spoken,
+            r#"
+default_provider = "anthropic"
+agent_paths = []
+
+[providers]
+bedrock_api_key = "ABSK-file"
+bedrock_region = "us-west-2"
+bedrock_base_url = "https://gw/from-file"
+"#,
+        )
+        .unwrap();
+
+        temp_env::with_vars(
+            [
+                ("AWS_BEARER_TOKEN_BEDROCK", Some("ABSK-env")),
+                ("AWS_REGION", Some(" eu-central-1 ")),
+                ("AWS_DEFAULT_REGION", Some("ap-south-1")),
+                ("BEDROCK_BASE_URL", Some("https://gw/from-env")),
+            ],
+            || {
+                let config = with_tracing(|| Config::load_from_path(&silent)).unwrap();
+                assert_eq!(
+                    config.providers.bedrock_api_key.as_deref(),
+                    Some("ABSK-env")
+                );
+                assert_eq!(
+                    config.providers.bedrock_region.as_deref(),
+                    Some("eu-central-1")
+                );
+                assert_eq!(
+                    config.providers.bedrock_base_url.as_deref(),
+                    Some("https://gw/from-env")
+                );
+
+                let config = with_tracing(|| Config::load_from_path(&spoken)).unwrap();
+                assert_eq!(
+                    config.providers.bedrock_api_key.as_deref(),
+                    Some("ABSK-file")
+                );
+                assert_eq!(
+                    config.providers.bedrock_region.as_deref(),
+                    Some("us-west-2")
+                );
+                assert_eq!(
+                    config.providers.bedrock_base_url.as_deref(),
+                    Some("https://gw/from-file")
+                );
+            },
+        );
+
+        // `AWS_REGION` set but blank falls through to `AWS_DEFAULT_REGION`;
+        // both blank is no region at all.
+        temp_env::with_vars(
+            [
+                ("AWS_BEARER_TOKEN_BEDROCK", None),
+                ("AWS_REGION", Some("")),
+                ("AWS_DEFAULT_REGION", Some("ap-south-1")),
+                ("BEDROCK_BASE_URL", None),
+            ],
+            || {
+                let config = with_tracing(|| Config::load_from_path(&silent)).unwrap();
+                assert!(config.providers.bedrock_api_key.is_none());
+                // An exported blank `AWS_REGION` is read first and found
+                // empty, so the default-region variable is not consulted;
+                // that matches the AWS tooling, which also stops at the
+                // first variable set.
+                assert_eq!(config.providers.bedrock_region, None);
+                assert!(config.providers.bedrock_base_url.is_none());
+            },
+        );
+        temp_env::with_vars(
+            [
+                ("AWS_REGION", None),
+                ("AWS_DEFAULT_REGION", Some("ap-south-1")),
+            ],
+            || {
+                let config = with_tracing(|| Config::load_from_path(&silent)).unwrap();
+                assert_eq!(
+                    config.providers.bedrock_region.as_deref(),
+                    Some("ap-south-1")
+                );
+            },
+        );
     }
 
     /// A gateway's key and its `extra` table are both credential-carrying:

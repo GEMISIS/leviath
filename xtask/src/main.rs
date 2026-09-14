@@ -14,7 +14,10 @@
 //!   `prices --check`            Print the diff and fail if the price table would change.
 //!   `modalities`                Refresh which mime types each model takes, from OpenRouter.
 //!   `modalities --check`        Print the diff and fail if the modality table would change.
+//!   `bedrock-windows`           Refresh each Bedrock model's token limits from AWS's model cards.
+//!   `bedrock-windows --check`   Print the diff and fail if the Bedrock table would change.
 
+mod bedrock_windows;
 mod coverage;
 mod docs;
 mod modalities;
@@ -39,10 +42,15 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         version::run,
         docs::run,
         structure::run,
-        prices::run,
-        modalities::run,
+        (prices::run, modalities::run, bedrock_windows::run),
     )
 }
+
+/// The handlers for the three commands that refresh a compiled-in table from
+/// the network: prices, modalities and the Bedrock limits, in that order.
+/// One argument rather than three, so the dispatcher's signature stays
+/// readable as commands are added.
+pub type Refreshers<P, M, W> = (P, M, W);
 
 /// Route the CLI arguments to the provided handler closures.
 ///
@@ -54,9 +62,13 @@ pub fn dispatch_with(
     run_ver: impl FnOnce(version::VersionMode) -> Result<()>,
     run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
     run_struct: impl FnOnce(structure::StructureMode) -> Result<()>,
-    run_prices: impl FnOnce(prices::PricesMode) -> Result<()>,
-    run_mod: impl FnOnce(modalities::ModalitiesMode) -> Result<()>,
+    run_tables: Refreshers<
+        impl FnOnce(prices::PricesMode) -> Result<()>,
+        impl FnOnce(modalities::ModalitiesMode) -> Result<()>,
+        impl FnOnce(bedrock_windows::WindowsMode) -> Result<()>,
+    >,
 ) -> Result<()> {
+    let (run_prices, run_mod, run_windows) = run_tables;
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
         "coverage" => {
@@ -83,6 +95,10 @@ pub fn dispatch_with(
             let mode = modalities::ModalitiesMode::parse(&args[1..])?;
             run_mod(mode)
         }
+        "bedrock-windows" => {
+            let mode = bedrock_windows::WindowsMode::parse(&args[1..])?;
+            run_windows(mode)
+        }
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -99,6 +115,12 @@ pub fn dispatch_with(
             println!("  modalities                Refresh model input/output mime types (network)");
             println!(
                 "  modalities --check        Fail if the modality table would change (network)"
+            );
+            println!(
+                "  bedrock-windows           Refresh Bedrock token limits from AWS's cards (network)"
+            );
+            println!(
+                "  bedrock-windows --check   Fail if the Bedrock table would change (network)"
             );
             Ok(())
         }
@@ -148,6 +170,11 @@ mod tests {
         Ok(())
     }
 
+    /// A `run_windows` stub matching `impl FnOnce(WindowsMode) -> Result<()>`.
+    fn windows_ok(_mode: bedrock_windows::WindowsMode) -> Result<()> {
+        Ok(())
+    }
+
     /// Covers the stub body so tests that pass it without calling it still get
     /// this single coverage hit.
     #[test]
@@ -158,6 +185,7 @@ mod tests {
         assert!(struct_ok(structure::StructureMode::Check).is_ok());
         assert!(prices_ok(prices::PricesMode::Check).is_ok());
         assert!(mod_ok(modalities::ModalitiesMode::Check).is_ok());
+        assert!(windows_ok(bedrock_windows::WindowsMode::Check).is_ok());
     }
 
     /// Build an owned-args slice from string literals (dispatch takes `&[String]`).
@@ -219,8 +247,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
@@ -238,8 +265,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
@@ -253,8 +279,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result.is_err(),
@@ -270,8 +295,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(result.is_err());
         assert!(
@@ -296,8 +320,7 @@ mod tests {
                 Ok(())
             },
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
         assert_eq!(got, Some(docs::DocsMode::Check));
@@ -311,8 +334,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result.is_err(),
@@ -331,11 +353,14 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            |mode| {
-                got = Some(mode);
-                Ok(())
-            },
-            mod_ok,
+            (
+                |mode| {
+                    got = Some(mode);
+                    Ok(())
+                },
+                mod_ok,
+                windows_ok,
+            ),
         )
         .unwrap();
         assert_eq!(got, Some(prices::PricesMode::Check));
@@ -350,14 +375,51 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            |mode| {
-                got = Some(mode);
-                Ok(())
-            },
+            (
+                prices_ok,
+                |mode| {
+                    got = Some(mode);
+                    Ok(())
+                },
+                windows_ok,
+            ),
         )
         .unwrap();
         assert_eq!(got, Some(modalities::ModalitiesMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_bedrock_windows_parses_check() {
+        let mut got = None;
+        dispatch_with(
+            &args(&["bedrock-windows", "--check"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            (prices_ok, mod_ok, |mode| {
+                got = Some(mode);
+                Ok(())
+            }),
+        )
+        .unwrap();
+        assert_eq!(got, Some(bedrock_windows::WindowsMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_bedrock_windows_bad_arg_returns_err() {
+        let result = dispatch_with(
+            &args(&["bedrock-windows", "--write"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            (prices_ok, mod_ok, windows_ok),
+        );
+        assert!(
+            result.is_err(),
+            "an unknown bedrock-windows flag must error"
+        );
     }
 
     #[test]
@@ -368,8 +430,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(result.is_err(), "an unknown modalities flag must error");
     }
@@ -382,8 +443,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result.is_err(),
@@ -405,8 +465,7 @@ mod tests {
             },
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Set("1.2.3".to_owned())));
@@ -424,8 +483,7 @@ mod tests {
             },
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Check));
@@ -439,8 +497,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result.is_err(),
@@ -456,8 +513,7 @@ mod tests {
             |_mode| anyhow::bail!("simulated version failure"),
             docs_ok,
             struct_ok,
-            prices_ok,
-            mod_ok,
+            (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result

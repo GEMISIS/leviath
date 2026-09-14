@@ -65,6 +65,11 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             config.providers.meshy_api_key.as_deref(),
             config.providers.meshy_base_url.as_deref(),
         ),
+        (
+            leviath_providers::bedrock::PROVIDER_NAME,
+            config.providers.bedrock_api_key.as_deref(),
+            config.providers.bedrock_base_url.as_deref(),
+        ),
     ];
     for (name, key, base_url) in keyed {
         // A blank key is not a key: `lev setup` writes empty strings for
@@ -79,6 +84,19 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
                 && let Some(ttl) = config.providers.anthropic_cache_ttl
             {
                 options.insert("cache_ttl".to_string(), cache_ttl_key(ttl).to_string());
+            }
+            // Only when set: the provider applies its own default otherwise,
+            // and not writing it keeps a config that says nothing comparing
+            // equal to itself on reload.
+            if name == leviath_providers::bedrock::PROVIDER_NAME
+                && let Some(region) = config
+                    .providers
+                    .bedrock_region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+            {
+                options.insert("region".to_string(), region.to_string());
             }
             creds.push(ProviderCreds {
                 name: name.to_string(),
@@ -959,6 +977,57 @@ mod tests {
         config.providers.anthropic_api_key = Some("k".to_string());
         let creds = provider_creds_from_config(&config);
         assert!(!creds[0].options.contains_key("cache_ttl"));
+    }
+
+    /// The region rides in the options map only when the config names one:
+    /// the provider applies its own default otherwise, and a config that says
+    /// nothing must compare equal to itself on reload.
+    #[test]
+    fn provider_creds_carry_the_bedrock_region_only_when_set() {
+        let mut config = Config::default();
+        config.providers.bedrock_api_key = Some("ABSK".to_string());
+        config.providers.bedrock_base_url = Some(" https://gw/bedrock ".to_string());
+        config.providers.bedrock_region = Some(" eu-west-1 ".to_string());
+        config.rate_limits.insert(
+            "bedrock".to_string(),
+            leviath_providers::RateLimitConfig {
+                requests_per_minute: 3,
+                tokens_per_minute: 30,
+            },
+        );
+        let creds = provider_creds_from_config(&config);
+        let bedrock = creds
+            .iter()
+            .find(|c| c.name == "bedrock")
+            .expect("bedrock is registered");
+        assert_eq!(bedrock.api_key.as_deref(), Some("ABSK"));
+        assert_eq!(bedrock.base_url.as_deref(), Some("https://gw/bedrock"));
+        assert_eq!(
+            bedrock.options.get("region").map(String::as_str),
+            Some("eu-west-1")
+        );
+        assert_eq!(
+            bedrock.rate_limit.as_ref().map(|r| r.requests_per_minute),
+            Some(3)
+        );
+
+        for region in [None, Some("   ".to_string())] {
+            config.providers.bedrock_region = region;
+            let creds = provider_creds_from_config(&config);
+            let bedrock = creds.iter().find(|c| c.name == "bedrock").unwrap();
+            assert!(!bedrock.options.contains_key("region"));
+        }
+
+        // A blank key registers nothing, as for every keyed provider. A
+        // second provider keeps the list non-empty, so the check below looks
+        // at something.
+        config.providers.openai_api_key = Some("k".to_string());
+        config.providers.bedrock_api_key = Some(String::new());
+        assert!(
+            !provider_creds_from_config(&config)
+                .iter()
+                .any(|c| c.name == "bedrock")
+        );
     }
 
     #[test]

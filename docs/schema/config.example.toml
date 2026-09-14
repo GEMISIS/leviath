@@ -23,6 +23,11 @@ openai_api_key = "sk-example"
 google_api_key = "AIza-example"
 # Meshy: generative 3D (image or mesh in, a textured model out).
 meshy_api_key = "msy-example"
+# AWS Bedrock: a Bedrock API key (not an AWS access key), and the region its
+# endpoints are called in. Unset, the region follows AWS_REGION, then
+# AWS_DEFAULT_REGION, then us-east-1.
+bedrock_api_key = "ABSK-example"
+bedrock_region = "us-east-1"
 # Reach a provider through an enterprise gateway instead of the vendor's host.
 # Unset means the vendor's own endpoint. One per provider, because a gateway
 # usually fronts one family.
@@ -31,6 +36,7 @@ openai_base_url = "https://gateway.example.internal/v1"
 google_base_url = "https://gateway.example.internal/v1"
 openrouter_base_url = "https://gateway.example.internal/v1"
 meshy_base_url = "https://gateway.example.internal/v1"
+bedrock_base_url = "https://gateway.example.internal/v1"
 claude_code_enabled = false
 # How long a cached prompt prefix survives: "5m" (free, default) or "1h".
 anthropic_cache_ttl = "5m"

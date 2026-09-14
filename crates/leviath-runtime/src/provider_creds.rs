@@ -19,8 +19,8 @@ use std::sync::Arc;
 #[derive(Clone, PartialEq)]
 pub struct ProviderCreds {
     /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
-    /// `ollama` | `claude-code` | `meshy`. Selects which provider is
-    /// instantiated.
+    /// `ollama` | `claude-code` | `meshy` | `bedrock`. Selects which provider
+    /// is instantiated.
     pub name: String,
     /// API key, when the provider needs one (`None` for `ollama`/`claude-code`).
     pub api_key: Option<String>,
@@ -38,7 +38,8 @@ pub struct ProviderCreds {
     /// Provider-specific settings that don't fit the api-key / base-URL shape.
     ///
     /// `claude-code` reads `binary` (path to the `claude` executable) and
-    /// `effort` (reasoning level). An OpenAI-compatible endpoint is marked by
+    /// `effort` (reasoning level); `bedrock` reads `region`, the AWS region
+    /// its hosts are derived from. An OpenAI-compatible endpoint is marked by
     /// `kind` and carries its headers and model list here too; see
     /// [`Self::openai_compatible`] and [`EndpointSpec`], which are the only
     /// two places that spell those keys. Kept as a map rather than named
@@ -487,6 +488,25 @@ pub fn build_provider_registry_probing(
                     );
                 }
             }
+            "bedrock" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "bedrock".to_string(),
+                        Arc::new(
+                            leviath_providers::BedrockProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            .with_base_url(c.base_url.clone())
+                            // Absent means the provider's default region; the
+                            // config layer writes it only when one was set.
+                            .with_region(c.options.get("region").cloned()),
+                        ),
+                    );
+                }
+            }
             "ollama" => {
                 let url = c
                     .base_url
@@ -642,6 +662,35 @@ mod tests {
         assert!(
             registry.get("meshy").is_none(),
             "a keyless meshy is skipped"
+        );
+    }
+
+    #[test]
+    fn a_bedrock_key_registers_the_provider_with_or_without_a_region() {
+        let mut cred = ProviderCreds::simple("bedrock");
+        cred.api_key = Some("ABSK-test".to_string());
+        cred.options
+            .insert("region".to_string(), "eu-west-1".to_string());
+        let registry = build_provider_registry(&[cred]).expect("an HTTPS client builds in tests");
+        assert!(
+            registry.get("bedrock").is_some(),
+            "a keyed bedrock is registered"
+        );
+
+        // No region carried: the provider's own default applies.
+        let mut cred = ProviderCreds::simple("bedrock");
+        cred.api_key = Some("ABSK-test".to_string());
+        cred.base_url = Some("https://gateway.example/bedrock".to_string());
+        let registry = build_provider_registry(&[cred]).expect("builds");
+        assert!(registry.get("bedrock").is_some());
+
+        // A bedrock cred with no key registers nothing, like every keyed
+        // provider: an empty account authenticates as nobody.
+        let registry =
+            build_provider_registry(&[ProviderCreds::simple("bedrock")]).expect("builds");
+        assert!(
+            registry.get("bedrock").is_none(),
+            "a keyless bedrock is skipped"
         );
     }
 
@@ -962,7 +1011,7 @@ mod tests {
         // api_key is present; a `None` key exercises the skip (else) path of
         // each `if let Some(ref key)` and leaves the provider unregistered.
         let caps = std::collections::HashMap::new();
-        let creds: Vec<ProviderCreds> = ["anthropic", "openai", "google", "openrouter"]
+        let creds: Vec<ProviderCreds> = ["anthropic", "openai", "google", "openrouter", "bedrock"]
             .into_iter()
             .map(|name| ProviderCreds {
                 name: name.to_string(),
@@ -979,6 +1028,7 @@ mod tests {
         assert!(!registry.has("openai"));
         assert!(!registry.has("google"));
         assert!(!registry.has("openrouter"));
+        assert!(!registry.has("bedrock"));
     }
 
     #[test]
@@ -1048,6 +1098,7 @@ mod tests {
             "google",
             "openrouter",
             "meshy",
+            "bedrock",
             "ollama",
         ]
         .map(|name| {

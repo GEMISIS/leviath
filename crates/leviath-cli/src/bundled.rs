@@ -838,7 +838,10 @@ mod tests {
 
     /// Every provider `lev setup` can configure, built so a test can ask them
     /// what they serve. Claude Code is a transport rather than a provider a
-    /// stage names, so it is not in this list.
+    /// stage names, so it is not in this list; nor is Bedrock, whose ids are
+    /// region-prefixed vendor ids (`us.anthropic.claude-sonnet-5`) that a
+    /// bundled stage naming `claude-sonnet-5` does not resolve on by
+    /// spelling. The provider crate proves its own routing.
     ///
     /// The keys are never used: `serves_model` reads a table compiled into the
     /// build, which is exactly the offline answer wanted here.

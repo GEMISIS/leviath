@@ -147,8 +147,8 @@ Two flags matter more than they look:
 - `--default-model <provider>/<model>` sets the model every stage falls back to. Without a default
   model, a blueprint's own list decides, which may not pick your provider.
 
-The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key`, and
-`--ollama-url`. See [`lev setup`](/docs/cli#lev-setup) for the full set.
+The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key`,
+`--bedrock-key` (with `--bedrock-region`), and `--ollama-url`. See [`lev setup`](/docs/cli#lev-setup) for the full set.
 
 </details>
 

@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Configure Anthropic, OpenAI, OpenAI Codex, Google, OpenRouter, Meshy, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
+description: Configure Anthropic, OpenAI, Codex, Google, OpenRouter, Bedrock, Meshy, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
 group: Get started
 group_order: 1
 order: 3
@@ -22,6 +22,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Meshy (3D models) | `MESHY_API_KEY` | [meshy.ai](https://www.meshy.ai/api) |
+| AWS Bedrock | `AWS_BEARER_TOKEN_BEDROCK` (region from `AWS_REGION`) | [console.aws.amazon.com/bedrock](https://console.aws.amazon.com/bedrock/home#/api-keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
 | Claude Code | none (subscription; terms caveat below; not in the wizard) | [see below](#claude-code-transport) |
 
@@ -52,6 +53,7 @@ provider verbatim, so it has to be spelled the way the provider spells it:
 | Google | the bare model name | `gemini-2.5-pro` |
 | OpenRouter | `vendor/model` | `deepseek/deepseek-v4-flash` |
 | Ollama | `model:tag` | `qwen3.5:9b` |
+| AWS Bedrock | the inference-profile id, or the bare model id | `us.anthropic.claude-sonnet-5` |
 
 OpenRouter is the one that trips people up: its identifiers carry a vendor prefix, and the prefix is
 part of the name. `deepseek-v4-flash` is not a valid OpenRouter model; `deepseek/deepseek-v4-flash`
@@ -453,7 +455,8 @@ ordinary use.
 
 ## Rate limits
 
-Optional per-provider client-side rate limits, enforced before each call:
+Optional per-provider client-side rate limits, enforced before each call. The table name is the
+provider's registry name, `bedrock` included:
 
 ```toml
 [rate_limits.anthropic]
@@ -529,6 +532,99 @@ default `[mime] max_part_bytes` ceiling (32 MiB), which drops it with a note in 
 knobs keep it in bounds - `target_polycount` with `should_remesh = true` in the stage
 parameters, which is also what makes the mesh game-ready, and a higher `[mime] max_part_bytes` in
 your config for when you do want the full-resolution model.
+
+## AWS Bedrock
+
+Bedrock serves models from a dozen vendors (Anthropic's Claude, Amazon Nova, Meta's Llama,
+Mistral, DeepSeek, OpenAI's open-weight models and more) billed to your AWS account. Leviath talks
+to it with a Bedrock API key, not with AWS access keys or request signing. Make one in the Bedrock
+console under **API keys** (a long-term key is the kind to use here; AWS's own
+[API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html) page walks through
+it), then export it or write it to the config:
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=ABSK...
+lev setup --non-interactive --bedrock-key "$AWS_BEARER_TOKEN_BEDROCK" --bedrock-region us-east-1
+```
+
+```toml
+[providers]
+bedrock_api_key = "ABSK..."     # env fallback: AWS_BEARER_TOKEN_BEDROCK
+bedrock_region  = "us-east-1"   # env fallback: AWS_REGION, then AWS_DEFAULT_REGION
+```
+
+Every Bedrock host is regional, so the region is part of the address. Unset, it follows
+`AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`; the wizard offers a picker on its
+Defaults screen once Bedrock is chosen. A model has to be enabled for your account in that region,
+or the call comes back as an access error.
+
+Model ids are Bedrock's own. Most current models are reached through an inference profile whose
+prefix says where the request may be routed, so name that: `us.anthropic.claude-sonnet-5`,
+`eu.amazon.nova-pro-v1:0`, `global.anthropic.claude-opus-5`. A model that takes on-demand calls by
+its bare id (`openai.gpt-oss-120b-1:0`) is named that way. Put the provider in front in a
+blueprint, and leave the bare vendor names to the vendors: `claude-sonnet-5` on its own still routes
+to your Anthropic key, because the same model on Bedrock bills a different account.
+
+```toml
+model = { models = ["bedrock/us.anthropic.claude-sonnet-5"] }
+```
+
+`lev models list --provider bedrock` lists what your key can reach, with prices beside the models
+AWS publishes a rate for. Requests go over the Converse and ConverseStream APIs, so streaming,
+tools, system prompts, images and PDFs work as they do on the other providers. Leviath does not
+use Bedrock's OpenAI-compatible route: it does not serve Claude, Nova or Llama.
+
+**Thinking.** A stage turns Claude's extended thinking on with its own field in the stage's
+model parameters, and Nova 2's with Amazon's; each reaches only the vendor that takes it. The
+signed reasoning a Claude returns is stored with the turn and replayed ahead of its tool calls on
+the next request, which is what Claude requires when thinking and tools are used together. The
+Claude 4 models take a budget; the Claude 5 models take `adaptive` and decide how much to think
+themselves, and Bedrock refuses a budget on them. A stage that wants a plain answer from either
+sets `thinking = { type = "disabled" }`.
+
+```toml
+[stages.plan.model]
+models = ["bedrock/us.anthropic.claude-sonnet-5"]
+parameters = { thinking = { type = "adaptive" } }
+
+[stages.review.model]
+models = ["bedrock/us.anthropic.claude-sonnet-4-6"]
+parameters = { thinking = { type = "enabled", budget_tokens = 4096 } }
+```
+
+**Exact token counts.** Bedrock's CountTokens is called before a request large enough to be worth
+measuring, the way Anthropic's and Gemini's counters are. The Claude models Bedrock serves only
+through a cross-region profile are not covered by it, and for those Anthropic's own `count_tokens`
+route on the `bedrock-mantle` host answers instead. That host exists in fourteen regions and not
+every model is on every one of them, so a count the region's host refuses goes to `us-east-1`,
+which carries them all; a configured region outside the fourteen counts there directly. The count
+is free and carries only the prompt text. A model neither route counts falls back to the local
+estimate.
+
+**Limits and prices, from AWS.** No Bedrock API states a model's context window or output cap,
+so Leviath reads them from the model cards in the AWS documentation and ships the result in the
+binary, refreshed by `cargo xtask bedrock-windows`. The Claude 5 models carry their 1M window
+there; a Claude 4.x model is 200K on Bedrock unless a stage opts into the beta with
+`anthropic_beta = ["context-1m-2025-08-07"]` in its parameters, in which case also raise the
+window in `[model_capabilities]`. Prices come from AWS's public price list at start-up for every
+vendor it covers; the newer Claude models are billed through AWS Marketplace and are not in that
+list, so they are priced from Anthropic's published rates, which Bedrock charges too. Both can be
+corrected per model:
+
+```toml
+[model_capabilities."us.amazon.nova-pro-v1:0"]
+max_output_tokens = 5000
+```
+
+An id with dots in it has to be quoted as a TOML key, as above.
+
+`bedrock_base_url` (env `BEDROCK_BASE_URL`) points inference at a gateway instead of
+`https://bedrock-runtime.<region>.amazonaws.com`. With it set, the live listing, the price file and
+the count routes are not read, since a gateway that fronts inference rarely fronts the rest, and
+`lev models list` shows this build's table for Bedrock instead. One more thing to know: the whole
+`AWS_*` namespace is withheld from shell and Rhai tools by default, so an agent's script cannot
+read the key; the provider reads it from the daemon's own environment, and
+`[security] allow_env_vars` is the escape hatch for a tool that needs one of them.
 
 ## OpenAI Codex (ChatGPT subscription)
 

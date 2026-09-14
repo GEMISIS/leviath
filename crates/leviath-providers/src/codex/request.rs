@@ -208,9 +208,13 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
     }
 
     // The reasoning item comes first: it belongs to the turn it precedes.
+    // Only a sealed token of this route's own: the Bedrock provider stores its
+    // reasoning in the same field as a JSON object, and history is replayed to
+    // whichever provider runs the next stage.
     if replay_reasoning
         && message.role == "assistant"
         && let Some(blob) = &message.reasoning
+        && !blob.starts_with('{')
     {
         input.push(json!({ "type": "reasoning", "encrypted_content": blob, "summary": [] }));
     }
