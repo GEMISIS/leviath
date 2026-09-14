@@ -13,6 +13,7 @@ pub mod mime_check;
 pub mod output_validator;
 pub mod parts;
 pub mod region_hook;
+mod script_check;
 pub mod stage_hook;
 pub mod tool;
 pub mod types;
