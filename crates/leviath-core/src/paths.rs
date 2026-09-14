@@ -125,6 +125,18 @@ pub fn resolves_within(path: &Path, root: &Path) -> bool {
 
 /// Canonicalize a path for allowlist matching, failing closed.
 ///
+/// `~` and `~/rest` against `home`; anything else as written. `None` for a
+/// `~` with no home to expand to, which names nothing checkable.
+pub fn expand_home(text: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if text == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    match text.strip_prefix("~/") {
+        Some(rest) => home.map(|h| h.join(rest)),
+        None => Some(PathBuf::from(text)),
+    }
+}
+
 /// The same machinery [`resolves_within`] uses, exposed for the `[read_paths]`
 /// resolver in `leviath-tools`: the deepest existing ancestor is
 /// canonicalized (which is where any symlink lives) and the unresolved tail

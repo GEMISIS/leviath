@@ -358,14 +358,6 @@ fn mcp_from_template(
     }
 }
 
-/// Whether `name` is set to a non-empty environment variable, via `probe`.
-///
-/// Only presence is examined; the value is never returned or logged. Returning a
-/// plain `bool` keeps the value from travelling any further.
-fn env_var_is_set(probe: &dyn crate::dependencies::Probe, name: &str) -> bool {
-    probe.env(name).filter(|v| !v.trim().is_empty()).is_some()
-}
-
 /// Tell the user which of the server's required environment variables are set,
 /// and how to set the rest.
 ///
@@ -373,7 +365,7 @@ fn env_var_is_set(probe: &dyn crate::dependencies::Probe, name: &str) -> bool {
 /// logged, and the value only probed for presence, so no value is written out.
 fn report_env_var_status(env_var_names: &[String], probe: &dyn crate::dependencies::Probe) {
     for name in env_var_names {
-        if env_var_is_set(probe, name) {
+        if crate::dependencies::env_is_set(probe, name) {
             println!("  {name} is already set.");
         } else {
             println!(

@@ -688,44 +688,32 @@ pub(crate) async fn dispatch_tools(
             continue;
         }
 
-        // A redirect leaving the workdir is a write `write_file` would refuse
-        // outright, so the shell does not get to be the spelling that works.
-        // Checked before policy resolution because no policy makes it allowed:
-        // this is containment, not permission.
-        if let Some(refusal) =
+        // Containment, checked before policy resolution because no policy
+        // makes any of it allowed: a redirect leaving the workdir is a write
+        // `write_file` would refuse, so the shell does not get to be the
+        // spelling that works; the files that decide what agents may do are
+        // not a run's to change, whatever its permissions say; and a full disk
+        // is not a permission question, so no `--yolo` gets to fill one.
+        let fence =
             crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
-        {
-            let refusal: EntryContent = refusal.into();
-            progress(&tc.id, &refusal);
-            slots.push((tc.id.clone(), Some(refusal)));
-            continue;
-        }
-
-        // The files that decide what agents may do are not a run's to change,
-        // whatever its permissions say - same footing as the fence above.
-        if let Some(refusal) = crate::tools::protected_path_refusal(
-            &tc.name,
-            &tc.arguments,
-            state.builtins.workdir(),
-            crate::yolo::home().as_deref(),
-            &state.protected.get(),
-        ) {
-            let refusal: EntryContent = refusal.into();
-            progress(&tc.id, &refusal);
-            slots.push((tc.id.clone(), Some(refusal)));
-            continue;
-        }
-
-        // How much this call would add to the run's disk footprint, and whether
-        // there is room for it. Checked before the policy layers
-        // for the same reason containment is: a full disk is not a permission
-        // question, and no `--yolo` should be able to fill one.
-        if let Some(refusal) = crate::tools::write_budget_refusal(
-            &tc.name,
-            &tc.arguments,
-            state.builtins.workdir(),
-            &state.writes,
-        ) {
+                .or_else(|| {
+                    crate::tools::protected_path_refusal(
+                        &tc.name,
+                        &tc.arguments,
+                        state.builtins.workdir(),
+                        crate::yolo::home().as_deref(),
+                        &state.protected.get(),
+                    )
+                })
+                .or_else(|| {
+                    crate::tools::write_budget_refusal(
+                        &tc.name,
+                        &tc.arguments,
+                        state.builtins.workdir(),
+                        &state.writes,
+                    )
+                });
+        if let Some(refusal) = fence {
             let refusal: EntryContent = refusal.into();
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));

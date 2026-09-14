@@ -20,20 +20,23 @@ pub struct PackArgs {
 
 /// Run `lev pack`: build a distributable bundle from an agent directory.
 pub(crate) async fn execute(args: PackArgs) -> anyhow::Result<()> {
-    execute_with_bundle(args, &|dir| AgentBundler::new().bundle(dir)).await
+    execute_with_bundle(args, &|dir, out| {
+        AgentBundler::new().bundle_to_file(dir, out)
+    })
+    .await
 }
 
-/// [`execute`] with an injectable bundling operation.
+/// [`execute`] with an injectable bundling operation: given the project
+/// directory and the output path, write the bundle.
 ///
-/// The `bundle` closure is a trait object so its failure arm (`bundler.bundle`
-/// erroring) can be exercised on every platform. Reaching that arm through the
-/// real bundler requires the directory walk itself to fail, which is only
-/// possible OS-agnostically via injection inside `leviath-package`; here the
-/// simpler seam is to inject the whole bundle step. Production always passes
-/// the real `AgentBundler`.
+/// The `bundle` closure is a trait object so its failure arm can be exercised
+/// on every platform. Reaching that arm through the real bundler requires the
+/// directory walk itself to fail, which is only possible OS-agnostically via
+/// injection inside `leviath-package`; here the simpler seam is to inject the
+/// whole bundle step. Production always passes the real `AgentBundler`.
 async fn execute_with_bundle(
     args: PackArgs,
-    bundle: &dyn Fn(&Path) -> anyhow::Result<Vec<u8>>,
+    bundle: &dyn Fn(&Path, &Path) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     let project_path = Path::new(&path);
@@ -55,16 +58,10 @@ async fn execute_with_bundle(
     // Bundle the project
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
 
-    let data = bundle(project_dir)?;
-    let bundle_size = data.len();
-
-    std::fs::write(&output_path, &data).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to write bundle to '{}': {}",
-            output_path.display(),
-            e
-        )
-    })?;
+    bundle(project_dir, &output_path)?;
+    let bundle_size = std::fs::metadata(&output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     // Print summary
     println!("Bundle written to: {}", output_path.display());
@@ -131,7 +128,7 @@ fn find_manifest_with_cwd(project_path: &Path, cwd: &Path) -> anyhow::Result<Pat
     )
 }
 
-fn format_size(bytes: usize) -> String {
+fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
     } else if bytes < 1024 * 1024 {
@@ -554,8 +551,10 @@ mod tests {
             path: Some(project.path().to_str().unwrap().to_string()),
             output: Some(output_path.to_str().unwrap().to_string()),
         };
-        let result =
-            execute_with_bundle(args, &|_| Err(anyhow::anyhow!("simulated bundle failure"))).await;
+        let result = execute_with_bundle(args, &|_, _| {
+            Err(anyhow::anyhow!("simulated bundle failure"))
+        })
+        .await;
         let e = result.unwrap_err();
         assert!(e.to_string().contains("simulated bundle failure"));
     }

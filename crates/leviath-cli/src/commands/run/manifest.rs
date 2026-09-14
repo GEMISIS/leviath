@@ -6,6 +6,31 @@
 
 use std::path::{Path, PathBuf};
 
+/// The blueprint at `path`, or `None` when the file cannot be read or parsed.
+///
+/// For the warnings a spawn prints beside the daemon's answer: a manifest
+/// that will not read or parse is the daemon's to report as the spawn error,
+/// and a warning must never be why a spawn fails.
+pub(crate) fn blueprint_at(path: &Path) -> Option<leviath_core::Blueprint> {
+    let content = std::fs::read_to_string(path).ok()?;
+    leviath_core::manifest::parse_manifest(&content).ok()
+}
+
+/// The "this output format retires your checks" warning for the blueprint at
+/// `path`, given the output `request` a spawn carries. Empty with no request,
+/// nothing retired, or a manifest [`blueprint_at`] cannot read.
+pub(crate) fn retired_check_warnings_at(
+    path: &Path,
+    request: Option<&leviath_core::output::OutputSpec>,
+) -> Vec<String> {
+    match (request, blueprint_at(path)) {
+        (Some(_), Some(blueprint)) => {
+            leviath_core::output::retired_check_warnings(&blueprint, request)
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Resolve an agent argument to the `agent.leviath` file it names.
 ///
 /// Accepts the file itself, a directory containing one, or an installed

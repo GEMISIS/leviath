@@ -336,7 +336,7 @@ fn arg_matches(pattern: &str, word: &str, input: &DecideInput<'_>) -> bool {
 /// when `~` has nowhere to expand to, the path climbs past its root, or
 /// nothing along it can be canonicalised.
 fn resolve_word(word: &str, workdir: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    let expanded = expand_home(word, home)?;
+    let expanded = leviath_core::paths::expand_home(word, home)?;
     let joined = match expanded.is_absolute() {
         true => expanded,
         false => workdir.join(expanded),
@@ -348,22 +348,11 @@ fn resolve_word(word: &str, workdir: &Path, home: Option<&Path>) -> Option<PathB
 /// A pattern with `~` and the workdir applied, so it is in the same space as
 /// a resolved word.
 fn expand_pattern(pattern: &str, workdir: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    let expanded = expand_home(pattern, home)?;
+    let expanded = leviath_core::paths::expand_home(pattern, home)?;
     Some(match expanded.is_absolute() {
         true => expanded,
         false => workdir.join(expanded),
     })
-}
-
-/// `~` and `~/rest` against `home`; anything else unchanged.
-fn expand_home(text: &str, home: Option<&Path>) -> Option<PathBuf> {
-    if text == "~" {
-        return home.map(Path::to_path_buf);
-    }
-    match text.strip_prefix("~/") {
-        Some(rest) => home.map(|h| h.join(rest)),
-        None => Some(PathBuf::from(text)),
-    }
 }
 
 /// Fold `.` and `..` lexically. `None` when a `..` would climb past the root,

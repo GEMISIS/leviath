@@ -518,7 +518,7 @@ fn protected_hit<'a>(
     home: Option<&std::path::Path>,
     protected: &'a [ProtectedPath],
 ) -> Option<&'a ProtectedPath> {
-    let expanded = expand_home_word(word, home)?;
+    let expanded = leviath_core::paths::expand_home(word, home)?;
     let joined = match expanded.is_absolute() {
         true => expanded,
         false => cwd.join(expanded),
@@ -532,18 +532,6 @@ fn protected_hit<'a>(
     protected.iter().find(|p| {
         leviath_core::canonicalize_for_match(&p.path).is_some_and(|root| target.starts_with(root))
     })
-}
-
-/// `~` and `~/rest` against `home`; anything else as written. `None` for a
-/// `~` with no home to expand to, which names nothing checkable.
-fn expand_home_word(word: &str, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
-    if word == "~" {
-        return home.map(std::path::Path::to_path_buf);
-    }
-    match word.strip_prefix("~/") {
-        Some(rest) => home.map(|h| h.join(rest)),
-        None => Some(std::path::PathBuf::from(word)),
-    }
 }
 
 /// [`protected_path_refusal`] for a shell line.
@@ -566,7 +554,7 @@ fn shell_protected_refusal(
             // `cd` moves where the rest of the line's relative words land.
             if let [program, target, ..] = segment.words.as_slice()
                 && program == "cd"
-                && let Some(next) = expand_home_word(target, home)
+                && let Some(next) = leviath_core::paths::expand_home(target, home)
             {
                 cwd = match next.is_absolute() {
                     true => next,

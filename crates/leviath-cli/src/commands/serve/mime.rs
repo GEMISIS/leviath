@@ -111,7 +111,7 @@ pub(super) struct DeleteMimeQuery {
 fn mime_types_path() -> std::path::PathBuf {
     super::mcp::admin_paths()
         .config
-        .with_file_name("mime_types.toml")
+        .with_file_name(crate::config::MIME_TYPES_FILE)
 }
 
 /// `PUT /api/mime` (admin-only): add a row to `mime_types.toml`, or set the

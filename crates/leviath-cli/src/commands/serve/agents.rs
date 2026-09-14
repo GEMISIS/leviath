@@ -59,16 +59,7 @@ fn spawn_warnings(
     manifest_path: &std::path::Path,
     request: Option<&leviath_core::output::OutputSpec>,
 ) -> Vec<String> {
-    if request.is_none() {
-        return Vec::new();
-    }
-    let Ok(content) = std::fs::read_to_string(manifest_path) else {
-        return Vec::new();
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
-        return Vec::new();
-    };
-    leviath_core::output::retired_check_warnings(&blueprint, request)
+    crate::commands::run::manifest::retired_check_warnings_at(manifest_path, request)
 }
 
 pub(super) async fn spawn_agent(
@@ -2372,25 +2363,22 @@ system_prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_logs_is_empty_when_no_stages_exist() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "agent_logs_no_stages",
-            |_d| async move {
-                let run_id = unique_run_id("logs-no-stages");
-                let meta = make_run(&run_id);
-                create_run(&meta).unwrap();
-                // No stages.json at all. A stray run-level file is not a log
-                // source either: only stage files are.
-                std::fs::write(
-                    runstate::run_dir(&run_id).join("output.log"),
-                    "not a log source",
-                )
-                .unwrap();
+        crate::runstate::with_isolated_runs_dir_async("agent_logs_no_stages", |_d| async move {
+            let run_id = unique_run_id("logs-no-stages");
+            let meta = make_run(&run_id);
+            create_run(&meta).unwrap();
+            // No stages.json at all. A stray run-level file is not a log
+            // source either: only stage files are.
+            std::fs::write(
+                runstate::run_dir(&run_id).join("output.log"),
+                "not a log source",
+            )
+            .unwrap();
 
-                assert_eq!(logs_body(&run_id, "").await, "");
+            assert_eq!(logs_body(&run_id, "").await, "");
 
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
         .await;
     }
 

@@ -80,23 +80,10 @@ pub(super) async fn submit_interaction(
             "files go with a text answer: send them with a \"value\"".to_string(),
         ));
     }
-    match (body.value.as_deref(), crate::runstate::read_meta(&id)) {
-        (Some(value), Ok(meta)) => {
-            let workdir = std::path::Path::new(&meta.workdir);
-            parts.extend(super::upload::json_parts(&body.parts, workdir, max_upload)?);
-            let (kept, named) = super::upload::inline_parts(value, None, workdir, max_upload)?;
-            body.value = Some(kept);
-            parts.extend(named);
-        }
-        (Some(_), Err(_)) if !body.parts.is_empty() => {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                format!(
-                    "Agent run '{id}' has no working directory this server can read parts from"
-                ),
-            ));
-        }
-        _ => {}
+    if let Some(value) = body.value.as_deref() {
+        let (kept, named) = workdir_parts(&id, value, &body.parts, max_upload)?;
+        body.value = Some(kept);
+        parts.extend(named);
     }
     let scope = body.scope.as_deref().map(approval_scope_from_wire);
     let response = InteractionResponse {
@@ -119,6 +106,35 @@ pub(super) async fn submit_interaction(
     )
 }
 
+/// The parts a request names inside run `id`'s workdir, by `listed` and by
+/// `@path` in `text`, with the text as the model should read it.
+///
+/// Only a run this server can see has a workdir to resolve against. For one
+/// it cannot, `@path` tokens stay text and the request still goes through
+/// with its uploads, but a `parts` list naming files there is a 404: those
+/// files were asked for by path and cannot be read.
+fn workdir_parts(
+    id: &str,
+    text: &str,
+    listed: &[super::upload::PartRef],
+    max_upload: u64,
+) -> Result<(String, Vec<leviath_core::mime::InboundPart>), ApiError> {
+    match crate::runstate::read_meta(id) {
+        Ok(meta) => {
+            let workdir = std::path::Path::new(&meta.workdir);
+            let mut parts = super::upload::json_parts(listed, workdir, max_upload)?;
+            let (kept, named) = super::upload::inline_parts(text, None, workdir, max_upload)?;
+            parts.extend(named);
+            Ok((kept, parts))
+        }
+        Err(_) if !listed.is_empty() => Err(err(
+            StatusCode::NOT_FOUND,
+            format!("Agent run '{id}' has no working directory this server can read parts from"),
+        )),
+        Err(_) => Ok((text.to_string(), Vec::new())),
+    }
+}
+
 /// `POST /api/agents/{id}/message`: deliver a message to a running agent.
 pub(super) async fn send_message(
     State(state): State<AppState>,
@@ -128,21 +144,9 @@ pub(super) async fn send_message(
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SendMessageReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
-    // Files named inside the run's workdir, by `parts` or by `@path` in the
-    // text. Only a run this API can see has a workdir to resolve against;
-    // a message to one it cannot still goes through, with its uploads.
-    if let Ok(meta) = crate::runstate::read_meta(&id) {
-        let workdir = std::path::Path::new(&meta.workdir);
-        parts.extend(super::upload::json_parts(&body.parts, workdir, max_upload)?);
-        let (kept, named) = super::upload::inline_parts(&body.message, None, workdir, max_upload)?;
-        body.message = kept;
-        parts.extend(named);
-    } else if !body.parts.is_empty() {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' has no working directory this server can read parts from"),
-        ));
-    }
+    let (kept, named) = workdir_parts(&id, &body.message, &body.parts, max_upload)?;
+    body.message = kept;
+    parts.extend(named);
     let reply = state
         .control
         .request(&ControlRequest::Message {
