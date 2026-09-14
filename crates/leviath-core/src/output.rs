@@ -842,9 +842,9 @@ mod tests {
         assert_eq!(resolved.format.as_deref(), Some("a2ui"));
     }
 
-    /// The bug this replaced: naming the format the blueprint already declared
-    /// dropped the schema, so a caller who asked for exactly what was on offer
-    /// lost the check that came with it.
+    /// Naming the format the blueprint already declared keeps its schema: a
+    /// caller who asks for exactly what is on offer must not lose the check
+    /// that comes with it.
     #[test]
     fn re_stating_the_declared_format_keeps_its_shape_checks() {
         let agent = OutputSpec {

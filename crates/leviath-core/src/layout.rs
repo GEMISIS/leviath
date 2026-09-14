@@ -330,7 +330,7 @@ impl ContextLayout {
     /// `resolve_compacting_threshold` helper). `eviction_order` is preserved. The
     /// total budget becomes the model `window` when any percentage budget is
     /// present (percentage ceilings are relative to the whole window and may sum
-    /// past 100%); a pure-absolute layout keeps its legacy summed total unchanged.
+    /// past 100%); a pure-absolute layout keeps its summed total unchanged.
     ///
     /// Resolving an already-absolute layout is a no-op, so this is safe to call
     /// unconditionally at window-build time.
@@ -1234,7 +1234,7 @@ mod tests {
         );
         let resolved = layout.resolved(1_000_000);
         assert_eq!(resolved.regions[0].max_tokens, 5000);
-        // Absolute layout keeps its legacy summed total, not the window.
+        // An absolute layout keeps its summed total, not the window.
         assert_eq!(resolved.total_budget_tokens, 5000);
     }
 

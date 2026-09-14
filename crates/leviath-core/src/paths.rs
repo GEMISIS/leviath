@@ -200,10 +200,9 @@ mod tests {
     use super::*;
 
     /// Everything Leviath persists sits under one root, and `LEVIATH_HOME`
-    /// moves all of it together. Seven separate resolvers with three readings of
-    /// that variable is what this replaced - and the consequence was concrete: a
-    /// run that believed it was isolated wrote to the real
-    /// `~/.leviath/config.toml`.
+    /// moves all of it together. One resolver, because several with their own
+    /// readings of that variable let a run that believes it is isolated write
+    /// to the real `~/.leviath/config.toml`.
     #[test]
     fn every_data_path_follows_leviath_home_together() {
         temp_env::with_var("LEVIATH_HOME", Some("/tmp/lev-paths-test"), || {

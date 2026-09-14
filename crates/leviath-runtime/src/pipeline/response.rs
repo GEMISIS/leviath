@@ -104,10 +104,9 @@ pub(crate) fn store_model_parts(
 pub(crate) const DROPPED_PART_PREFIX: &str = "[model output dropped: ";
 
 /// The text part that stands where a produced part should be, and the
-/// warning that goes with it. A file over `[mime] max_part_bytes` used to
-/// vanish into this note alone: nothing in the run's log said a model had
-/// made something the run threw away, so a stage that then had "nothing to
-/// hand back" looked like a model failure rather than a ceiling.
+/// warning that goes with it. Both, because a stage that then has "nothing
+/// to hand back" must read as a ceiling in the run's log, not as a model
+/// that made nothing.
 fn dropped_part(run_id: &str, why: &str) -> leviath_core::mime::Part {
     tracing::warn!(run = %run_id, "[mime] produced part dropped: {why}");
     leviath_core::mime::Part::text(format!("{DROPPED_PART_PREFIX}{why}]"))

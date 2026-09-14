@@ -9,8 +9,8 @@ use crate::layout::SeedToolCall;
 ///
 /// Each region may express its ceiling as a percentage of the model context
 /// window (`budget = "35%"`) with optional absolute guard-rails (`max_tokens`
-/// caps it, `min_tokens` floors it), or as a plain absolute `max_tokens` (the
-/// legacy form, default 5000). Compacting regions may set `compact_at = "80%"`
+/// caps it, `min_tokens` floors it), or as a plain absolute `max_tokens`
+/// (default 5000). Compacting regions may set `compact_at = "80%"`
 /// (compact at that fraction of the resolved budget) and/or an absolute
 /// `threshold_tokens` cap. Percentage regions carry a provisional `max_tokens`
 /// (the cap, or 0) that is finalized when the layout is resolved against a model
@@ -30,7 +30,7 @@ pub(super) fn parse_region_layout(
         let count = |key: &str| count_of(region_value, &where_, key);
         // `budget = "N%"` opts a region into percentage mode; `max_tokens` then
         // becomes the absolute cap and `min_tokens` the absolute floor. Without a
-        // `budget`, `max_tokens` is the literal ceiling (legacy behavior).
+        // `budget`, `max_tokens` is the literal ceiling.
         let percent = match str_of(region_value, "budget") {
             Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
@@ -106,7 +106,7 @@ pub(super) fn parse_region_layout(
                     (Some(_), None, _) => usize::MAX,
                     (None, Some(t), _) => t,
                     // No compact_at and no threshold: default to 80% of the budget
-                    // for percentage regions (resolved later), else the legacy
+                    // for percentage regions (resolved later), else the
                     // absolute `max_tokens * 8 / 10`.
                     (None, None, true) => usize::MAX,
                     (None, None, false) => provisional_max_tokens.saturating_mul(8) / 10,

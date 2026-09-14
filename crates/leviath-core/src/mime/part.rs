@@ -247,14 +247,13 @@ impl Part {
 
     /// What this part costs a region.
     ///
-    /// A stored part is charged its STAND-IN, not its native token estimate. In
-    /// a region a stored blob is only a reference plus the short stand-in line
-    /// that stands for it in the assembled prompt; the native estimate on the
-    /// blob ref (which can be enormous - a per-byte rule over a multi-megabyte
-    /// model is millions of tokens) is the cost of sending the bytes to a model
-    /// that can read them, and that is charged separately at request-build time,
-    /// not against the region's budget. Charging the native estimate here made
-    /// it impossible for any reasonably-sized region to hold real media.
+    /// A stored part is charged its stand-in, not its native token estimate.
+    /// In a region a stored blob is only a reference plus the short stand-in
+    /// line that stands for it in the assembled prompt; the native estimate
+    /// on the blob ref (a per-byte rule over a multi-megabyte model is
+    /// millions of tokens) is the cost of sending the bytes to a model that
+    /// can read them, charged at request-build time. Charged here instead, no
+    /// reasonably sized region could hold real media at all.
     pub fn tokens(&self, reg: &MimeRegistry) -> usize {
         match &self.body {
             PartBody::Inline(s) => {

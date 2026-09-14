@@ -32,12 +32,10 @@ pub enum Credential {
 /// Where a provider's choice lives in a [`Config`], as the row itself
 /// declares it.
 ///
-/// Adding a provider used to mean adding an arm to `stored_credential`, one
-/// to `set_credential`, sometimes one to `is_configured`, and an entry in
-/// `configured_providers` - four places, none of which the compiler would
-/// mention if you missed them, and one of which shipped missed. A row that
-/// carries its own accessors is one place instead, and the functions below
-/// are then written once against any provider rather than once per provider.
+/// A row carries its own accessors so that adding a provider is one place,
+/// and the functions below are written once against any provider. Spread
+/// over per-provider arms in four functions, a new provider is four edits the
+/// compiler cannot ask for, and a missed one ships.
 #[derive(Clone, Copy)]
 pub enum Setting {
     /// One `Option<String>` on the config: an API key, or a base URL.
@@ -349,8 +347,7 @@ pub(crate) fn stored_credential(config: &Config, id: &str) -> Option<String> {
 
 /// Write a provider's credential into a config. `None` clears it.
 pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String>) {
-    // An id the catalog does not have goes nowhere, which is what a
-    // `_ => {}` arm used to say.
+    // An id the catalog does not have goes nowhere.
     let Some(row) = row(id) else {
         return;
     };
@@ -376,9 +373,9 @@ pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
 
 /// Every provider this config has configured, in catalog order.
 ///
-/// Derived from the table rather than restated: the list that decides which
-/// providers can be the default used to be its own hard-coded tuple, and a
-/// provider missing from it was configured, usable, and not offered.
+/// Derived from the table rather than kept as a list of its own: a provider
+/// missing from a hand-kept list is configured, usable, and never offered as
+/// the default.
 pub(crate) fn configured(config: &Config) -> Vec<&'static str> {
     providers()
         .into_iter()

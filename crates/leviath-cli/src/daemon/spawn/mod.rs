@@ -792,11 +792,10 @@ fn build_agent_inner(
     // `seed = { tools = [...] }` needs them: a seeded call answers to the
     // same policy a mid-run call does, and a seeded *script* tool needs the
     // host it would run under. Everything they read is already bound.
-    // Launch overrides: `--allow X` allows tool `X` outright. `--yolo` is not
-    // an override any more but a profile (`profile` above), applied after the
+    // Launch overrides: `--allow X` allows tool `X` outright. `--yolo` is a
+    // profile (`profile` above) rather than an override, applied after the
     // config layers by `crate::yolo::apply_profile`; bare `--yolo` is the
-    // profile that allows everything the config does not deny, which is the
-    // wildcard it used to write here.
+    // profile that allows everything the config does not deny.
     let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
     for tool in &args.allow {
         launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
