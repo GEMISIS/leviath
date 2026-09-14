@@ -1,7 +1,7 @@
 //! Typed content: mime types, parts, and where their bytes live.
 //!
-//! Leviath used to move text and nothing else. This module is the type system
-//! that lets an image, an audio clip, a video, a document or a 3D model travel
+//! This module is the type system that lets an image, an audio clip, a
+//! video, a document or a 3D model travel
 //! through the same places text does: a context region, a tool result, a user
 //! message, a model reply, a final output. Nothing here knows what an image
 //! *is*. A [`MimeRegistry`] that users, blueprints and providers extend says

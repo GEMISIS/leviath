@@ -394,9 +394,9 @@ fn finished(
 ///
 /// The store is content-addressed and shared across runs, so the child's
 /// bytes are read by hash and stored under the parent, typed as the child
-/// declared them. A child's answer used to reach its parent as text alone:
-/// a sub-agent that drew or built something reported a path its parent
-/// could not read. A file the store no longer holds, or one over the part
+/// declared them, so a sub-agent that drew or built something hands its
+/// parent the file and not a path it cannot read. A file the store no longer
+/// holds, or one over the part
 /// ceiling, is left out with a warning; a world with no store hands up
 /// nothing, and the text still names every file.
 fn handed_back(

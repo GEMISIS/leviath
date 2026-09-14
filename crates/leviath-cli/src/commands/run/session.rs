@@ -115,13 +115,13 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         }
     }
 
-    // Ollama needs no key and answers on a well-known local port, so this
-    // used to register it on every machine whether or not anybody had asked.
-    // That made a bare model name in a blueprint resolvable against whatever
-    // happened to be running locally - a surprising place for a run to end
-    // up, and not one the user chose. Opt-in now, by the switch `lev setup`
-    // writes or by naming an address, which is what an install that
-    // configured it before the switch existed already has.
+    // Ollama is opt-in like every other provider, by the switch `lev setup`
+    // writes or by naming an address (an install that configured it before
+    // the switch existed has the address). Needing no key and answering on a
+    // well-known local port is not a reason to register it unasked: that
+    // makes a bare model name in a blueprint resolvable against whatever
+    // happens to be running locally, a place a run should end up only when
+    // the user chose it.
     if config.providers.ollama_enabled || config.ollama_base_url.is_some() {
         creds.push(ProviderCreds {
             name: "ollama".to_string(),
@@ -1123,10 +1123,10 @@ mod tests {
             &|_| true,
         )
         .expect("an HTTPS client builds in tests");
-        // Every provider is opt-in, Ollama included. It needs no key and
-        // answers on a well-known local port, which used to be reason enough
-        // to register it everywhere - and made a bare model name resolvable
-        // against whatever happened to be running on the machine.
+        // Every provider is opt-in, Ollama included: needing no key and
+        // answering on a well-known local port is not a reason to register it
+        // unasked, since that makes a bare model name resolvable against
+        // whatever happens to be running on the machine.
         assert!(!registry.has("ollama"));
         assert!(!registry.has("claude-code"));
     }

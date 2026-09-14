@@ -938,11 +938,10 @@ impl Wizard {
                 // A key left blank is a credential the user did not give -
                 // usually because it is in their environment on purpose, and
                 // `Config::load` reads it back from there. This is the only
-                // kind that rule holds for, and it used to be written as "any
-                // empty value", which caught the kinds that never have one: a
-                // browser sign-in types nothing, so every finished Codex
-                // sign-in was switched back off the moment the plan was
-                // applied.
+                // kind that rule holds for: written as "any empty value" it
+                // would catch the kinds that never have one, and a finished
+                // browser sign-in, which types nothing, would be switched back
+                // off the moment the plan was applied.
                 Credential::ApiKey if row.value.is_empty() => {
                     catalog::set_credential(&mut config, row.provider.id, None)
                 }
@@ -3251,13 +3250,12 @@ pub(super) mod tests {
     /// A base-URL provider left on its default is configured, and its
     /// address is still not written down.
     ///
-    /// Those used to be the same answer: the only record of the choice was
-    /// the URL, so keeping the default meant recording nothing, and choosing
-    /// Ollama left it out of `configured_providers` entirely - it could not
-    /// be picked as the default provider, and the wizard forgot it by the
-    /// next run. Storing the default instead would pin it and stop
-    /// `$OLLAMA_HOST` applying, so the choice and the address are now two
-    /// fields saying two different things.
+    /// The choice and the address are two fields saying two different
+    /// things. Were the URL the only record of the choice, keeping the
+    /// default would record nothing: the provider would be missing from
+    /// `configured_providers`, unpickable as the default and forgotten by
+    /// the wizard's next run. Storing the default address instead would pin
+    /// it and stop `$OLLAMA_HOST` applying.
     #[test]
     fn a_base_url_provider_left_on_its_default_is_still_chosen() {
         let dir = tempfile::tempdir().unwrap();

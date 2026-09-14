@@ -2,7 +2,7 @@
 //!
 //! Supersedes `GET /api/agents`, which returns every run ever recorded as one
 //! unbounded array and accepts only a status filter. That route stays exactly as
-//! it is, deprecated: it is the legacy spelling (the console says "runs"
+//! it is, deprecated: it is the older spelling (the console says "runs"
 //! everywhere), and it gets a replacement at a new path rather than a changed
 //! response shape, so nothing that calls it today breaks.
 //!

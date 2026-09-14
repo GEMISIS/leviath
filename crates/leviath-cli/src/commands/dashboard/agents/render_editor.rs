@@ -582,10 +582,9 @@ fn field_lines(
 /// The stage tabs as one line that fits `width`: the full titles when they
 /// do, the short ones otherwise, each with its number and the tab it is.
 ///
-/// The strip used to be the full titles whatever the width, and at the
-/// inspector's usual width it wrapped onto a second line, which cut the
-/// last tab in two and put every row one line below where the click map
-/// had it.
+/// Short titles when the width calls for them, because a strip that wraps
+/// onto a second line cuts the last tab in two and puts every row one line
+/// below where the click map has it.
 fn tab_strip(width: u16) -> Vec<(usize, StageTab, String)> {
     let strip = |short: bool| -> Vec<(usize, StageTab, String)> {
         StageTab::ALL

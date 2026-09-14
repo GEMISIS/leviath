@@ -2,7 +2,6 @@
 //!
 //! Each run lives under `~/.leviath/runs/<run-id>/` with:
 //! - `meta.json`    - run metadata, updated atomically (tmp + rename)
-//! - `output.log`  - append-only combined worker stdout (legacy/fallback)
 //! - `stages.json` - index of per-stage records
 //! - `stages/<idx>/output.log` - readable agent output for that stage
 //! - `stages/<idx>/logs.log`   - operational events + tool activity

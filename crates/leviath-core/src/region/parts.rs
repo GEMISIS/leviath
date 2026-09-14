@@ -1,7 +1,7 @@
 //! What a region entry holds: a list of typed parts, and the text they read as.
 //!
-//! An entry used to be a `String`. It is now any number of [`Part`]s, each
-//! with a mime type: a paragraph, an image, a clip. Text parts keep their
+//! An entry is any number of [`Part`]s, each with a mime type: a paragraph,
+//! an image, a clip. Text parts keep their
 //! bytes inline; every other part is a reference into the run's blob store.
 //! The text those parts *read as* is kept beside them, rendered once when the
 //! content is built: inline text as it is, and for each stored part the

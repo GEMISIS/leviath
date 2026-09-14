@@ -518,10 +518,9 @@ pub(super) struct WriteConfigReq {
     /// `GET /api/providers` reports the two separately.
     /// Turn Ollama on or off.
     ///
-    /// Off, no run registers it. It needs no key and answers on a well-known
-    /// local port, so it used to be registered on every machine whether or
-    /// not anybody asked - which made a bare model name resolvable against
-    /// whatever happened to be running there.
+    /// Off, no run registers it. Needing no key and answering on a well-known
+    /// local port is not a reason to register it unasked: that makes a bare
+    /// model name resolvable against whatever happens to be running there.
     pub(super) ollama_enabled: Option<bool>,
     pub(super) codex_enabled: Option<bool>,
     /// How hard Codex thinks: `none`, `minimal`, `low`, `medium`, `high` or

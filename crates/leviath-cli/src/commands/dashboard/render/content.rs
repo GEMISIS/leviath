@@ -1066,7 +1066,7 @@ mod tests {
                 },
                 runstate::RegionSnapshot {
                     name: "history".to_string(),
-                    // The word a snapshot writes. The legacy `sliding` spelling
+                    // The word a snapshot writes. The older `sliding` spelling
                     // has to draw the same letter, which
                     // `render_context_bar_regions_string_with_many_region_types`
                     // covers.

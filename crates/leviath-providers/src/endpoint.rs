@@ -1,12 +1,10 @@
 //! A provider for any server that speaks the OpenAI chat API.
 //!
 //! llama.cpp, vLLM, LM Studio, LocalAI, and most gateways answer
-//! `POST /chat/completions` and `GET /models` in OpenAI's shape, and until now
-//! reaching one from Leviath meant writing a Rhai provider script for a wire
-//! format this crate already implements twice. This is the third use of
-//! the crate-private OpenAI compatibility module, with nothing vendor-specific on top: no compiled
-//! model table, no pricing, no cache markers, just the request, the stream and
-//! the listing.
+//! `POST /chat/completions` and `GET /models` in OpenAI's shape, so one
+//! provider over the crate-private OpenAI compatibility module reaches all of
+//! them with nothing vendor-specific on top: no compiled model table, no
+//! pricing, no cache markers, just the request, the stream and the listing.
 //!
 //! What it knows about a model it learns from the server. `GET /models` fills
 //! the catalogue at priming; a server that will not list (some gateways refuse
