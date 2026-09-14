@@ -142,8 +142,11 @@ mod shape_tests {
         assert_eq!(anthropic.output, ["text/*", "video/*"]);
         // A wildcard input, and a pattern that names no family, read the
         // same way whatever the shape.
-        let odd = WireShape::Anthropic.carried(ModelMime::new(&["*/*", "x-thing/*"], &["text/*"]));
-        assert_eq!(odd.input, ["*/*"]);
+        let odd = WireShape::Anthropic.carried(ModelMime::new(
+            &["*/*", "x-thing/*", "application/zip", "noslash"],
+            &["text/*"],
+        ));
+        assert_eq!(odd.input, ["*/*", "noslash"]);
     }
 }
 

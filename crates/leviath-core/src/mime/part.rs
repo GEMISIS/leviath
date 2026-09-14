@@ -291,6 +291,18 @@ impl Part {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_delivery_word_parses_or_names_the_three_words() {
+        assert_eq!(Delivery::from_arg("native"), Ok(Delivery::Native));
+        assert_eq!(Delivery::from_arg("text"), Ok(Delivery::Text));
+        assert_eq!(Delivery::from_arg("stand_in"), Ok(Delivery::StandIn));
+        let err = Delivery::from_arg("loud").unwrap_err();
+        assert!(
+            err.contains("native, text or stand_in, not 'loud'"),
+            "{err}"
+        );
+    }
+
     /// The one naming rule: exact name, the file name of a path, or six or
     /// more hash characters in either case. An inline part is never named.
     #[test]

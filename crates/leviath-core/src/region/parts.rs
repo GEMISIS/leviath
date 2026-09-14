@@ -480,6 +480,22 @@ mod tests {
         assert_eq!(EntryContent::text("").inline_text(), "");
     }
 
+    /// With a registry the charge follows each type's own rule; with the
+    /// bundled rows that is the byte heuristic, so the two answers agree, and
+    /// a row of the operator's own moves it.
+    #[test]
+    fn a_registry_charges_inline_text_by_its_rule() {
+        let c = EntryContent::from_parts(vec![Part::text("one two three"), stored("a.png")]);
+        let builtin = MimeRegistry::builtin();
+        assert_eq!(c.tokens(Some(&builtin)), c.tokens(None));
+        let mut fixed = MimeRegistry::builtin();
+        let table: toml::Table =
+            toml::from_str("[\"text/plain\"]\ntokens = { fixed = 7 }\n").unwrap();
+        fixed.layer(&table, "test").unwrap();
+        let stand_in = crate::text::estimate_tokens(&stored("a.png").blob().unwrap().stand_in);
+        assert_eq!(c.tokens(Some(&fixed)), 7 + stand_in);
+    }
+
     #[test]
     fn a_large_stored_model_costs_its_stand_in_not_its_native_estimate() {
         // A per-byte rule over a multi-megabyte model yields a native estimate

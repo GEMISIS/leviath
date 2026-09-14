@@ -834,6 +834,26 @@ mod tests {
         assert_eq!(resolved.example.as_deref(), Some("agent example"));
     }
 
+    /// The listing columns every surface prints: the hash prefix rides along
+    /// only when the bytes were stored.
+    #[test]
+    fn an_artifact_lists_its_columns_with_the_hash_only_when_stored() {
+        let mut artifact = Artifact::from_path("out/hero.png");
+        assert!(
+            artifact
+                .short_label()
+                .starts_with("hero.png (application/octet-stream, ")
+        );
+        let bare = artifact.detail_columns();
+        assert!(
+            bare.starts_with("out/hero.png  application/octet-stream  "),
+            "{bare}"
+        );
+        assert!(!bare.contains("sha256"));
+        artifact.sha256 = "abcdef0123456789".repeat(4);
+        assert!(artifact.detail_columns().ends_with("  sha256:abcdef012345"));
+    }
+
     #[test]
     fn a_stage_alone_can_ask_for_an_output() {
         let stage = spec(Some("a2ui"), None);

@@ -258,7 +258,7 @@ fn find_part(
     wanted: &str,
 ) -> Option<(Option<String>, leviath_core::mime::BlobRef)> {
     let part = window.find_stored_part(wanted)?;
-    Some((part.name.clone(), part.blob()?.clone()))
+    part.blob().map(|blob| (part.name.clone(), blob.clone()))
 }
 
 #[cfg(test)]

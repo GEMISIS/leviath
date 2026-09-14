@@ -70,6 +70,21 @@ pub(crate) fn popup_frame(frame: &mut Frame, area: Rect, title: &str, border_col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_floor_holds_a_popup_open_on_a_tiny_terminal() {
+        let roomy = Rect::new(0, 0, 100, 40);
+        assert_eq!(
+            centered_at_least(64, 70, roomy, 20, 6),
+            centered(64, 70, roomy)
+        );
+        let tiny = Rect::new(0, 0, 10, 4);
+        assert_eq!(centered_at_least(64, 70, tiny, 20, 6), tiny);
+        let narrow = Rect::new(2, 3, 60, 8);
+        let popup = centered_at_least(10, 10, narrow, 20, 6);
+        assert_eq!((popup.width, popup.height), (20, 6));
+        assert_eq!((popup.x, popup.y), (22, 4));
+    }
     use crate::tui::test_terminal;
     use crate::tui::theme::C_WARN;
 

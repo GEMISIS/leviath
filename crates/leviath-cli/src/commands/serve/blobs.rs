@@ -363,11 +363,9 @@ pub(super) async fn artifact(
     )
 }
 
-/// One row of the effective mime registry.
-///
-/// A type's row is resolved: what `image/png` inherits from `image/*` is
-/// filled in, as `lev mime list` shows it. A pattern's row is as written,
-/// since a pattern resolves to nothing on its own.
+/// One row of the effective mime registry, resolved: what `image/png`
+/// inherits from `image/*` is filled in, as `lev mime list` shows it, and a
+/// pattern row reports what a type under it inherits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct MimeTypeEntry {
     /// The row's key: a type, or a pattern such as `image/*`.
@@ -375,17 +373,16 @@ pub(super) struct MimeTypeEntry {
     /// Where the row came from: `builtin`, `config`, or a blueprint or
     /// provider name.
     pub(super) source: String,
-    /// The family: resolved for a type, as written for a pattern.
+    /// The family the type resolves to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) family: Option<String>,
-    /// Whether the bytes are text: resolved for a type, as written for a
-    /// pattern.
+    /// Whether the bytes are text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) text: Option<bool>,
-    /// How the bytes are counted in tokens, the same way.
+    /// How the bytes are counted in tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) tokens: Option<TokenRule>,
-    /// The extensions the type is known by, the same way.
+    /// The extensions the type is known by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) extensions: Option<Vec<String>>,
     /// The stand-in template a row set, when one applies.
@@ -403,14 +400,15 @@ pub(super) struct MimeListing {
     pub(super) types: Vec<MimeTypeEntry>,
 }
 
-/// The rows of `registry`, keys sorted: every type resolved through the
-/// broader rows it inherits from, every pattern as written.
+/// The rows of `registry`, keys sorted, each resolved through the broader
+/// rows it inherits from. Every key the registry holds parses as a type or a
+/// pattern, so nothing is left out.
 pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
     let mut keys = registry.keys();
     keys.sort();
     keys.into_iter()
-        .map(|(key, source)| match MimeType::parse(&key) {
-            Ok(mime_type) => {
+        .filter_map(|(key, source)| {
+            MimeType::parse(&key).ok().map(|mime_type| {
                 let info = registry.info(&mime_type);
                 MimeTypeEntry {
                     mime_type: key,
@@ -422,20 +420,7 @@ pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
                     stand_in: info.stand_in,
                     check: info.check,
                 }
-            }
-            Err(_) => {
-                let row = registry.row(&key).cloned().unwrap_or_default();
-                MimeTypeEntry {
-                    mime_type: key,
-                    source,
-                    family: row.family,
-                    text: row.text,
-                    tokens: row.tokens,
-                    extensions: row.extensions,
-                    stand_in: row.stand_in,
-                    check: row.check,
-                }
-            }
+            })
         })
         .collect()
 }
