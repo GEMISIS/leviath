@@ -158,6 +158,7 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
     let shape = match provider {
         "anthropic" => Some(WireShape::Anthropic),
         "codex" => Some(WireShape::Codex),
+        "bedrock" => Some(WireShape::Bedrock),
         "openai" | "google" | "gemini" | "ollama" | "openrouter" => Some(WireShape::OpenAi),
         _ => None,
     };

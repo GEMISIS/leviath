@@ -65,6 +65,8 @@ pub enum WireShape {
     Anthropic,
     /// Codex Responses: `input_image`, `input_file`.
     Codex,
+    /// Bedrock Converse: `image`, `document`.
+    Bedrock,
 }
 
 impl WireShape {
@@ -136,6 +138,10 @@ mod shape_tests {
         assert_eq!(anthropic.input, ["text/*", "image/*", "application/pdf"]);
         assert_eq!(
             WireShape::Codex.carried(everything()).input,
+            anthropic.input
+        );
+        assert_eq!(
+            WireShape::Bedrock.carried(everything()).input,
             anthropic.input
         );
         // Outputs are the reply's business and are left alone.

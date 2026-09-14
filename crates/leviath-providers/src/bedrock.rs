@@ -565,10 +565,11 @@ impl Provider for BedrockProvider {
 
     fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         let base = self.learned.mime_corrected(model, catalog::mime_for(model));
-        match self.capability_overrides.get(model) {
+        let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
-        }
+        };
+        crate::mime::WireShape::Bedrock.carried(mime)
     }
 
     /// Read the listing, the profiles and the price file into `Self::learned`.
