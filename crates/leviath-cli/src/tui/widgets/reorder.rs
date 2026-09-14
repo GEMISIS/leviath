@@ -14,12 +14,19 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use super::list_cursor;
 use super::popup::{centered, popup_frame};
 use crate::tui::theme::{C_ACCENT, C_ACTIVE, C_DIM, C_MUTED, C_WHITE};
 
-/// The grip that lifts a row, and the width of the gutter reserved for it.
-const GRIP: &str = "⠿ ";
-const GRIP_W: u16 = 2;
+/// The grip drawn beside a row the mouse can pick up and drag, with the space
+/// that separates it from the label. Braille dots: the widest-supported glyph
+/// that reads as "handle" rather than as content. Shared with the agent
+/// editor's model-chain reorder so the two drags look the same.
+pub(crate) const GRIP: &str = "⠿ ";
+/// Cells [`GRIP`] occupies, and so the width of the column reserved for it on
+/// every row: a grip that shifted its own row two columns right would be a
+/// worse cue than one that lines up with the blanks above it.
+pub(crate) const GRIP_W: u16 = 2;
 
 /// What a key or click did to the modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +114,7 @@ impl Reorder {
 
     /// Move the cursor, clamped to the list.
     fn move_cursor(&mut self, delta: isize) {
-        let next = self.cursor as isize + delta;
-        self.cursor = next.clamp(0, self.items.len().saturating_sub(1) as isize) as usize;
+        self.cursor = list_cursor::move_cursor(self.cursor, delta, self.items.len());
     }
 
     /// Move the row under the cursor one place, the cursor following it. A move

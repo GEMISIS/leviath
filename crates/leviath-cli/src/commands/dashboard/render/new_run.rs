@@ -9,6 +9,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
 };
 
+use crate::commands::dashboard::helpers::focus_colour;
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::{ClickTarget, NewRunPane};
@@ -307,13 +308,6 @@ const START_BUTTON: &str = "[ Start run ]";
 /// Border colour for a pane, by whether it holds the keys.
 fn focus_style(focused: bool) -> Style {
     Style::default().fg(focus_colour(focused))
-}
-
-fn focus_colour(focused: bool) -> Color {
-    match focused {
-        true => C_BORDER_FOCUS,
-        false => C_BORDER,
-    }
 }
 
 /// Colour an agent's source, so a bundled-but-not-installed row reads as the

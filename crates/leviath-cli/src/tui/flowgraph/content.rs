@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
+use crate::tui::text::truncate;
 use crate::tui::theme::*;
 
 use super::model::{EdgeClass, NodeKind, StageNode};
@@ -225,7 +226,7 @@ impl StageNodeContent {
         // Two cells of padding around the text.
         let fixed = 2 + prefix.chars().count() + suffix.chars().count();
         let room = budget.saturating_sub(fixed);
-        let name = fit(&self.name, room);
+        let name = truncate(&self.name, room);
         Line::from(Span::styled(format!(" {prefix}{name}{suffix} "), style))
     }
 
@@ -330,19 +331,6 @@ impl StageNodeContent {
         let marker = if self.end_marker().is_some() { 2 } else { 0 };
         2 + prefix + self.name.chars().count() + suffix + marker
     }
-}
-
-/// `text`, cut to `room` cells with an ellipsis when it does not fit.
-fn fit(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
-        return text.to_string();
-    }
-    let keep = room.saturating_sub(1);
-    let mut cut: String = text.chars().take(keep).collect();
-    if room > 0 {
-        cut.push('…');
-    }
-    cut
 }
 
 impl NodeContent for StageNodeContent {
@@ -713,10 +701,6 @@ mod tests {
             format!("[ {GLYPH_COMPLETE} pl… ×12 ]"),
             "{text}"
         );
-        assert_eq!(fit("plan", 4), "plan");
-        assert_eq!(fit("plan", 3), "pl…");
-        assert_eq!(fit("plan", 1), "…");
-        assert_eq!(fit("plan", 0), "");
 
         let compact = content();
         let (buf, text) = draw(&compact, Rect::new(0, 0, 14, 1), true);

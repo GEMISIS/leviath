@@ -43,17 +43,6 @@ fn type_detail(value: &str) -> String {
     }
 }
 
-/// `200k`, `1M`, `1.5M`: a context window as the picker shows it.
-pub(super) fn window_label(tokens: usize) -> String {
-    if tokens >= 1_000_000 {
-        let m = tokens as f64 / 1_000_000.0;
-        let text = format!("{m:.1}");
-        format!("{}M", text.trim_end_matches(".0"))
-    } else {
-        format!("{}k", tokens / 1000)
-    }
-}
-
 /// A short label for what a model makes, when it is not a plain text model:
 /// "makes 3D models", "makes images", and so on. `None` for a text model, so
 /// the picker only tags the ones worth calling out (a Meshy operation, an image
@@ -851,7 +840,10 @@ impl Dashboard {
                     detail.push("already in this agent".to_string());
                 }
                 if let Some(window) = windows.get(&(provider.to_string(), id.to_string())) {
-                    detail.push(format!("{} context", window_label(*window)));
+                    detail.push(format!(
+                        "{} context",
+                        crate::commands::dashboard::helpers::format_tokens(*window)
+                    ));
                 }
                 // What the model makes, so a stage that must emit a mesh or an
                 // image can be pointed at a model that produces one rather than

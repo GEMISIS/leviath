@@ -26,6 +26,7 @@
 
 pub(crate) mod flowgraph;
 pub(crate) mod keymap;
+pub(crate) mod text;
 pub(crate) mod theme;
 pub(crate) mod widgets;
 

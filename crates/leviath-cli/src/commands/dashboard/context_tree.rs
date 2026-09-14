@@ -16,6 +16,8 @@ use super::theme::*;
 use super::types::ContextTreeState;
 use crate::commands::dashboard::helpers::format_tokens;
 use crate::runstate::ContextSnapshot;
+use crate::tui::text::truncate;
+use unicode_width::UnicodeWidthStr;
 
 /// One interactive (cursor-addressable) row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,16 +164,12 @@ fn name_width(snap: &ContextSnapshot) -> usize {
 /// never truncates - so a name or a kind wider than its column would shunt
 /// that one row's remaining columns right of every other row's.
 ///
-/// Counted in characters, which is also what the padding counts, so the two
-/// agree on what "wide" means.
+/// Cut and padded in display columns alike, so the two agree on what "wide"
+/// means and a CJK region name lines up with the ASCII one below it.
 fn cell(text: &str, width: usize) -> String {
-    let room = width.saturating_sub(GUTTER);
-    if text.chars().count() <= room {
-        return format!("{text:<width$}");
-    }
-    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-    cut.push('…');
-    format!("{cut:<width$}")
+    let shown = truncate(text, width.saturating_sub(GUTTER));
+    let pad = width.saturating_sub(shown.width());
+    format!("{shown}{}", " ".repeat(pad))
 }
 
 /// Render the region tree. `cursor` highlights that interactive row.

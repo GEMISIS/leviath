@@ -16,9 +16,11 @@ use super::super::types::PaneId;
 use super::editor::{Editor, Focus, InspectorHits, ModelDrag, Overlay};
 use super::inspector::{Field, FieldId, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
+use crate::tui::text::truncate;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
 use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, chord_label};
 use crate::tui::widgets::popup::{centered, popup_frame};
+use crate::tui::widgets::reorder::{GRIP, GRIP_W};
 
 /// Under this many columns the panes take turns.
 const SIDE_BY_SIDE_MIN_WIDTH: u16 = 120;
@@ -26,14 +28,6 @@ const SIDE_BY_SIDE_MIN_WIDTH: u16 = 120;
 const INSPECTOR_WIDTH: u16 = 74;
 /// Rows the expanded problems list takes.
 const PROBLEMS_ROWS: u16 = 6;
-/// The grip drawn beside a row the mouse can pick up and drag, with the space
-/// that separates it from the label. Braille dots: the widest-supported glyph
-/// that reads as "handle" rather than as content.
-const GRIP: &str = "⠿ ";
-/// Cells [`GRIP`] occupies, and so the width of the column reserved for it on
-/// every row - a grip that shifted its own row two columns right would be a
-/// worse cue than one that lines up with the blanks above it.
-const GRIP_W: u16 = 2;
 
 impl Dashboard {
     /// The editor screen.
@@ -564,7 +558,7 @@ fn field_lines(
         let is_button = matches!(field.value, FieldValue::Button);
         if !is_button {
             spans.push(Span::styled(
-                format!("{:<label_w$}", fit(&field.label, label_w)),
+                format!("{:<label_w$}", truncate(&field.label, label_w)),
                 label_style,
             ));
         }
@@ -577,7 +571,7 @@ fn field_lines(
                 } else {
                     value_w
                 };
-                spans.push(Span::styled(fit(&text, room), style));
+                spans.push(Span::styled(truncate(&text, room), style));
             }
         }
         painted.lines.push(Line::from(spans));
@@ -706,14 +700,4 @@ fn value_text(field: &Field, on: bool) -> (String, Style) {
             },
         ),
     }
-}
-
-/// `text` cut to `room` cells with an ellipsis.
-fn fit(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
 }

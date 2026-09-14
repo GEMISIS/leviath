@@ -18,7 +18,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::line_edit::{EditOutcome, LineEdit};
+use super::list_cursor;
 use super::popup::{centered, popup_frame};
+use crate::tui::text::truncate;
 use crate::tui::theme::{C_ACCENT, C_ACTIVE, C_BORDER_FOCUS, C_DIM, C_MUTED, C_WARN, C_WHITE};
 
 /// Rows a page key moves.
@@ -107,13 +109,8 @@ impl Picker {
     }
 
     /// Move within the filtered list, clamped to it.
-    ///
-    /// Clamping rather than wrapping: at eighty models, wrapping from the top
-    /// to the bottom looks like the list jumped rather than moved.
     pub(crate) fn move_cursor(&mut self, delta: isize) {
-        let count = self.matches().len();
-        let next = self.cursor as isize + delta;
-        self.cursor = next.clamp(0, count.saturating_sub(1) as isize) as usize;
+        self.cursor = list_cursor::move_cursor(self.cursor, delta, self.matches().len());
     }
 
     /// Whether an option is chosen (multi-select).
@@ -211,8 +208,8 @@ impl Picker {
     }
 
     /// Which option a click landed on, as an index into the filtered list.
-    /// Shares the layout with the drawing, so a click cannot resolve against
-    /// rows that were not on screen.
+    /// Shares the layout and the scroll window with the drawing, so a click
+    /// cannot resolve against rows that were not on screen.
     pub(crate) fn row_at(&self, area: Rect, row: u16) -> Option<usize> {
         let popup = centered(80, 88, area);
         // What `popup_frame` leaves after its border.
@@ -225,7 +222,7 @@ impl Picker {
             return None;
         }
         let height = list.height as usize;
-        let offset = self.cursor.saturating_sub(height.saturating_sub(1));
+        let offset = list_cursor::window_start(self.cursor, height);
         let position = offset + (row - list.y) as usize;
         (position < self.matches().len()).then_some(position)
     }
@@ -275,9 +272,9 @@ impl Picker {
 
         let height = chunks[2].height as usize;
         let value_w = self.value_column(&matches, chunks[2].width);
-        // Keep the cursor in view without a stored offset: the list is rebuilt
-        // every frame anyway, so the window into it is arithmetic, not state.
-        let offset = self.cursor.saturating_sub(height.saturating_sub(1));
+        // The list is rebuilt every frame, so the window into it is
+        // arithmetic, not state.
+        let offset = list_cursor::window_start(self.cursor, height);
         let rows: Vec<Line<'static>> = matches
             .iter()
             .enumerate()
@@ -298,7 +295,7 @@ impl Picker {
                     ),
                     Span::styled(mark, Style::default().fg(C_ACCENT)),
                     Span::styled(
-                        format!("{:<value_w$}", fit(&option.value, value_w - 2)),
+                        format!("{:<value_w$}", truncate(&option.value, value_w - 2)),
                         if selected {
                             Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
                         } else {
@@ -330,16 +327,6 @@ impl Picker {
 
 /// The narrowest the value column gets, gap included.
 const VALUE_MIN: usize = 20;
-
-/// `text` cut to `room` cells with an ellipsis.
-fn fit(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
 
 #[cfg(test)]
 mod tests {

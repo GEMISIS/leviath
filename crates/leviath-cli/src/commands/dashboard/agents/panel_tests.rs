@@ -396,13 +396,6 @@ async fn the_model_chooser_grows_when_the_providers_answer() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn context_windows_read_as_k_or_m() {
-    assert_eq!(super::editor_panels::window_label(200_000), "200k");
-    assert_eq!(super::editor_panels::window_label(1_000_000), "1M");
-    assert_eq!(super::editor_panels::window_label(1_500_000), "1.5M");
-}
-
 // ─── context ─────────────────────────────────────────────────────────────────
 
 #[test]

@@ -20,11 +20,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
+use super::helpers::{focus_colour, format_tokens, truncate};
 use super::state::Dashboard;
 use super::theme::*;
 use super::types::{ClickTarget, NewRunPane};
 use crate::commands::run::attach::{cli_registry, read_region_input};
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
+use crate::tui::widgets::list_cursor;
 
 /// One caller-input region of the selected blueprint, and what was typed
 /// for it.
@@ -80,7 +82,7 @@ impl NewRunInput {
             bits.push(self.accepts.join(" "));
         }
         if self.max_tokens > 0 {
-            bits.push(format!("≤{} tok", compact_count(self.max_tokens)));
+            bits.push(format!("≤{} tok", format_tokens(self.max_tokens)));
         }
         if self.required {
             bits.push("required".to_string());
@@ -241,11 +243,13 @@ impl Dashboard {
         match key.code {
             KeyCode::Esc | KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
             KeyCode::Tab => self.new_run_focus = NewRunPane::Task,
-            KeyCode::Up => {
-                self.new_run_input_selected = self.new_run_input_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.new_run_input_selected = (self.new_run_input_selected + 1).min(last);
+            KeyCode::Up | KeyCode::Down => {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                self.new_run_input_selected = list_cursor::move_cursor(
+                    self.new_run_input_selected,
+                    delta,
+                    self.new_run_inputs.len(),
+                );
             }
             _ => {
                 let idx = self.new_run_input_selected;
@@ -381,7 +385,7 @@ impl Dashboard {
         for (i, slot) in self.new_run_inputs.iter().enumerate() {
             let on = focused && i == self.new_run_input_selected;
             let label = format!("{}{}", slot.key, slot.note());
-            let label = fit(&label, label_w.saturating_sub(2));
+            let label = truncate(&label, label_w.saturating_sub(2));
             let mut spans = vec![
                 Span::styled(if on { "› " } else { "  " }, Style::default().fg(C_ACCENT)),
                 Span::styled(
@@ -411,39 +415,6 @@ impl Dashboard {
         }
         frame.render_widget(Paragraph::new(lines), inner);
     }
-}
-
-/// The border and title colour of a pane, lit when it has the keys.
-fn focus_colour(focused: bool) -> ratatui::style::Color {
-    match focused {
-        true => C_BORDER_FOCUS,
-        false => C_BORDER,
-    }
-}
-
-/// A token count shortened for a label: `117000` reads `117k`, `1500` reads
-/// `1.5k`, and anything under a thousand stays exact.
-pub(super) fn compact_count(n: usize) -> String {
-    match n {
-        0..=999 => n.to_string(),
-        _ => {
-            let thousands = n as f64 / 1000.0;
-            match thousands >= 10.0 {
-                true => format!("{}k", thousands.round() as usize),
-                false => format!("{:.1}k", thousands),
-            }
-        }
-    }
-}
-
-/// `text` cut to `room` cells with an ellipsis.
-fn fit(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
 }
 
 /// The effective context window of the blueprint's entry stage, resolved
@@ -592,7 +563,7 @@ mod tests {
             dash.new_run_inputs[0].note(),
             " (image/*, ≤100k tok, required)"
         );
-        assert_eq!(dash.new_run_inputs[1].note(), " (≤1.0k tok)");
+        assert_eq!(dash.new_run_inputs[1].note(), " (≤1k tok)");
         assert!(dash.new_run_has_inputs());
         assert_eq!(dash.new_run_inputs_height(), 4);
         // The same agent again keeps the slots; no agent clears them.
@@ -772,7 +743,6 @@ mod tests {
         dash.new_run_inputs[1].edit = LineEdit::new("be brief", false);
         let text = screen(&mut dash);
         assert!(text.contains("be brief"), "{text}");
-        assert_eq!(fit("abcdef", 4), "abc…");
     }
 
     /// A slot with nothing worth noting (no type, one file, no budget, not
@@ -789,17 +759,6 @@ mod tests {
             files: Vec::new(),
         };
         assert_eq!(slot.note(), "");
-    }
-
-    /// The token count in a note is shortened: exact under a thousand, one
-    /// decimal into the thousands, and whole thousands past ten.
-    #[test]
-    fn compact_count_shortens_a_token_figure() {
-        assert_eq!(compact_count(500), "500");
-        assert_eq!(compact_count(1500), "1.5k");
-        assert_eq!(compact_count(1000), "1.0k");
-        assert_eq!(compact_count(100000), "100k");
-        assert_eq!(compact_count(15500), "16k");
     }
 
     /// A file slot shows the files it holds: the names, the count against the

@@ -24,6 +24,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use super::state::Dashboard;
 use super::theme::*;
 use crate::commands::run::attach::cli_registry;
+use crate::tui::widgets::list_cursor;
+use crate::tui::widgets::popup::centered_at_least;
 
 /// The most files the picker will walk the working directory for. A menu is a
 /// convenience; past a few thousand entries a list stops being one, and the
@@ -259,11 +261,10 @@ impl Dashboard {
                 self.new_run_inputs[row].files = files;
             }
             KeyCode::Char(' ') => picker.toggle_highlighted(),
-            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
-            KeyCode::Down => {
-                if picker.selected + 1 < picker.filtered.len() {
-                    picker.selected += 1;
-                }
+            KeyCode::Up | KeyCode::Down => {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                picker.selected =
+                    list_cursor::move_cursor(picker.selected, delta, picker.filtered.len());
             }
             KeyCode::Backspace => {
                 picker.query.pop();
@@ -282,7 +283,7 @@ impl Dashboard {
         let Some(picker) = self.new_run_picker.as_ref() else {
             return;
         };
-        let popup = centred(area, 64, 70);
+        let popup = centered_at_least(64, 70, area, 20, 6);
         let inner = Rect {
             x: popup.x + 1,
             y: popup.y + 1,
@@ -341,7 +342,7 @@ impl Dashboard {
                 Style::default().fg(C_DIM),
             )));
         } else {
-            let start = picker.selected.saturating_sub(list_rows.saturating_sub(1));
+            let start = list_cursor::window_start(picker.selected, list_rows);
             for &fi in picker.filtered.iter().skip(start).take(list_rows) {
                 let file = &picker.files[fi];
                 let on = Some(fi) == picker.filtered.get(picker.selected).copied();
@@ -371,7 +372,7 @@ impl Dashboard {
                         format!(
                             "  {}  ~{} tok",
                             file.type_label,
-                            super::new_run_inputs::compact_count(file.tokens)
+                            super::helpers::format_tokens(file.tokens)
                         ),
                         Style::default().fg(C_DIM),
                     ),
@@ -399,18 +400,6 @@ impl Dashboard {
             height: 1,
         };
         frame.render_widget(Paragraph::new(footer), footer_area);
-    }
-}
-
-/// A rectangle `pct_w` × `pct_h` percent of `area`, centred in it.
-fn centred(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
-    let width = (area.width * pct_w / 100).clamp(20, area.width);
-    let height = (area.height * pct_h / 100).clamp(6, area.height);
-    Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
     }
 }
 
