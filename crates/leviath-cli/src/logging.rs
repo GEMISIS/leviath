@@ -262,10 +262,13 @@ mod tests {
     /// toggling it in parallel would park the first one's writes.
     #[test]
     fn holding_the_terminal_parks_output_until_it_is_released() {
-        // Released is the resting state, so a write goes straight out.
+        // Released is the resting state, so a write goes straight out. A real
+        // byte rather than an empty slice: `write_all` of nothing never calls
+        // `write`, and the pass-through then depended on some other test
+        // happening to log while nothing held the terminal.
         release_from_tui();
         assert!(!TUI_HOLDS_TERMINAL.load(Ordering::Relaxed));
-        writer().write_all(b"").expect("stderr accepts a write");
+        assert_eq!(writer().write(b"\n").expect("stderr accepts a write"), 1);
         writer().flush().expect("stderr accepts a flush");
 
         hold_for_tui();

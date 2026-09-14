@@ -132,13 +132,22 @@ pub(super) fn lint_stage_mime(
     if unseen.is_empty() {
         return Vec::new();
     }
+    // A stage whose models see some of what it takes and not the rest is a
+    // media pipeline working as designed: the mesh stage sees the mesh and
+    // reads the reference images as stand-ins, the drawing stage the other
+    // way round. That is said as information. The warning is for a stage
+    // that sees none of it - a text model asked to look at pictures.
+    let severity = match unseen.len() == needs.len() {
+        true => LintSeverity::Warning,
+        false => LintSeverity::Note,
+    };
     let listed: Vec<String> = judged
         .iter()
         .map(|e| format!("{}/{}", e.provider, e.model))
         .collect();
     vec![
         LintFinding::new(
-            LintSeverity::Warning,
+            severity,
             "mime-unseen",
             format!(
                 "takes {} but none of its models ({}) takes that natively, so such parts reach \

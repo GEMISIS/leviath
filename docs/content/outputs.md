@@ -460,7 +460,8 @@ unreachable.
 | `allow-complete-skips-output` | An earlier stage may end the run instead of routing onward |
 | `output-shape-not-required` | A shape is declared but nothing must produce it |
 | `output-stage-can-modify` | An output stage can also write files |
-| `mime-unseen` | A stage's regions take a mime type none of its listed models can see, so those parts reach the model as stand-ins |
+| `output-stage-cannot-answer` | An output stage's models cannot call tools (an image model, a 3D generator), so `submit_output` is out of reach, and it declares no artifact or routes no produced part: the run would end with nothing |
+| `mime-unseen` | A stage's regions take a mime type its listed models cannot see, so those parts reach the model as stand-ins. A warning when the models see none of what the stage takes; information when they see some of it, which is a media pipeline working as designed |
 
 The second one is worth knowing about. `allow_complete` offers the model a "DONE" it can choose
 instead of a transition. Leviath appends that option even to a stage's own `transition_prompt`, so a

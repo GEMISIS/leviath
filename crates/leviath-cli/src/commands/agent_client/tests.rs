@@ -1631,6 +1631,53 @@ mod run_status_helpers {
     }
 
     #[test]
+    fn an_artifact_is_linked_where_it_can_be_opened() {
+        use leviath_core::mime::BlobStore;
+        crate::runstate::with_isolated_runs_dir("acp_artifact_location", |_runs| {
+            let cwd = tempfile::tempdir().unwrap();
+            std::fs::write(cwd.path().join("notes.md"), "n").unwrap();
+            let cwd = cwd.path().to_string_lossy().to_string();
+            let mut written = leviath_core::output::Artifact::from_path("notes.md");
+            written.sha256 = "a".repeat(64);
+            // On disk: the workdir copy, whatever the store holds.
+            assert_eq!(
+                artifact_location(&cwd, "run-a", &written),
+                std::path::Path::new(&cwd).join("notes.md")
+            );
+            // Not on disk but in the store: the stored file.
+            let store = leviath_runtime::blob_store::FsBlobStore::new(crate::runstate::runs_dir());
+            let stored = store
+                .put(
+                    "run-a",
+                    &leviath_core::mime::Blob::new(
+                        leviath_core::mime::MimeType::parse("model/gltf-binary").unwrap(),
+                        b"glTF".to_vec(),
+                    ),
+                    &leviath_core::mime::MimeRegistry::builtin(),
+                )
+                .unwrap();
+            let mut made = leviath_core::output::Artifact::from_path("out/scene.glb");
+            made.sha256 = stored.sha256.clone();
+            assert_eq!(
+                artifact_location(&cwd, "run-a", &made),
+                crate::blobs::blob_path("run-a", &stored.sha256)
+            );
+            // In neither place, or never stored: the workdir path, which is
+            // the most a link can say.
+            made.sha256 = "b".repeat(64);
+            assert_eq!(
+                artifact_location(&cwd, "run-a", &made),
+                std::path::Path::new(&cwd).join("out/scene.glb")
+            );
+            made.sha256.clear();
+            assert_eq!(
+                artifact_location(&cwd, "run-a", &made),
+                std::path::Path::new(&cwd).join("out/scene.glb")
+            );
+        });
+    }
+
+    #[test]
     fn read_run_status_is_none_when_missing_or_malformed() {
         let dir = tempfile::tempdir().unwrap();
         // Missing file.

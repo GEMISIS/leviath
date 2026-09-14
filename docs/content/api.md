@@ -216,6 +216,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
 | `GET /api/agents/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
+| `GET /api/agents/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent. Takes files too; see [attaching files](#attaching-files) |
@@ -687,9 +688,15 @@ starts past the end is `416 Range Not Satisfiable` with `Content-Range: bytes */
 malformed or multi-range header is ignored and the whole body served.
 
 `GET /api/agents/{id}/files/raw?path=` does the same for any file inside the working directory,
-typed by the registry from its bytes and name, where the JSON `files` route wraps text. The answer's
-`artifacts` carry each file's `path` and, when the run could store it, its `sha256`, so a client can
-fetch an artifact either way.
+typed by the registry from its bytes and name, where the JSON `files` route wraps text. A path the
+directory does not hold but the answer lists as an artifact is served from the blob store instead,
+so a file a model made and nothing wrote to disk answers here too.
+
+`GET /api/agents/{id}/artifacts/{name}` is the route that follows an artifact the way the runtime
+does: by the name the answer's `artifacts` list it under, from the blob store by hash first and the
+working directory second, under the artifact's own mime type. It is the one to use when a client has
+the answer in hand; the answer's `artifacts` carry each file's `path` and, when the run could store
+it, its `sha256`, so the other two routes reach the same bytes.
 
 ## A run's files
 
@@ -1506,6 +1513,7 @@ than that feature, not broken.
 | `messages.parts` | The same on `POST /api/agents/{id}/message` |
 | `runs.blobs` | `GET /api/agents/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
 | `runs.files.raw` | `GET /api/agents/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
+| `runs.artifacts` | `GET /api/agents/{id}/artifacts/{name}`, the bytes of one file the run handed back, from the blob store or the workdir |
 | `runs.result.artifacts` | `artifacts` on a run's answer as `{ name, path, mime_type, size, sha256 }` objects rather than paths |
 | `mime.registry` | `GET /api/mime`, the effective mime registry with each row's source |
 | `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |

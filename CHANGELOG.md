@@ -29,6 +29,27 @@ same list.
 - The Meshy provider lists its six operations, so a configured key shows them
   on `GET /api/models` and `lev models list` like any other provider's models.
 
+- `GET /api/agents/{id}/artifacts/{name}` serves one file a run handed back,
+  by the name its answer lists, from the blob store by hash first and the
+  working directory second (capability `runs.artifacts`). A client had the
+  name, type and hash from the result and no route that took any of them: a
+  file a model made and nothing wrote to disk was unreachable over HTTP.
+  `files/raw?path=` now falls back to the same store for a path the answer
+  lists as an artifact, and an Agent Client Protocol host's `resource_link`
+  points at the stored file when the working directory has no copy.
+
+- A sub-agent's files reach its parent. `wait_for_agent` and `check_agent`
+  list the child's artifacts under its answer and hand them up as parts of
+  the tool result, stored again under the parent's run and named
+  `<child>/<artifact>`, so a parent whose model takes the type sees the
+  file itself.
+
+- A new lint, `output-stage-cannot-answer`: an output stage whose models
+  cannot call tools (an image model, a 3D generator) can never reach
+  `submit_output`, so unless it declares an artifact and routes the produced
+  part the run ends with nothing after re-submitting the job up to six times.
+  Said at validate time, as an error.
+
 - A transition gate can require a count: `require_region_entries = { region =
   "views", at_least = 4 }` holds the stage and re-runs it with the gate's
   message until the region holds that many entries. It is what lets a stage
@@ -93,6 +114,21 @@ same list.
   stage log and the daemon log now say what was dropped and why, so a stage
   left with nothing to hand back reads as a ceiling rather than a model that
   made nothing.
+
+- `mime-unseen` fired on every stage of a media pipeline, since a drawing
+  stage cannot see the mesh region and the build stage cannot see the images:
+  that is the runtime handing each model its stand-ins, as designed. It is
+  now information when a stage's models see some of what it takes, and a
+  warning only when they see none of it.
+
+- `unbounded-percentage-budget` measured every percentage region against the
+  Meshy provider's 64-million-token "window", which is the ceiling its REST
+  call takes a mesh under, not a context window. A model that does not write
+  text no longer counts toward the widest declared window.
+
+- `lev blobs` and `GET /api/agents/{id}/blobs` reported a stored part's
+  native token estimate (2.4 million for a 9 MB mesh) as its `tokens`; the
+  figure is now what the region charges it, its stand-in.
 
 - The title call no longer tries a model that does not write text. A run whose
   entry stage is a Meshy operation or an image model put that model at the

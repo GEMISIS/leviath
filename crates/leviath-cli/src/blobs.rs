@@ -127,7 +127,7 @@ pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
                                 width: blob.width,
                                 height: blob.height,
                                 duration_ms: blob.duration_ms,
-                                tokens: blob.tokens,
+                                tokens: charged_tokens(blob),
                                 regions: vec![region.name.clone()],
                                 stored: blob_path(run_id, &blob.sha256).is_file(),
                             },
@@ -143,6 +143,19 @@ pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
             .filter_map(|sha| found.remove(&sha))
             .collect(),
     )
+}
+
+/// What a region charges the part: its one-line stand-in, the same figure
+/// the runtime budgets it at. The native estimate the registry made at
+/// ingest is what a model that takes the part natively pays per request,
+/// and showing that here (2.4 million "tokens" for a 9 MB mesh) read as the
+/// part's cost to the run, which it is not. A part stored before stand-ins
+/// were recorded falls back to the native figure.
+fn charged_tokens(blob: &leviath_core::mime::BlobRef) -> usize {
+    match blob.stand_in.is_empty() {
+        true => blob.tokens,
+        false => leviath_core::estimate_tokens(&blob.stand_in),
+    }
 }
 
 /// How much of a hash a caller has to type for it to count as naming a
@@ -237,6 +250,29 @@ mod tests {
         assert_eq!(odd.file_name(&registry), "0123456789ab");
         odd.mime_type = "not a type".to_string();
         assert_eq!(odd.file_name(&registry), "0123456789ab");
+    }
+
+    /// The listing shows what a region charges the part - its stand-in - not
+    /// the native estimate a model that takes it pays; a part stored before
+    /// stand-ins were recorded shows the native figure.
+    #[test]
+    fn a_part_is_listed_at_the_tokens_its_region_charges() {
+        let mut blob = leviath_core::mime::BlobRef {
+            sha256: "a".repeat(64),
+            mime_type: MimeType::parse("model/gltf-binary").unwrap(),
+            size: 9_000_000,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens: 2_400_000,
+            stand_in: "[model/gltf-binary 8.6 MB] scene.glb".to_string(),
+        };
+        assert_eq!(
+            charged_tokens(&blob),
+            leviath_core::estimate_tokens(&blob.stand_in)
+        );
+        blob.stand_in.clear();
+        assert_eq!(charged_tokens(&blob), 2_400_000);
     }
 
     #[test]
