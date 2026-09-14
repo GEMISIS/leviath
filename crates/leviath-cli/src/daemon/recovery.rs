@@ -1792,6 +1792,7 @@ mod tests {
             active: vec![("item-1".to_string(), "worker-fo".to_string())],
             summaries: vec![],
             failures: vec![],
+            parts: vec![],
             paused: false,
         };
         std::fs::write(

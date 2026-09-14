@@ -43,6 +43,11 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
+use leviath_core::mime::{InboundPart, Part};
+use leviath_core::output::Artifact;
+
+use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeRegistryHandle, RunMimeRegistry};
+use crate::context_setup::PartSink;
 
 use crate::components::{
     AgentState, AgentStatus, ContextWindow, InferenceResult, ParentRef, SubAgentChildren,
@@ -118,6 +123,9 @@ pub struct FanOutWaiting {
     active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
     failures: Vec<(String, String)>,
+    /// The files finished workers handed back, re-stored under this parent's
+    /// run so the merge stage's model can take them as parts.
+    parts: Vec<leviath_core::mime::Part>,
     /// Set when the user pauses this parent. Its own status has to stay
     /// `Waiting` - the merge poll reads it - so the pause lives here instead,
     /// and holds back the one thing a parked parent still does on its own:
@@ -146,6 +154,10 @@ pub struct FanOutState {
     pub summaries: Vec<(String, String)>,
     /// Failed worker results as `(item_id, message)`.
     pub failures: Vec<(String, String)>,
+    /// The parts finished workers handed back, already in the parent's store.
+    /// `default` so a state written by an older build still loads, with none.
+    #[serde(default)]
+    pub parts: Vec<leviath_core::mime::Part>,
     /// Whether the fan-out was paused. `default` so a state written by an older
     /// build still loads, as an un-paused one.
     #[serde(default)]
@@ -192,6 +204,7 @@ impl FanOutWaiting {
                 .collect(),
             summaries: self.summaries.clone(),
             failures: self.failures.clone(),
+            parts: self.parts.clone(),
             paused: self.paused,
         }
     }
@@ -228,6 +241,7 @@ pub fn restore_fan_out_waiting(
         active,
         summaries: state.summaries,
         failures,
+        parts: state.parts,
         paused: state.paused,
     });
 }
@@ -629,6 +643,7 @@ pub(crate) fn begin_fan_out(
             active: Vec::new(),
             summaries: Vec::new(),
             failures: Vec::new(),
+            parts: Vec::new(),
             paused: false,
             origin,
         });
@@ -677,7 +692,10 @@ pub(crate) fn fan_out_collect(world: &mut World) {
                     // after that its bibliography is only on disk.
                     merge_worker_sources(world, parent, aw.entity, &aw.item_id);
                     match result {
-                        Ok(content) => w.summaries.push((aw.item_id, content)),
+                        Ok(content) => {
+                            w.parts.extend(hand_up_artifacts(world, parent, &aw));
+                            w.summaries.push((aw.item_id, content));
+                        }
                         Err(message) => w.failures.push((aw.item_id, message)),
                     }
                     world.entity_mut(aw.entity).insert(MergedWorker);
@@ -826,9 +844,84 @@ fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
         .get::<ContextWindow>(parent)
         .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
     let report = build_report(&w.summaries, &w.failures, budget);
-    inject_results(world, parent, &region, &report);
+    inject_results(world, parent, &region, &report, w.parts.clone());
 
     leave_fan_out(world, parent, &w.config);
+}
+
+/// The files a finished worker handed back, re-stored under the parent's run
+/// as parts named `<item>/<artifact>`.
+///
+/// A worker's answer used to travel up as its text alone: a fan-out of image
+/// or mesh workers merged nothing but each worker's description of what it
+/// made. The bytes are read from the worker's own store and stored again
+/// under the parent (the store is content-addressed, so a file two workers
+/// both produced is one file on disk), typed and sized by the parent's
+/// registry like any other inbound part. A file the store no longer holds,
+/// or one over the part ceiling, is left out with a warning rather than
+/// failing the merge.
+fn hand_up_artifacts(world: &World, parent: Entity, worker: &ActiveWorker) -> Vec<Part> {
+    let Some(output) = world.get::<crate::persistence::FinalOutput>(worker.entity) else {
+        return Vec::new();
+    };
+    let artifacts: Vec<&Artifact> = output
+        .0
+        .artifacts
+        .iter()
+        .filter(|a| !a.sha256.is_empty())
+        .collect();
+    if artifacts.is_empty() {
+        return Vec::new();
+    }
+    let Some(store) = world.get_resource::<BlobStoreHandle>() else {
+        return Vec::new();
+    };
+    let Some(registry) = world
+        .get::<RunMimeRegistry>(parent)
+        .map(RunMimeRegistry::registry)
+        .or_else(|| {
+            world
+                .get_resource::<MimeRegistryHandle>()
+                .map(|r| r.0.clone())
+        })
+    else {
+        return Vec::new();
+    };
+    let parent_run = world
+        .get::<crate::persistence::RunMetadata>(parent)
+        .map(|m| m.run_id.clone())
+        .unwrap_or_default();
+    let sink = PartSink {
+        store: store.0.as_ref(),
+        registry: &registry,
+        run_id: &parent_run,
+        max_part_bytes: world
+            .get_resource::<MimeLimits>()
+            .map_or(MimeLimits::default().max_part_bytes, |l| l.max_part_bytes),
+    };
+    artifacts
+        .into_iter()
+        .filter_map(|artifact| {
+            let name = format!("{}/{}", worker.item_id, artifact.name);
+            let stored = store
+                .0
+                .read(&worker.run_id, &artifact.sha256)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    sink.store_part(
+                        &InboundPart::from_bytes(name.clone(), bytes.to_vec())
+                            .typed(artifact.mime_type.clone()),
+                    )
+                });
+            match stored {
+                Ok(part) => Some(part),
+                Err(why) => {
+                    tracing::warn!(item = %worker.item_id, part = %name, "[mime] worker artifact not handed up: {why}");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// A `fan_out` tool call: the report is that call's result, and the agent picks
@@ -2884,7 +2977,7 @@ mod tests {
         let summaries: Vec<(String, String)> =
             (0..100).map(|i| (format!("w{i}"), huge.clone())).collect();
         let report = build_report(&summaries, &[], Some(10_000));
-        inject_results(&mut world, parent, "conversation", &report);
+        inject_results(&mut world, parent, "conversation", &report, Vec::new());
 
         let region = world
             .get::<ContextWindow>(parent)
@@ -2938,7 +3031,7 @@ mod tests {
             (0..8).map(|i| (format!("w{i}"), long.clone())).collect();
         let report = build_report(&summaries, &[], Some(REGION_TOKENS));
         assert!(report.len() > REGION_TOKENS * 4 / 5, "the report is big");
-        inject_results(&mut world, parent, "worker_results", &report);
+        inject_results(&mut world, parent, "worker_results", &report, Vec::new());
 
         let region = world
             .get::<ContextWindow>(parent)
@@ -2988,7 +3081,7 @@ mod tests {
         let summaries: Vec<(String, String)> =
             (0..100).map(|i| (format!("w{i}"), long.clone())).collect();
         let report = build_report(&summaries, &[], Some(REGION_TOKENS));
-        inject_results(&mut world, parent, "worker_results", &report);
+        inject_results(&mut world, parent, "worker_results", &report, Vec::new());
 
         let landed = world
             .get::<ContextWindow>(parent)
@@ -3041,7 +3134,13 @@ mod tests {
             20_000,
         ));
         let parent = world.spawn((parent_state(), window)).id();
-        inject_results(&mut world, parent, "worker_results", "the report");
+        inject_results(
+            &mut world,
+            parent,
+            "worker_results",
+            "the report",
+            Vec::new(),
+        );
 
         let w = world.get::<ContextWindow>(parent).expect("window");
         assert_eq!(
@@ -3072,7 +3171,7 @@ mod tests {
             10_000,
         ));
         let parent = world.spawn((parent_state(), window)).id();
-        inject_results(&mut world, parent, "typo_region", "the report");
+        inject_results(&mut world, parent, "typo_region", "the report", Vec::new());
 
         assert_eq!(
             world
@@ -3103,7 +3202,7 @@ mod tests {
             &[],
             Some(10_000),
         );
-        inject_results(&mut world, parent, "conversation", &report);
+        inject_results(&mut world, parent, "conversation", &report, Vec::new());
         let landed = world
             .get::<ContextWindow>(parent)
             .expect("window")
@@ -3268,7 +3367,7 @@ mod tests {
     fn inject_conversation_is_a_noop_without_a_window() {
         let mut world = World::new();
         let has_window = world.spawn(window()).id();
-        inject_results(&mut world, has_window, "conversation", "hello");
+        inject_results(&mut world, has_window, "conversation", "hello", Vec::new());
         assert!(
             world
                 .get::<ContextWindow>(has_window)
@@ -3280,7 +3379,173 @@ mod tests {
         );
         // Entity without a ContextWindow: silently ignored.
         let no_window = world.spawn(parent_state()).id();
-        inject_results(&mut world, no_window, "conversation", "hello");
+        inject_results(&mut world, no_window, "conversation", "hello", Vec::new());
+    }
+
+    /// The run metadata a worker or parent carries, enough for the store to
+    /// key its files by.
+    fn run_meta(run_id: &str) -> crate::persistence::RunMetadata {
+        crate::persistence::RunMetadata {
+            run_id: run_id.to_string(),
+            agent_name: "a".to_string(),
+            agent_path: String::new(),
+            task: String::new(),
+            model: None,
+            workdir: String::new(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            callback_secret: None,
+            title: None,
+            title_error: None,
+            unattended: false,
+            yolo_profile: None,
+            read_paths: None,
+            output_request: None,
+            model_override: None,
+        }
+    }
+
+    /// A worker's files travel up with its text: re-stored under the parent,
+    /// named after the worker, typed as the worker declared them. A file the
+    /// store lost, one never stored (no hash) and one over the ceiling are
+    /// left out; a worker with no output, or a world with no store or
+    /// registry, hands up nothing.
+    #[test]
+    fn a_finished_workers_artifacts_are_handed_up_as_parts() {
+        let mut world = World::new();
+        let store: Arc<dyn leviath_core::mime::BlobStore> =
+            Arc::new(leviath_core::mime::MemoryBlobStore::new());
+        let registry = leviath_core::mime::MimeRegistry::builtin();
+        let png = leviath_core::mime::MimeType::parse("image/png").unwrap();
+        let hero = store
+            .put(
+                "run-w",
+                &leviath_core::mime::Blob {
+                    mime_type: png.clone(),
+                    bytes: b"\x89PNG fake".to_vec(),
+                    name: Some("hero.png".to_string()),
+                },
+                &registry,
+            )
+            .unwrap();
+        world.insert_resource(BlobStoreHandle(store.clone()));
+        world.insert_resource(MimeRegistryHandle(Arc::new(registry)));
+        let parent = world.spawn((parent_state(), run_meta("run-p"))).id();
+        let artifact = |name: &str, sha: String| Artifact {
+            name: name.to_string(),
+            path: format!("{name}.png"),
+            mime_type: png.clone(),
+            size: 9,
+            sha256: sha,
+        };
+        let worker = world
+            .spawn((
+                parent_state(),
+                run_meta("run-w"),
+                crate::persistence::FinalOutput(
+                    leviath_core::output::FinalOutput::new("drawn", None, "s".to_string(), 0)
+                        .with_artifacts(vec![
+                            artifact("hero", hero.sha256.clone()),
+                            artifact("lost", "00".repeat(32)),
+                            Artifact::from_path("untracked.txt"),
+                        ]),
+                ),
+            ))
+            .id();
+        let aw = ActiveWorker {
+            item_id: "w1".to_string(),
+            entity: worker,
+            run_id: "run-w".to_string(),
+        };
+
+        let parts = hand_up_artifacts(&world, parent, &aw);
+        assert_eq!(
+            parts.len(),
+            1,
+            "the lost and the unstored files are left out"
+        );
+        assert_eq!(parts[0].name.as_deref(), Some("w1/hero"));
+        let blob = parts[0].blob().expect("a stored part");
+        assert_eq!(blob.sha256, hero.sha256);
+        assert_eq!(blob.mime_type, png);
+        assert!(
+            store.read("run-p", &hero.sha256).is_ok(),
+            "the bytes now sit under the parent's run"
+        );
+
+        // Over the part ceiling: skipped with a warning, not an error.
+        world.insert_resource(MimeLimits {
+            max_part_bytes: 1,
+            ..MimeLimits::default()
+        });
+        assert!(hand_up_artifacts(&world, parent, &aw).is_empty());
+
+        // Only unstored files: nothing to hand up before any store is asked.
+        let bare = world
+            .spawn((
+                parent_state(),
+                crate::persistence::FinalOutput(
+                    leviath_core::output::FinalOutput::new("said", None, "s".to_string(), 0)
+                        .with_artifacts(vec![Artifact::from_path("untracked.txt")]),
+                ),
+            ))
+            .id();
+        let bare = ActiveWorker {
+            item_id: "w2".to_string(),
+            entity: bare,
+            run_id: "run-b".to_string(),
+        };
+        assert!(hand_up_artifacts(&world, parent, &bare).is_empty());
+
+        // No output at all.
+        let silent = world.spawn(parent_state()).id();
+        let silent = ActiveWorker {
+            item_id: "w3".to_string(),
+            entity: silent,
+            run_id: "run-s".to_string(),
+        };
+        assert!(hand_up_artifacts(&world, parent, &silent).is_empty());
+
+        // A world with no registry, then none with a store either.
+        world.remove_resource::<MimeLimits>();
+        world.remove_resource::<MimeRegistryHandle>();
+        assert!(hand_up_artifacts(&world, parent, &aw).is_empty());
+        world.remove_resource::<BlobStoreHandle>();
+        assert!(hand_up_artifacts(&world, parent, &aw).is_empty());
+    }
+
+    /// The parts ride on the report's own entry, charged their stand-ins.
+    #[test]
+    fn injected_results_carry_the_workers_parts() {
+        let mut world = World::new();
+        let parent = world.spawn((parent_state(), window())).id();
+        let part = Part::stored(leviath_core::mime::BlobRef {
+            sha256: "ab".repeat(32),
+            mime_type: leviath_core::mime::MimeType::parse("image/png").unwrap(),
+            size: 9,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens: 400,
+            stand_in: "[image/png 9 B] w1/hero".to_string(),
+        })
+        .named("w1/hero");
+        inject_results(&mut world, parent, "conversation", "the report", vec![part]);
+        let window = world.get::<ContextWindow>(parent).unwrap();
+        let region = window.get_region("conversation").unwrap();
+        assert_eq!(region.content.len(), 1);
+        let entry = &region.content[0];
+        assert_eq!(entry.content.parts()[0].inline_text(), Some("the report"));
+        assert!(entry.content.has_stored());
+        assert_eq!(entry.content.parts()[1].name.as_deref(), Some("w1/hero"));
+        assert!(
+            entry.tokens < 400,
+            "charged the stand-in, not the native estimate: {}",
+            entry.tokens
+        );
     }
 
     #[test]

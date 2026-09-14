@@ -2137,6 +2137,59 @@ fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
     assert_eq!(led.0[0].ended_at, Some(50));
 }
 
+/// A produced part the run cannot keep leaves its note in the stage log, after
+/// the token line, so the log says why a stage has nothing to hand back.
+#[test]
+fn collect_inference_logs_a_produced_part_the_run_dropped() {
+    let (mut world, tx) = world_with_results();
+    let mut state = agent_state();
+    state.current_stage = "impl".to_string();
+    let e = world
+        .spawn((
+            state,
+            AwaitingInference,
+            StageCursor { index: 1 },
+            ledger2(),
+            StageIoBuffer::default(),
+        ))
+        .id();
+    let mut response = resp("");
+    response.tokens_used.prompt_tokens = 5;
+    response.tokens_used.completion_tokens = 3;
+    // This world has no blob store, so the part cannot be kept.
+    response.parts = vec![leviath_core::mime::Blob {
+        mime_type: leviath_core::mime::MimeType::parse("image/png").unwrap(),
+        bytes: vec![0; 12],
+        name: Some("hero.png".to_string()),
+    }];
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let buf = world.get::<StageIoBuffer>(e).unwrap();
+    assert!(
+        buf.output.is_empty(),
+        "an empty reply is not buffered as output"
+    );
+    assert_eq!(
+        buf.logs,
+        vec![
+            (1, "[Tokens: 5 in, 3 out]".to_string()),
+            (
+                1,
+                "[mime] model output dropped: image/png of 12 B, this run has no blob store"
+                    .to_string()
+            ),
+        ]
+    );
+}
+
 #[test]
 fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     let (mut world, tx) = world_with_results();
@@ -3193,6 +3246,7 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
         e,
         crate::fanout::FanOutState {
             origin: crate::fanout::FanOutOrigin::Stage,
+            parts: Vec::new(),
             config: FanOutConfig {
                 worker_agent: None,
                 worker_stage: Some("w".to_string()),
@@ -19329,7 +19383,7 @@ mod typed_tool_results {
 mod model_parts {
     use super::*;
     use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeParams, MimeRegistryHandle};
-    use crate::pipeline::response::{reply_content, store_model_parts};
+    use crate::pipeline::response::{dropped_part_notes, reply_content, store_model_parts};
     use crate::pipeline::tool_results::{Reply, apply_tool_results_with_parts};
     use leviath_core::mime::{Blob, MemoryBlobStore, MimeType, Part};
 
@@ -19419,7 +19473,15 @@ mod model_parts {
         assert_eq!(parts.len(), 1);
         assert_eq!(
             parts[0].inline_text().unwrap(),
-            "[image/png of 12 B from the model dropped: this run has no blob store]"
+            "[model output dropped: image/png of 12 B, this run has no blob store]"
+        );
+        // The note reaches the stage log, in the log's own voice; a kept part
+        // and ordinary text leave nothing there.
+        let mut parts = parts;
+        parts.push(leviath_core::mime::Part::text("here is the render"));
+        assert_eq!(
+            dropped_part_notes(&parts),
+            vec!["[mime] model output dropped: image/png of 12 B, this run has no blob store"]
         );
     }
 

@@ -25,8 +25,8 @@ use leviath_core::mime::{Blob, MimeType};
 use crate::capabilities::{Match, ModelCapabilities, ModelCapabilityOverride, ModelMime, Row};
 use crate::pricing::TokenUsage;
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, Provider, ProviderError, RateLimitConfig,
-    Result, StreamChunk, UnavailableReason, apply_request_timeout,
+    FinishReason, InferenceRequest, InferenceResponse, ModelInfo, Provider, ProviderError,
+    RateLimitConfig, Result, StreamChunk, UnavailableReason, apply_request_timeout,
 };
 use crate::rate_limit::RateLimiter;
 
@@ -452,6 +452,20 @@ impl Provider for MeshyProvider {
         leviath_core::estimate_tokens(text)
     }
 
+    /// The six operations, straight from the compiled catalogue: Meshy has no
+    /// listing endpoint, and without this arm a live `/api/models` or
+    /// `lev models list` showed a configured Meshy key serving nothing.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(CATALOG
+            .iter()
+            .map(|&(id, display)| {
+                ModelInfo::new(id, self.name(), self.capabilities(id))
+                    .named(Some(display.to_string()))
+                    .with_mime(self.mime(id))
+            })
+            .collect())
+    }
+
     fn max_context_tokens(&self, model: &str) -> usize {
         self.capabilities(model).max_context_tokens
     }
@@ -566,6 +580,23 @@ mod tests {
         assert!(
             crate::mime_tables::builtin_mime("meshy", "image-to-3d")
                 .accepts(&MimeType::parse("image/png").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_listing_names_every_operation_with_its_mime() {
+        let p = MeshyProvider::new(client(), "k".into());
+        let listed = p.list_models().await.unwrap();
+        let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+        let expected: Vec<&str> = CATALOG.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, expected);
+        let rig = listed.iter().find(|m| m.id == "rig").unwrap();
+        assert_eq!(rig.provider, "meshy");
+        assert_eq!(rig.display_name.as_deref(), Some("Meshy Rig"));
+        assert!(!rig.capabilities.supports_tools);
+        assert!(
+            rig.mime
+                .produces(&MimeType::parse("model/gltf-binary").unwrap())
         );
     }
 

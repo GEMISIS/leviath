@@ -296,6 +296,12 @@ Name a `results_region` when the results are bulky. The default is `conversation
 carrying the message history, so a large report competes with the turns around it. A region of its
 own has a budget of its own, and that budget is what the shares divide.
 
+A worker that hands back files (its `artifacts`) hands them up too. Each one is stored again under
+the parent's run and rides on the report's entry as a part named `<item>/<artifact>`, so a merge
+stage whose model takes images or meshes sees the files themselves, not each worker's description
+of them; a text-only model sees the usual stand-in line. A file the store no longer holds, or one
+over `[mime] max_part_bytes`, is left out with a warning in the parent's log.
+
 `max_items` caps how many work items the split may produce. This is not `max_workers`, which caps how
 many run at the same time:
 

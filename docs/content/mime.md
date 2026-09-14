@@ -132,7 +132,9 @@ reply's text on the assistant turn, named as the provider named it (`image-1.png
 not), so the next request, `lev blobs`, the dashboard's Context view and the API all see it,
 and a later `context_export` or `submit_output` can hand it on as an artifact. A part the run
 cannot keep (over `[mime] max_part_bytes`, or a world with no store) becomes a line in the
-reply saying what was dropped. A plain URL in a reply is never fetched.
+reply saying what was dropped, with the same line in the stage's log and a warning in the
+daemon's, so a stage left with nothing to hand back reads as a ceiling, not a model that made
+nothing. A plain URL in a reply is never fetched.
 
 Most models that draw cannot call tools (`lev models show` says `supports_tools = false`), and
 their providers refuse a request that carries a function call anywhere in it. A stage on such a

@@ -130,7 +130,10 @@ disk.
 
 `AgentWorld::result(&run_id)` asks for the same thing at any point while the run is loaded. Its
 `artifacts` are the files the run produced, each with a path relative to the workdir, a mime
-type, a size and the hash the run's blob store holds it under.
+type, a size and the hash the run's blob store holds it under. `artifact_bytes(&run_id, &artifact)`
+reads one of them back from that store, so an embedder never needs to know where the world keeps
+its files; it answers `None` for a file the store does not hold (one too large to store, or an
+artifact recorded by path alone).
 
 Files go in the same way. `SpawnSpec::attach` puts an `InboundPart` on the spawn, typed by the
 run's registry unless the part declares a type and landing in the task region unless it names

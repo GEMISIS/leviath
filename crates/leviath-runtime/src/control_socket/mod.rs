@@ -1003,6 +1003,9 @@ mod tests {
                     ControlOp::Result { reply, .. } => {
                         let _ = reply.send(None);
                     }
+                    ControlOp::Blob { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
                     ControlOp::Pause { reply, .. }
                     | ControlOp::Resume { reply, .. }
                     | ControlOp::Cancel { reply, .. } => {
@@ -1281,6 +1284,23 @@ mod tests {
             })
             .expect("the fake host is listening");
 
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), answer)
+                .await
+                .expect("an unanswered op hangs its caller")
+                .expect("the reply channel stays open"),
+            None
+        );
+
+        // The other embed-only op, the bytes behind an artifact.
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        op_tx
+            .send(ControlOp::Blob {
+                run_id: "run-a".to_string(),
+                sha256: "ab".repeat(32),
+                reply,
+            })
+            .expect("the fake host is listening");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(5), answer)
                 .await
