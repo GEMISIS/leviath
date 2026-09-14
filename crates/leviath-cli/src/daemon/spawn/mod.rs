@@ -1459,6 +1459,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            worker_stage: None,
             output: None,
             parts: Vec::new(),
         }
@@ -4023,6 +4024,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            worker_stage: None,
             output: None,
             parts: Vec::new(),
         }
@@ -4113,6 +4115,27 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
         )
         .unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
+    }
+
+    /// A fan-out worker of the same blueprint is not asked for the caller's
+    /// required inputs: its work item is its input, and the parent already met
+    /// the caller's contract. The region is left empty rather than refused.
+    #[test]
+    fn resolve_seeds_a_worker_is_not_held_to_the_callers_required_inputs() {
+        let bp =
+            bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
+        let mut args = args_with("Work item id: a\nContext: {}", HashMap::new(), "/tmp");
+        args.worker_stage = Some("review_one".to_string());
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert!(!seeds.contains_key("spec"));
     }
 
     #[test]

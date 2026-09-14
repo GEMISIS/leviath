@@ -175,7 +175,12 @@ pub(super) fn resolve_seeds(
                     .iter()
                     .any(|p| p.region.as_deref() == Some(name.as_str()));
                 if value.trim().is_empty() && !has_part {
-                    if region.required {
+                    // A worker spawned by its own blueprint's fan-out carries
+                    // its input in the task; the region a caller must fill
+                    // (`--diff`) was filled by the caller of the parent. The
+                    // reviewer's workers were refused here for as long as
+                    // they were spawned at all.
+                    if region.required && args.worker_stage.is_none() {
                         return Err(region.required_message.clone().unwrap_or_else(|| {
                             format!(
                                 "required region '{}' was not provided; supply it via \

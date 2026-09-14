@@ -207,6 +207,12 @@ Without it the model sees a prompt it has already answered, over a context holdi
 answered with, and reasonably reports that the work is done. That is not a hypothetical: it is what
 ended a `deep-researcher` run whose four workers had already finished.
 
+A `worker_stage` worker is spawned with its work item as its task, the way `lev run --task` hands
+one in, so the blueprint needs a region seeded from the task to receive it (`lev validate` reports
+`fanout-worker-task-unheld` when there is none). The caller inputs the blueprint requires of a run
+started from the outside, a `--diff` say, are not demanded of the worker: the parent met that
+contract, and the worker's share of the diff travels inside its work item.
+
 ### A worker that is a whole other agent
 
 `worker_stage` keeps the work inside this blueprint. `worker_agent` hands each item to a separate

@@ -79,6 +79,7 @@ pub(super) fn spawn_args(
         allow: args.allow.clone(),
         max_depth: args.max_depth,
         parent_run_id: None,
+        worker_stage: None,
         // A host that wants a particular shape says so when it starts the
         // server; ACP itself carries no field for it.
         output: match (&args.output_format, &args.output_instructions) {

@@ -296,57 +296,6 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
     findings
 }
 
-/// A `fail_all` fan-out stage with nowhere to go when a worker fails.
-///
-/// `on_worker_failure = "fail_all"` means one failed worker ends the stage. That
-/// is a deliberate choice - a merge that cannot be trusted with a partial set
-/// should not run on one - but it only reads as that choice when the blueprint
-/// says where to go instead. Without an edge the run simply stops, and a single
-/// flaky worker takes the whole thing down.
-///
-/// The default, `continue`, needs none of this: it merges what succeeded and
-/// reports the rest, so there is nothing to escape from.
-///
-/// A warning rather than an error, because a run that ends loudly on a failed
-/// worker is a defensible design, just rarely the intended one.
-pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding> {
-    let StageMode::FanOut { config } = &stage.mode else {
-        return Vec::new();
-    };
-    if config.on_worker_failure != leviath_core::blueprint::WorkerFailurePolicy::FailAll {
-        return Vec::new();
-    }
-    let escapes = stage
-        .transitions
-        .iter()
-        .flat_map(|t| t.values())
-        .any(|edge| {
-            matches!(
-                edge.condition,
-                leviath_core::blueprint::TransitionCondition::Error
-                    | leviath_core::blueprint::TransitionCondition::DeadEnd
-            )
-        });
-    if escapes {
-        return Vec::new();
-    }
-    vec![
-        LintFinding::new(
-            LintSeverity::Warning,
-            "fanout-no-escape",
-            "sets on_worker_failure = \"fail_all\" but declares no 'error' or 'dead_end' \
-             transition, so one failed worker ends the run with nowhere to go"
-                .to_string(),
-        )
-        .in_stage(&stage.name)
-        .with_fix(
-            "add a transition with condition = \"error\" to a recovery stage, or use the \
-             default on_worker_failure = \"continue\""
-                .to_string(),
-        ),
-    ]
-}
-
 /// A stage's own output declarations: a demand it cannot meet, a shape nothing
 /// will read, or a reporting stage that can also change the workspace.
 pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {

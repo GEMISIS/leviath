@@ -125,7 +125,9 @@ refused before the daemon is dialled.
 
 Run `lev run <agent>` with no `-t` and Leviath opens your editor on a short commented template.
 Type the task, save, and the run starts. Lines beginning with `#` are stripped, so none of the
-template reaches the agent. Save an empty file and the run is cancelled.
+template reaches the agent. Save an empty file and the run is cancelled. No editor opens when the
+command line already carries the run's input, a named region (`--diff @x.patch`) or an attachment,
+and the blueprint's task region is not `required`: that run starts with an empty task.
 
 The editor is `$VISUAL`, then `$EDITOR`, then the first of `vim`, `nano`, `vi` that is installed.
 On Windows it is `edit`, then `notepad`, then `vim`. `$VISUAL` and `$EDITOR` are split on
@@ -254,6 +256,7 @@ that was looked for.
 | error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted, by name or through a group. It reads as a grant and is not one. |
 | error | `required-tool-not-granted` | A `required_tools` entry that no name and no group in `available_tools` reaches, so the model never sees it. Only checked when a group is in play; without one the load itself refuses the manifest. |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
+| error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage of this blueprint, which declares no region seeded from the task. Each worker is spawned with its work item as its task, so every one is refused and the merge stage works alone. Add a region with `seed = "task"` |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
