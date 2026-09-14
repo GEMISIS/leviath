@@ -7,7 +7,7 @@
 # `openrouter` or `litellm` when only one listed it, and `manual` for a row a
 # person wrote, which the refresh never overwrites.
 
-read_on = "2026-09-07"
+read_on = "2026-09-14"
 
 [[rate]]
 provider = "anthropic"
@@ -588,10 +588,10 @@ source = "openrouter"
 [[rate]]
 provider = "google"
 prefix = "gemma-4-26b-a4b-it"
-input = 0.07
-cache_read = 0.07
-cache_write = 0.07
-output = 0.34
+input = 0.09
+cache_read = 0.05
+cache_write = 0.09
+output = 0.3
 source = "openrouter"
 
 [[rate]]
@@ -619,6 +619,15 @@ input = 5.0
 cache_read = 5.0
 cache_write = 5.0
 output = 15.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "computer-use-preview"
+input = 3.0
+cache_read = 3.0
+cache_write = 3.0
+output = 12.0
 source = "litellm"
 
 [[rate]]
