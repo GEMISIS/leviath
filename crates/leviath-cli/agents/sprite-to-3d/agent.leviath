@@ -485,22 +485,31 @@ max_revisits = 2
 
 [stages.build-model.model]
 allow_user_default = false
-# A Meshy job runs for minutes; give the provider room to poll to completion.
-request_timeout_secs = 900
+# A Meshy job runs for minutes, and an ultra-mode one for longer; give the
+# provider room to poll to completion.
+request_timeout_secs = 1800
 
 [[stages.build-model.model.models]]
 provider = "meshy"
 model = "multi-image-to-3d"
 
-# The static build hints. Remesh to a game-ready, cleanly-riggable polycount;
-# quad topology and PBR for a stylized asset. The dynamic texture prompt rides in
-# from the build_spec region's text - the provider reads a visible text region as
-# its texture prompt - so the palette and materials the reference stages settled
-# on steer the texturing. Only fields Meshy documents for this endpoint are sent.
+# The static build hints, tuned for a hero character. Ultra mode is Meshy's
+# high-fidelity geometry pass, and the biggest lever against torn thin parts
+# (a ponytail, ear rims, fingers). Triangle topology at ~60k triangles keeps
+# those thin sheets watertight where the quad remesher at 12k left holes in
+# them; every engine triangulates anyway, and Meshy's rig is happy with
+# triangles. An explicit A-pose keeps the limbs separated for rigging. The
+# dynamic texture prompt rides in from the build_spec region's text - the
+# provider reads a visible text region as its texture prompt - so the palette
+# and materials the reference stages settled on steer the texturing. Only
+# fields Meshy documents for this endpoint are sent.
 [stages.build-model.model.parameters]
+ai_model = "meshy-7"
+ultra_mode = true
 should_remesh = true
-target_polycount = 12000
-topology = "quad"
+topology = "triangle"
+target_polycount = 60000
+pose_mode = "a-pose"
 enable_pbr = true
 texture_resolution = "2k"
 
