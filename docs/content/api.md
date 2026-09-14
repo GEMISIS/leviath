@@ -1582,7 +1582,8 @@ PUT /api/mime
 
 Every field but `mime_type` is optional, and only the fields sent are changed, so a later `PUT`
 that carries just `{"mime_type": "...", "extensions": [...]}` adds an extension and leaves the
-rest. `tokens` is one of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }` or `{ fixed }`.
+rest. `tokens` is one of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }`, `{ per_page }` or
+`{ fixed }`.
 The answer is `{"mime_type", "created"}`, where `created` is false when the row was already there.
 The row is validated the way `lev mime add` validates it before anything is written: a type that
 is not `type/subtype`, a token rule that names none or more than one rate, a `magic` that is not

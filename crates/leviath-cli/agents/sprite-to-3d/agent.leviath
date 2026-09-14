@@ -1,6 +1,6 @@
 [agent]
 name = "sprite-to-3d"
-version = "0.3.1"
+version = "0.3.2"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 entry_stage = "prep-references"
 
@@ -14,6 +14,14 @@ entry_stage = "prep-references"
 [context.regions.task]
 kind = "pinned"
 budget = "5%"
+
+# Where a stage's provider failure is written when its error edge is taken,
+# so the stage that catches it can say what went wrong. The rig is the one
+# that fails: Meshy refuses a mesh it finds no humanoid pose in, and the run
+# then finalizes the unrigged build with the refusal quoted here.
+[context.regions.error_report]
+kind = "pinned"
+budget = "2%"
 
 [context.regions.conversation]
 kind = "sliding_window"
@@ -620,6 +628,19 @@ hide = ["task", "source", "marketing", "references", "model_preview", "review", 
 hint = "Once the rigged mesh is in the model region."
 transform = "direct"
 
+# Meshy's rigger refuses a mesh it cannot find a humanoid pose in (a 422,
+# "Pose estimation failed"): a waving arm, a prop merged into the body, a
+# non-humanoid character, a single-view build. The built mesh is still a good
+# model, so hand it back unrigged with the refusal on record, rather than
+# ending the run with nothing after the build already succeeded. Verification
+# is skipped on this path: it judges the build against the references, which
+# the rig failing says nothing about, and the error edge cannot share the
+# verify-model target with the edge above.
+[stages.rig-model.transitions.finalize]
+condition = "error"
+hint = "Meshy refused to rig the mesh: finalize the unrigged model and say why."
+transform = "direct"
+
 # ── 7. Check the model against the references, and rebuild if it is off ───────
 
 [stages.verify-model]
@@ -712,7 +733,11 @@ submit_output with the required `model` artifact whose `path` is that part name:
 submit_output resolves a produced part by its name, so there is no file on disk
 to find. In the answer text, summarize briefly what the model is and note any
 caveats the verifier or the missing region raised, so the operator knows what
-they are getting. The run ends when you submit.
+they are getting. If the error_report region holds a rig failure, the model is
+the unrigged build: submit `model.glb`, say plainly that Meshy refused to rig
+it, quote the reason, and say what usually fixes it (an upright A-pose
+character with limbs apart and no props merged into the body, built from
+several views). The run ends when you submit.
 """
 
 [stages.finalize.model]

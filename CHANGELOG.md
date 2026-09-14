@@ -156,6 +156,20 @@ same list.
   of ten thousand elements applies to blobs too, so the bytes `http_get_bytes`
   fetched never reached the script. The ceiling is now the same 32 MiB the
   host caps a fetched body at.
+- A PDF was billed half a token per byte, so a 2 MB brochure counted as over
+  a million tokens and a stage that handed it to a model that reads PDFs died
+  on the context limit. A document is now billed by its pages, with the new
+  `per_page` token rule (`{ per_page = 2000 }` for `application/pdf`; also
+  `lev mime add --tokens per_page=N` and `PUT /api/mime`): the page count is
+  read off the file, a stand-in says `12 pages`, and a file whose pages cannot
+  be counted is taken as a page per 64 KiB.
+- A sprite-to-3d run whose mesh Meshy refused to rig ("Pose estimation
+  failed": a waving arm, a prop merged into the body, a non-humanoid shape)
+  ended with an error and no output after the build had succeeded. The
+  bundled agent (0.3.2) now finalizes the unrigged model with the refusal on
+  record, and the Meshy provider's error says what the refusal means and what
+  usually fixes it (an upright A-pose character with limbs apart, built from
+  several views) instead of reading as a malformed request.
 - A run title that came back as a markdown heading kept its `#`; the marker is
   stripped like the quotes around a title are.
 - `lev run --help` said the bundled coder's plan approval holds an unattended

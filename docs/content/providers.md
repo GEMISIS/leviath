@@ -490,7 +490,7 @@ a typed part, which is the shape every provider speaks. Set `MESHY_API_KEY` (or
 | `image-to-3d` | one image | a textured `model/gltf-binary` |
 | `multi-image-to-3d` | up to four views of one subject | a textured `model/gltf-binary`, with preview renders |
 | `retexture` | a `model/gltf-binary` mesh plus a text style | the re-textured mesh |
-| `rig` | a `model/gltf-binary` mesh | the rigged, animation-ready mesh |
+| `rig` | a `model/gltf-binary` mesh | the rigged, animation-ready mesh. Meshy refuses a mesh it finds no humanoid pose in (a waving arm, a prop merged into the body, a non-humanoid shape, a single-view build); the error says so, and the bundled sprite-to-3d hands back the unrigged model when that happens |
 | `animate` | a `model/gltf-binary` mesh plus an action name | the animated mesh (rigs, then applies the action) |
 
 A stage's texture prompt, text prompt, or animation action comes from the text

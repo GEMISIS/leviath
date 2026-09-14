@@ -175,7 +175,9 @@ impl MeshyProvider {
             .send()
             .await
             .map_err(|e| ProviderError::transport(doing, &e))?;
-        crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await
+        crate::provider::check_http_response(response, self.rate_limiter.as_ref())
+            .await
+            .map_err(explain_rig_refusal)
     }
 
     /// [`Self::send`], then the JSON body: capped, with a malformed body the
@@ -484,6 +486,26 @@ impl Provider for MeshyProvider {
     }
 }
 
+/// Meshy refuses to rig a mesh it finds no body in with a 422 whose message
+/// says "Pose estimation failed, please provide a valid model URL" - a remark
+/// about the mesh, worded as if the request were malformed. Say what it
+/// means and what fixes it, and keep Meshy's own words at the end.
+fn explain_rig_refusal(err: ProviderError) -> ProviderError {
+    match err {
+        ProviderError::ApiError(msg) if msg.contains("Pose estimation failed") => {
+            ProviderError::ApiError(format!(
+                "Meshy could not rig this mesh: its pose estimation found no humanoid body \
+                 to fit a skeleton to. Rigging wants one upright, roughly humanoid character \
+                 with its limbs apart (an A- or T-pose) and no props merged into the body, \
+                 built from several views; a single-view build, a waving or crossed arm, or \
+                 a non-humanoid shape is refused here. Rebuild with more views and \
+                 pose_mode = \"a-pose\", or use the unrigged mesh as it is ({msg})"
+            ))
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +517,28 @@ mod tests {
 
     fn client() -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    /// The rigger's refusal is reworded to say what it means; every other
+    /// error, and every other message, passes through untouched.
+    #[test]
+    fn a_pose_estimation_refusal_is_explained() {
+        let raw = "[bad-request] HTTP 422 Unprocessable Entity: {\"message\":\"Pose estimation \
+                   failed, please provide a valid model URL\"}";
+        let explained = explain_rig_refusal(ProviderError::ApiError(raw.to_string())).to_string();
+        assert!(explained.contains("could not rig this mesh"), "{explained}");
+        assert!(explained.contains("a-pose"), "{explained}");
+        assert!(explained.contains(raw), "{explained}");
+
+        let other = explain_rig_refusal(ProviderError::ApiError("HTTP 500: boom".into()));
+        assert_eq!(other.to_string(), "API error: HTTP 500: boom");
+        let failed = explain_rig_refusal(ProviderError::RequestFailed(
+            "Pose estimation failed".into(),
+        ));
+        assert!(
+            matches!(failed, ProviderError::RequestFailed(ref m) if m == "Pose estimation failed"),
+            "{failed}"
+        );
     }
 
     fn provider_at(url: &str) -> MeshyProvider {

@@ -2084,7 +2084,7 @@
                   },
                   "tokens": {
                     "type": "object",
-                    "description": "One of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }` or `{ fixed }`.",
+                    "description": "One of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }`, `{ per_page }` or `{ fixed }`.",
                     "properties": {
                       "per_byte": {
                         "type": "number"
@@ -2093,6 +2093,9 @@
                         "type": "integer"
                       },
                       "per_second": {
+                        "type": "integer"
+                      },
+                      "per_page": {
                         "type": "integer"
                       },
                       "fixed": {

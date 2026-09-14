@@ -139,7 +139,9 @@ pub(super) fn estimate_file_tokens(path: &Path, registry: &MimeRegistry) -> usiz
     let info = registry.info(&mime_type);
     let dims = leviath_core::mime::probe::dimensions(&mime_type, &head);
     let duration = leviath_core::mime::probe::duration_ms(&mime_type, &head);
-    info.tokens.estimate(size, dims, duration)
+    // A document's pages are spread through the whole file, not its head, so
+    // the page rule falls back to its size guess here; that errs high too.
+    info.tokens.estimate(size, dims, duration, None)
 }
 
 /// The first `cap` bytes of `path`, enough for the header probes; empty if it
