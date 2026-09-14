@@ -11211,6 +11211,32 @@ fn a_zero_baseline_cannot_run_away() {
     assert!(!rec.runaway_warned);
 }
 
+/// A stage named with a hyphen is a stage the router could never pick: the
+/// reply was split on every non-word character, so `generate-more` became
+/// `generate` and `more`, matched nothing, and the run took the first edge
+/// declared - which in the bundled sprite agent was the build. Two runs built
+/// from too few views on exactly that path.
+#[test]
+fn a_hyphenated_target_is_matched_whole() {
+    use leviath_core::blueprint::TransitionCondition;
+    let edges = vec![
+        edge("build-model", TransitionCondition::LlmChoice).1,
+        edge("generate-more", TransitionCondition::LlmChoice).1,
+    ];
+    assert_eq!(
+        match_transition_choice("generate-more", &edges, false).as_deref(),
+        Some("generate-more")
+    );
+    assert_eq!(
+        match_transition_choice("Route to generate-more.", &edges, false).as_deref(),
+        Some("generate-more")
+    );
+    assert_eq!(
+        match_transition_choice("GENERATE-MORE", &edges, false).as_deref(),
+        Some("generate-more")
+    );
+}
+
 // ── transition gates: require_region_entries ─────────
 
 /// A window whose `views` region holds `n` entries.
