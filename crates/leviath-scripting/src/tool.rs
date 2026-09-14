@@ -313,6 +313,18 @@ pub trait ScriptHost: Send + Sync {
         body: &str,
         headers: BTreeMap<String, String>,
     ) -> std::result::Result<String, String>;
+    /// HTTP GET `url`, returning the response's declared content type (its
+    /// essence, lowercased, parameters dropped) and its raw bytes: what a
+    /// script stores with `write_part` when the body is an image, a sound or
+    /// a document rather than text. A host that cannot fetch bytes says so.
+    fn http_get_bytes(
+        &self,
+        url: &str,
+        headers: BTreeMap<String, String>,
+    ) -> std::result::Result<(String, Vec<u8>), String> {
+        let _ = (url, headers);
+        Err("this host cannot fetch bytes".to_string())
+    }
     /// Run a shell command, returning its combined output.
     fn shell(&self, command: &str) -> std::result::Result<String, String>;
     /// Read a file (confined to the agent workdir by the implementor).
@@ -709,6 +721,20 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
         })
     });
 
+    // http_get_bytes(url) / http_get_bytes(url, headers) -> #{ mime_type, bytes }
+    let h = host.clone();
+    engine.register_fn("http_get_bytes", move |url: &str| {
+        guard_dyn("http_get_bytes", &mut || {
+            fetched(h.http_get_bytes(url, BTreeMap::new()))
+        })
+    });
+    let h = host.clone();
+    engine.register_fn("http_get_bytes", move |url: &str, headers: Map| {
+        guard_dyn("http_get_bytes", &mut || {
+            fetched(h.http_get_bytes(url, headers_from_map(&headers)))
+        })
+    });
+
     // http_post(url, body) / http_post(url, body, headers)
     let h = host.clone();
     engine.register_fn("http_post", move |url: &str, body: &str| {
@@ -831,6 +857,17 @@ fn written(r: std::result::Result<serde_json::Value, String>) -> HostRes<Dynamic
     let json =
         r.map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))?;
     rhai::serde::to_dynamic(json)
+}
+
+/// A fetched body as the map `http_get_bytes` returns: `mime_type` as the
+/// server declared it and `bytes` as a Rhai blob, ready for `write_part`.
+fn fetched(r: std::result::Result<(String, Vec<u8>), String>) -> HostRes<Dynamic> {
+    let (mime_type, bytes) =
+        r.map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))?;
+    let mut map = Map::new();
+    map.insert("mime_type".into(), mime_type.into());
+    map.insert("bytes".into(), Dynamic::from_blob(bytes));
+    Ok(map.into())
 }
 
 /// Whether a part summary answers to `wanted`: its name exactly, or a hash
@@ -1158,6 +1195,14 @@ mod tests {
         ) -> std::result::Result<String, String> {
             *self.last_get.lock().unwrap() = Some((url.to_string(), headers));
             self.get_response.lock().unwrap().clone()
+        }
+        fn http_get_bytes(
+            &self,
+            url: &str,
+            headers: BTreeMap<String, String>,
+        ) -> std::result::Result<(String, Vec<u8>), String> {
+            *self.last_get.lock().unwrap() = Some((url.to_string(), headers));
+            Ok(("image/png".to_string(), b"\x89PNG".to_vec()))
         }
         fn http_post(
             &self,
@@ -1828,6 +1873,43 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     }
 
     // ── host functions via a script ──
+
+    /// The bytes path hands a script the declared type and a blob it can
+    /// pass straight to `write_part`; a host that cannot fetch bytes says so
+    /// as an ordinary error.
+    #[test]
+    fn http_get_bytes_hands_back_the_type_and_a_blob() {
+        let host = FakeHost::arc();
+        let tool = tool_from(
+            "// @tool t\nlet r = http_get_bytes(\"http://x/hero.png\");\n\
+             r.mime_type + \":\" + r.bytes.len()",
+        );
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out, "image/png:4");
+        let (url, headers) = host.last_get.lock().unwrap().clone().unwrap();
+        assert_eq!(url, "http://x/hero.png");
+        assert!(headers.is_empty());
+
+        let tool = tool_from(
+            "// @tool t\nlet r = http_get_bytes(\"http://x/a\", #{ \"Accept\": \"image/*\" });\n\
+             r.bytes.len()",
+        );
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out, "4");
+        let (_, headers) = host.last_get.lock().unwrap().clone().unwrap();
+        assert_eq!(headers.get("Accept").map(String::as_str), Some("image/*"));
+
+        // The trait's default: a host with no byte fetch.
+        let tool = tool_from("// @tool t\nhttp_get_bytes(\"http://x\")");
+        let out = execute(
+            &tool,
+            serde_json::json!({}),
+            Arc::new(PanickingHost {
+                payload: PanicPayload::Literal,
+            }),
+        );
+        assert!(out.contains("cannot fetch bytes"), "got: {out}");
+    }
 
     #[test]
     fn http_get_no_headers() {

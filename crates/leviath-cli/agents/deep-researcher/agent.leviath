@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.4.7"
+version = "0.4.8"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 max_child_depth = 2
 entry_stage = "gather"

@@ -1,5 +1,5 @@
 // @tool web_fetch
-// @description Fetch a URL over HTTP(S) and return its readable text. HTML pages are stripped to prose (scripts/styles/tags removed, entities decoded); other content is returned as-is. Large pages are truncated; oversized, blocked, or client-side-rendered pages return a diagnostic instead of failing the run.
+// @description Fetch a URL over HTTP(S) and return its readable text. HTML pages are stripped to prose (scripts/styles/tags removed, entities decoded); other text is returned as-is. An image, a sound, a PDF or another file that is not text is stored as a part of the run and attached to this result, so a model that takes the type sees the file itself. Large pages are truncated; oversized, blocked, or client-side-rendered pages return a diagnostic instead of failing the run.
 // @param url string required "The URL to fetch (http or https)"
 // @requires network
 
@@ -43,6 +43,25 @@ try {
     // unreachable and cites it from memory instead.
     let msg = `${e}`;
     let lower = msg.to_lower();
+    if lower.contains("non-text content") {
+        // Not a page but a file: an image, a sound, a PDF. Fetch it as bytes
+        // and store it as a part of the run, attached to this result, so a
+        // model that takes the type reads the file rather than a refusal.
+        try {
+            let got = http_get_bytes(params.url, #{ "User-Agent": "Leviath-Researcher/0.3 (+https://leviath.dev)" });
+            let segments = params.url.split("?")[0].split("/");
+            let name = segments[segments.len() - 1];
+            if name.len() == 0 { name = "fetched"; }
+            let part = write_part(got.bytes, got.mime_type, name);
+            return #{
+                content: `[web_fetch stored ${got.mime_type} (${part.size} bytes) from ${params.url} as the part ${part.name}, attached to this result]`,
+                parts: [part]
+            };
+        } catch(e2) {
+            msg = `${e2}`;
+            lower = msg.to_lower();
+        }
+    }
     let why = if lower.contains("unreadable body") {
         "the response was not readable text (compressed, binary, or an encoding this client cannot decode). Try an API endpoint, an RSS/JSON feed, or a static mirror";
     } else if lower.contains("http2") || lower.contains("connection") || lower.contains("timed out") {

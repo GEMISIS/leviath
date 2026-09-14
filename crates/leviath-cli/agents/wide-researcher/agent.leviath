@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.4.7"
+version = "0.4.8"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 max_child_depth = 2
 entry_stage = "survey"

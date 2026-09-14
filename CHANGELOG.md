@@ -15,6 +15,18 @@ same list.
 
 ### Added
 
+- Rhai tools can fetch a file: `http_get_bytes(url [, headers])` returns the
+  declared `mime_type` and the raw `bytes`, ready for `write_part`, under the
+  same permission as `http_get`. The bundled `web_fetch` uses it: a URL that
+  answers with an image, a sound or a PDF is stored as a part of the run and
+  attached to the tool result instead of coming back as a refusal, so a model
+  that takes the type sees the file. (researcher, deep-researcher,
+  wide-researcher and data-analyst bumped.)
+
+- The Gemini provider's offline listing (what `lev models list` and the
+  picker show before a live listing is read) names the 2.5 models, including
+  `gemini-2.5-flash-image`, beside the 3.x ones.
+
 - A fan-out worker's files travel up with its answer. Each artifact a worker
   hands back is stored again under the parent's run and rides on the merge
   report's entry as a part named `<item>/<artifact>`, so a merge stage whose
