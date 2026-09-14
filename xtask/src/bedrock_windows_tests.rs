@@ -416,7 +416,11 @@ fn the_workspace_root_holds_the_table_and_today_is_a_date() {
 
 #[test]
 fn the_shipped_table_parses_and_names_the_current_claude() {
-    let text = std::fs::read_to_string(workspace_root().join(WINDOWS_FILE)).unwrap();
+    // A Windows checkout with `core.autocrlf` hands us CRLF; the refresh
+    // always writes LF, so compare the file as the repository stores it.
+    let text = std::fs::read_to_string(workspace_root().join(WINDOWS_FILE))
+        .unwrap()
+        .replace("\r\n", "\n");
     let table = parse_table(&text).unwrap();
     let sonnet = &table.rows["anthropic.claude-sonnet-5"];
     assert_eq!((sonnet.context, sonnet.output), (1_000_000, 128_000));
