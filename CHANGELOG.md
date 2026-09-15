@@ -15,6 +15,17 @@ same list.
 
 ### Added
 
+- `[providers] <provider>_headers` (`anthropic_headers`, `openai_headers`,
+  `google_headers`, `openrouter_headers`, `meshy_headers`, `bedrock_headers`):
+  extra headers sent after the provider's own on every request to its host,
+  for a gateway named in `<provider>_base_url` that wants a token or a tag of
+  its own. Meshy's asset downloads and Bedrock's AWS-only routes are not sent
+  them. Kept out of logs the way the keys are.
+- `zero_retention_request` on a `[model_providers.<name>]` endpoint names
+  the built-in provider whose per-request zero-retention fields the host
+  takes (`openai` sends `store = false`, `openrouter` the `provider.zdr`
+  routing fields), so an Azure OpenAI deployment or an OpenAI-shaped gateway
+  is sent them with the switch on. The data retention page shows both.
 - Which models can give zero data retention is now read per model where a
   provider publishes it. Bedrock's model listing says which data retention
   modes each model may be served under, and a model it never offers under
@@ -36,6 +47,12 @@ same list.
 
 ### Fixed
 
+- An OpenAI-compatible endpoint entry carrying `retention` refused to load
+  as having an unknown key, though the docs said to write it there.
+- Under `[providers] zero_retention`, the run-title call and compaction
+  summaries went out without the per-request zero-retention fields, though
+  both carry the run's own text; they now ride those calls the way they
+  ride a stage's request.
 - A running daemon judged a spawn under `[providers] zero_retention` by the
   Bedrock account mode it read when it started, so `lev providers retention
   set zero` (which sets the mode to `none`) was followed by a refusal

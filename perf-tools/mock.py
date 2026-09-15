@@ -54,6 +54,13 @@ SPLIT_UTF8 = os.environ.get("LV_MOCK_SPLIT_UTF8") == "1"
 # `LV_MOCK_IMAGE=1` makes every text reply carry one PNG the way OpenRouter
 # returns a drawn image: an `images` list of data URIs on the message.
 IMAGE = os.environ.get("LV_MOCK_IMAGE") == "1"
+# `LV_MOCK_REQUIRE_HEADER=Name=value` makes the mock a gateway that refuses
+# (401) any request without that header, the way a corporate proxy does, so a
+# probe can prove `[providers] <provider>_headers` reached the wire.
+REQUIRE_HEADER = os.environ.get("LV_MOCK_REQUIRE_HEADER", "").partition("=")
+# `LV_MOCK_DUMP=path` appends one JSON line per completion request (path,
+# headers, body), so a probe can assert what was sent.
+DUMP = os.environ.get("LV_MOCK_DUMP")
 IMAGE_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
 
@@ -127,7 +134,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _gateway_refuses(self):
+        """Whether the required header is missing; answers the 401 itself."""
+        name, _, value = REQUIRE_HEADER
+        if not name or self.headers.get(name) == value:
+            return False
+        self._json({"error": {"message": f"missing gateway header {name}"}}, 401)
+        return True
+
+    def _dump(self, req):
+        if DUMP:
+            with open(DUMP, "a") as out:
+                out.write(json.dumps({
+                    "path": self.path,
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
+                    "body": req,
+                }) + "\n")
+
     def do_GET(self):
+        if self._gateway_refuses():
+            return
         if self.path.startswith("/count"):
             return self._json({"count": CALLS[0], "token_counts": COUNTS[0]})
         # Both providers read `data[].id`; the Anthropic one only routes to a
@@ -144,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         n = int(self.headers.get("content-length", "0"))
         req = json.loads(self.rfile.read(n) or b"{}")
+        self._dump(req)
+        if self._gateway_refuses():
+            return
         if self.path.startswith("/v1/messages/count_tokens"):
             COUNTS[0] += 1
             return self._json({"input_tokens": len(anthropic_text(req)) // 4})

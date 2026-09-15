@@ -101,6 +101,7 @@ openai_base_url     = "https://gw.corp/v1"   # env fallback: OPENAI_BASE_URL
 google_base_url     = "https://gw.corp/v1"   # env fallback: GOOGLE_BASE_URL
 openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 bedrock_base_url    = "https://gw.corp/bedrock"   # env fallback: BEDROCK_BASE_URL
+anthropic_headers   = { X-Gateway-Token = "..." }  # extra headers for that gateway (see below)
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
@@ -158,6 +159,22 @@ A gateway serving model IDs the vendor never published (`internal-model-1`, say)
 IDs described, or nothing knows their context window. That is
 `[model_capabilities.<model_id>]` below, which works the same way for a gateway as for anything
 else.
+
+A gateway that wants something of its own on each request, a token in a second header or a
+tenant or cost-centre tag, gets it from `<provider>_headers`: a table of header names to values,
+sent as written after the provider's own headers on every request the provider makes to that
+host. `anthropic_headers`, `openai_headers`, `google_headers`, `openrouter_headers`,
+`meshy_headers` and `bedrock_headers` exist. Two hosts are left out on purpose: Meshy's asset
+downloads go to signed URLs on another host, and Bedrock's control-plane, price-file and
+token-count routes go to AWS itself, so neither is sent them. A value here is as often a credential
+as not, so it is kept out of logs the way the keys are.
+
+```toml
+[providers]
+anthropic_base_url = "https://llm-gateway.corp.example/anthropic"
+anthropic_api_key  = "gateway-placeholder"      # the gateway holds the real key
+anthropic_headers  = { X-Gateway-Token = "...", X-Cost-Centre = "research" }
+```
 
 `HTTP_PROXY` and `HTTPS_PROXY` are honoured independently of this, so a gateway that is itself
 behind a proxy needs nothing extra here.
@@ -1002,6 +1019,14 @@ kind     = "openai-compatible"
 base_url = "http://192.168.1.20:8080/v1"
 api_key  = "..."                   # optional; sent as a bearer token
 headers  = { "X-Org" = "research" }  # optional; extra headers on every request
+
+[model_providers.azure]
+kind      = "openai-compatible"
+base_url  = "https://my-resource.openai.azure.com/openai/v1"
+headers   = { api-key = "..." }      # Azure authenticates with this header, not a bearer token
+serves    = ["gpt-5.5"]
+retention = "zero"                   # only with Azure's abuse-monitoring exemption approved
+zero_retention_request = "openai"    # send store = false when zero_retention is on
 ```
 
 This is three providers: two llama.cpp servers under their own names, and Anthropic. A blueprint
@@ -1012,6 +1037,16 @@ required and includes the path prefix the server expects, usually `/v1`. Each en
 to load with a key it does not read (a script entry forwards such keys to its `initialize`, an
 endpoint has nowhere to send them), so a misspelled `models` or `headers` is an error naming the
 entry rather than a catalogue or header that quietly never arrives.
+
+The fourth entry above is Azure OpenAI, whose `/openai/v1/` surface speaks OpenAI's chat API and
+authenticates with an `api-key` header. Two keys on an endpoint are about
+[data retention](/docs/data-retention). `retention` says what the host keeps, which Leviath
+cannot know for a custom host: Azure keeps prompts up to 30 days for abuse monitoring unless the
+exemption is approved for your subscription, so write `zero` only then.
+`zero_retention_request` names the built-in provider whose per-request zero-retention fields this
+host takes when `[providers] zero_retention` is on: `openai` sends `store = false`, `openrouter`
+the `provider.zdr` routing fields. Without it an endpoint is sent neither, because Leviath cannot
+tell an Azure deployment from a llama.cpp server that would reject the field.
 
 Streaming and tool calls are on. Each request carries the temperature the stage asks for, and a
 server that refuses one is asked again without it and remembered for the rest of the process.

@@ -131,6 +131,10 @@ pub struct GeminiProvider {
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
+
+    /// The operator's extra headers, sent after the provider's own on every
+    /// request to `base_url`: a gateway's token, a tenant tag.
+    extra_headers: Vec<(String, String)>,
 }
 
 impl GeminiProvider {
@@ -143,6 +147,7 @@ impl GeminiProvider {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -160,7 +165,15 @@ impl GeminiProvider {
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Extra headers on every request to the host, after the provider's own:
+    /// what a gateway named in `with_base_url` wants of its own.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     /// Point this provider at a different host.
@@ -233,10 +246,13 @@ impl GeminiProvider {
             crate::provider::side_call_client(),
             "gemini",
             &url,
-            &[
-                ("x-goog-api-key", self.api_key.clone()),
-                ("Content-Type", "application/json".to_string()),
-            ],
+            &crate::provider::with_extra_header_pairs(
+                vec![
+                    ("x-goog-api-key", self.api_key.clone()),
+                    ("Content-Type", "application/json".to_string()),
+                ],
+                &self.extra_headers,
+            ),
             &body,
             self.rate_limiter.as_ref(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
@@ -269,10 +285,13 @@ impl Provider for GeminiProvider {
             &self.client,
             "gemini",
             &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                ("Content-Type", "application/json".to_string()),
-            ],
+            &crate::provider::with_extra_header_pairs(
+                vec![
+                    ("Authorization", format!("Bearer {}", self.api_key)),
+                    ("Content-Type", "application/json".to_string()),
+                ],
+                &self.extra_headers,
+            ),
             &body,
             self.rate_limiter.as_ref(),
             request.request_timeout_secs,
@@ -308,10 +327,13 @@ impl Provider for GeminiProvider {
             &self.client,
             "gemini",
             &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                ("Content-Type", "application/json".to_string()),
-            ],
+            &crate::provider::with_extra_header_pairs(
+                vec![
+                    ("Authorization", format!("Bearer {}", self.api_key)),
+                    ("Content-Type", "application/json".to_string()),
+                ],
+                &self.extra_headers,
+            ),
             &body,
             self.rate_limiter.as_ref(),
             request.request_timeout_secs,
@@ -526,7 +548,10 @@ impl GeminiProvider {
         auth: (&str, String),
     ) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
-            self.client.get(url).header(auth.0, auth.1),
+            crate::provider::with_extra_headers(
+                self.client.get(url).header(auth.0, auth.1),
+                &self.extra_headers,
+            ),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .send()
@@ -953,6 +978,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -981,6 +1007,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("anything", "gemini-3.5-flash").await;
         assert_eq!(tokens, 99);
@@ -1006,6 +1033,7 @@ mod tests {
             })),
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         assert_eq!(provider.count_tokens("first", "gemini-3.5-flash").await, 9);
         let held = tokio::time::timeout(
@@ -1029,6 +1057,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         // 8 chars / 4 = 2 (heuristic fallback)
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -1046,6 +1075,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
         assert_eq!(tokens, 2);
@@ -1061,6 +1091,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
         assert_eq!(tokens, 2);
@@ -1076,6 +1107,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
         assert_eq!(tokens, 2);
@@ -1212,6 +1244,25 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    /// The operator's extra headers reach the wire on an inference, after
+    /// the provider's own.
+    #[tokio::test]
+    async fn extra_headers_ride_every_request() {
+        let body = br#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url)
+            .with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+        provider.infer(&simple_request()).await.unwrap();
+        let request = leviath_core::sync::lock(&seen)[0].to_ascii_lowercase();
+        assert!(request.contains("x-gateway-token: t-1"), "{request}");
+        let own = request.find("authorization").expect("the key is sent");
+        let extra = request.find("x-gateway-token").expect("the extra is sent");
+        assert!(
+            own < extra,
+            "the provider's own header comes first: {request}"
+        );
     }
 
     #[tokio::test]
@@ -1373,6 +1424,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -1428,6 +1480,7 @@ mod tests {
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
+            extra_headers: Vec::new(),
         };
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));

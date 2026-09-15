@@ -2986,6 +2986,10 @@ meshy_api_key = "msy-existing"
     fn provider_config_debug_never_prints_the_keys() {
         let providers = ProviderConfig {
             anthropic_api_key: Some("sk-ant-SECRET-VALUE".to_string()),
+            anthropic_headers: std::collections::BTreeMap::from([(
+                "X-Gateway-Token".to_string(),
+                "hdr-SECRET-VALUE".to_string(),
+            )]),
             openai_api_key: Some("sk-openai-SECRET-VALUE".to_string()),
             google_api_key: Some("AIza-SECRET-VALUE".to_string()),
             anthropic_base_url: None,
@@ -3004,6 +3008,9 @@ meshy_api_key = "msy-existing"
         // "is it configured" is what a debug line is actually asking.
         assert!(rendered.contains("<set>"), "{rendered}");
         assert!(rendered.contains("claude_code_enabled: true"), "{rendered}");
+        // A header's name says what is configured; its value is a credential
+        // as often as not.
+        assert!(rendered.contains("X-Gateway-Token"), "{rendered}");
 
         let empty = format!(
             "{:?}",
@@ -3398,6 +3405,24 @@ script = \"groq.rhai\"
         assert_eq!(
             loaded.model_providers["groq"].extra["org"],
             toml::Value::String("research".into())
+        );
+
+        // The two retention keys land in `extra` through the flatten and are
+        // read from there, so an endpoint carrying them loads.
+        std::fs::write(
+            &path,
+            "[model_providers.azure]\nkind = \"openai-compatible\"\n\
+             base_url = \"https://r.openai.azure.com/openai/v1\"\n\
+             headers = { api-key = \"k\" }\nretention = \"zero\"\n\
+             zero_retention_request = \"openai\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load_from_path(&path).expect("an endpoint reads its retention keys");
+        let azure = &loaded.model_providers["azure"];
+        assert_eq!(azure.extra["retention"], toml::Value::String("zero".into()));
+        assert_eq!(
+            azure.extra["zero_retention_request"],
+            toml::Value::String("openai".into())
         );
     }
 

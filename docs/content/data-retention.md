@@ -129,6 +129,40 @@ live, which only Bedrock offers. `requested per request` is the field sent with 
 set on a `[model_capabilities.<model>]` or `[model_providers.<name>]` entry, which wins over
 everything else and is how you tell Leviath about a custom host it cannot know.
 
+## Proxies, gateways and Azure
+
+Many organisations reach a provider through a gateway of their own, which holds the real key,
+strips retention by contract, and wants a token or a tag of its own on every request. Point the
+provider at it with `<provider>_base_url`, give it what it wants with `<provider>_headers`, and
+declare the zero retention the gateway provides as an agreement, since no API can read it:
+
+```toml
+[providers]
+anthropic_base_url = "https://llm-gateway.corp.example/anthropic"
+anthropic_api_key  = "gateway-placeholder"
+anthropic_headers  = { X-Gateway-Token = "...", X-Cost-Centre = "research" }
+zero_retention = true
+zero_retention_agreements = ["anthropic"]
+```
+
+Azure OpenAI is an OpenAI-compatible endpoint with its own header and its own retention terms.
+Azure keeps prompts up to 30 days for abuse monitoring unless the exemption is approved for your
+subscription, so `retention = "zero"` is yours to declare only then. `zero_retention_request`
+tells Leviath to send it OpenAI's `store = false` with the switch on, which it would otherwise
+withhold from an endpoint, because a llama.cpp server would reject the field:
+
+```toml
+[model_providers.azure]
+kind      = "openai-compatible"
+base_url  = "https://my-resource.openai.azure.com/openai/v1"
+headers   = { api-key = "..." }
+serves    = ["gpt-5.5"]
+retention = "zero"
+zero_retention_request = "openai"
+```
+
+The exact keys are on the [configuration page](/docs/configuration#reaching-a-provider-through-a-gateway).
+
 ## What this cannot do
 
 It cannot read a contract, so a declared agreement is trusted. It cannot see a provider's internal

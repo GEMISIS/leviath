@@ -295,6 +295,10 @@ pub struct AnthropicProvider {
     /// Cache TTL for prompt caching breakpoints.
     cache_ttl: CacheTtl,
 
+    /// The operator's extra headers, sent after the provider's own on every
+    /// request to `base_url`: a gateway's token, a tenant tag.
+    extra_headers: Vec<(String, String)>,
+
     /// What `GET /v1/models` said, filled by [`Provider::prime_capabilities`].
     ///
     /// Empty until primed, and empty for good if the endpoint could not be
@@ -412,6 +416,7 @@ impl AnthropicProvider {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -430,12 +435,20 @@ impl AnthropicProvider {
             capability_overrides: overrides,
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
     }
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
         table_capabilities(model)
+    }
+
+    /// Extra headers on every request to the host, after the provider's own:
+    /// what a gateway named in `with_base_url` wants of its own.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     /// Point this provider at a different host.
@@ -486,7 +499,7 @@ impl AnthropicProvider {
     /// how the debug-http log drifted - it hardcoded three headers and silently
     /// omitted `anthropic-beta`, so under `--features debug-http` a 1h-cache
     /// request logged something the wire never carried.
-    fn header_pairs(&self) -> Vec<(&'static str, String)> {
+    fn header_pairs(&self) -> Vec<(&str, String)> {
         let mut headers = vec![
             ("x-api-key", self.api_key.clone()),
             ("anthropic-version", "2023-06-01".to_string()),
@@ -498,7 +511,7 @@ impl AnthropicProvider {
                 "extended-cache-ttl-2025-04-11".to_string(),
             ));
         }
-        headers
+        crate::provider::with_extra_header_pairs(headers, &self.extra_headers)
     }
 
     /// Call Anthropic's exact `/messages/count_tokens` endpoint for `text`.
@@ -1039,10 +1052,13 @@ impl AnthropicProvider {
     /// One page of the listing, as the endpoint answers it.
     async fn fetch_models_page(&self, url: String) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
-            self.client
-                .get(url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01"),
+            crate::provider::with_extra_headers(
+                self.client
+                    .get(url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01"),
+                &self.extra_headers,
+            ),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .send()
@@ -2205,6 +2221,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -2246,6 +2263,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("anything", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 42);
@@ -2275,6 +2293,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         assert_eq!(provider.count_tokens("first", "claude-sonnet-4-6").await, 7);
         let held = tokio::time::timeout(
@@ -2300,6 +2319,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2317,6 +2337,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2334,6 +2355,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2980,6 +3002,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -3016,6 +3039,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -3045,6 +3069,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
@@ -3248,6 +3273,25 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    /// The operator's extra headers reach the wire on an inference, after
+    /// the provider's own.
+    #[tokio::test]
+    async fn extra_headers_ride_every_request() {
+        let body = br#"{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url)
+            .with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+        provider.infer(&simple_request()).await.unwrap();
+        let request = leviath_core::sync::lock(&seen)[0].to_ascii_lowercase();
+        assert!(request.contains("x-gateway-token: t-1"), "{request}");
+        let own = request.find("x-api-key").expect("the key is sent");
+        let extra = request.find("x-gateway-token").expect("the extra is sent");
+        assert!(
+            own < extra,
+            "the provider's own header comes first: {request}"
+        );
     }
 
     #[tokio::test]
@@ -3610,6 +3654,7 @@ mod tests {
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::Ephemeral1h,
             learned: Default::default(),
+            extra_headers: Vec::new(),
         };
         assert_eq!(
             provider.cache_control_value(),

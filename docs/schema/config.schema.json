@@ -73,6 +73,48 @@
           "description": "The AWS region whose Bedrock endpoints are called. Unset falls back to AWS_REGION, then AWS_DEFAULT_REGION, then us-east-1.",
           "type": "string"
         },
+        "anthropic_headers": {
+          "type": "object",
+          "description": "Extra headers on every request Anthropic's provider makes to its host, after the provider's own: a gateway's token, a tenant tag.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "openai_headers": {
+          "type": "object",
+          "description": "Extra headers on every request OpenAI's provider makes to its host.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "google_headers": {
+          "type": "object",
+          "description": "Extra headers on every request Google's provider makes to its host.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "openrouter_headers": {
+          "type": "object",
+          "description": "Extra headers on every request OpenRouter's provider makes to its host.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "meshy_headers": {
+          "type": "object",
+          "description": "Extra headers on Meshy's API calls, not on asset downloads.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "bedrock_headers": {
+          "type": "object",
+          "description": "Extra headers on Bedrock inference calls to the runtime origin, not on the AWS control-plane, price-file or count routes.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "anthropic_base_url": {
           "type": "string"
         },
@@ -780,6 +822,15 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "retention": {
+            "type": "string",
+            "description": "What this host keeps of its requests, which Leviath cannot know: zero, <N>d (30d), indefinite or unknown."
+          },
+          "zero_retention_request": {
+            "type": "string",
+            "enum": ["openai", "openrouter"],
+            "description": "The built-in provider whose per-request zero-retention fields this host takes with zero_retention on: openai sends store = false, openrouter the provider.zdr routing fields."
           },
           "models": {
             "type": "array",
