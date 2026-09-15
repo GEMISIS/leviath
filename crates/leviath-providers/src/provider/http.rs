@@ -142,6 +142,35 @@ pub use reqwest::Client as HttpClient;
 pub type HttpClientFactory<'a> =
     &'a (dyn Fn(Option<u64>) -> std::result::Result<reqwest::Client, reqwest::Error> + Send + Sync);
 
+/// `builder` with the operator's extra headers on it: what a built-in
+/// provider sends alongside its own when a gateway in front of its host
+/// wants a token or a tag of its own. Sent as written, after the provider's,
+/// so a name the provider also sets is sent twice rather than overwritten.
+pub fn with_extra_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    builder
+}
+
+/// `own` followed by the operator's extra headers, for the send paths that
+/// take a header slice rather than a builder.
+pub fn with_extra_header_pairs<'a>(
+    own: Vec<(&'a str, String)>,
+    extra: &'a [(String, String)],
+) -> Vec<(&'a str, String)> {
+    let mut headers = own;
+    headers.extend(
+        extra
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone())),
+    );
+    headers
+}
+
 /// The HTTP client every provider talks through.
 ///
 /// Redirects are capped and confined to the origin the request started on. That

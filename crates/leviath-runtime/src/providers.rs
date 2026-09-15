@@ -115,7 +115,10 @@ impl ProviderRegistry {
     /// provider without such fields is left alone.
     pub fn apply_retention_knobs(&self, provider: &str, extra: &mut serde_json::Value) {
         if self.retention.zero_requested {
-            leviath_providers::retention::apply_request_knobs(provider, extra);
+            // An endpoint that declared which built-in's fields it takes
+            // (`zero_retention_request`) is sent that provider's.
+            let knobs = self.retention.knob_provider(provider);
+            leviath_providers::retention::apply_request_knobs(knobs, extra);
         }
     }
 
@@ -684,6 +687,20 @@ mod tests {
         assert_eq!(declared.source, Source::Declared);
         registry.apply_retention_knobs("openai", &mut extra);
         assert_eq!(extra, serde_json::json!({ "store": false }));
+
+        // An endpoint that declared whose fields it takes is sent them; one
+        // that did not is sent nothing, since the table has none for it.
+        registry.set_retention(RetentionSettings {
+            zero_requested: true,
+            request_knob_aliases: HashMap::from([("azure".to_string(), "openai".to_string())]),
+            ..Default::default()
+        });
+        let mut azure = serde_json::Value::Null;
+        registry.apply_retention_knobs("azure", &mut azure);
+        assert_eq!(azure, serde_json::json!({ "store": false }));
+        let mut plain = serde_json::Value::Null;
+        registry.apply_retention_knobs("gw", &mut plain);
+        assert!(plain.is_null());
     }
 
     #[test]

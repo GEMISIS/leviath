@@ -105,6 +105,10 @@ pub struct MeshyProvider {
     rate_limiter: Option<RateLimiter>,
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
     poll_interval: Duration,
+    /// The operator's extra headers, sent after the bearer token on every
+    /// API call to `base_url`; not on asset downloads, which go to signed
+    /// URLs on another host.
+    extra_headers: Vec<(String, String)>,
 }
 
 impl MeshyProvider {
@@ -117,6 +121,7 @@ impl MeshyProvider {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             poll_interval: POLL_INTERVAL,
+            extra_headers: Vec::new(),
         }
     }
 
@@ -135,6 +140,7 @@ impl MeshyProvider {
             rate_limiter: rate_limit.map(RateLimiter::new),
             capability_overrides: overrides,
             poll_interval: POLL_INTERVAL,
+            extra_headers: Vec::new(),
         }
     }
 
@@ -152,6 +158,13 @@ impl MeshyProvider {
         if let Some(url) = base_url {
             self.base_url = url.trim_end_matches('/').to_string();
         }
+        self
+    }
+
+    /// Extra headers on every API call to the host, after the bearer token:
+    /// what a gateway named in `with_base_url` wants of its own.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
         self
     }
 
@@ -194,14 +207,20 @@ impl MeshyProvider {
 
     /// POST a create body and read the JSON response.
     async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
-        let builder = self.client.post(url).bearer_auth(&self.api_key).json(body);
+        let builder = crate::provider::with_extra_headers(
+            self.client.post(url).bearer_auth(&self.api_key).json(body),
+            &self.extra_headers,
+        );
         self.send_json(builder, SHORT_REQUEST_SECS, "creating a Meshy task")
             .await
     }
 
     /// GET a task's status body.
     async fn get_json(&self, url: &str) -> Result<Value> {
-        let builder = self.client.get(url).bearer_auth(&self.api_key);
+        let builder = crate::provider::with_extra_headers(
+            self.client.get(url).bearer_auth(&self.api_key),
+            &self.extra_headers,
+        );
         self.send_json(builder, SHORT_REQUEST_SECS, "polling a Meshy task")
             .await
     }
@@ -353,7 +372,10 @@ impl MeshyProvider {
             "{ANIMATIONS_PATH}/library?search={}",
             query_encode(search)
         ));
-        let builder = self.client.get(&url).bearer_auth(&self.api_key);
+        let builder = crate::provider::with_extra_headers(
+            self.client.get(&url).bearer_auth(&self.api_key),
+            &self.extra_headers,
+        );
         self.send_json(builder, SHORT_REQUEST_SECS, "listing Meshy animations")
             .await
     }
@@ -646,6 +668,24 @@ mod tests {
         let p = MeshyProvider::new(client(), "k".into()).with_base_url(Some("http://h/".into()));
         assert_eq!(p.base_url, "http://h");
         assert_eq!(p.url("openapi/v1/rigging"), "http://h/openapi/v1/rigging");
+    }
+
+    /// The operator's extra headers reach the wire on an API call, after the
+    /// bearer token.
+    #[tokio::test]
+    async fn extra_headers_ride_every_api_call() {
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", b"{}".to_vec()).await;
+        let provider = provider_at(&url)
+            .with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+        provider
+            .get_json(&format!("{url}/v1/tasks/t"))
+            .await
+            .unwrap();
+        let request = leviath_core::sync::lock(&seen)[0].to_ascii_lowercase();
+        assert!(request.contains("x-gateway-token: t-1"), "{request}");
+        let own = request.find("authorization").expect("the key is sent");
+        let extra = request.find("x-gateway-token").expect("the extra is sent");
+        assert!(own < extra, "the bearer token comes first: {request}");
     }
 
     /// A create response, two polls, then the download. The succeeded body

@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::provider::{FinishReason, Message};
-use leviath_testkit::{spawn_mock_sequence, spawn_mock_server, spawn_mock_server_with_headers};
+use leviath_testkit::{
+    spawn_mock_recorder, spawn_mock_sequence, spawn_mock_server, spawn_mock_server_with_headers,
+};
 use serde_json::json;
 
 fn client() -> reqwest::Client {
@@ -883,6 +885,21 @@ async fn the_listing_says_which_models_can_run_under_mode_none() {
 
 /// Priming reads the account's mode and the listing after the prices, both
 /// best effort.
+/// The operator's extra headers reach the wire on an inference, after the
+/// provider's own.
+#[tokio::test]
+async fn extra_headers_ride_every_inference() {
+    let (url, seen) = spawn_mock_recorder(200, "OK", converse_reply()).await;
+    let p =
+        provider_at(&url).with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+    p.infer(&request("amazon.nova-2")).await.unwrap();
+    let sent = seen.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(sent.contains("x-gateway-token: t-1"), "{sent}");
+    let own = sent.find("authorization").expect("the key is sent");
+    let extra = sent.find("x-gateway-token").expect("the extra is sent");
+    assert!(own < extra, "the provider's own header comes first: {sent}");
+}
+
 #[tokio::test]
 async fn priming_reads_the_retention_mode_and_the_listing() {
     let _guard = crate::test_support::always_on_tracing_guard();

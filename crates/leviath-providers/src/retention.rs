@@ -329,6 +329,22 @@ pub struct RetentionSettings {
     pub model_overrides: HashMap<String, Retention>,
     /// `retention` on a `[model_providers.<name>]` entry, by provider name.
     pub provider_declarations: HashMap<String, Retention>,
+    /// `zero_retention_request` on a `[model_providers.<name>]` entry, by
+    /// provider name: the built-in provider whose per-request zero-retention
+    /// fields ([`request_knobs`]) this host takes. An OpenAI-shaped gateway
+    /// or an Azure OpenAI deployment names `openai` here and is sent
+    /// `store = false` with the switch on.
+    pub request_knob_aliases: HashMap<String, String>,
+}
+
+impl RetentionSettings {
+    /// The provider whose request fields `provider` is sent: its alias when
+    /// one is declared, else itself.
+    pub fn knob_provider<'a>(&'a self, provider: &'a str) -> &'a str {
+        self.request_knob_aliases
+            .get(provider)
+            .map_or(provider, String::as_str)
+    }
 }
 
 /// `base` with the operator's settings applied, in the order they are
@@ -424,6 +440,20 @@ pub fn apply_request_knobs(provider: &str, extra: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An endpoint that declared whose request fields it takes is answered
+    /// with that provider's; one that did not is answered with itself.
+    #[test]
+    fn a_request_knob_alias_names_whose_fields_a_host_takes() {
+        let settings = RetentionSettings {
+            request_knob_aliases: HashMap::from([("azure".to_string(), "openai".to_string())]),
+            ..Default::default()
+        };
+        assert_eq!(settings.knob_provider("azure"), "openai");
+        assert_eq!(settings.knob_provider("openrouter"), "openrouter");
+        assert!(request_knobs(settings.knob_provider("azure")).is_some());
+        assert!(request_knobs(settings.knob_provider("gw")).is_none());
+    }
 
     #[test]
     fn a_retention_round_trips_through_its_word() {

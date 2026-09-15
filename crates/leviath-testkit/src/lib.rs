@@ -140,6 +140,44 @@ pub async fn spawn_mock_server_with_headers(
     spawn_mock_raw(response).await
 }
 
+/// A one-shot JSON server that also hands back the whole request it was
+/// sent, headers included, so a test can assert what reached the wire: the
+/// header a gateway wants, and that it came after the provider's own.
+///
+/// The request is the raw bytes as read, so header names are spelled the
+/// way the client wrote them; lowercase before matching.
+pub async fn spawn_mock_recorder(
+    status: u16,
+    reason: &str,
+    body: impl Into<Vec<u8>>,
+) -> (String, RecordedBodies) {
+    let body = body.into();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let recorded: RecordedBodies = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let recorder = std::sync::Arc::clone(&recorded);
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0u8; 65536];
+        let read = socket.read(&mut buf).await.unwrap_or(0);
+        recorder
+            .lock()
+            .expect("recorder lock")
+            .push(String::from_utf8_lossy(&buf[..read]).to_string());
+        let _ = socket.write_all(&response).await;
+        let _ = socket.flush().await;
+        let _ = socket.shutdown().await;
+    });
+    (format!("http://{}", addr), recorded)
+}
+
 /// The request bodies a [`spawn_mock_sequence`] server has received, in order.
 pub type RecordedBodies = std::sync::Arc<Mutex<Vec<String>>>;
 

@@ -85,6 +85,10 @@ pub struct BedrockProvider {
     /// A model absent here is one the listing does not carry, and the
     /// account's mode alone decides for it.
     model_retention: std::sync::RwLock<HashMap<String, ModelRetention>>,
+    /// The operator's extra headers, sent after the provider's own on every
+    /// inference call to the runtime origin (the one a gateway replaces),
+    /// and not on the AWS control-plane, price-file or count routes.
+    extra_headers: Vec<(String, String)>,
 }
 
 /// What Bedrock's model listing says about one model's data retention: the
@@ -165,6 +169,7 @@ impl BedrockProvider {
             count_route: crate::provider::ModelMemo::default(),
             retention_mode: std::sync::RwLock::new(None),
             model_retention: std::sync::RwLock::new(HashMap::new()),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -366,6 +371,15 @@ impl BedrockProvider {
         self
     }
 
+    /// Extra headers on every inference call to the runtime origin, after
+    /// the provider's own: what a gateway named in `with_base_url` wants of
+    /// its own. The AWS-only routes (control plane, price file, counts) are
+    /// not sent them; a gateway does not front those.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
     /// Replace the URL the price file is read from.
     pub fn with_pricing_url(mut self, url: Option<String>) -> Self {
         if let Some(url) = url {
@@ -457,6 +471,7 @@ impl BedrockProvider {
         for (name, value) in self.header_pairs() {
             builder = builder.header(name, value);
         }
+        builder = crate::provider::with_extra_headers(builder, &self.extra_headers);
         let response = builder
             .json(body)
             .send()

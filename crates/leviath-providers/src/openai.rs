@@ -50,6 +50,10 @@ pub struct OpenAIProvider {
     /// Empty until primed, and empty for good if the endpoint could not be
     /// reached, in which case the compiled table answers everything.
     learned: LearnedModels,
+
+    /// The operator's extra headers, sent after the provider's own on every
+    /// request to `base_url`: a gateway's token, a tenant tag.
+    extra_headers: Vec<(String, String)>,
 }
 
 /// Whether `model_key` is shaped like one of OpenAI's chat or reasoning
@@ -163,6 +167,7 @@ impl OpenAIProvider {
             reasoning_effort_none: Default::default(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -182,7 +187,15 @@ impl OpenAIProvider {
             reasoning_effort_none: Default::default(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Extra headers on every request to the host, after the provider's own:
+    /// what a gateway named in `with_base_url` wants of its own.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     /// Point this provider at a different host.
@@ -224,10 +237,13 @@ impl OpenAIProvider {
         mut body: serde_json::Value,
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
-        let headers = [
-            ("Authorization", format!("Bearer {}", self.api_key)),
-            ("Content-Type", "application/json".to_string()),
-        ];
+        let headers = crate::provider::with_extra_header_pairs(
+            vec![
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &self.extra_headers,
+        );
 
         // A model that takes no temperature is sent none, rather than being sent
         // zero. `build_openai_request_body_with` always writes the key and the
@@ -513,9 +529,12 @@ impl OpenAIProvider {
     /// GET `/models`, as the endpoint answers it.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
-            self.client
-                .get(format!("{}/models", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key)),
+            crate::provider::with_extra_headers(
+                self.client
+                    .get(format!("{}/models", self.base_url))
+                    .header("Authorization", format!("Bearer {}", self.api_key)),
+                &self.extra_headers,
+            ),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .send()
@@ -1328,6 +1347,25 @@ mod tests {
         assert_eq!(sent.len(), 2);
         let retry = &sent[1];
         assert!(retry.contains(r#""reasoning_effort":"none""#), "{retry}");
+    }
+
+    /// The operator's extra headers reach the wire on an inference, after
+    /// the provider's own.
+    #[tokio::test]
+    async fn extra_headers_ride_every_request() {
+        let body = br#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url)
+            .with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+        provider.infer(&simple_request()).await.unwrap();
+        let request = leviath_core::sync::lock(&seen)[0].to_ascii_lowercase();
+        assert!(request.contains("x-gateway-token: t-1"), "{request}");
+        let own = request.find("authorization").expect("the key is sent");
+        let extra = request.find("x-gateway-token").expect("the extra is sent");
+        assert!(
+            own < extra,
+            "the provider's own header comes first: {request}"
+        );
     }
 
     #[tokio::test]

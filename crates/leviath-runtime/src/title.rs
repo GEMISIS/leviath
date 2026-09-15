@@ -639,13 +639,19 @@ pub(crate) fn dispatch_title(
         // found a full pool does not cost the run a candidate.
         chain.0.remove(0);
 
+        // The title call carries the task, so the zero-retention fields ride
+        // it the way they ride a stage's own request.
+        let mut request = title_request(&meta.task, &provider_name, &model);
+        providers
+            .0
+            .apply_retention_knobs(&provider_name, &mut request.extra);
         stage.runtime.spawn(run_title_job(
             TitleJob {
                 entity,
                 provider,
                 provider_name: provider_name.clone(),
                 model: model.clone(),
-                request: title_request(&meta.task, &provider_name, &model),
+                request,
                 permit,
             },
             retry,

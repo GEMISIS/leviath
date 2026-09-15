@@ -69,6 +69,10 @@ pub struct OpenRouterProvider {
     /// the compiled-in table answers and a request for zero retention is
     /// left to OpenRouter to refuse.
     zdr_models: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
+
+    /// The operator's extra headers, sent after the provider's own on every
+    /// request to `base_url`: a gateway's token, a tenant tag.
+    extra_headers: Vec<(String, String)>,
 }
 
 impl OpenRouterProvider {
@@ -100,6 +104,7 @@ impl OpenRouterProvider {
             temperature_unsupported: Default::default(),
             learned: Default::default(),
             zdr_models: std::sync::RwLock::new(None),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -120,7 +125,15 @@ impl OpenRouterProvider {
             temperature_unsupported: Default::default(),
             learned: Default::default(),
             zdr_models: std::sync::RwLock::new(None),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Extra headers on every request to the host, after the provider's own:
+    /// what a gateway named in `with_base_url` wants of its own.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     /// Point this provider at a different host.
@@ -475,13 +488,24 @@ impl OpenRouterProvider {
     /// OpenRouter attributes a request to an app by the referer and title
     /// pair, and sending only the referer left every Leviath call unnamed on
     /// the account's activity page.
-    fn chat_headers(&self) -> [(&'static str, String); 4] {
-        [
-            ("Authorization", format!("Bearer {}", self.api_key)),
-            ("HTTP-Referer", "https://leviath.dev".to_string()),
-            ("X-Title", "Leviath".to_string()),
-            ("Content-Type", "application/json".to_string()),
-        ]
+    fn chat_headers(&self) -> Vec<(&str, String)> {
+        crate::provider::with_extra_header_pairs(
+            vec![
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("HTTP-Referer", "https://leviath.dev".to_string()),
+                ("X-Title", "Leviath".to_string()),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &self.extra_headers,
+        )
+    }
+
+    /// The headers a listing read carries: the key, and the operator's extras.
+    fn listing_headers(&self) -> Vec<(&str, String)> {
+        crate::provider::with_extra_header_pairs(
+            vec![("Authorization", format!("Bearer {}", self.api_key))],
+            &self.extra_headers,
+        )
     }
 
     /// Whether this model has already refused a temperature.
@@ -526,7 +550,7 @@ impl OpenRouterProvider {
         crate::provider::fetch_listing(
             &self.client,
             &format!("{}/models", self.base_url),
-            &[("Authorization", format!("Bearer {}", self.api_key))],
+            &self.listing_headers(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .await
@@ -539,7 +563,7 @@ impl OpenRouterProvider {
         let body = crate::provider::fetch_listing(
             &self.client,
             &format!("{}/endpoints/zdr", self.base_url),
-            &[("Authorization", format!("Bearer {}", self.api_key))],
+            &self.listing_headers(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .await?;
@@ -1924,6 +1948,25 @@ mod tests {
             "the first stream request carries temperature and the retry drops it: {sent:?}"
         );
         assert!(provider.temperature_is_unsupported("openai/gpt-5-image-mini"));
+    }
+
+    /// The operator's extra headers reach the wire on an inference, after
+    /// the provider's own.
+    #[tokio::test]
+    async fn extra_headers_ride_every_request() {
+        let body = br#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url)
+            .with_headers(vec![("X-Gateway-Token".to_string(), "t-1".to_string())]);
+        provider.infer(&simple_request()).await.unwrap();
+        let request = leviath_core::sync::lock(&seen)[0].to_ascii_lowercase();
+        assert!(request.contains("x-gateway-token: t-1"), "{request}");
+        let own = request.find("authorization").expect("the key is sent");
+        let extra = request.find("x-gateway-token").expect("the extra is sent");
+        assert!(
+            own < extra,
+            "the provider's own header comes first: {request}"
+        );
     }
 
     #[tokio::test]

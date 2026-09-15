@@ -39,39 +39,47 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
     // The third column is the host this provider is reached on, when it is not
     // the vendor's own. Per provider, because a gateway usually fronts one
     // family and pointing the others at it would break them.
+    // The fourth is the extra headers that host wants on every request: a
+    // gateway's own token, a tenant tag. Per provider for the same reason.
     let keyed = [
         (
             "anthropic",
             config.providers.anthropic_api_key.as_deref(),
             config.providers.anthropic_base_url.as_deref(),
+            &config.providers.anthropic_headers,
         ),
         (
             "openai",
             config.providers.openai_api_key.as_deref(),
             config.providers.openai_base_url.as_deref(),
+            &config.providers.openai_headers,
         ),
         (
             "google",
             config.providers.google_api_key.as_deref(),
             config.providers.google_base_url.as_deref(),
+            &config.providers.google_headers,
         ),
         (
             "openrouter",
             config.openrouter_api_key.as_deref(),
             config.providers.openrouter_base_url.as_deref(),
+            &config.providers.openrouter_headers,
         ),
         (
             "meshy",
             config.providers.meshy_api_key.as_deref(),
             config.providers.meshy_base_url.as_deref(),
+            &config.providers.meshy_headers,
         ),
         (
             leviath_providers::bedrock::PROVIDER_NAME,
             config.providers.bedrock_api_key.as_deref(),
             config.providers.bedrock_base_url.as_deref(),
+            &config.providers.bedrock_headers,
         ),
     ];
-    for (name, key, base_url) in keyed {
+    for (name, key, base_url, headers) in keyed {
         // A blank key is not a key: `lev setup` writes empty strings for
         // providers the user skipped, and registering one produces a provider
         // that authenticates as nobody and fails at the first call.
@@ -98,20 +106,28 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             {
                 options.insert("region".to_string(), region.to_string());
             }
-            creds.push(ProviderCreds {
-                name: name.to_string(),
-                api_key: Some(key.to_string()),
-                // Blank is not a URL, for the same reason blank is not a key:
-                // `lev setup` writes empty strings for what the user skipped.
-                base_url: base_url
-                    .map(str::trim)
-                    .filter(|u| !u.is_empty())
-                    .map(str::to_string),
-                model_capabilities: caps.clone(),
-                request_timeout_secs: timeout,
-                rate_limit: config.rate_limits.get(name).cloned(),
-                options,
-            });
+            creds.push(
+                ProviderCreds {
+                    name: name.to_string(),
+                    api_key: Some(key.to_string()),
+                    // Blank is not a URL, for the same reason blank is not a key:
+                    // `lev setup` writes empty strings for what the user skipped.
+                    base_url: base_url
+                        .map(str::trim)
+                        .filter(|u| !u.is_empty())
+                        .map(str::to_string),
+                    model_capabilities: caps.clone(),
+                    request_timeout_secs: timeout,
+                    rate_limit: config.rate_limits.get(name).cloned(),
+                    options,
+                }
+                .with_headers(
+                    headers
+                        .iter()
+                        .map(|(header, value)| (header.clone(), value.clone()))
+                        .collect(),
+                ),
+            );
         }
     }
 
@@ -363,6 +379,25 @@ pub(crate) fn retention_settings(
             }
         })
         .collect();
+    // Which built-in's per-request fields an endpoint takes. Only names the
+    // table has fields for mean anything; another is a typo, said once.
+    let request_knob_aliases = config
+        .model_providers
+        .iter()
+        .filter_map(|(name, entry)| {
+            let target = entry.extra.get("zero_retention_request")?.as_str()?;
+            if leviath_providers::retention::request_knobs(target).is_none() {
+                tracing::warn!(
+                    provider = %name,
+                    "ignoring [model_providers] zero_retention_request = \"{target}\": no \
+                     built-in provider of that name takes a per-request field (openai, \
+                     openrouter)"
+                );
+                return None;
+            }
+            Some((name.clone(), target.to_string()))
+        })
+        .collect();
     leviath_providers::retention::RetentionSettings {
         zero_requested: config.providers.zero_retention,
         agreements: config.providers.zero_retention_agreements.clone(),
@@ -372,6 +407,7 @@ pub(crate) fn retention_settings(
             .filter_map(|(model, caps)| caps.retention.map(|r| (model.clone(), r)))
             .collect(),
         provider_declarations,
+        request_knob_aliases,
     }
 }
 
@@ -1098,7 +1134,33 @@ mod tests {
             "silent".to_string(),
             toml::from_str("api_key = \"k\"\nretention = 3").unwrap(),
         );
+        // An endpoint names whose request fields it takes; a name the table
+        // has no fields for is dropped with a warning.
+        config.model_providers.insert(
+            "azure".to_string(),
+            toml::from_str(
+                "kind = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+                 zero_retention_request = \"openai\"",
+            )
+            .unwrap(),
+        );
+        config.model_providers.insert(
+            "odd".to_string(),
+            toml::from_str("api_key = \"k\"\nzero_retention_request = \"groq\"").unwrap(),
+        );
+        config.model_providers.insert(
+            "numeric".to_string(),
+            toml::from_str("api_key = \"k\"\nzero_retention_request = 3").unwrap(),
+        );
         let settings = retention_settings(&config);
+        assert_eq!(
+            settings.request_knob_aliases.get("azure"),
+            Some(&"openai".to_string())
+        );
+        assert!(!settings.request_knob_aliases.contains_key("odd"));
+        assert!(!settings.request_knob_aliases.contains_key("numeric"));
+        assert_eq!(settings.knob_provider("azure"), "openai");
+        assert_eq!(settings.knob_provider("odd"), "odd");
         assert!(settings.zero_requested);
         assert_eq!(settings.agreements, vec!["openai".to_string()]);
         assert_eq!(
@@ -1169,6 +1231,35 @@ mod tests {
             !names.contains(&"openai"),
             "whitespace-only key must not register"
         );
+    }
+
+    /// A provider's extra headers ride its credentials in the config's
+    /// order, and a provider with none carries none.
+    #[test]
+    fn provider_creds_from_config_carries_extra_headers() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant".to_string()),
+                anthropic_headers: std::collections::BTreeMap::from([
+                    ("X-Gateway-Token".to_string(), "t-1".to_string()),
+                    ("X-Org".to_string(), "research".to_string()),
+                ]),
+                openai_api_key: Some("sk-oa".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let anthropic = creds.iter().find(|c| c.name == "anthropic").unwrap();
+        assert_eq!(
+            anthropic.headers().unwrap(),
+            vec![
+                ("X-Gateway-Token".to_string(), "t-1".to_string()),
+                ("X-Org".to_string(), "research".to_string()),
+            ]
+        );
+        let openai = creds.iter().find(|c| c.name == "openai").unwrap();
+        assert!(openai.headers().unwrap().is_empty());
     }
 
     #[test]

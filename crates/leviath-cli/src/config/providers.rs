@@ -81,6 +81,39 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub bedrock_base_url: Option<String>,
 
+    /// Extra headers on every request Anthropic's provider makes to its
+    /// host: a gateway's own token, a tenant or cost-centre tag. Sent as
+    /// written, after the provider's own headers. Meant for a gateway named
+    /// in [`Self::anthropic_base_url`]; a value here is as often a credential
+    /// as not, so `Debug` prints the names alone.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub anthropic_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for OpenAI's provider. See [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub openai_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for Google's provider. See [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub google_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for OpenRouter's provider. See [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub openrouter_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for Meshy's provider, on its API calls and not on the
+    /// asset downloads, which go to signed URLs on another host. See
+    /// [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub meshy_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for Bedrock's provider, on inference calls to the
+    /// runtime origin (the one [`Self::bedrock_base_url`] replaces) and not
+    /// on the AWS control-plane, price-file or count routes. See
+    /// [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bedrock_headers: std::collections::BTreeMap<String, String>,
+
     /// Whether the Claude Code CLI transport is enabled.
     ///
     /// **Opt-in, and never selected for the user.** The CLI injects its own
@@ -249,6 +282,17 @@ impl std::fmt::Debug for ProviderConfig {
             .field("fallback_order", &self.fallback_order)
             .field("zero_retention", &self.zero_retention)
             .field("zero_retention_agreements", &self.zero_retention_agreements)
+            // A header value is a credential as often as not, so the names
+            // alone say what is configured.
+            .field("anthropic_headers", &header_names(&self.anthropic_headers))
+            .field("openai_headers", &header_names(&self.openai_headers))
+            .field("google_headers", &header_names(&self.google_headers))
+            .field(
+                "openrouter_headers",
+                &header_names(&self.openrouter_headers),
+            )
+            .field("meshy_headers", &header_names(&self.meshy_headers))
+            .field("bedrock_headers", &header_names(&self.bedrock_headers))
             .finish()
     }
 }
@@ -273,6 +317,12 @@ impl Default for ProviderConfig {
             openrouter_base_url: None,
             meshy_base_url: None,
             bedrock_base_url: None,
+            anthropic_headers: std::collections::BTreeMap::new(),
+            openai_headers: std::collections::BTreeMap::new(),
+            google_headers: std::collections::BTreeMap::new(),
+            openrouter_headers: std::collections::BTreeMap::new(),
+            meshy_headers: std::collections::BTreeMap::new(),
+            bedrock_headers: std::collections::BTreeMap::new(),
             claude_code_enabled: false,
             claude_code_binary: None,
             claude_code_effort: None,
@@ -289,6 +339,12 @@ impl Default for ProviderConfig {
             zero_retention_agreements: Vec::new(),
         }
     }
+}
+
+/// The header names alone, for [`Debug`] output: a value is as often a
+/// credential as not.
+fn header_names(headers: &std::collections::BTreeMap<String, String>) -> Vec<&str> {
+    headers.keys().map(String::as_str).collect()
 }
 
 /// `"<set>"` or `"<unset>"` for an optional secret, for [`Debug`] output.
@@ -424,7 +480,14 @@ const ENDPOINT_KEYS: &[&str] = &[
     "serves",
     "headers",
     "models",
+    "retention",
+    "zero_retention_request",
 ];
+
+/// The keys an endpoint entry reads off `extra`, where a `flatten` puts them:
+/// what the host keeps of its requests, and which built-in provider's
+/// zero-retention request field it takes.
+const ENDPOINT_EXTRA_KEYS: &[&str] = &["retention", "zero_retention_request"];
 
 impl ModelProviderConfig {
     /// The kind this entry is, with absent read as a script.
@@ -463,8 +526,13 @@ impl ModelProviderConfig {
         // and both would otherwise load clean. `Config::unknown_config_keys`
         // cannot catch them either, because `flatten` writes them straight
         // back.
-        if self.is_endpoint() && !self.extra.is_empty() {
-            let mut keys: Vec<&str> = self.extra.keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = self
+            .extra
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !ENDPOINT_EXTRA_KEYS.contains(key))
+            .collect();
+        if self.is_endpoint() && !keys.is_empty() {
             keys.sort_unstable();
             anyhow::bail!(
                 "[model_providers.{name}] has kind = \"openai-compatible\" and \

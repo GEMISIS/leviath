@@ -108,22 +108,7 @@ impl EndpointSpec {
                 creds.name
             ))
         };
-        // Sorted by the position the encoder stamped, so the config's own
-        // order is what the wire sees whatever order the map iterates in.
-        let mut headers: Vec<(usize, String, String)> = Vec::new();
-        for (key, value) in &creds.options {
-            let Some(rest) = key.strip_prefix(HEADER_PREFIX) else {
-                continue;
-            };
-            let position = rest
-                .split_once(':')
-                .and_then(|(position, name)| Some((position.parse().ok()?, name)));
-            let Some((position, name)) = position else {
-                return Err(malformed(key, "a numbered header (header:<n>:<name>)"));
-            };
-            headers.push((position, name.to_string(), value.clone()));
-        }
-        headers.sort();
+        let headers = creds.headers()?;
         let list = |option: &str| -> Result<Option<Vec<String>>, _> {
             creds
                 .options
@@ -134,10 +119,7 @@ impl EndpointSpec {
         };
         Ok(Some(Self {
             base_url,
-            headers: headers
-                .into_iter()
-                .map(|(_, name, value)| (name, value))
-                .collect(),
+            headers,
             models: list(MODELS_OPTION)?,
             serves: list(SERVES_OPTION)?.unwrap_or_default(),
         }))
@@ -193,6 +175,51 @@ impl ProviderCreds {
             rate_limit: None,
             options: std::collections::HashMap::new(),
         }
+    }
+
+    /// Carry extra request headers, one `header:<n>:<name>` option per
+    /// header, numbered so the config's order survives a `HashMap`. What a
+    /// built-in provider behind a gateway sends alongside its own headers;
+    /// [`Self::headers`] reads them back.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        for (position, (header, value)) in headers.into_iter().enumerate() {
+            self.options
+                .insert(format!("{HEADER_PREFIX}{position}:{header}"), value);
+        }
+        self
+    }
+
+    /// The extra headers [`Self::with_headers`] or
+    /// [`Self::openai_compatible`] wrote, in the order the config listed
+    /// them. An option that is there but does not read back is an error, not
+    /// an absence: the runtime wrote it, so a failure is a bug, and a header
+    /// with a bad position is a header the server never sees.
+    pub fn headers(&self) -> Result<Vec<(String, String)>, leviath_providers::ProviderError> {
+        // Sorted by the position the encoder stamped, so the config's own
+        // order is what the wire sees whatever order the map iterates in.
+        let mut headers: Vec<(usize, String, String)> = Vec::new();
+        for (key, value) in &self.options {
+            let Some(rest) = key.strip_prefix(HEADER_PREFIX) else {
+                continue;
+            };
+            let position = rest
+                .split_once(':')
+                .and_then(|(position, name)| Some((position.parse().ok()?, name)));
+            let Some((position, name)) = position else {
+                return Err(leviath_providers::ProviderError::Other(format!(
+                    "provider '{}': the '{key}' option is not a numbered header \
+                     (header:<n>:<name>); the runtime wrote it from the config, so this \
+                     is a bug in leviath rather than in the config",
+                    self.name
+                )));
+            };
+            headers.push((position, name.to_string(), value.clone()));
+        }
+        headers.sort();
+        Ok(headers
+            .into_iter()
+            .map(|(_, name, value)| (name, value))
+            .collect())
     }
 
     /// A cred entry for an OpenAI-compatible endpoint registered as `name`.
@@ -409,6 +436,7 @@ pub fn build_provider_registry_probing(
                                 c.rate_limit.as_ref(),
                             )
                             .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?)
                             // An unrecognised value keeps the default rather
                             // than failing the daemon's boot over a cache
                             // setting; the config layer is what validates it.
@@ -435,7 +463,8 @@ pub fn build_provider_registry_probing(
                                 caps,
                                 c.rate_limit.as_ref(),
                             )
-                            .with_base_url(c.base_url.clone()),
+                            .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?),
                         ),
                     );
                 }
@@ -451,7 +480,8 @@ pub fn build_provider_registry_probing(
                                 caps,
                                 c.rate_limit.as_ref(),
                             )
-                            .with_base_url(c.base_url.clone()),
+                            .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?),
                         ),
                     );
                 }
@@ -467,7 +497,8 @@ pub fn build_provider_registry_probing(
                                 caps,
                                 c.rate_limit.as_ref(),
                             )
-                            .with_base_url(c.base_url.clone()),
+                            .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?),
                         ),
                     );
                 }
@@ -483,7 +514,8 @@ pub fn build_provider_registry_probing(
                                 caps,
                                 c.rate_limit.as_ref(),
                             )
-                            .with_base_url(c.base_url.clone()),
+                            .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?),
                         ),
                     );
                 }
@@ -500,6 +532,7 @@ pub fn build_provider_registry_probing(
                                 c.rate_limit.as_ref(),
                             )
                             .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?)
                             // Absent means the provider's default region; the
                             // config layer writes it only when one was set.
                             .with_region(c.options.get("region").cloned()),
@@ -754,6 +787,61 @@ mod tests {
         assert_eq!(spec.models, None);
         assert!(spec.serves.is_empty());
         assert!(spec.headers.is_empty());
+    }
+
+    /// A built-in provider's extra headers ride the same numbered options an
+    /// endpoint's do, read back in the config's order, and reach the
+    /// registry's constructor; a header that lost its position fails the
+    /// registry naming the provider, the way an endpoint's does.
+    #[test]
+    fn a_builtin_providers_headers_travel_in_the_options_and_reach_the_registry() {
+        let creds = ProviderCreds {
+            api_key: Some("sk-test".to_string()),
+            ..ProviderCreds::simple("openai")
+        }
+        .with_headers(vec![
+            ("X-Gateway-Token".to_string(), "t-1".to_string()),
+            ("X-Org".to_string(), "research".to_string()),
+        ]);
+        assert_eq!(
+            creds.headers().expect("decodes"),
+            vec![
+                ("X-Gateway-Token".to_string(), "t-1".to_string()),
+                ("X-Org".to_string(), "research".to_string()),
+            ]
+        );
+        assert!(
+            ProviderCreds::simple("openai")
+                .headers()
+                .expect("decodes")
+                .is_empty()
+        );
+        let registry = build_provider_registry(&[creds]).expect("builds");
+        assert!(registry.has("openai"));
+
+        // Every built-in that takes headers refuses a header without a
+        // position the same way, naming itself.
+        for name in [
+            "anthropic",
+            "openai",
+            "google",
+            "openrouter",
+            "meshy",
+            "bedrock",
+        ] {
+            let mut bad = ProviderCreds {
+                api_key: Some("sk-test".to_string()),
+                ..ProviderCreds::simple(name)
+            };
+            bad.options
+                .insert("header:X-No-Position".to_string(), "v".to_string());
+            let err = build_provider_registry(&[bad])
+                .map(drop)
+                .expect_err("a header without a position is a bug, not an absence")
+                .to_string();
+            assert!(err.contains(&format!("'{name}'")), "{err}");
+            assert!(err.contains("header:X-No-Position"), "{err}");
+        }
     }
 
     /// Not an endpoint: a native provider, and an endpoint that lost its

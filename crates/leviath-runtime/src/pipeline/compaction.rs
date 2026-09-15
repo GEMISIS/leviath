@@ -143,6 +143,13 @@ pub(crate) fn dispatch_compaction(
         let Some(provider) = providers.0.get(&config.provider) else {
             continue; // compaction provider not registered - skip, non-fatal
         };
+        // A summary request carries the run's context, so the zero-retention
+        // fields ride it the way they ride a stage's own request.
+        for (_, request) in requests.iter_mut() {
+            providers
+                .0
+                .apply_retention_knobs(&config.provider, &mut request.extra);
+        }
         let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
             continue; // pool full - skip compaction this round
         };
@@ -469,7 +476,13 @@ pub(crate) fn dispatch_edge_compact(
         let started = settings
             .and_then(|s| {
                 let config = &s.0;
-                let requests = build_edge_compact_requests(window, &pending.0, config)?;
+                let mut requests = build_edge_compact_requests(window, &pending.0, config)?;
+                // As above: a summary carries the run's context.
+                for (_, request) in requests.iter_mut() {
+                    providers
+                        .0
+                        .apply_retention_knobs(&config.provider, &mut request.extra);
+                }
                 let Some(provider) = providers.0.get(&config.provider) else {
                     tracing::warn!(
                         provider = %config.provider,
