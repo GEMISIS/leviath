@@ -11,6 +11,24 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Added
+
+- Data retention is a thing a provider answers, and zero retention a thing
+  you can ask for. `lev providers retention` says what each configured
+  provider keeps of a request and how that is controlled: a per-request
+  field (OpenRouter), an account setting Leviath reads and writes (Bedrock,
+  `GET`/`PUT /data-retention`), or an agreement no API can read (OpenAI,
+  Anthropic, Google), with the models that retain regardless (Claude Fable 5
+  and Mythos 5) called out. `[providers] zero_retention = true` (or
+  `lev providers retention set zero`) sends OpenAI `store = false`, routes
+  OpenRouter only to zero-retention endpoints, sets Bedrock's account mode to
+  `none`, and refuses at spawn a stage whose model still keeps something.
+  `zero_retention_agreements` declares the contracts you hold; `retention` on
+  a `[model_capabilities]` or `[model_providers]` entry answers for one model
+  or one custom host; `lev models show` prints a model's own answer.
+
 ## 0.6.0 - 2026-09-14
 
 ### Added

@@ -964,6 +964,9 @@ serves it.
 | `lev providers` (or `lev providers list`) | `--json` | List configured providers and the current priority order |
 | `lev providers order <NAME>...` | | Set the order, best first (e.g. `lev providers order codex openrouter openai`) |
 | `lev providers order --clear` | | Remove the order, so `default_provider` alone decides |
+| `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's account mode read live. See [data retention](/docs/providers#data-retention) |
+| `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
+| `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review` or `inherit` |
 
 Naming a provider in the order is also how a subscription transport (Codex, Claude Code) becomes
 eligible for a bare model name - it is otherwise reachable only by an explicit `provider/model`, so

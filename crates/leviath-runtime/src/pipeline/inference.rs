@@ -605,6 +605,13 @@ pub(crate) fn dispatch_inference(
                         raise_output_cap: progress.is_some_and(|p| p.raise_output_cap),
                     },
                 );
+                // Zero retention asked for: the providers that take it per
+                // request get their field here, keyed by the name the stage
+                // resolved to, which is the one the registry knows.
+                let mut request = request;
+                providers
+                    .0
+                    .apply_retention_knobs(&si.provider_name, &mut request.extra);
                 // Remembered for the next request, which is the only way the
                 // breakpoint decision can be made on evidence.
                 par_commands.command_scope(|mut commands| {

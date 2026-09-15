@@ -762,6 +762,24 @@ mod mime_tests;
 #[cfg(test)]
 mod tests {
 
+    /// Retention is a matter of documentation for this provider, so it reads
+    /// nothing and the compiled-in table answers.
+    #[test]
+    fn a_provider_that_reads_no_retention_setting_answers_none() {
+        use crate::provider::Provider;
+        let provider = super::OpenRouterProvider::with_overrides(
+            reqwest::Client::new(),
+            "k".to_string(),
+            std::collections::HashMap::new(),
+            None,
+        );
+        assert!(
+            provider
+                .live_retention("anthropic/claude-sonnet-5")
+                .is_none()
+        );
+    }
+
     /// `/models` quotes USD per token as strings; `ModelPricing` is per million.
     /// Getting that scale wrong is a factor of a million, which is the kind of
     /// error that looks like a bug in something else entirely.

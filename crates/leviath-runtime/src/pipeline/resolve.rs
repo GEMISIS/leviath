@@ -51,6 +51,14 @@ pub struct ModelDefaults {
     /// subscription transport that is otherwise reachable only by an explicit
     /// `provider/model` becomes eligible at the priority it is listed.
     pub provider_order: Vec<String>,
+    /// The operator's data retention settings, from `config.toml` as it
+    /// stands at spawn: whether zero retention is asked for (in which case a
+    /// stage whose model cannot give it is refused rather than sent), the
+    /// agreements declared, and the per-model and per-host words. Carried
+    /// here rather than read off the registry because the registry's copy
+    /// follows the config on the housekeeper's cadence, and a spawn should
+    /// answer to the config the operator just wrote.
+    pub retention: leviath_providers::retention::RetentionSettings,
 }
 
 impl ModelDefaults {
@@ -943,6 +951,30 @@ pub fn resolve_stages(
                     ),
                 });
             }
+            // Zero data retention was asked for, so a model that keeps
+            // anything is refused here, with the provider's own reason, rather
+            // than sent with a request field that cannot reach the abuse log.
+            // Refused rather than skipped for the same reason as the check
+            // above: an author who pinned a model would not see it swapped
+            // for one at another vendor.
+            if defaults.retention.zero_requested {
+                let policy =
+                    registry.retention_with(&defaults.retention, &head.provider, &head.model);
+                if !policy.is_zero() {
+                    return Err(format!(
+                        "stage '{}' names {}/{}, which does not run with zero data \
+                         retention (retention {}: {}). `[providers] zero_retention` is \
+                         on: name a model that keeps nothing, declare the agreement \
+                         in `zero_retention_agreements` if you hold one, or turn the \
+                         setting off.",
+                        stage.name,
+                        head.provider,
+                        head.model,
+                        policy.retention.describe(),
+                        policy.note,
+                    ));
+                }
+            }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved) and by group. A name matching nothing
             // (a typo, or an MCP tool whose server isn't installed) is simply
@@ -1095,6 +1127,7 @@ mod tests {
             .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "spark".to_string(),
             override_model: None,
             fallback_model: None,
@@ -1124,6 +1157,7 @@ mod tests {
             .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "spark".to_string(),
             override_model: None,
             fallback_model: None,
@@ -1148,6 +1182,7 @@ mod tests {
             .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "spark".to_string(),
             override_model: None,
             fallback_model: None,
@@ -1325,6 +1360,7 @@ mod tests {
     fn resolve_user_default_when_nothing_listed_available() {
         // Listed provider "ghost" is unavailable; anthropic (the default) is.
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("claude-default".to_string()),
             fallback_model: None,
@@ -1346,6 +1382,7 @@ mod tests {
     #[test]
     fn an_override_model_qualified_with_its_own_provider_is_sent_bare() {
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "ollama".to_string(),
             override_model: Some("ollama/qwen3.8:latest".to_string()),
             fallback_model: None,
@@ -1408,6 +1445,7 @@ mod tests {
     #[test]
     fn resolve_user_default_with_model_override() {
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: None,
@@ -1428,6 +1466,7 @@ mod tests {
         // allow_user_default, a default model set, but the default provider isn't
         // registered ⇒ neither user-default branch fires ⇒ last resort.
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "ghost-default".to_string(),
             override_model: Some("dm".to_string()),
             fallback_model: None,
@@ -1460,6 +1499,7 @@ mod tests {
         let mut cfg = model_cfg(vec![("ghost", "g")]);
         cfg.allow_user_default = false; // forbid the default fallback
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("would-be-default".to_string()),
             fallback_model: None,
@@ -1549,6 +1589,85 @@ mod tests {
         assert!(err.contains("plan"), "names the stage: {err}");
         assert!(err.contains("groq/llama-3.1-70b"), "names the pair: {err}");
         assert!(err.contains("lev models list"), "says what to do: {err}");
+    }
+
+    /// With zero retention asked for, a model the table says keeps
+    /// something is refused with that reason, one that keeps nothing goes
+    /// through, and a declared agreement turns the first into the second.
+    #[test]
+    fn resolve_stages_refuses_a_retaining_model_when_zero_retention_is_asked_for() {
+        let stage = |name: &str, provider: &str, model: &str| {
+            leviath_core::Stage::new(name.to_string(), model_cfg(vec![(provider, model)]))
+        };
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage("plan", "openai", "gpt-5.5")],
+            layout.clone(),
+        );
+        let defaults = ModelDefaults {
+            retention: leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+            ..ModelDefaults::default()
+        };
+        let registry = registry_publishing(&[("openai", &["gpt-5.5"]), ("ollama", &["q"])]);
+
+        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+            .expect_err("OpenAI keeps an abuse log");
+        assert!(err.contains("plan"), "{err}");
+        assert!(err.contains("30 days"), "{err}");
+        assert!(err.contains("zero_retention_agreements"), "{err}");
+
+        let local = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage("plan", "ollama", "q")],
+            layout.clone(),
+        );
+        resolve_stages(
+            &local,
+            None,
+            &defaults,
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("local inference keeps nothing");
+
+        // Off, nothing is checked.
+        resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("not asked for, not refused");
+
+        let with_agreement = ModelDefaults {
+            retention: leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                agreements: vec!["openai".to_string()],
+                ..Default::default()
+            },
+            ..ModelDefaults::default()
+        };
+        resolve_stages(
+            &bp,
+            None,
+            &with_agreement,
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("a declared agreement makes OpenAI zero");
     }
 
     /// And when the provider can say *why*, the spawn error says that instead.
@@ -1681,6 +1800,7 @@ mod tests {
     #[test]
     fn providers_tried_lists_the_blueprint_entries_and_the_user_default() {
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "fallback".to_string(),
             override_model: None,
             fallback_model: None,
@@ -1925,6 +2045,7 @@ mod tests {
     fn the_global_chain_comes_after_the_user_default() {
         let cfg = model_cfg(vec![("openrouter", "deepseek")]);
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("sonnet".to_string()),
             fallback_model: None,
@@ -1954,6 +2075,7 @@ mod tests {
     fn the_fallback_model_comes_after_the_stages_own_entries_and_is_never_promoted() {
         let cfg = model_cfg(vec![("openrouter", "deepseek"), ("anthropic", "opus")]);
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: Some("haiku".to_string()),
@@ -1982,6 +2104,7 @@ mod tests {
     fn a_stage_with_nothing_configured_starts_on_the_fallback_model_and_says_so() {
         let cfg = model_cfg(vec![("ghost", "m")]);
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: Some("anthropic/haiku".to_string()),
@@ -2003,6 +2126,7 @@ mod tests {
         let mut cfg = model_cfg(vec![("openrouter", "deepseek")]);
         cfg.allow_user_default = false;
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("sonnet".to_string()),
             fallback_model: Some("haiku".to_string()),
@@ -2023,6 +2147,7 @@ mod tests {
     fn the_fallback_model_needs_its_provider_registered() {
         let cfg = model_cfg(vec![("openrouter", "deepseek")]);
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: Some("haiku".to_string()),
@@ -2043,6 +2168,7 @@ mod tests {
         let cfg = model_cfg(vec![("anthropic", "opus")]);
         let registry = registry_with(&["anthropic"]);
         let displaced = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("sonnet".to_string()),
             fallback_model: None,
@@ -2106,6 +2232,7 @@ mod tests {
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_with(&["anthropic"]);
         let overridden = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("sonnet".to_string()),
             fallback_model: None,
@@ -2143,6 +2270,7 @@ mod tests {
             leviath_core::layout::ContextLayout::new(vec![], 1000),
         );
         let fallback = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: Some("haiku".to_string()),
@@ -2296,6 +2424,7 @@ mod tests {
         // nowhere, which reads to the operator as a swap that did nothing.
         let cfg = model_cfg(vec![("anthropic", "sonnet"), ("anthropic", "sonnet")]);
         let defaults = ModelDefaults {
+            retention: Default::default(),
             provider: "anthropic".to_string(),
             override_model: Some("sonnet".to_string()),
             fallback_model: None,
@@ -3174,6 +3303,7 @@ mod tests {
 
     fn defaults_of(provider: &str) -> ModelDefaults {
         ModelDefaults {
+            retention: Default::default(),
             provider: provider.to_string(),
             override_model: None,
             fallback_model: None,
@@ -3299,6 +3429,7 @@ mod tests {
 
     fn defaults_ordered(default_provider: &str, order: &[&str]) -> ModelDefaults {
         ModelDefaults {
+            retention: Default::default(),
             provider: default_provider.to_string(),
             override_model: None,
             fallback_model: None,

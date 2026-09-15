@@ -33,6 +33,7 @@ pub mod openrouter;
 pub mod pricing;
 pub mod provider;
 pub mod rate_limit;
+pub mod retention;
 pub mod rhai_provider;
 pub(crate) mod text_tools;
 pub use text_tools::flatten_tool_turns;

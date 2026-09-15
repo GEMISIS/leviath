@@ -37,6 +37,41 @@ enum ProvidersCommand {
     List(ListArgs),
     /// Set the priority order for a bare model name, best first
     Order(OrderArgs),
+    /// What each provider keeps of a request, and ask for zero retention
+    Retention(RetentionArgs),
+}
+
+#[derive(Args)]
+struct RetentionArgs {
+    /// Omitted, it shows what every provider keeps and how that is controlled
+    #[command(subcommand)]
+    command: Option<RetentionCommand>,
+    /// Emit JSON instead of a table
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum RetentionCommand {
+    /// `zero` asks every provider for zero retention and refuses a model that
+    /// cannot give it; `off` stops asking
+    Set(RetentionSetArgs),
+    /// Set the Bedrock account's data retention mode directly (`none`,
+    /// `default`, `aws_review`, `inherit`)
+    Bedrock(BedrockModeArgs),
+}
+
+#[derive(Args)]
+struct RetentionSetArgs {
+    /// `zero` or `off`
+    want: String,
+}
+
+#[derive(Args)]
+struct BedrockModeArgs {
+    /// The mode: `none` is zero retention, `aws_review` is what Claude Fable 5
+    /// and Mythos 5 need
+    mode: String,
 }
 
 #[derive(Args)]
@@ -62,6 +97,9 @@ struct OrderArgs {
 pub struct ProvidersEnv {
     /// Path to the config file to read and rewrite.
     pub config_path: std::path::PathBuf,
+    /// Where Bedrock's control plane answers, when a test stands one up in
+    /// place of AWS's. `None` derives it from the configured region.
+    pub bedrock_control_url: Option<String>,
 }
 
 /// Run a `lev providers` subcommand against the injected environment.
@@ -70,7 +108,220 @@ pub async fn execute_with(args: ProvidersArgs, env: &ProvidersEnv) -> anyhow::Re
         None | Some(ProvidersCommand::List(ListArgs { json: false })) => list(false, env),
         Some(ProvidersCommand::List(ListArgs { json: true })) => list(true, env),
         Some(ProvidersCommand::Order(order)) => set_order(order, env),
+        Some(ProvidersCommand::Retention(RetentionArgs {
+            command: None,
+            json,
+        })) => show_retention(json, env, &leviath_providers::provider::build_http_client).await,
+        Some(ProvidersCommand::Retention(RetentionArgs {
+            command: Some(RetentionCommand::Set(set)),
+            ..
+        })) => {
+            set_retention(
+                &set.want,
+                env,
+                &leviath_providers::provider::build_http_client,
+            )
+            .await
+        }
+        Some(ProvidersCommand::Retention(RetentionArgs {
+            command: Some(RetentionCommand::Bedrock(args)),
+            ..
+        })) => {
+            set_bedrock_mode(
+                &args.mode,
+                env,
+                &leviath_providers::provider::build_http_client,
+            )
+            .await
+        }
     }
+}
+
+/// The Bedrock provider the config describes, for reading and writing the
+/// account's data retention mode; `None` when no Bedrock key is configured.
+fn bedrock_from(
+    config: &Config,
+    env: &ProvidersEnv,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<Option<leviath_providers::BedrockProvider>> {
+    let Some(key) = config
+        .providers
+        .bedrock_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    else {
+        return Ok(None);
+    };
+    let client = build_client(None)?;
+    let mut provider = leviath_providers::BedrockProvider::new(client, key.to_string())
+        .with_region(config.providers.bedrock_region.clone())
+        .with_base_url(config.providers.bedrock_base_url.clone());
+    if let Some(url) = &env.bedrock_control_url {
+        provider = provider.with_control_url(Some(url.clone()));
+    }
+    Ok(Some(provider))
+}
+
+/// Every provider worth a row: the built-ins that are configured, and every
+/// `[model_providers]` entry.
+fn retention_rows(config: &Config) -> Vec<String> {
+    let configured = catalog::configured(config);
+    let mut names: Vec<String> = catalog::providers()
+        .iter()
+        .filter(|p| configured.contains(&p.id))
+        .map(|p| p.id.to_string())
+        .collect();
+    let mut custom: Vec<String> = config.model_providers.keys().cloned().collect();
+    custom.sort();
+    names.extend(custom);
+    names
+}
+
+/// `lev providers retention`: what each provider keeps, with the account's
+/// mode read live from Bedrock when a key is configured.
+async fn show_retention(
+    json: bool,
+    env: &ProvidersEnv,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<()> {
+    let config = Config::load_from_path_public(&env.config_path)?;
+    let settings = crate::commands::run::session::retention_settings(&config);
+    let bedrock_mode = match bedrock_from(&config, env, build_client)? {
+        Some(provider) => match provider.account_retention().await {
+            Ok(Some(read)) => Some(Ok(read.mode)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e.to_string())),
+        },
+        None => None,
+    };
+    let rows: Vec<(String, leviath_providers::retention::RetentionPolicy)> =
+        retention_rows(&config)
+            .into_iter()
+            .map(|name| {
+                let base = leviath_providers::retention::builtin(&name, "");
+                let policy = leviath_providers::retention::resolve(base, &name, "", &settings);
+                (name, policy)
+            })
+            .collect();
+
+    if json {
+        let out = serde_json::json!({
+            "zero_retention": config.providers.zero_retention,
+            "zero_retention_agreements": config.providers.zero_retention_agreements,
+            "bedrock_account_mode": match &bedrock_mode {
+                Some(Ok(mode)) => serde_json::json!(mode),
+                Some(Err(e)) => serde_json::json!({ "error": e }),
+                None => serde_json::Value::Null,
+            },
+            "providers": rows.iter().map(|(name, policy)| serde_json::json!({
+                "id": name,
+                "retention": policy.retention.as_word(),
+                "control": policy.control,
+                "source": policy.source,
+                "note": policy.note,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{out:#}");
+        return Ok(());
+    }
+
+    println!("What each provider keeps of a request once the reply is back:");
+    for (name, policy) in &rows {
+        println!("  {:<12} {}", name, policy.summary());
+        println!("               {}", policy.note);
+        if name == "bedrock" {
+            match &bedrock_mode {
+                Some(Ok(mode)) => {
+                    println!("               account data retention mode: {mode} (read just now)")
+                }
+                Some(Err(e)) => {
+                    println!("               account data retention mode: could not be read ({e})")
+                }
+                None => {}
+            }
+        }
+    }
+    println!();
+    match config.providers.zero_retention {
+        true => println!(
+            "[providers] zero_retention = true: a stage whose model keeps anything is \
+             refused at spawn; `lev providers retention set off` stops asking."
+        ),
+        false => println!(
+            "[providers] zero_retention = false: runs use every configured model; \
+             `lev providers retention set zero` asks for zero retention everywhere."
+        ),
+    }
+    if !config.providers.zero_retention_agreements.is_empty() {
+        println!(
+            "Declared zero data retention agreements: {}",
+            config.providers.zero_retention_agreements.join(", ")
+        );
+    }
+    println!("Per model: `lev models show <model>` prints the model's own answer.");
+    Ok(())
+}
+
+/// `lev providers retention set zero|off`: the config switch, and on
+/// Bedrock the account mode that goes with it.
+async fn set_retention(
+    want: &str,
+    env: &ProvidersEnv,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<()> {
+    let zero = match want.trim().to_ascii_lowercase().as_str() {
+        "zero" | "on" | "none" => true,
+        "off" | "default" => false,
+        other => anyhow::bail!(
+            "'{other}' is not a setting: `zero` asks every provider for zero retention, `off` stops asking"
+        ),
+    };
+    let mut config = Config::load_from_path_public(&env.config_path)?;
+    config.providers.zero_retention = zero;
+    config.save_to_path_public(&env.config_path)?;
+    match zero {
+        true => println!(
+            "Zero retention is on: OpenAI is sent store=false, OpenRouter routes only to \
+             zero-retention endpoints, and a stage whose model keeps anything is refused \
+             at spawn."
+        ),
+        false => println!("Zero retention is off: runs use every configured model."),
+    }
+    match bedrock_from(&config, env, build_client)? {
+        Some(provider) if zero => match provider.set_account_retention("none").await {
+            Ok(written) => println!(
+                "Bedrock account data retention mode set to {} (Claude Fable 5 and Mythos 5 \
+                 need aws_review and are unavailable under it).",
+                written.mode
+            ),
+            Err(e) => println!(
+                "Bedrock's account data retention mode could not be set to none: {e}. Set it \
+                 with `lev providers retention bedrock none` once the key can."
+            ),
+        },
+        Some(_) => println!(
+            "Bedrock's account data retention mode is left as it is; `lev providers \
+             retention bedrock <mode>` changes it."
+        ),
+        None => {}
+    }
+    Ok(())
+}
+
+/// `lev providers retention bedrock <mode>`: the account setting, directly.
+async fn set_bedrock_mode(
+    mode: &str,
+    env: &ProvidersEnv,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<()> {
+    let config = Config::load_from_path_public(&env.config_path)?;
+    let Some(provider) = bedrock_from(&config, env, build_client)? else {
+        anyhow::bail!("no Bedrock key is configured; `lev setup --bedrock-key ...` first");
+    };
+    let written = provider.set_account_retention(mode.trim()).await?;
+    println!("Bedrock account data retention mode: {}", written.mode);
+    Ok(())
 }
 
 /// Whether `name` is a provider this machine could route to: a built-in the
@@ -210,7 +461,278 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         config.save_to_path_public(&config_path).expect("save");
-        (dir, ProvidersEnv { config_path })
+        (
+            dir,
+            ProvidersEnv {
+                config_path,
+                bedrock_control_url: None,
+            },
+        )
+    }
+
+    fn retention_args(command: Option<RetentionCommand>, json: bool) -> ProvidersArgs {
+        ProvidersArgs {
+            command: Some(ProvidersCommand::Retention(RetentionArgs { command, json })),
+        }
+    }
+
+    /// The listing describes every configured built-in and every custom
+    /// entry, the switch is written and read back, and a word that is not a
+    /// setting is refused.
+    #[tokio::test]
+    async fn retention_is_shown_and_the_switch_is_written() {
+        let mut config = Config::default();
+        config.providers.openai_api_key = Some("sk-test".to_string());
+        config.providers.zero_retention_agreements = vec!["openai".to_string()];
+        config.model_providers.insert(
+            "cerebras".to_string(),
+            toml::from_str(
+                r#"api_key = "k"
+retention = "zero""#,
+            )
+            .unwrap(),
+        );
+        let (_dir, env) = env_with(config);
+
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        execute_with(retention_args(None, true), &env)
+            .await
+            .unwrap();
+
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "zero".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(load(&env).providers.zero_retention);
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "off".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(!load(&env).providers.zero_retention);
+
+        let err = execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "maybe".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not a setting"), "{err}");
+
+        // No Bedrock key: the direct mode command says so.
+        let err = execute_with(
+            retention_args(
+                Some(RetentionCommand::Bedrock(BedrockModeArgs {
+                    mode: "none".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no Bedrock key"), "{err}");
+    }
+
+    /// With a Bedrock key the listing reads the account's mode, `set zero`
+    /// writes mode none to the account, and the direct command writes what
+    /// it is told; a plane that refuses is reported, not fatal to `set`.
+    #[tokio::test]
+    async fn retention_reads_and_writes_the_bedrock_account_mode() {
+        let mut config = Config::default();
+        config.providers.bedrock_api_key = Some("ABSK-test".to_string());
+        let (_dir, mut env) = env_with(config);
+
+        let url =
+            leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"default"}"#.to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        execute_with(retention_args(None, true), &env)
+            .await
+            .unwrap();
+
+        let url =
+            leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"none"}"#.to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "zero".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(load(&env).providers.zero_retention);
+
+        let url =
+            leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"aws_review"}"#.to_vec())
+                .await;
+        env.bedrock_control_url = Some(url);
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Bedrock(BedrockModeArgs {
+                    mode: "aws_review".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+
+        // `set off` leaves the account alone; a refusal on `set zero` is printed.
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "off".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        let url = leviath_testkit::spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+        env.bedrock_control_url = Some(url.clone());
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "zero".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        // The listing reports a plane that will not answer. Each mock answers
+        // one request, so every call gets its own.
+        let url = leviath_testkit::spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        let url = leviath_testkit::spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        let err = execute_with(
+            retention_args(
+                Some(RetentionCommand::Bedrock(BedrockModeArgs {
+                    mode: "none".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("403"), "{err}");
+
+        // The text listing prints a mode it read, and the JSON one a refusal.
+        let url =
+            leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"none"}"#.to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        let url = leviath_testkit::spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        execute_with(retention_args(None, true), &env)
+            .await
+            .unwrap();
+    }
+
+    /// A gateway in front of Bedrock's control plane cannot be asked, so the
+    /// listing has no mode to show and `set zero` cannot write one; a client
+    /// that cannot be built, or a config that cannot be read, stops each
+    /// command with its reason.
+    #[tokio::test]
+    async fn retention_commands_report_what_stops_them() {
+        let mut config = Config::default();
+        config.providers.bedrock_api_key = Some("ABSK-test".to_string());
+        config.providers.bedrock_base_url = Some("http://gw.local".to_string());
+        let (_dir, env) = env_with(config);
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        execute_with(retention_args(None, true), &env)
+            .await
+            .unwrap();
+        execute_with(
+            retention_args(
+                Some(RetentionCommand::Set(RetentionSetArgs {
+                    want: "zero".into(),
+                })),
+                false,
+            ),
+            &env,
+        )
+        .await
+        .unwrap();
+        // Without an override the control plane follows the region.
+        let config = load(&env);
+        let provider = bedrock_from(
+            &config,
+            &env,
+            &leviath_providers::provider::build_http_client,
+        )
+        .unwrap()
+        .expect("a key is configured");
+        assert_eq!(provider.region(), "us-east-1");
+
+        let failing: leviath_providers::provider::HttpClientFactory<'_> =
+            &|_t| Err(leviath_providers::provider::malformed_url_error());
+        assert!(bedrock_from(&config, &env, failing).is_err());
+        assert!(show_retention(false, &env, failing).await.is_err());
+        assert!(set_retention("zero", &env, failing).await.is_err());
+        assert!(set_bedrock_mode("none", &env, failing).await.is_err());
+
+        // A config that cannot be read stops every command the same way.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let broken = dir.path().join("config.toml");
+        std::fs::write(&broken, "this = = is not toml").expect("write config");
+        let env = ProvidersEnv {
+            config_path: broken,
+            bedrock_control_url: None,
+        };
+        let real = &leviath_providers::provider::build_http_client;
+        assert!(show_retention(false, &env, real).await.is_err());
+        assert!(set_retention("zero", &env, real).await.is_err());
+        assert!(set_bedrock_mode("none", &env, real).await.is_err());
+
+        // And one that loads (as the default) but cannot be written back.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").expect("write blocker");
+        let env = ProvidersEnv {
+            config_path: blocker.join("config.toml"),
+            bedrock_control_url: None,
+        };
+        let err = set_retention("zero", &env, real).await.unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 
     fn order_args(names: &[&str], clear: bool) -> ProvidersArgs {
@@ -322,7 +844,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, "this is : not : toml\n").expect("write garbage");
-        let env = ProvidersEnv { config_path };
+        let env = ProvidersEnv {
+            config_path,
+            bedrock_control_url: None,
+        };
         assert!(
             execute_with(order_args(&["anthropic"], false), &env)
                 .await
@@ -345,6 +870,7 @@ mod tests {
         std::fs::write(&blocker, "not a directory").expect("write blocker");
         let env = ProvidersEnv {
             config_path: blocker.join("config.toml"),
+            bedrock_control_url: None,
         };
         let err = execute_with(order_args(&["anthropic"], false), &env)
             .await

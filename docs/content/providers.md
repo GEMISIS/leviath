@@ -453,6 +453,53 @@ back before using it. Signing in again is for a session that was revoked or one
 left unused long enough for the refresh token itself to expire, not for
 ordinary use.
 
+## Data retention
+
+What a provider keeps of a request once the reply is back is not one thing, and Leviath does not
+pretend it is. Every provider answers a policy for a model: how long prompts and outputs stay on
+its side, who can change that, and one line saying what to do about it.
+
+```bash
+lev providers retention              # what each configured provider keeps, and how that is set
+lev providers retention --json
+lev providers retention set zero     # ask everywhere; refuse a model that cannot give it
+lev providers retention set off
+lev providers retention bedrock none # Bedrock's account mode, directly
+lev models show claude-sonnet-5      # a model's own answer, on the Retention line
+```
+
+`set zero` writes `[providers] zero_retention = true`. With it on, OpenAI is sent `store = false`,
+OpenRouter is sent `provider.zdr = true` with `data_collection = "deny"` so it routes only to
+endpoints with a zero-retention policy (and refuses a model that has none, rather than routing it
+elsewhere), Bedrock's account mode is set to `none`, and a stage whose model still keeps something
+is refused at spawn with the provider's own reason. Nothing is silently rerouted: an author who
+pinned a model would not see it swapped for one at another vendor. A running daemon reads the
+switch at every spawn and picks the per-request fields up on its next housekeeping pass, so no
+restart is needed.
+
+What each shipped provider does, as documented on 2026-09-14:
+
+| Provider | Keeps | Controlled by | What that means |
+|---|---|---|---|
+| `bedrock` | nothing, for a model that allows mode `none` | the account's data retention mode, `GET`/`PUT /data-retention` | Modes are ordered `none < default < aws_review`; Leviath reads the mode at start-up and `lev providers retention` reads it live. Claude Fable 5 and Mythos 5 require `aws_review` and keep 30 days inside AWS for the human review Anthropic requires; under `none` they are unavailable. Model invocation logging is a separate, opt-in setting on your account |
+| `openai` | up to 30 days, for abuse monitoring | a Zero Data Retention agreement with OpenAI | `store = false` stops the stored-completion copy on every request; only the agreement removes the abuse log. Declare it in `zero_retention_agreements` |
+| `anthropic` | up to 30 days, for trust and safety | a zero data retention agreement with Anthropic | Declare it in `zero_retention_agreements`. Claude Fable 5 and 5.1, Mythos 5 and 5.1 keep 30 days regardless and are not available under ZDR without Anthropic's express authorisation |
+| `google` | 55 days, for abuse monitoring (paid tier) | per project, on request to Google | Declare it in `zero_retention_agreements`. The free tier trains on prompts |
+| `openrouter` | nothing itself unless prompt logging is on; the endpoint's own policy applies | `provider.zdr` on each request | `GET https://openrouter.ai/api/v1/endpoints/zdr` lists the endpoints that qualify |
+| `meshy` | 3 days (enterprise: indefinitely) | nothing | A task's model files, previews and textures are kept so they can be downloaded; nothing is used for training |
+| `ollama`, `llama-cpp`, `lm-studio` | nothing | nothing | Local inference |
+| `codex` | the ChatGPT account's terms | nothing | A subscription transport, outside the API's agreements |
+| `claude-code` | the account behind the CLI | nothing | A Commercial API key inherits its organisation's arrangement, ZDR included |
+| a `[model_providers]` entry | unknown | its `retention` key | Leviath cannot know a custom host's policy; declare it if you do |
+
+A model can differ from its provider: `retention` on a `[model_capabilities.<model>]` entry
+replaces the answer for that model alone, and wins over everything above. Anthropic's covered
+models are the built-in case of that.
+
+Two things this cannot do. It cannot read an agreement: OpenAI, Anthropic and Google expose no
+API for it, so a declared agreement is taken at your word. And it cannot make a provider keep
+less than its floor: a model that retains regardless is refused under `zero_retention`, not sent.
+
 ## Rate limits
 
 Optional per-provider client-side rate limits, enforced before each call. The table name is the

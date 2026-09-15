@@ -46,6 +46,143 @@ fn converse_reply() -> Vec<u8> {
     .into_bytes()
 }
 
+/// The account's mode is read off the control plane and remembered, so the
+/// live answer for a model reflects it: `none` is zero for an ordinary
+/// model and still 30 days for a covered Claude; `default` is unknown;
+/// `aws_review` keeps nothing for a model that allows `none`. A write goes
+/// out as `PUT` with the mode and is remembered too; a word Bedrock does
+/// not take is refused before any request.
+#[tokio::test]
+async fn the_account_retention_mode_is_read_written_and_remembered() {
+    let p = BedrockProvider::new(client(), "k".to_string());
+    assert!(
+        p.live_retention("amazon.nova-2").is_none(),
+        "nothing read yet"
+    );
+    assert!(p.retention_mode().is_none());
+
+    let url = spawn_mock_server(
+        200,
+        "OK",
+        br#"{"mode":"none","updated_at":"2026-06-07T20:19:44.723Z"}"#.to_vec(),
+    )
+    .await;
+    let p = provider_at(&url);
+    let read = p.account_retention().await.unwrap().unwrap();
+    assert_eq!(read.mode, "none");
+    assert_eq!(p.retention_mode().as_deref(), Some("none"));
+    let plain = p.live_retention("amazon.nova-2").unwrap();
+    assert!(plain.is_zero(), "{plain:?}");
+    assert_eq!(plain.source, crate::retention::Source::Live);
+    let covered = p.live_retention("us.anthropic.claude-fable-5-1").unwrap();
+    assert_eq!(covered.retention, crate::retention::Retention::Days(30));
+    assert!(covered.note.contains("aws_review"), "{}", covered.note);
+
+    let url = spawn_mock_server(
+        200,
+        "OK",
+        br#"{"mode":"default","updated_at":1733529600}"#.to_vec(),
+    )
+    .await;
+    let p = provider_at(&url);
+    p.account_retention().await.unwrap();
+    assert_eq!(
+        p.live_retention("amazon.nova-2").unwrap().retention,
+        crate::retention::Retention::Unknown
+    );
+
+    let url = spawn_mock_server(200, "OK", br#"{"mode":"aws_review"}"#.to_vec()).await;
+    let p = provider_at(&url);
+    let written = p.set_account_retention("aws_review").await.unwrap();
+    assert_eq!(written.mode, "aws_review");
+    assert!(written.updated_at.is_none());
+    assert!(p.live_retention("amazon.nova-2").unwrap().is_zero());
+    assert_eq!(
+        p.live_retention("anthropic.claude-mythos-5")
+            .unwrap()
+            .retention,
+        crate::retention::Retention::Days(30)
+    );
+
+    let err = p
+        .set_account_retention("sometimes")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a Bedrock data retention mode"), "{err}");
+
+    // A gateway fronting the control plane: nothing to read, and a write is refused.
+    let gated = BedrockProvider::new(client(), "k".to_string())
+        .with_base_url(Some("http://gw.local".to_string()));
+    assert!(gated.account_retention().await.unwrap().is_none());
+    let err = gated
+        .set_account_retention("none")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("gateway"), "{err}");
+
+    // An answer that is not a retention setting is an API error, not a panic.
+    let url = spawn_mock_server(200, "OK", br#"{"updated_at":1}"#.to_vec()).await;
+    let p = provider_at(&url);
+    let err = p.account_retention().await.unwrap_err().to_string();
+    assert!(err.contains("not one"), "{err}");
+    // The mock answers one request, so each call gets its own.
+    let url = spawn_mock_server(200, "OK", br#"{"updated_at":1}"#.to_vec()).await;
+    let err = provider_at(&url)
+        .set_account_retention("none")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not one"), "{err}");
+    // A body that is not JSON at all, and a plane nobody answers on.
+    let url = spawn_mock_server(200, "OK", b"<html>".to_vec()).await;
+    assert!(
+        provider_at(&url)
+            .set_account_retention("none")
+            .await
+            .is_err()
+    );
+    let dead = BedrockProvider::new(client(), "k".to_string())
+        .with_control_url(Some("http://127.0.0.1:1".to_string()));
+    let err = dead.set_account_retention("none").await.unwrap_err();
+    assert!(err.is_transient(), "{err}");
+    // A body that is not JSON at all, and a plane nobody answers on.
+    let url = spawn_mock_server(200, "OK", b"<html>".to_vec()).await;
+    assert!(
+        provider_at(&url)
+            .set_account_retention("none")
+            .await
+            .is_err()
+    );
+    let dead = BedrockProvider::new(client(), "k".to_string())
+        .with_control_url(Some("http://127.0.0.1:1".to_string()));
+    let err = dead.set_account_retention("none").await.unwrap_err();
+    assert!(err.is_transient(), "{err}");
+    // A body that is not JSON at all, and a plane nobody answers on.
+    let url = spawn_mock_server(200, "OK", b"<html>".to_vec()).await;
+    assert!(
+        provider_at(&url)
+            .set_account_retention("none")
+            .await
+            .is_err()
+    );
+    let dead = BedrockProvider::new(client(), "k".to_string())
+        .with_control_url(Some("http://127.0.0.1:1".to_string()));
+    let err = dead.set_account_retention("none").await.unwrap_err();
+    assert!(err.is_transient(), "{err}");
+    // And a refusal from the plane is surfaced as such.
+    let url = spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+    assert!(provider_at(&url).account_retention().await.is_err());
+    let url = spawn_mock_server(403, "Forbidden", b"{}".to_vec()).await;
+    assert!(
+        provider_at(&url)
+            .set_account_retention("none")
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 fn the_default_hosts_follow_the_region() {
     let p = BedrockProvider::new(client(), "k".to_string());
@@ -665,21 +802,27 @@ async fn a_listing_that_fails_or_misparses_is_reported() {
 
 #[tokio::test]
 async fn check_credential_reads_the_listing_again() {
+    // Priming reads the listing, the profiles, the prices, and then the
+    // account's data retention mode.
+    let retention = || br#"{"mode":"none"}"#.to_vec();
     let (url, bodies) = spawn_mock_sequence(vec![
         (200, "OK", listing_page()),
         (200, "OK", profiles_page(None)),
         (200, "OK", price_page()),
+        (200, "OK", retention()),
         (200, "OK", listing_page()),
         (200, "OK", profiles_page(None)),
         (200, "OK", price_page()),
+        (200, "OK", retention()),
     ])
     .await;
     let p = provider_at(&url);
     p.list_models().await.unwrap();
-    assert_eq!(bodies.lock().unwrap().len(), 3);
+    assert_eq!(bodies.lock().unwrap().len(), 4);
+    assert_eq!(p.retention_mode().as_deref(), Some("none"));
     let models = p.check_credential().await.unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(bodies.lock().unwrap().len(), 6);
+    assert_eq!(bodies.lock().unwrap().len(), 8);
 }
 
 #[tokio::test]

@@ -26,6 +26,9 @@ pub struct ProviderRegistry {
     /// Lazy, hot-reloading resolver for `.rhai` script providers. Shared across
     /// registry clones (one compile cache daemon-wide).
     script_layer: Option<Arc<ScriptProviderLayer>>,
+    /// The operator's data retention settings, laid over what each provider
+    /// documents or reads. See [`Self::retention`].
+    retention: leviath_providers::retention::RetentionSettings,
 }
 
 impl ProviderRegistry {
@@ -38,6 +41,69 @@ impl ProviderRegistry {
     pub fn with_script_layer(mut self, layer: Arc<ScriptProviderLayer>) -> Self {
         self.script_layer = Some(layer);
         self
+    }
+
+    /// The data retention settings from `config.toml`: whether zero
+    /// retention is asked for, which providers the organisation holds an
+    /// agreement with, and the per-model and per-provider declarations.
+    pub fn with_retention(
+        mut self,
+        settings: leviath_providers::retention::RetentionSettings,
+    ) -> Self {
+        self.retention = settings;
+        self
+    }
+
+    /// Replace the settings in place: what the daemon's housekeeper does
+    /// when `config.toml` changes under a running daemon.
+    pub fn set_retention(&mut self, settings: leviath_providers::retention::RetentionSettings) {
+        self.retention = settings;
+    }
+
+    /// The settings [`Self::with_retention`] installed.
+    pub fn retention_settings(&self) -> &leviath_providers::retention::RetentionSettings {
+        &self.retention
+    }
+
+    /// [`Self::retention`] with the caller's settings rather than the
+    /// registry's own: the spawn gate reads them off the config it was
+    /// handed, which is the live one, while the registry's copy follows on
+    /// the next housekeeping pass.
+    pub fn retention_with(
+        &self,
+        settings: &leviath_providers::retention::RetentionSettings,
+        provider: &str,
+        model: &str,
+    ) -> leviath_providers::retention::RetentionPolicy {
+        let base = self
+            .get(provider)
+            .and_then(|p| p.live_retention(model))
+            .unwrap_or_else(|| leviath_providers::retention::builtin(provider, model));
+        leviath_providers::retention::resolve(base, provider, model, settings)
+    }
+
+    /// What `provider` keeps of `model`'s requests, with the operator's
+    /// settings applied: what the provider read from its account if it
+    /// could, else the compiled-in table for the name it is registered
+    /// under (a script provider or an endpoint answers by its own name),
+    /// then a declaration, an agreement, or the request for zero retention
+    /// on top. Answers for a provider that is not registered too, from the
+    /// table alone, so a listing can describe one that is merely known.
+    pub fn retention(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> leviath_providers::retention::RetentionPolicy {
+        self.retention_with(&self.retention, provider, model)
+    }
+
+    /// Merge the per-request zero-retention fields for `provider` into a
+    /// request's extra parameters, when zero retention is asked for. A
+    /// provider without such fields is left alone.
+    pub fn apply_retention_knobs(&self, provider: &str, extra: &mut serde_json::Value) {
+        if self.retention.zero_requested {
+            leviath_providers::retention::apply_request_knobs(provider, extra);
+        }
     }
 
     /// Register a provider by name.
@@ -561,6 +627,52 @@ mod tests {
 
     /// A provider gets to explain a refusal, and one with nothing to add is
     /// silent rather than inventing a sentence.
+    /// A retention answer is keyed by the name a provider is registered
+    /// under, not the name it calls itself: a stub registered as `openai`
+    /// answers with OpenAI's documented policy, and the operator's settings
+    /// sit on top. The per-request knobs go out only when zero retention was
+    /// asked for.
+    #[test]
+    fn retention_is_answered_by_registry_name_with_settings_on_top() {
+        use leviath_providers::retention::{Retention, RetentionSettings, Source};
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "openai".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        let documented = registry.retention("openai", "gpt-5.5");
+        assert_eq!(documented.retention, Retention::Days(30));
+        assert_eq!(documented.source, Source::Builtin);
+        // Unregistered is still described, from the table.
+        assert!(registry.retention("ollama", "qwen3.5:9b").is_zero());
+        let mut extra = serde_json::Value::Null;
+        registry.apply_retention_knobs("openai", &mut extra);
+        assert!(extra.is_null(), "nothing asked for, nothing sent");
+
+        let settings = RetentionSettings {
+            zero_requested: true,
+            agreements: vec!["openai".to_string()],
+            ..Default::default()
+        };
+        let mut registry = registry.with_retention(settings.clone());
+        assert_eq!(registry.retention_settings(), &settings);
+        // Replaced in place, the way the housekeeper does it, and answered
+        // with a caller's settings, the way the spawn gate does it.
+        registry.set_retention(RetentionSettings::default());
+        assert!(!registry.retention("openai", "gpt-5.5").is_zero());
+        assert!(
+            registry
+                .retention_with(&settings, "openai", "gpt-5.5")
+                .is_zero()
+        );
+        registry.set_retention(settings.clone());
+        let declared = registry.retention("openai", "gpt-5.5");
+        assert!(declared.is_zero());
+        assert_eq!(declared.source, Source::Declared);
+        registry.apply_retention_knobs("openai", &mut extra);
+        assert_eq!(extra, serde_json::json!({ "store": false }));
+    }
+
     #[test]
     fn refusal_reason_comes_from_the_provider_or_not_at_all() {
         let mut reg = ProviderRegistry::new();
