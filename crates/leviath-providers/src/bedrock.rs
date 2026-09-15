@@ -792,12 +792,12 @@ impl Provider for BedrockProvider {
     /// its mode serves each model under that model's default.
     fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
         use crate::retention::{Control, Retention, RetentionPolicy, Source};
-        let account = self.retention_mode()?;
+        let read = self.retention_mode()?;
         let covered = crate::retention::is_covered_claude(model);
         let listed = self.model_retention(model);
         // The mode the model is served under: the account's own, or the
         // model's default when the account defers.
-        let mode = match (account.as_str(), &listed) {
+        let mode = match (read.as_str(), &listed) {
             ("inherit", Some(m)) if !m.mode.is_empty() => m.mode.clone(),
             ("inherit", _) => "default".to_string(),
             (own, _) => own.to_string(),
@@ -844,7 +844,7 @@ impl Provider for BedrockProvider {
             ),
             (_, "default", false) => (
                 Retention::Unknown,
-                match account.as_str() {
+                match read.as_str() {
                     "inherit" => {
                         "the account inherits its data retention mode, so this model runs \
                          under its own default, and AWS may keep content flagged for \
