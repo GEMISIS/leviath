@@ -542,6 +542,8 @@ mod tests {
             openrouter_key: None,
             bedrock_key: None,
             bedrock_region: None,
+            zero_retention: None,
+            zero_retention_agreements: None,
             ollama_url: None,
             override_model: None,
             fallback_model: None,

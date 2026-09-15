@@ -11,6 +11,45 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Added
+
+- Which models can give zero data retention is now read per model where a
+  provider publishes it. Bedrock's model listing says which data retention
+  modes each model may be served under, and a model it never offers under
+  `none` (every OpenAI model on Bedrock, Claude Fable 5) is refused up front
+  under `[providers] zero_retention` rather than reported unavailable by
+  Bedrock mid-run; an account set to `inherit` is read as serving each model
+  under that model's own default, where it was read as zero. OpenRouter's
+  `GET /endpoints/zdr` list is read the same way, so a model with no
+  zero-retention endpoint is refused before the request goes out.
+- `lev validate` reports it before a run does: `retention-not-zero` (error)
+  for a stage whose model would be refused under the switch, and
+  `retention-fallback-dropped` (warning) for a fallback that failover would
+  skip, each with the provider's reason.
+- The setup wizard's Defaults screen has a **Zero data retention (ZDR)**
+  switch whose help spells out what it does, with an agreement row for each
+  chosen provider that settles retention by contract (Anthropic, OpenAI,
+  Google). Headless: `lev setup --zero-retention true` and
+  `--zero-retention-agreements anthropic,openai`.
+
+### Fixed
+
+- A running daemon judged a spawn under `[providers] zero_retention` by the
+  Bedrock account mode it read when it started, so `lev providers retention
+  set zero` (which sets the mode to `none`) was followed by a refusal
+  naming the old mode until the daemon restarted. While the switch is on
+  the daemon now reads the mode again before every spawn.
+- `lev providers retention` names the Bedrock models never served under
+  mode `none`, and any unavailable to the account as things stand with
+  Bedrock's reason (a mode the model is not served under, a missing access
+  grant), so a refusal is explained before a run meets it.
+- Under `[providers] zero_retention`, a fallback that keeps something is
+  dropped from a stage's failover list at spawn, with a line in the stage's
+  log; only the model the stage starts on was checked before, so a failover
+  could reach a model the switch should have kept the request from.
+
 ## 0.6.1 - 2026-09-15
 
 ### Added

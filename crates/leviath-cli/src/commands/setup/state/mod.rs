@@ -23,6 +23,7 @@ use crate::config::Config;
 mod endpoints;
 mod models;
 mod priority;
+mod retention;
 pub(crate) use endpoints::*;
 mod lanes;
 mod limits;
@@ -690,6 +691,9 @@ impl Wizard {
 
         let timeout = self.current_request_timeout();
         let region = self.current_bedrock_region();
+        // Read off the form before it is replaced, like the two above.
+        let zero = self.current_zero_retention();
+        let agreements = self.current_agreements();
         self.defaults = vec![
             Field {
                 label: "Provider priority",
@@ -711,7 +715,7 @@ impl Wizard {
             },
         ];
         // Bedrock's hosts are regional, so a chosen Bedrock gets a region
-        // field; nobody else has one, and the form keeps its three rows.
+        // field; nobody else has one, and the retention rows below follow it.
         if self.bedrock_selected() {
             let current =
                 region.unwrap_or_else(|| leviath_providers::bedrock::DEFAULT_REGION.to_string());
@@ -730,6 +734,10 @@ impl Wizard {
                 value: FieldValue::Choice { options, index },
             });
         }
+        // The zero data retention switch and the agreement rows, read off
+        // the previous form above (their rows move when Bedrock is picked
+        // or dropped, so they are found by label; see `retention`).
+        self.push_retention_fields(zero, &agreements);
         // Re-pick the concurrency default now that the provider choice is
         // settled. Doing this only on an arrow press missed the commonest
         // Ollama case entirely: when it is the *only* provider selected it is
@@ -1001,6 +1009,8 @@ impl Wizard {
                 .filter(|r| Some(r) != self.region_from_env.as_ref()),
             false => None,
         };
+        config.providers.zero_retention = self.current_zero_retention();
+        config.providers.zero_retention_agreements = self.current_agreements();
 
         apply_limits_fields(&mut config, &self.limits);
 
@@ -1143,13 +1153,15 @@ pub(super) mod tests {
         let mut wizard = test_wizard(dir.path());
         wizard.providers[0].selected = true;
         wizard.enter(Step::Defaults);
-        assert_eq!(wizard.defaults.len(), 3);
+        // Three fixed rows, the retention switch, and the first provider's
+        // agreement row.
+        assert_eq!(wizard.defaults.len(), 5);
         assert_eq!(wizard.current_bedrock_region(), None);
 
         let bedrock = bedrock_row(&wizard);
         wizard.providers[bedrock].selected = true;
         wizard.enter(Step::Defaults);
-        assert_eq!(wizard.defaults.len(), 4);
+        assert_eq!(wizard.defaults.len(), 6);
         let field = &wizard.defaults[Wizard::REGION_FIELD];
         assert_eq!(field.label, "AWS Bedrock region");
         assert_eq!(field.value.display(), "us-east-1");
@@ -1176,8 +1188,92 @@ pub(super) mod tests {
         );
         wizard.providers[bedrock].selected = false;
         wizard.rebuild_defaults();
-        assert_eq!(wizard.defaults.len(), 3);
+        assert_eq!(wizard.defaults.len(), 5);
         assert_eq!(wizard.build_config().providers.bedrock_region, None);
+    }
+
+    /// The retention switch follows the region row, keeps its value across a
+    /// rebuild that moves it, and writes `zero_retention`; an agreement row
+    /// appears for each chosen contract provider and writes the list, while
+    /// a name the wizard does not offer stays as the config wrote it.
+    #[test]
+    fn the_retention_rows_follow_the_region_and_write_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.base.providers.zero_retention_agreements =
+            vec!["groq".to_string(), "openai".to_string()];
+        let anthropic = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "anthropic")
+            .expect("the catalog offers Anthropic");
+        wizard.providers[anthropic].selected = true;
+        wizard.enter(Step::Defaults);
+
+        // No region row, so the switch is fourth.
+        let zero = Wizard::REGION_FIELD;
+        assert_eq!(wizard.defaults[zero].label, Wizard::ZERO_RETENTION_LABEL);
+        assert_eq!(wizard.defaults[zero].value.display(), "no");
+        assert!(
+            wizard.defaults[zero]
+                .help
+                .contains("zero data retention, ZDR"),
+            "the help spells the term out"
+        );
+        assert_eq!(
+            wizard.defaults[zero + 1].label,
+            "ZDR agreement with Anthropic"
+        );
+        assert_eq!(
+            wizard.defaults.len(),
+            zero + 2,
+            "OpenAI is not chosen, so no row"
+        );
+        assert!(!wizard.current_zero_retention());
+        assert_eq!(
+            wizard.current_agreements(),
+            vec!["groq".to_string(), "openai".to_string()],
+            "the config's names stand until a row says otherwise"
+        );
+
+        wizard.defaults[zero].value = FieldValue::Bool(true);
+        wizard.defaults[zero + 1].value = FieldValue::Bool(true);
+        let config = wizard.build_config();
+        assert!(config.providers.zero_retention);
+        assert_eq!(
+            config.providers.zero_retention_agreements,
+            vec![
+                "groq".to_string(),
+                "anthropic".to_string(),
+                "openai".to_string()
+            ]
+        );
+
+        // Bedrock moves the switch down one; the values ride along.
+        let bedrock = bedrock_row(&wizard);
+        wizard.providers[bedrock].selected = true;
+        wizard.rebuild_defaults();
+        assert_eq!(wizard.defaults[4].label, Wizard::ZERO_RETENTION_LABEL);
+        assert_eq!(wizard.defaults[4].value.display(), "yes");
+        assert_eq!(wizard.defaults[5].value.display(), "yes");
+        assert!(wizard.build_config().providers.zero_retention);
+
+        // An OpenAI row appears once OpenAI is chosen, holding the config's
+        // answer; turning it off drops the name.
+        let openai = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "openai")
+            .expect("the catalog offers OpenAI");
+        wizard.providers[openai].selected = true;
+        wizard.rebuild_defaults();
+        assert_eq!(wizard.defaults[6].label, "ZDR agreement with OpenAI");
+        assert_eq!(wizard.defaults[6].value.display(), "yes");
+        wizard.defaults[6].value = FieldValue::Bool(false);
+        assert_eq!(
+            wizard.build_config().providers.zero_retention_agreements,
+            vec!["groq".to_string(), "anthropic".to_string()]
+        );
     }
 
     #[test]

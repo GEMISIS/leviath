@@ -62,6 +62,13 @@ pub struct OpenRouterProvider {
     /// Empty until primed, and empty forever if the endpoint could not be
     /// reached - both mean "fall back to the built-in table".
     learned: LearnedModels,
+
+    /// The models OpenRouter has at least one zero-retention endpoint for,
+    /// from `GET /endpoints/zdr`, filled by [`Provider::prime_capabilities`].
+    /// `None` until read, or when the endpoint could not be reached; then
+    /// the compiled-in table answers and a request for zero retention is
+    /// left to OpenRouter to refuse.
+    zdr_models: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
 }
 
 impl OpenRouterProvider {
@@ -92,6 +99,7 @@ impl OpenRouterProvider {
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
+            zdr_models: std::sync::RwLock::new(None),
         }
     }
 
@@ -111,6 +119,7 @@ impl OpenRouterProvider {
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
+            zdr_models: std::sync::RwLock::new(None),
         }
     }
 
@@ -523,6 +532,47 @@ impl OpenRouterProvider {
         .await
     }
 
+    /// GET `/endpoints/zdr`: every endpoint with a zero-retention policy,
+    /// remembered as the set of model ids that have at least one. Answers
+    /// how many models that is.
+    pub async fn read_zdr_endpoints(&self) -> Result<usize> {
+        let body = crate::provider::fetch_listing(
+            &self.client,
+            &format!("{}/endpoints/zdr", self.base_url),
+            &[("Authorization", format!("Bearer {}", self.api_key))],
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .await?;
+        let rows = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
+        let models: std::collections::HashSet<String> = rows
+            .iter()
+            .filter_map(|row| row.get("model_id")?.as_str().map(str::to_string))
+            .collect();
+        let count = models.len();
+        *self
+            .zdr_models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(models);
+        Ok(count)
+    }
+
+    /// Whether `model` has a zero-retention endpoint, once the list has
+    /// been read: `None` before then. A variant suffix (`:free`, `:nitro`)
+    /// names a routing preference on the same model, so it is dropped for
+    /// the lookup when the full id is not listed.
+    pub fn has_zdr_endpoint(&self, model: &str) -> Option<bool> {
+        let listed = self
+            .zdr_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let models = listed.as_ref()?;
+        let plain = model.split_once(':').map_or(model, |(id, _)| id);
+        Some(models.contains(model) || models.contains(plain))
+    }
+
     /// Say so when a model falls through to [`FALLBACK_CAPABILITIES`].
     ///
     /// OpenRouter fronts hundreds of models and this build's table names a few
@@ -644,6 +694,44 @@ impl Provider for OpenRouterProvider {
         Some(&self.learned)
     }
 
+    /// The zero-retention list, if it was never read.
+    async fn refresh_retention(&self) {
+        let unread = self
+            .zdr_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        if unread && let Err(e) = self.read_zdr_endpoints().await {
+            tracing::debug!(error = %e, "OpenRouter's zero-retention endpoints could not be read");
+        }
+    }
+
+    /// Once the zero-retention list has been read, a model on it takes the
+    /// documented answer (zero when asked for, per request); a model off it
+    /// cannot be asked, and says so, rather than letting the request field
+    /// go out and be refused by OpenRouter after the run has started.
+    fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
+        use crate::retention::{Control, Retention, RetentionPolicy, Source};
+        let listed = self.has_zdr_endpoint(model)?;
+        let base = crate::retention::builtin("openrouter", model);
+        Some(match listed {
+            true => RetentionPolicy {
+                source: Source::Live,
+                ..base
+            },
+            false => RetentionPolicy {
+                retention: Retention::Unknown,
+                control: Control::Fixed,
+                source: Source::Live,
+                note: "no OpenRouter endpoint for this model has a zero-retention policy \
+                       (GET /endpoints/zdr lists those that do), so a request for zero \
+                       retention would be refused by OpenRouter; the endpoint's own \
+                       policy applies"
+                    .to_string(),
+            },
+        })
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what OpenRouter
         // says, what this build was compiled with.
@@ -738,6 +826,15 @@ impl Provider for OpenRouterProvider {
             priced,
             "learned OpenRouter model capabilities and rates"
         );
+        // Best effort, like the rates: without the list the compiled-in
+        // table answers, and a request for zero retention is OpenRouter's
+        // to refuse rather than Leviath's.
+        match self.read_zdr_endpoints().await {
+            Ok(n) => tracing::debug!(models = n, "read OpenRouter's zero-retention endpoints"),
+            Err(e) => {
+                tracing::debug!(error = %e, "OpenRouter's zero-retention endpoints could not be read")
+            }
+        }
         Ok(())
     }
 
@@ -762,22 +859,38 @@ mod mime_tests;
 #[cfg(test)]
 mod tests {
 
-    /// Retention is a matter of documentation for this provider, so it reads
-    /// nothing and the compiled-in table answers.
-    #[test]
-    fn a_provider_that_reads_no_retention_setting_answers_none() {
+    /// Retention is a matter of documentation for a provider that reads no
+    /// setting (OpenAI's is an agreement), so it answers nothing live, and a
+    /// refresh has nothing to read: the trait's defaults.
+    #[tokio::test]
+    async fn a_provider_that_reads_no_retention_setting_answers_none() {
         use crate::provider::Provider;
-        let provider = super::OpenRouterProvider::with_overrides(
-            reqwest::Client::new(),
-            "k".to_string(),
-            std::collections::HashMap::new(),
-            None,
-        );
-        assert!(
-            provider
-                .live_retention("anthropic/claude-sonnet-5")
-                .is_none()
-        );
+        let provider = crate::openai::OpenAIProvider::new(reqwest::Client::new(), "k".to_string());
+        assert!(provider.live_retention("gpt-5.5").is_none());
+        provider.refresh_retention().await;
+        assert!(provider.live_retention("gpt-5.5").is_none());
+    }
+
+    /// A refresh reads the zero-retention list when it was never read and
+    /// leaves a list already read alone; a list that cannot be read is
+    /// logged and stays unknown.
+    #[tokio::test]
+    async fn a_refresh_reads_the_zero_retention_list_once() {
+        use crate::provider::Provider;
+        let _guard = always_on_tracing_guard();
+        let body = br#"{"data":[{"model_id":"openai/gpt-5"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        provider.refresh_retention().await;
+        assert_eq!(provider.has_zdr_endpoint("openai/gpt-5"), Some(true));
+        // The mock answered its one request; a second read would fail, and
+        // none is made.
+        provider.refresh_retention().await;
+        assert_eq!(provider.has_zdr_endpoint("openai/gpt-5"), Some(true));
+
+        let dead = provider_with_url("http://127.0.0.1:1".to_string());
+        dead.refresh_retention().await;
+        assert_eq!(dead.has_zdr_endpoint("openai/gpt-5"), None);
     }
 
     /// `/models` quotes USD per token as strings; `ModelPricing` is per million.
@@ -1925,6 +2038,96 @@ mod tests {
         let after = provider.capabilities("moonshotai/kimi-k3");
         assert_eq!(after.max_context_tokens, 1_048_576);
         assert_eq!(after.max_output_tokens, 32_768);
+    }
+
+    /// The zero-retention list is read into a set of model ids. A model on
+    /// it keeps the documented answer (per request, zero when asked for); a
+    /// model off it cannot be asked and says so, and a request for zero
+    /// retention does not turn it zero. A variant suffix names the same
+    /// model. Before the list is read, nothing is known.
+    #[tokio::test]
+    async fn the_zero_retention_list_decides_per_model() {
+        use crate::provider::Provider as _;
+        use crate::retention::{Control, Retention, RetentionSettings, Source, resolve};
+        let body = br#"{"data":[{"name":"A | anthropic/claude-sonnet-5","model_id":"anthropic/claude-sonnet-5"},{"model_id":"openai/gpt-5"},{"nonsense":1}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        assert_eq!(provider.has_zdr_endpoint("openai/gpt-5"), None);
+        assert!(provider.live_retention("openai/gpt-5").is_none());
+
+        assert_eq!(provider.read_zdr_endpoints().await.unwrap(), 2);
+        assert_eq!(provider.has_zdr_endpoint("openai/gpt-5"), Some(true));
+        assert_eq!(
+            provider.has_zdr_endpoint("anthropic/claude-sonnet-5:nitro"),
+            Some(true),
+            "a variant suffix names the same model"
+        );
+        assert_eq!(provider.has_zdr_endpoint("x-ai/grok-5"), Some(false));
+
+        let asked = RetentionSettings {
+            zero_requested: true,
+            ..Default::default()
+        };
+        let listed = provider.live_retention("openai/gpt-5").unwrap();
+        assert_eq!(listed.source, Source::Live);
+        assert_eq!(listed.control, Control::PerRequest);
+        assert!(resolve(listed, "openrouter", "openai/gpt-5", &asked).is_zero());
+
+        let unlisted = provider.live_retention("x-ai/grok-5").unwrap();
+        assert_eq!(unlisted.retention, Retention::Unknown);
+        assert_eq!(unlisted.control, Control::Fixed);
+        assert!(
+            unlisted.note.contains("no OpenRouter endpoint"),
+            "{}",
+            unlisted.note
+        );
+        assert!(!resolve(unlisted, "openrouter", "x-ai/grok-5", &asked).is_zero());
+
+        // A page without the array is an invalid response, not a panic.
+        let url = spawn_mock_server(200, "OK", br#"{"endpoints":[]}"#).await;
+        let err = provider_with_url(url)
+            .read_zdr_endpoints()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("data"), "{err}");
+    }
+
+    /// Priming reads the models page and then the zero-retention list, and a
+    /// list that cannot be read leaves the models learned all the same.
+    #[tokio::test]
+    async fn priming_reads_the_zero_retention_list_after_the_models() {
+        let _guard = always_on_tracing_guard();
+        let models = br#"{"data":[{"id":"openai/o3","context_length":200000}]}"#.to_vec();
+        let zdr = br#"{"data":[{"model_id":"openai/o3"}]}"#.to_vec();
+        let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", models.clone()),
+            (200, "OK", zdr),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        provider.prime_capabilities().await.expect("primes");
+        assert_eq!(provider.has_zdr_endpoint("openai/o3"), Some(true));
+        assert_eq!(
+            provider.capabilities("openai/o3").max_context_tokens,
+            200_000
+        );
+
+        let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", models),
+            (500, "Internal Server Error", b"{}".to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        provider
+            .prime_capabilities()
+            .await
+            .expect("the list is best effort");
+        assert_eq!(provider.has_zdr_endpoint("openai/o3"), None);
+        assert_eq!(
+            provider.capabilities("openai/o3").max_context_tokens,
+            200_000
+        );
     }
 
     /// An entry with no `supported_parameters` says nothing about shape, so

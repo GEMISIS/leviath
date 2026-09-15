@@ -1520,6 +1520,7 @@ mod tests {
             provider_refusals: std::collections::HashMap::new(),
             unrouted_models: std::collections::HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
+            retention_refusals: std::collections::HashMap::new(),
         }
     }
 

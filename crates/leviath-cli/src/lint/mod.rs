@@ -232,6 +232,26 @@ pub(crate) struct LintEnv {
     /// unbounded-percentage check, because a warning that cannot name a number
     /// is a warning nobody acts on.
     pub model_windows: HashMap<(String, String), usize>,
+
+    /// Under `[providers] zero_retention`, the stages whose models keep
+    /// something: keyed by stage name, each entry the `provider/model` rows
+    /// that would be refused at spawn (the head) or dropped from failover
+    /// (a fallback), with the provider's reason. Asked of the same primed
+    /// registry the spawn gate asks, with the same settings. Empty when
+    /// nobody asked or the switch is off.
+    pub retention_refusals: HashMap<String, Vec<RetentionRefusal>>,
+}
+
+/// One model a stage names that cannot run with zero data retention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetentionRefusal {
+    /// `provider/model`, as the resolver would run it.
+    pub route: String,
+    /// Whether this is the model the stage would start on (refused at
+    /// spawn) or a fallback (dropped from failover).
+    pub head: bool,
+    /// What is kept and why, in the provider's words.
+    pub reason: String,
 }
 
 impl LintEnv {
@@ -275,7 +295,74 @@ impl LintEnv {
             provider_refusals: HashMap::new(),
             unrouted_models: HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
+            retention_refusals: HashMap::new(),
         }
+    }
+
+    /// Add, under `[providers] zero_retention`, which of each stage's models
+    /// cannot run with zero data retention: the one the stage would start
+    /// on, which the spawn gate refuses, and the fallbacks, which it drops.
+    /// Asked of the primed registry with the config's settings, so the
+    /// answer is the one a spawn would get (a Bedrock model the listing
+    /// never offers under mode `none`, an OpenRouter model with no
+    /// zero-retention endpoint, a provider whose agreement is not declared).
+    /// Nothing is recorded when the switch is off.
+    pub(crate) fn with_retention(
+        mut self,
+        blueprint: &Blueprint,
+        config: &crate::config::Config,
+        registry: &leviath_runtime::ProviderRegistry,
+    ) -> Self {
+        let defaults = crate::daemon::spawn::model_defaults(config);
+        if !defaults.retention.zero_requested {
+            return self;
+        }
+        for stage in &blueprint.stages {
+            let (provider, model) = leviath_runtime::pipeline::resolve_stage_model(
+                &stage.model,
+                None,
+                &defaults,
+                registry,
+            );
+            let mut refusals = Vec::new();
+            let mut seen = HashSet::new();
+            let mut consider = |provider: &str, model: &str, head: bool| {
+                let route = format!("{provider}/{model}");
+                if !seen.insert(route.clone()) {
+                    return;
+                }
+                let policy = registry.retention_with(&defaults.retention, provider, model);
+                if !policy.is_zero() {
+                    refusals.push(RetentionRefusal {
+                        route,
+                        head,
+                        reason: format!(
+                            "retention {}: {}",
+                            policy.retention.describe(),
+                            policy.note
+                        ),
+                    });
+                }
+            };
+            consider(&provider, &model, true);
+            // The pinned entries the stage names after its head, on providers
+            // this install has, which are what a failover would reach. An open
+            // entry resolves through the same preference the head did, and is
+            // judged there; a provider that is not configured here is not in
+            // the failover list either.
+            for entry in stage
+                .model
+                .models
+                .iter()
+                .filter(|e| !e.provider.is_empty() && registry.has(&e.provider))
+            {
+                consider(&entry.provider, &entry.model, false);
+            }
+            if !refusals.is_empty() {
+                self.retention_refusals.insert(stage.name.clone(), refusals);
+            }
+        }
+        self
     }
 
     /// Add the answer to "can this install reach the providers the blueprint
@@ -462,6 +549,7 @@ pub(crate) fn lint_manifest(
         findings.extend(lint_tool_policies(stage, &agent_permissions));
         findings.extend(lint_permission_clamp(stage, &agent_permissions));
         findings.extend(lint_models(stage, env));
+        findings.extend(lint_retention(stage, env));
         findings.extend(lint_output_stage(stage));
         findings.extend(lint_output_stage_can_answer(stage));
         findings.extend(lint_fanout_escape(stage));

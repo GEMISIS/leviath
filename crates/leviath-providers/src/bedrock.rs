@@ -79,6 +79,51 @@ pub struct BedrockProvider {
     /// [`Self::account_retention`] has answered, or when a gateway fronts
     /// the control plane and it cannot be asked.
     retention_mode: std::sync::RwLock<Option<String>>,
+    /// What the `bedrock-mantle` listing says each model allows, keyed by
+    /// the bare id that listing spells (`anthropic.claude-sonnet-5`, never a
+    /// profile). Empty until [`Self::read_model_retention`] has answered.
+    /// A model absent here is one the listing does not carry, and the
+    /// account's mode alone decides for it.
+    model_retention: std::sync::RwLock<HashMap<String, ModelRetention>>,
+}
+
+/// What Bedrock's model listing says about one model's data retention: the
+/// modes it can be served under, and the mode it is served under now.
+///
+/// A model that does not list `none` cannot run with zero data retention on
+/// Bedrock at all, whatever the account is set to; under account mode `none`
+/// Bedrock reports it unavailable. Measured on 2026-09-15: every OpenAI model
+/// on Bedrock and Claude Fable 5 are such models, Claude Sonnet 5 and Opus 5
+/// are not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelRetention {
+    /// The modes the model can be served under.
+    #[serde(default)]
+    pub allowed_modes: Vec<String>,
+    /// The mode it is served under with the account as it is now: the
+    /// account's own mode, or the model's default when the account inherits.
+    #[serde(default)]
+    pub mode: String,
+    /// `available` or `unavailable`, as the listing says of the model under
+    /// the account as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Why it is unavailable, in Bedrock's words: the mode it is not served
+    /// under, or an access grant the account lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+}
+
+impl ModelRetention {
+    /// Whether the model can be served under `mode`.
+    pub fn allows(&self, mode: &str) -> bool {
+        self.allowed_modes.iter().any(|m| m == mode)
+    }
+
+    /// Whether the listing says the model cannot be called as things stand.
+    pub fn unavailable(&self) -> bool {
+        self.status.as_deref() == Some("unavailable")
+    }
 }
 
 /// The account's data retention setting as Bedrock reports it.
@@ -119,7 +164,80 @@ impl BedrockProvider {
             learned: LearnedModels::default(),
             count_route: crate::provider::ModelMemo::default(),
             retention_mode: std::sync::RwLock::new(None),
+            model_retention: std::sync::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// `GET /v1/models` on the `bedrock-mantle` host: which data retention
+    /// modes each model allows. Remembered, so [`Provider::live_retention`]
+    /// can refuse a model that cannot run under mode `none` before a request
+    /// is sent. Answers how many models were read; `Ok(0)` behind a gateway,
+    /// where the host is not reached.
+    ///
+    /// The listing is tried on the region's host and then on `us-east-1`,
+    /// the way a count is: a host that does not carry the listing answers
+    /// with an error rather than an empty page.
+    pub async fn read_model_retention(&self) -> Result<usize> {
+        let Some(hosts) = self.mantle_hosts() else {
+            return Ok(0);
+        };
+        let headers = [("x-api-key", self.api_key.clone())];
+        let mut result = Err(ProviderError::Other("no mantle host".to_string()));
+        for host in &hosts {
+            result = self
+                .get_json_with(&format!("{host}/v1/models"), &headers)
+                .await;
+            if result.is_ok() {
+                break;
+            }
+        }
+        let body = result?;
+        let rows = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
+            ProviderError::InvalidResponse("the mantle listing carries no data".to_string())
+        })?;
+        let read: HashMap<String, ModelRetention> = rows
+            .iter()
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?.to_string();
+                let mut retention: ModelRetention =
+                    serde_json::from_value(row.get("data_retention")?.clone()).ok()?;
+                let text = |key: &str| row.get(key)?.as_str().map(str::to_string);
+                retention.status = text("status");
+                retention.status_reason = text("status_reason");
+                Some((id, retention))
+            })
+            .collect();
+        let count = read.len();
+        *self
+            .model_retention
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = read;
+        Ok(count)
+    }
+
+    /// What the listing said about `model`'s retention, by its bare id, once
+    /// [`Self::read_model_retention`] has answered. `None` for a model the
+    /// listing does not carry.
+    pub fn model_retention(&self, model: &str) -> Option<ModelRetention> {
+        self.model_retention
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(catalog::bare_id(model))
+            .cloned()
+    }
+
+    /// Everything the listing said, by bare id, sorted: what
+    /// `lev providers retention` prints per model.
+    pub fn model_retentions(&self) -> Vec<(String, ModelRetention)> {
+        let mut rows: Vec<(String, ModelRetention)> = self
+            .model_retention
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(id, r)| (id.clone(), r.clone()))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
     }
 
     /// `GET /data-retention` on the control plane: the account's data
@@ -376,12 +494,27 @@ impl BedrockProvider {
 
     /// A `GET` of one JSON document from an AWS host, with the key.
     async fn get_json(&self, url: &str, authed: bool) -> Result<serde_json::Value> {
+        let bearer = [("authorization", format!("Bearer {}", self.api_key))];
+        let headers: &[(&str, String)] = match authed {
+            true => &bearer,
+            false => &[],
+        };
+        self.get_json_with(url, headers).await
+    }
+
+    /// A side `GET` with the headers given, the mantle listing's `x-api-key`
+    /// included, answered as JSON.
+    async fn get_json_with(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+    ) -> Result<serde_json::Value> {
         let mut builder = crate::provider::apply_request_timeout(
             crate::provider::side_call_client().get(url),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         );
-        if authed {
-            builder = builder.header("authorization", format!("Bearer {}", self.api_key));
+        for (name, value) in headers {
+            builder = builder.header(*name, value);
         }
         let response = builder
             .send()
@@ -649,17 +782,53 @@ impl Provider for BedrockProvider {
         PROVIDER_NAME
     }
 
-    /// The account's mode, once read, decides. A model that allows mode
-    /// `none` keeps nothing under any mode; Claude Fable 5 and Mythos 5 keep
-    /// 30 days under `aws_review` and are unavailable below it; `default`
-    /// leaves each model to its own policy, under which AWS may keep flagged
-    /// content for abuse detection.
+    /// The account's mode, once read, decides, and the listing's word on the
+    /// model narrows it. A model the listing never offers under `none`
+    /// cannot run with zero retention here at all. Otherwise a model that
+    /// allows mode `none` keeps nothing under any mode; Claude Fable 5 and
+    /// Mythos 5 keep 30 days under `aws_review` and are unavailable below
+    /// it; `default` leaves each model to its own policy, under which AWS may
+    /// keep flagged content for abuse detection. An account that inherits
+    /// its mode serves each model under that model's default.
     fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
         use crate::retention::{Control, Retention, RetentionPolicy, Source};
-        let mode = self.retention_mode()?;
+        let account = self.retention_mode()?;
         let covered = crate::retention::is_covered_claude(model);
-        let (retention, note) = match (mode.as_str(), covered) {
-            (_, true) => (
+        let listed = self.model_retention(model);
+        // The mode the model is served under: the account's own, or the
+        // model's default when the account defers.
+        let mode = match (account.as_str(), &listed) {
+            ("inherit", Some(m)) if !m.mode.is_empty() => m.mode.clone(),
+            ("inherit", _) => "default".to_string(),
+            (own, _) => own.to_string(),
+        };
+        let kept_regardless = match covered {
+            true => Retention::Days(30),
+            false => Retention::Unknown,
+        };
+        let (retention, note) = match (&listed, mode.as_str(), covered) {
+            (Some(m), _, _) if !m.allows("none") => (
+                kept_regardless,
+                format!(
+                    "Bedrock serves this model under data retention mode {} only, never \
+                     none, so it cannot run with zero data retention here{}",
+                    m.allowed_modes.join(" or "),
+                    match m.allows(&mode) {
+                        true => String::new(),
+                        false => format!("; under the account's mode {mode} it is unavailable"),
+                    }
+                ),
+            ),
+            (Some(m), _, _) if !m.allows(&mode) => (
+                kept_regardless,
+                format!(
+                    "the account's data retention mode is {mode}, which Bedrock does not \
+                     serve this model under (it allows {}), so the model is unavailable \
+                     until the mode changes",
+                    m.allowed_modes.join(" or ")
+                ),
+            ),
+            (_, _, true) => (
                 Retention::Days(30),
                 format!(
                     "the account's data retention mode is {mode}; this model needs \
@@ -667,20 +836,29 @@ impl Provider for BedrockProvider {
                      for the human review Anthropic requires"
                 ),
             ),
-            ("none", false) => (
+            (_, "none", false) => (
                 Retention::Zero,
                 "the account's data retention mode is none: nothing is written to \
                  durable storage or shared with the model provider"
                     .to_string(),
             ),
-            ("default", false) => (
+            (_, "default", false) => (
                 Retention::Unknown,
-                "the account's data retention mode is default: the model's own policy \
-                 applies, and AWS may keep content flagged for abuse detection; set the \
-                 mode to none for a guarantee"
-                    .to_string(),
+                match account.as_str() {
+                    "inherit" => {
+                        "the account inherits its data retention mode, so this model runs \
+                         under its own default, and AWS may keep content flagged for \
+                         abuse detection; set the mode to none for a guarantee"
+                    }
+                    _ => {
+                        "the account's data retention mode is default: the model's own \
+                         policy applies, and AWS may keep content flagged for abuse \
+                         detection; set the mode to none for a guarantee"
+                    }
+                }
+                .to_string(),
             ),
-            (_, false) => (
+            (_, _, false) => (
                 Retention::Zero,
                 format!(
                     "the account's data retention mode is {mode}; a model that allows \
@@ -694,6 +872,23 @@ impl Provider for BedrockProvider {
             source: Source::Live,
             note,
         })
+    }
+
+    /// The account's mode again, and the listing if it was never read: what
+    /// `lev providers retention set zero` changed on the account reaches a
+    /// daemon that primed before it.
+    async fn refresh_retention(&self) {
+        if let Err(e) = self.account_retention().await {
+            tracing::debug!(error = %e, "Bedrock's data retention mode could not be re-read");
+        }
+        let unread = self
+            .model_retention
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if unread && let Err(e) = self.read_model_retention().await {
+            tracing::debug!(error = %e, "Bedrock's per-model data retention could not be read");
+        }
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
@@ -749,6 +944,14 @@ impl Provider for BedrockProvider {
             Ok(None) => {}
             Err(e) => {
                 tracing::debug!(error = %e, "Bedrock's data retention mode could not be read")
+            }
+        }
+        // The same again for what each model allows: a listing that cannot
+        // be read leaves the account's mode to decide alone.
+        match self.read_model_retention().await {
+            Ok(n) => tracing::debug!(models = n, "read Bedrock's per-model data retention"),
+            Err(e) => {
+                tracing::debug!(error = %e, "Bedrock's per-model data retention could not be read")
             }
         }
         Ok(())
