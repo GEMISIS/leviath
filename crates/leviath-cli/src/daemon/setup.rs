@@ -592,6 +592,11 @@ pub fn build_host(parts: HostParts) -> WorldHost {
             // asks it what its models are. The sync spawner installs whatever
             // this built.
             reload.refresh_and_prime(&config).await;
+            // Under zero retention, what the providers read their answer
+            // from (Bedrock's account mode) is read again here, on the one
+            // hook that can await, so the gate a moment later judges this
+            // spawn by the mode as it is now.
+            reload.refresh_retention(&config).await;
             warm_blueprint_models(
                 &reload.registry(),
                 &blueprint_path,

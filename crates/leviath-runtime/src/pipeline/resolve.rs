@@ -957,6 +957,7 @@ pub fn resolve_stages(
             // Refused rather than skipped for the same reason as the check
             // above: an author who pinned a model would not see it swapped
             // for one at another vendor.
+            let mut dropped = Vec::new();
             if defaults.retention.zero_requested {
                 let policy =
                     registry.retention_with(&defaults.retention, &head.provider, &head.model);
@@ -974,6 +975,28 @@ pub fn resolve_stages(
                         policy.note,
                     ));
                 }
+                // The fallbacks are held to the same bar. A failover is the
+                // one place a request could otherwise reach a model that
+                // keeps something after the head was checked, so a fallback
+                // that cannot run with zero retention is dropped here, and
+                // the stage's log says which.
+                candidates.retain(|entry| {
+                    let policy =
+                        registry.retention_with(&defaults.retention, &entry.provider, &entry.model);
+                    if policy.is_zero() {
+                        return true;
+                    }
+                    dropped.push(format!(
+                        "[model] stage '{}' will not fail over to {}/{}: it does not run \
+                         with zero data retention (retention {}: {})",
+                        stage.name,
+                        entry.provider,
+                        entry.model,
+                        policy.retention.describe(),
+                        policy.note,
+                    ));
+                    false
+                });
             }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved) and by group. A name matching nothing
@@ -997,7 +1020,13 @@ pub fn resolve_stages(
             // the model its blueprint named. It rides the stage's operational
             // log so `lev run`, the dashboard and the journal all carry it;
             // a stage that starts on its own first choice says nothing.
-            let notes = match head_source(&stage.model, model_override, defaults, registry, &head) {
+            let mut notes = match head_source(
+                &stage.model,
+                model_override,
+                defaults,
+                registry,
+                &head,
+            ) {
                 HeadSource::Blueprint => Vec::new(),
                 HeadSource::Override => vec![format!(
                     "[model] stage '{}' starts on {}/{} (override_model); blueprint asked for {}",
@@ -1015,6 +1044,7 @@ pub fn resolve_stages(
                     blueprint_choice(&stage.model)
                 )],
             };
+            notes.extend(dropped);
             Ok(ResolvedStage {
                 provider_name: head.provider,
                 model: head.model,
@@ -1594,6 +1624,65 @@ mod tests {
     /// With zero retention asked for, a model the table says keeps
     /// something is refused with that reason, one that keeps nothing goes
     /// through, and a declared agreement turns the first into the second.
+    /// The head passes and a fallback that keeps something is dropped from
+    /// the failover list, with a note in the stage's log; off, the fallback
+    /// stays.
+    #[test]
+    fn resolve_stages_drops_a_retaining_fallback_when_zero_retention_is_asked_for() {
+        let stage = leviath_core::Stage::new(
+            "plan".to_string(),
+            model_cfg(vec![
+                ("ollama", "q"),
+                ("openai", "gpt-5.5"),
+                ("llama-cpp", "local"),
+            ]),
+        );
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let registry = registry_publishing(&[
+            ("openai", &["gpt-5.5"]),
+            ("ollama", &["q"]),
+            ("llama-cpp", &["local"]),
+        ]);
+        let defaults = ModelDefaults {
+            retention: leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+            ..ModelDefaults::default()
+        };
+
+        let resolved = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+            .expect("the head keeps nothing");
+        assert_eq!(resolved[0].provider_name, "ollama");
+        // The local fallback keeps nothing and stays; OpenAI's is dropped.
+        let kept: Vec<String> = resolved[0]
+            .fallbacks
+            .iter()
+            .map(|e| format!("{}/{}", e.provider, e.model))
+            .collect();
+        assert_eq!(kept, vec!["llama-cpp/local".to_string()]);
+        let notes = resolved[0].notes.join("\n");
+        assert!(
+            notes.contains("will not fail over to openai/gpt-5.5"),
+            "{notes}"
+        );
+        assert_eq!(resolved[0].notes.len(), 1, "{notes}");
+
+        let off = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("resolves");
+        assert_eq!(off[0].fallbacks.len(), 2);
+        assert!(off[0].notes.is_empty());
+    }
+
     #[test]
     fn resolve_stages_refuses_a_retaining_model_when_zero_retention_is_asked_for() {
         let stage = |name: &str, provider: &str, model: &str| {

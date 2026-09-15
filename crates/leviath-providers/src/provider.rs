@@ -1022,6 +1022,14 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Read again whatever [`Self::live_retention`] answers from: the
+    /// account's mode, the per-model listing. Called when zero retention is
+    /// switched on under a running daemon, so a mode set by
+    /// `lev providers retention` reaches the daemon's copy of the provider
+    /// rather than waiting for a restart. Best effort; a provider that reads
+    /// nothing does nothing.
+    async fn refresh_retention(&self) {}
+
     /// Every model id this provider will accept, when it is in a position to
     /// say so.
     ///

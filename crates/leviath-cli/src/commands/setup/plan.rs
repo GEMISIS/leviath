@@ -156,6 +156,19 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     );
     push_if_changed(
         &mut out,
+        "zero data retention",
+        Some(&before.providers.zero_retention),
+        Some(&after.providers.zero_retention),
+    );
+    let listed = |names: &[String]| (!names.is_empty()).then(|| names.join(", "));
+    push_if_changed(
+        &mut out,
+        "zero data retention agreements",
+        listed(&before.providers.zero_retention_agreements).as_ref(),
+        listed(&after.providers.zero_retention_agreements).as_ref(),
+    );
+    push_if_changed(
+        &mut out,
         "max concurrent inferences",
         before.limits.max_concurrent_inferences.as_ref(),
         after.limits.max_concurrent_inferences.as_ref(),
@@ -513,6 +526,8 @@ mod tests {
         after.override_model = Some("llama3".to_string());
         after.fallback_model = Some("llama3-small".to_string());
         after.providers.bedrock_region = Some("eu-west-1".to_string());
+        after.providers.zero_retention = true;
+        after.providers.zero_retention_agreements = vec!["anthropic".to_string()];
         after.limits.max_concurrent_inferences = Some(1);
         after.limits.max_concurrent_tools = 4;
         after.limits.default_max_iterations = None;
@@ -525,6 +540,8 @@ mod tests {
         assert!(lines.contains(&"override model: (unset) → llama3".to_string()));
         assert!(lines.contains(&"fallback model: (unset) → llama3-small".to_string()));
         assert!(lines.contains(&"AWS Bedrock region: (unset) → eu-west-1".to_string()));
+        assert!(lines.contains(&"zero data retention: false → true".to_string()));
+        assert!(lines.contains(&"zero data retention agreements: (unset) → anthropic".to_string()));
         assert!(lines.contains(&"max concurrent inferences: 8 → 1".to_string()));
         assert!(lines.contains(&"max concurrent tools: 8 → 4".to_string()));
         assert!(lines.contains(&"default max iterations: 50 → (unset)".to_string()));

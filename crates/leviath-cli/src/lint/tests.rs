@@ -3363,6 +3363,94 @@ fn script_registry(
     (registry, dir)
 }
 
+/// A registry of providers that publish what they serve, under the names
+/// the retention table knows.
+fn registry_serving(providers: &[(&str, &str)]) -> leviath_runtime::ProviderRegistry {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    for (name, model) in providers {
+        registry.register(
+            (*name).to_string(),
+            std::sync::Arc::new(ExplainingProvider {
+                serves: vec![(*model).to_string()],
+                reason: "not here".to_string(),
+            }),
+        );
+    }
+    registry
+}
+
+fn zero_retention_config() -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.providers.zero_retention = true;
+    config
+}
+
+/// Under the switch, the model a stage would start on is judged the way the
+/// spawn gate judges it: a provider that keeps an abuse log is an error
+/// carrying the reason; local inference passes. Off, nothing is recorded.
+#[test]
+fn a_retaining_head_model_is_an_error_under_zero_retention() {
+    let registry = registry_serving(&[("openai", "gpt-5.5"), ("ollama", "q")]);
+    let bp = blueprint_pinning(&[("openai", "gpt-5.5"), ("ollama", "q")]);
+
+    let env = LintEnv::default().with_retention(&bp, &zero_retention_config(), &registry);
+    let refusals = &env.retention_refusals["main"];
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    let refusal = &refusals[0];
+    assert!(refusal.head);
+    assert_eq!(refusal.route, "openai/gpt-5.5");
+    let reason = refusal.reason.as_str();
+    assert!(reason.contains("30 days"), "{reason}");
+
+    let findings = lint_manifest("", &bp, &env);
+    assert_eq!(codes(&findings), ["retention-not-zero"]);
+    let message = findings[0].message.as_str();
+    assert!(message.contains("openai/gpt-5.5"), "{message}");
+    assert!(message.contains("30 days"), "{message}");
+    let fix = findings[0].fix.clone().unwrap_or_default();
+    assert!(fix.contains("zero_retention_agreements"), "{fix}");
+
+    let off = LintEnv::default().with_retention(&bp, &crate::config::Config::default(), &registry);
+    assert!(off.retention_refusals.is_empty());
+    assert!(lint_manifest("", &bp, &off).is_empty());
+}
+
+/// A fallback that keeps something is a warning, since failover drops it
+/// rather than the spawn refusing it; a fallback on a provider this install
+/// does not have is not judged, because it is not in the failover list
+/// either; a declared agreement clears the provider.
+#[test]
+fn a_retaining_fallback_is_a_warning_under_zero_retention() {
+    let registry = registry_serving(&[("openai", "gpt-5.5"), ("ollama", "q")]);
+    let bp = blueprint_pinning(&[
+        ("ollama", "q"),
+        ("openai", "gpt-5.5"),
+        ("anthropic", "claude-sonnet-5"),
+    ]);
+
+    let env = LintEnv::default().with_retention(&bp, &zero_retention_config(), &registry);
+    let refusals = &env.retention_refusals["main"];
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    let refusal = &refusals[0];
+    assert!(!refusal.head);
+    assert_eq!(refusal.route, "openai/gpt-5.5");
+
+    let findings = lint_manifest("", &bp, &env);
+    assert_eq!(codes(&findings), ["retention-fallback-dropped"]);
+    assert_eq!(findings[0].severity, LintSeverity::Warning);
+    let message = findings[0].message.as_str();
+    assert!(message.contains("failover skips it"), "{message}");
+
+    let mut config = zero_retention_config();
+    config.providers.zero_retention_agreements = vec!["openai".to_string()];
+    let cleared = LintEnv::default().with_retention(&bp, &config, &registry);
+    assert!(
+        cleared.retention_refusals.is_empty(),
+        "{:?}",
+        cleared.retention_refusals
+    );
+}
+
 /// The case the whole check exists for: a Rhai provider that answers
 /// `list_models` publishes a complete catalogue, and the blueprint's model is
 /// then checkable.

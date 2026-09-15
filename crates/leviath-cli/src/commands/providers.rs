@@ -100,6 +100,10 @@ pub struct ProvidersEnv {
     /// Where Bedrock's control plane answers, when a test stands one up in
     /// place of AWS's. `None` derives it from the configured region.
     pub bedrock_control_url: Option<String>,
+    /// Where Bedrock's `bedrock-mantle` host answers (the per-model
+    /// retention listing), when a test stands one up. `None` derives it
+    /// from the configured region.
+    pub bedrock_mantle_url: Option<String>,
 }
 
 /// Run a `lev providers` subcommand against the injected environment.
@@ -160,6 +164,9 @@ fn bedrock_from(
     if let Some(url) = &env.bedrock_control_url {
         provider = provider.with_control_url(Some(url.clone()));
     }
+    if let Some(url) = &env.bedrock_mantle_url {
+        provider = provider.with_mantle_url(Some(url.clone()));
+    }
     Ok(Some(provider))
 }
 
@@ -187,7 +194,8 @@ async fn show_retention(
 ) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
     let settings = crate::commands::run::session::retention_settings(&config);
-    let bedrock_mode = match bedrock_from(&config, env, build_client)? {
+    let bedrock = bedrock_from(&config, env, build_client)?;
+    let bedrock_mode = match &bedrock {
         Some(provider) => match provider.account_retention().await {
             Ok(Some(read)) => Some(Ok(read.mode)),
             Ok(None) => None,
@@ -195,6 +203,34 @@ async fn show_retention(
         },
         None => None,
     };
+    // What Bedrock's listing says per model, so a model it never serves
+    // under mode none, or one this account cannot call as things stand, is
+    // named here rather than at spawn. Best effort: a listing that cannot
+    // be read leaves the account's mode to speak alone.
+    let bedrock_models = match &bedrock {
+        Some(provider) => {
+            if let Err(e) = provider.read_model_retention().await {
+                tracing::debug!(error = %e, "Bedrock's per-model data retention could not be read");
+            }
+            provider.model_retentions()
+        }
+        None => Vec::new(),
+    };
+    let never_none: Vec<&str> = bedrock_models
+        .iter()
+        .filter(|(_, r)| !r.allows("none"))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let unavailable: Vec<String> = bedrock_models
+        .iter()
+        .filter(|(_, r)| r.unavailable())
+        .map(|(id, r)| {
+            format!(
+                "{id} ({})",
+                r.status_reason.as_deref().unwrap_or("no reason given")
+            )
+        })
+        .collect();
     let rows: Vec<(String, leviath_providers::retention::RetentionPolicy)> =
         retention_rows(&config)
             .into_iter()
@@ -214,6 +250,13 @@ async fn show_retention(
                 Some(Err(e)) => serde_json::json!({ "error": e }),
                 None => serde_json::Value::Null,
             },
+            "bedrock_models": bedrock_models.iter().map(|(id, r)| serde_json::json!({
+                "id": id,
+                "allowed_modes": r.allowed_modes,
+                "mode": r.mode,
+                "status": r.status,
+                "status_reason": r.status_reason,
+            })).collect::<Vec<_>>(),
             "providers": rows.iter().map(|(name, policy)| serde_json::json!({
                 "id": name,
                 "retention": policy.retention.as_word(),
@@ -239,6 +282,15 @@ async fn show_retention(
                     println!("               account data retention mode: could not be read ({e})")
                 }
                 None => {}
+            }
+            if !never_none.is_empty() {
+                println!(
+                    "               never served under mode none, so never with zero retention: {}",
+                    never_none.join(", ")
+                );
+            }
+            for row in &unavailable {
+                println!("               unavailable to this account as things stand: {row}");
             }
         }
     }
@@ -469,6 +521,7 @@ mod tests {
             ProvidersEnv {
                 config_path,
                 bedrock_control_url: None,
+                bedrock_mantle_url: None,
             },
         )
     }
@@ -569,12 +622,33 @@ retention = "zero""#,
         config.providers.bedrock_api_key = Some("ABSK-test".to_string());
         let (_dir, mut env) = env_with(config);
 
+        // The listing names a model never served under mode none and one
+        // unavailable as things stand; both are printed, as JSON and as text.
+        let listing = || {
+            br#"{"data":[
+                {"id":"openai.gpt-5.4","status":"available","data_retention":{"allowed_modes":["default","aws_review"],"mode":"default"}},
+                {"id":"anthropic.claude-fable-5","status":"unavailable","status_reason":"This model is not available under data retention mode 'default'.","data_retention":{"allowed_modes":["aws_review"],"mode":"default"}},
+                {"id":"anthropic.claude-sonnet-5","status":"available","data_retention":{"allowed_modes":["none","default"],"mode":"default"}}
+            ]}"#.to_vec()
+        };
         let url =
             leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"default"}"#.to_vec()).await;
         env.bedrock_control_url = Some(url);
+        env.bedrock_mantle_url =
+            Some(leviath_testkit::spawn_mock_server(200, "OK", listing()).await);
         execute_with(retention_args(None, true), &env)
             .await
             .unwrap();
+        let url =
+            leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"default"}"#.to_vec()).await;
+        env.bedrock_control_url = Some(url);
+        env.bedrock_mantle_url =
+            Some(leviath_testkit::spawn_mock_server(200, "OK", listing()).await);
+        execute_with(retention_args(None, false), &env)
+            .await
+            .unwrap();
+        // A listing that cannot be read leaves the account's mode to speak alone.
+        env.bedrock_mantle_url = Some("http://127.0.0.1:1".to_string());
 
         let url =
             leviath_testkit::spawn_mock_server(200, "OK", br#"{"mode":"none"}"#.to_vec()).await;
@@ -721,6 +795,7 @@ retention = "zero""#,
         let env = ProvidersEnv {
             config_path: broken,
             bedrock_control_url: None,
+            bedrock_mantle_url: None,
         };
         let real = &leviath_providers::provider::build_http_client;
         assert!(show_retention(false, &env, real).await.is_err());
@@ -733,6 +808,7 @@ retention = "zero""#,
         let env = ProvidersEnv {
             config_path: blocker.join("config.toml"),
             bedrock_control_url: None,
+            bedrock_mantle_url: None,
         };
         let err = set_retention("zero", &env, real).await.unwrap_err();
         assert!(!err.to_string().is_empty());
@@ -850,6 +926,7 @@ retention = "zero""#,
         let env = ProvidersEnv {
             config_path,
             bedrock_control_url: None,
+            bedrock_mantle_url: None,
         };
         assert!(
             execute_with(order_args(&["anthropic"], false), &env)
@@ -874,6 +951,7 @@ retention = "zero""#,
         let env = ProvidersEnv {
             config_path: blocker.join("config.toml"),
             bedrock_control_url: None,
+            bedrock_mantle_url: None,
         };
         let err = execute_with(order_args(&["anthropic"], false), &env)
             .await

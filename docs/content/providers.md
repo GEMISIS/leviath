@@ -468,24 +468,45 @@ lev providers retention bedrock none # Bedrock's account mode, directly
 lev models show claude-sonnet-5      # a model's own answer, on the Retention line
 ```
 
+How to think about retention, and what the switch can and cannot promise, is its own page:
+[Data retention](/docs/data-retention). This section is the reference.
+
 `set zero` writes `[providers] zero_retention = true`. With it on, OpenAI is sent `store = false`,
 OpenRouter is sent `provider.zdr = true` with `data_collection = "deny"` so it routes only to
 endpoints with a zero-retention policy (and refuses a model that has none, rather than routing it
 elsewhere), Bedrock's account mode is set to `none`, and a stage whose model still keeps something
 is refused at spawn with the provider's own reason. Nothing is silently rerouted: an author who
-pinned a model would not see it swapped for one at another vendor. A running daemon reads the
-switch at every spawn and picks the per-request fields up on its next housekeeping pass, so no
-restart is needed.
+pinned a model would not see it swapped for one at another vendor. A fallback the stage lists is
+held to the same bar and dropped from failover when it keeps something, with a line in the
+stage's log saying so. A running daemon reads the switch at every spawn and picks the per-request
+fields up on its next housekeeping pass, so no restart is needed. While the switch is on, the
+daemon also reads Bedrock's account mode again before every spawn, so a mode `lev providers
+retention` set a moment ago is the one the spawn is judged by.
+
+`lev validate` says the same thing before a run does: with the switch on, a stage whose model
+would be refused is a `retention-not-zero` error and a fallback that would be dropped is a
+`retention-fallback-dropped` warning, each carrying the provider's reason. The wizard's Defaults
+screen has the switch too, with an agreement row per contract provider, and `lev setup
+--zero-retention true` writes it headlessly.
+
+Which models can give zero retention is a per-model fact, and two providers publish it. Bedrock's
+model listing says which data retention modes each model may be served under, and a model it
+never offers under `none` (measured on 2026-09-15: every OpenAI model on Bedrock, and Claude
+Fable 5) cannot run with zero retention there whatever the account is set to; Leviath reads the
+listing at start-up and refuses such a model up front rather than letting Bedrock report it
+unavailable mid-run. OpenRouter lists the endpoints with a zero-retention policy at
+`GET /endpoints/zdr`, and a model with none is refused up front for the same reason. Everywhere
+else the answer is the provider's, not the model's, except the covered Claude models above.
 
 What each shipped provider does, as documented on 2026-09-14:
 
 | Provider | Keeps | Controlled by | What that means |
 |---|---|---|---|
-| `bedrock` | nothing, for a model that allows mode `none` | the account's data retention mode, `GET`/`PUT /data-retention` | Modes are ordered `none < default < aws_review`; Leviath reads the mode at start-up and `lev providers retention` reads it live. Claude Fable 5 and Mythos 5 require `aws_review` and keep 30 days inside AWS for the human review Anthropic requires; under `none` they are unavailable. Model invocation logging is a separate, opt-in setting on your account |
+| `bedrock` | nothing, for a model that allows mode `none` | the account's data retention mode, `GET`/`PUT /data-retention`, and what the model listing allows | Modes are ordered `none < default < aws_review`; Leviath reads the mode and each model's allowed modes at start-up, and `lev providers retention` reads the mode live. An account set to `inherit` serves each model under that model's own default. Claude Fable 5 and Mythos 5 require `aws_review` and keep 30 days inside AWS for the human review Anthropic requires; under `none` they are unavailable, as is any model the listing does not offer under `none`. Model invocation logging is a separate, opt-in setting on your account |
 | `openai` | up to 30 days, for abuse monitoring | a Zero Data Retention agreement with OpenAI | `store = false` stops the stored-completion copy on every request; only the agreement removes the abuse log. Declare it in `zero_retention_agreements` |
 | `anthropic` | up to 30 days, for trust and safety | a zero data retention agreement with Anthropic | Declare it in `zero_retention_agreements`. Claude Fable 5 and 5.1, Mythos 5 and 5.1 keep 30 days regardless and are not available under ZDR without Anthropic's express authorisation |
 | `google` | 55 days, for abuse monitoring (paid tier) | per project, on request to Google | Declare it in `zero_retention_agreements`. The free tier trains on prompts |
-| `openrouter` | nothing itself unless prompt logging is on; the endpoint's own policy applies | `provider.zdr` on each request | `GET https://openrouter.ai/api/v1/endpoints/zdr` lists the endpoints that qualify |
+| `openrouter` | nothing itself unless prompt logging is on; the endpoint's own policy applies | `provider.zdr` on each request | `GET https://openrouter.ai/api/v1/endpoints/zdr` lists the endpoints that qualify; Leviath reads it at start-up and refuses a model with none up front |
 | `meshy` | 3 days (enterprise: indefinitely) | nothing | A task's model files, previews and textures are kept so they can be downloaded; nothing is used for training |
 | `ollama`, `llama-cpp`, `lm-studio` | nothing | nothing | Local inference |
 | `codex` | the ChatGPT account's terms | nothing | A subscription transport, outside the API's agreements |

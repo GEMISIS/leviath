@@ -257,6 +257,8 @@ that was looked for.
 | error | `required-tool-not-granted` | A `required_tools` entry that no name and no group in `available_tools` reaches, so the model never sees it. Only checked when a group is in play; without one the load itself refuses the manifest. |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
 | error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage of this blueprint, which declares no region seeded from the task. Each worker is spawned with its work item as its task, so every one is refused and the merge stage works alone. Add a region with `seed = "task"` |
+| error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something, so the spawn would be refused. The message carries the provider's reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no zero-retention endpoint, a provider whose agreement is not declared. See [data retention](/docs/providers#data-retention) |
+| warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a fallback the stage lists keeps something, so failover skips it |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
@@ -877,12 +879,21 @@ Shift+arrows for itself (Apple Terminal does). It writes the same
 `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare model
 names onto your plan.
 
+The same screen carries **Zero data retention (ZDR)**: a switch that asks every provider to keep
+nothing of your prompts and replies once a reply is returned, with a row under it for each chosen
+provider that settles retention by contract (Anthropic, OpenAI, Google), so an agreement your
+organisation holds can be declared where the key is. Each row's help spells out what the provider
+keeps without it. What the switch does, provider by provider, is
+[data retention](/docs/providers#data-retention).
+
 | Flag | Purpose |
 |---|---|
 | `--non-interactive` | Use only flag values, ask nothing |
 | `--no-verify` | Skip checking credentials against the provider APIs |
 | `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
 | `--bedrock-region <REGION>` | AWS region for Bedrock (default `us-east-1`; also read from `AWS_REGION`) |
+| `--zero-retention <true\|false>` | Ask every provider for zero data retention (ZDR): nothing of a prompt or reply is kept once the reply is returned. Writes `[providers] zero_retention`; see [data retention](/docs/providers#data-retention) |
+| `--zero-retention-agreements <NAMES>` | Providers your organisation holds a zero data retention agreement with, comma separated (`anthropic,openai,google`). Replaces `zero_retention_agreements` |
 | `--ollama-url <URL>` | Ollama base URL |
 | `--override-model <MODEL>` | One model every stage starts on, ahead of what its blueprint names; unset lets each blueprint decide |
 | `--fallback-model <MODEL>` | The model a stage falls back to when none of the models it names is configured here |

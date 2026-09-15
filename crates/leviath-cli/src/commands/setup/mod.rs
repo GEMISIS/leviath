@@ -89,6 +89,20 @@ pub struct SetupArgs {
     #[arg(long)]
     pub bedrock_region: Option<String>,
 
+    /// Ask every provider for zero data retention (ZDR): nothing of a prompt
+    /// or reply is kept once the reply is returned. Bedrock's account mode
+    /// is set to none, OpenAI is sent store=false, OpenRouter routes only to
+    /// zero-retention endpoints, and a stage whose model cannot give it is
+    /// refused. `lev providers retention` says what each provider keeps
+    #[arg(long)]
+    pub zero_retention: Option<bool>,
+
+    /// Providers your organisation holds a zero data retention agreement
+    /// with, comma separated (anthropic, openai, google). No API can read a
+    /// contract, so it is declared here. Replaces the configured list
+    #[arg(long, value_delimiter = ',')]
+    pub zero_retention_agreements: Option<Vec<String>>,
+
     /// Ollama base URL (default: http://localhost:11434)
     #[arg(long)]
     pub ollama_url: Option<String>,
@@ -225,6 +239,16 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
     if let Some(ref r) = args.bedrock_region {
         config.providers.bedrock_region = Some(r.clone());
+    }
+    if let Some(on) = args.zero_retention {
+        config.providers.zero_retention = on;
+    }
+    if let Some(ref names) = args.zero_retention_agreements {
+        config.providers.zero_retention_agreements = names
+            .iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
     }
     if let Some(ref u) = args.ollama_url {
         config.ollama_base_url = Some(u.clone());
@@ -525,6 +549,8 @@ mod tests {
             openrouter_key: None,
             bedrock_key: None,
             bedrock_region: None,
+            zero_retention: None,
+            zero_retention_agreements: None,
             ollama_url: None,
             override_model: None,
             fallback_model: None,
@@ -553,6 +579,38 @@ mod tests {
             // a plan writes its declines here and never to the real file.
             ui_state_path: Some(dir.join("ui-state.json")),
         }
+    }
+
+    /// The two retention flags write the switch and replace the agreement
+    /// list, trimmed of blanks; unset, both leave the config alone.
+    #[test]
+    fn the_retention_flags_write_the_switch_and_the_agreements() {
+        let mut config = Config::default();
+        config.providers.zero_retention_agreements = vec!["groq".to_string()];
+        apply_flags(&mut config, &args());
+        assert!(!config.providers.zero_retention);
+        assert_eq!(
+            config.providers.zero_retention_agreements,
+            vec!["groq".to_string()]
+        );
+
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                zero_retention: Some(true),
+                zero_retention_agreements: Some(vec![
+                    " anthropic".to_string(),
+                    String::new(),
+                    "openai ".to_string(),
+                ]),
+                ..args()
+            },
+        );
+        assert!(config.providers.zero_retention);
+        assert_eq!(
+            config.providers.zero_retention_agreements,
+            vec!["anthropic".to_string(), "openai".to_string()]
+        );
     }
 
     // ─── default_provider retargeting ───────────────────────────────────────

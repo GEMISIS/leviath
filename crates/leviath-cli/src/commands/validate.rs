@@ -521,7 +521,9 @@ fn execute_reporting_outcome(
         // an empty catalogue would call every model wrong - so this is the one
         // builder that takes the registry the caller already warmed.
         if let Some(registry) = registry {
-            env = env.with_provider_catalogs(&checked.blueprint, config, registry);
+            env = env
+                .with_provider_catalogs(&checked.blueprint, config, registry)
+                .with_retention(&checked.blueprint, config, registry);
         }
     }
     let findings = lint_manifest(&checked.content, &checked.blueprint, &env);

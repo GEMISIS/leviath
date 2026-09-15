@@ -97,6 +97,19 @@ impl ProviderRegistry {
         self.retention_with(&self.retention, provider, model)
     }
 
+    /// Ask every native provider to read again what it answers
+    /// [`Provider::live_retention`] from, in turn. A daemon calls this
+    /// when zero retention is switched on under it, so an account mode
+    /// `lev providers retention` just set is what the next spawn is judged
+    /// by rather than what the daemon read when it started.
+    pub async fn refresh_retention(&self) {
+        // One after another: a handful of providers, of which one or two
+        // read anything, each a short side call.
+        for provider in self.providers.values() {
+            provider.refresh_retention().await;
+        }
+    }
+
     /// Merge the per-request zero-retention fields for `provider` into a
     /// request's extra parameters, when zero retention is asked for. A
     /// provider without such fields is left alone.
@@ -1183,6 +1196,26 @@ mod tests {
         let reg = ProviderRegistry::new();
         reg.prime_capabilities(std::time::Duration::from_secs(5), &["nope"])
             .await;
+    }
+
+    /// A refresh asks every registered provider in turn; a provider that
+    /// reads no setting has nothing to do, and the registry's answer for it
+    /// is the table's before and after.
+    #[tokio::test]
+    async fn a_refresh_asks_every_registered_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "openai".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        registry.register(
+            "ollama".to_string(),
+            Arc::new(StubProvider::new(PrimeOutcome::Ok)),
+        );
+        let before = registry.retention("openai", "gpt-5.5");
+        registry.refresh_retention().await;
+        assert_eq!(registry.retention("openai", "gpt-5.5"), before);
+        assert!(registry.retention("ollama", "q").is_zero());
     }
 
     #[tokio::test]

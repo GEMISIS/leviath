@@ -28,6 +28,11 @@ use crate::config::Config;
 /// than allowed to hold up a run.
 const PRIME_TIMEOUT_SECS: u64 = 10;
 
+/// How long a spawn under zero retention waits for a provider to re-read its
+/// retention setting: one small `GET`, on the path of every spawn while the
+/// switch is on, so shorter than a prime.
+const RETENTION_REFRESH_TIMEOUT_SECS: u64 = 5;
+
 /// What a rebuild produced: the registry to install, and the providers whose
 /// credentials are not the ones the old registry was built with.
 struct Pending {
@@ -145,6 +150,31 @@ impl ProviderReload {
                 .await;
         }
         changed
+    }
+
+    /// With zero retention asked for, read again what each provider answers
+    /// its retention from (Bedrock's account mode), so the spawn about to be
+    /// judged sees a mode `lev providers retention` set a moment ago rather
+    /// than the one read when the daemon started. One short call per spawn,
+    /// bounded so an unreachable plane cannot hold the spawn; nothing to do
+    /// while the switch is off.
+    pub async fn refresh_retention(&self, config: &Config) {
+        if !config.providers.zero_retention {
+            return;
+        }
+        let registry = self.registry();
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(RETENTION_REFRESH_TIMEOUT_SECS),
+            registry.refresh_retention(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "a provider's data retention setting could not be re-read in {RETENTION_REFRESH_TIMEOUT_SECS}s; \
+                 the spawn is judged by what was last read"
+            );
+        }
     }
 
     /// Install whatever [`refresh`](Self::refresh) built into `world`. Does
@@ -349,6 +379,80 @@ mod tests {
         );
         // Nothing changed the second time, so nothing is primed either.
         assert!(reload.refresh_and_prime(&after).await.is_empty());
+    }
+
+    /// A provider whose retention re-read never answers, to stand in for an
+    /// unreachable control plane.
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for HangingProvider {
+        async fn infer(
+            &self,
+            _r: &leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            Err(leviath_providers::ProviderError::Other("t".to_string()))
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            1000
+        }
+        fn name(&self) -> &str {
+            "hanging"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+        async fn refresh_retention(&self) {
+            std::future::pending::<()>().await
+        }
+    }
+
+    /// With the switch off nothing is read; with it on every provider is
+    /// asked, and one that never answers is given up on after the bound
+    /// rather than holding the spawn.
+    #[tokio::test(start_paused = true)]
+    async fn the_retention_re_read_is_bounded_and_only_under_the_switch() {
+        let config = config_with_key("sk-ant");
+        let reload = boot(&config);
+        reload.refresh_retention(&config).await;
+
+        let mut on = config.clone();
+        on.providers.zero_retention = true;
+        reload.refresh_retention(&on).await;
+
+        // The stub's inert answers, pinned so the fixture stays measured.
+        {
+            use leviath_providers::Provider as _;
+            let stub = HangingProvider;
+            assert_eq!(stub.name(), "hanging");
+            assert_eq!(stub.count_tokens("ab", "m").await, 1);
+            assert_eq!(stub.max_context_tokens("m"), 1000);
+            let _ = stub.capabilities("m");
+            let request = leviath_providers::InferenceRequest {
+                system: Vec::new(),
+                messages: Vec::new(),
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: Vec::new(),
+                extra: serde_json::Value::Null,
+                request_timeout_secs: None,
+            };
+            assert!(stub.infer(&request).await.is_err());
+        }
+
+        let mut registry = boot_registry(&config);
+        registry.register("hanging".to_string(), std::sync::Arc::new(HangingProvider));
+        let reload = ProviderReload::new(&config, registry, client_factory());
+        let started = tokio::time::Instant::now();
+        reload.refresh_retention(&on).await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(RETENTION_REFRESH_TIMEOUT_SECS),
+            "the bound elapsed"
+        );
     }
 
     #[test]

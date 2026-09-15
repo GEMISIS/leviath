@@ -697,6 +697,209 @@ fn price_page() -> Vec<u8> {
     .into_bytes()
 }
 
+/// The mantle listing, as measured on 2026-09-15: Sonnet 5 allows `none`,
+/// OpenAI's models never do, Fable 5 needs `aws_review`, and one made-up
+/// row allows `none` and `aws_review` but not `default`.
+fn mantle_listing() -> Vec<u8> {
+    json!({
+        "object": "list",
+        "data": [
+            { "id": "anthropic.claude-sonnet-5", "status": "available",
+              "data_retention": { "allowed_modes": ["none", "default", "aws_review"], "mode": "default", "source": "model_default" } },
+            { "id": "openai.gpt-5.4", "status": "available",
+              "data_retention": { "allowed_modes": ["default", "aws_review"], "mode": "default", "source": "model_default" } },
+            { "id": "anthropic.claude-fable-5", "status": "unavailable",
+              "status_reason": "This model is not available under data retention mode 'default'.",
+              "data_retention": { "allowed_modes": ["aws_review"], "mode": "default", "source": "model_default" } },
+            { "id": "vendor.odd", "status": "available",
+              "data_retention": { "allowed_modes": ["none", "aws_review"], "mode": "none", "source": "model_default" } },
+            { "id": "vendor.silent" },
+            { "data_retention": { "allowed_modes": ["none"] } },
+            { "id": 7, "data_retention": { "allowed_modes": ["none"] } },
+            { "id": "vendor.garbled", "data_retention": "none" }
+        ]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A refresh re-reads the account's mode every time and the listing only
+/// while none has been read; a host that cannot be reached is logged and
+/// leaves what was known.
+#[tokio::test]
+async fn a_refresh_re_reads_the_mode_and_reads_the_listing_once() {
+    let _guard = crate::test_support::always_on_tracing_guard();
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"mode":"none"}"#.to_vec()),
+        (200, "OK", mantle_listing()),
+        (200, "OK", br#"{"mode":"default"}"#.to_vec()),
+    ])
+    .await;
+    let p = provider_at(&url);
+    p.refresh_retention().await;
+    assert_eq!(p.retention_mode().as_deref(), Some("none"));
+    assert!(p.model_retention("openai.gpt-5.4").is_some());
+    p.refresh_retention().await;
+    assert_eq!(p.retention_mode().as_deref(), Some("default"));
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        3,
+        "the listing was not read again"
+    );
+
+    let dead = provider_at("http://127.0.0.1:1");
+    dead.refresh_retention().await;
+    assert!(dead.retention_mode().is_none());
+    assert!(dead.model_retention("openai.gpt-5.4").is_none());
+}
+
+/// A provider that has read `mode` off the control plane and the listing
+/// off the mantle host.
+async fn provider_knowing(mode: &str) -> BedrockProvider {
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", format!(r#"{{"mode":"{mode}"}}"#).into_bytes()),
+        (200, "OK", mantle_listing()),
+    ])
+    .await;
+    let p = provider_at(&url);
+    p.account_retention().await.unwrap();
+    assert_eq!(
+        p.read_model_retention().await.unwrap(),
+        4,
+        "the silent row is skipped"
+    );
+    p
+}
+
+/// What the listing says narrows the account's mode: a model never offered
+/// under `none` cannot run with zero retention whatever the account says
+/// (and is unavailable under `none`); a listed model is looked up by its
+/// bare id, so a profile finds it; an account that inherits serves each
+/// model under its own default; a model the account's mode does not serve
+/// is unavailable; an unlisted model is left to the account's mode alone.
+#[tokio::test]
+async fn the_listing_says_which_models_can_run_under_mode_none() {
+    use crate::retention::Retention;
+    let p = provider_knowing("none").await;
+    assert_eq!(
+        p.model_retention("us.anthropic.claude-sonnet-5")
+            .unwrap()
+            .allowed_modes,
+        vec!["none", "default", "aws_review"]
+    );
+    assert!(p.model_retention("amazon.nova-2").is_none());
+    // The whole listing, sorted, with each row's availability in Bedrock's
+    // words: what `lev providers retention` prints.
+    let rows = p.model_retentions();
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "anthropic.claude-fable-5",
+            "anthropic.claude-sonnet-5",
+            "openai.gpt-5.4",
+            "vendor.odd"
+        ]
+    );
+    assert!(rows[0].1.unavailable());
+    assert!(
+        rows[0]
+            .1
+            .status_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("not available")),
+        "{:?}",
+        rows[0].1.status_reason
+    );
+    assert!(!rows[1].1.unavailable());
+    assert!(
+        p.live_retention("us.anthropic.claude-sonnet-5")
+            .unwrap()
+            .is_zero()
+    );
+    assert!(p.live_retention("amazon.nova-2").unwrap().is_zero());
+    let gpt = p.live_retention("openai.gpt-5.4").unwrap();
+    assert_eq!(gpt.retention, Retention::Unknown);
+    assert!(gpt.note.contains("never none"), "{}", gpt.note);
+    assert!(gpt.note.contains("unavailable"), "{}", gpt.note);
+    let fable = p.live_retention("anthropic.claude-fable-5").unwrap();
+    assert_eq!(fable.retention, Retention::Days(30));
+    assert!(fable.note.contains("never none"), "{}", fable.note);
+
+    let p = provider_knowing("inherit").await;
+    let sonnet = p.live_retention("us.anthropic.claude-sonnet-5").unwrap();
+    assert_eq!(sonnet.retention, Retention::Unknown);
+    assert!(sonnet.note.contains("inherits"), "{}", sonnet.note);
+    let gpt = p.live_retention("openai.gpt-5.4").unwrap();
+    assert!(gpt.note.contains("never none"), "{}", gpt.note);
+    assert!(!gpt.note.contains("unavailable"), "{}", gpt.note);
+    assert!(
+        p.live_retention("vendor.odd").unwrap().is_zero(),
+        "its own default is none"
+    );
+    let nova = p.live_retention("amazon.nova-2").unwrap();
+    assert_eq!(nova.retention, Retention::Unknown);
+    assert!(nova.note.contains("inherits"), "{}", nova.note);
+
+    let p = provider_knowing("default").await;
+    let odd = p.live_retention("vendor.odd").unwrap();
+    assert_eq!(odd.retention, Retention::Unknown);
+    assert!(
+        odd.note.contains("does not serve this model under"),
+        "{}",
+        odd.note
+    );
+    let fable = p.live_retention("anthropic.claude-fable-5").unwrap();
+    assert_eq!(fable.retention, Retention::Days(30));
+
+    let p = provider_knowing("aws_review").await;
+    assert!(
+        p.live_retention("us.anthropic.claude-sonnet-5")
+            .unwrap()
+            .is_zero()
+    );
+    let fable = p.live_retention("anthropic.claude-fable-5").unwrap();
+    assert_eq!(fable.retention, Retention::Days(30));
+    assert!(fable.note.contains("never none"), "{}", fable.note);
+    assert!(!fable.note.contains("unavailable"), "{}", fable.note);
+    // A covered Claude the listing does not carry keeps the documented answer.
+    let mythos = p.live_retention("us.anthropic.claude-mythos-5").unwrap();
+    assert_eq!(mythos.retention, Retention::Days(30));
+    assert!(mythos.note.contains("needs aws_review"), "{}", mythos.note);
+
+    // Behind a gateway the mantle host is not reached and nothing is read.
+    let gated = BedrockProvider::new(client(), "k".to_string())
+        .with_base_url(Some("http://gw.local".to_string()));
+    assert_eq!(gated.read_model_retention().await.unwrap(), 0);
+    // A page without the array is an invalid response, not a panic.
+    let url = spawn_mock_server(200, "OK", br#"{"models":[]}"#.to_vec()).await;
+    let err = provider_at(&url)
+        .read_model_retention()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no data"), "{err}");
+}
+
+/// Priming reads the account's mode and the listing after the prices, both
+/// best effort.
+#[tokio::test]
+async fn priming_reads_the_retention_mode_and_the_listing() {
+    let _guard = crate::test_support::always_on_tracing_guard();
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", listing_page()),
+        (200, "OK", profiles_page(None)),
+        (200, "OK", price_page()),
+        (200, "OK", br#"{"mode":"none"}"#.to_vec()),
+        (200, "OK", mantle_listing()),
+    ])
+    .await;
+    let p = provider_at(&url);
+    p.prime_capabilities().await.unwrap();
+    assert_eq!(p.retention_mode().as_deref(), Some("none"));
+    assert!(p.model_retention("anthropic.claude-sonnet-5").is_some());
+}
+
 #[tokio::test]
 async fn priming_reads_the_listing_every_profile_page_and_the_prices() {
     let _guard = crate::test_support::always_on_tracing_guard();
@@ -802,27 +1005,30 @@ async fn a_listing_that_fails_or_misparses_is_reported() {
 
 #[tokio::test]
 async fn check_credential_reads_the_listing_again() {
-    // Priming reads the listing, the profiles, the prices, and then the
-    // account's data retention mode.
+    // Priming reads the listing, the profiles, the prices, then the
+    // account's data retention mode and what each model allows.
     let retention = || br#"{"mode":"none"}"#.to_vec();
     let (url, bodies) = spawn_mock_sequence(vec![
         (200, "OK", listing_page()),
         (200, "OK", profiles_page(None)),
         (200, "OK", price_page()),
         (200, "OK", retention()),
+        (200, "OK", mantle_listing()),
         (200, "OK", listing_page()),
         (200, "OK", profiles_page(None)),
         (200, "OK", price_page()),
         (200, "OK", retention()),
+        (200, "OK", mantle_listing()),
     ])
     .await;
     let p = provider_at(&url);
     p.list_models().await.unwrap();
-    assert_eq!(bodies.lock().unwrap().len(), 4);
+    assert_eq!(bodies.lock().unwrap().len(), 5);
     assert_eq!(p.retention_mode().as_deref(), Some("none"));
+    assert!(p.model_retention("openai.gpt-5.4").is_some());
     let models = p.check_credential().await.unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(bodies.lock().unwrap().len(), 8);
+    assert_eq!(bodies.lock().unwrap().len(), 10);
 }
 
 #[tokio::test]

@@ -690,6 +690,46 @@ fn sample_catalog(ids: &[String]) -> String {
     }
 }
 
+/// Under `[providers] zero_retention`, the models this stage names that keep
+/// something: an error for the one the stage would start on, since the spawn
+/// gate refuses it, and a warning for a fallback, since failover drops it.
+pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+    let Some(refusals) = env.retention_refusals.get(&stage.name) else {
+        return Vec::new();
+    };
+    refusals
+        .iter()
+        .map(|r| match r.head {
+            true => LintFinding::new(
+                LintSeverity::Error,
+                "retention-not-zero",
+                format!(
+                    "would run on {}, which does not run with zero data retention ({}); \
+                     `[providers] zero_retention` is on, so the spawn is refused",
+                    r.route, r.reason
+                ),
+            )
+            .in_stage(&stage.name)
+            .with_fix(
+                "name a model that keeps nothing (`lev providers retention` says which), \
+                 declare the agreement in `[providers] zero_retention_agreements` if you \
+                 hold one, or `lev providers retention set off`",
+            ),
+            false => LintFinding::new(
+                LintSeverity::Warning,
+                "retention-fallback-dropped",
+                format!(
+                    "lists {} as a fallback, which does not run with zero data retention \
+                     ({}); `[providers] zero_retention` is on, so failover skips it",
+                    r.route, r.reason
+                ),
+            )
+            .in_stage(&stage.name)
+            .with_fix("list a fallback that keeps nothing, or drop this one"),
+        })
+        .collect()
+}
+
 /// Models and providers the install cannot resolve.
 pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
