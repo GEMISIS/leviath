@@ -289,11 +289,13 @@ async fn set_retention(
         false => println!("Zero retention is off: runs use every configured model."),
     }
     match bedrock_from(&config, env, build_client)? {
+        // The mode printed is the one asked for: Bedrock echoes it back on
+        // success, so the two are equal, and the request is the fact worth
+        // saying rather than a value read back off the account.
         Some(provider) if zero => match provider.set_account_retention("none").await {
-            Ok(written) => println!(
-                "Bedrock account data retention mode set to {} (Claude Fable 5 and Mythos 5 \
-                 need aws_review and are unavailable under it).",
-                written.mode
+            Ok(_) => println!(
+                "Bedrock account data retention mode set to none (Claude Fable 5 and Mythos 5 \
+                 need aws_review and are unavailable under it)."
             ),
             Err(e) => println!(
                 "Bedrock's account data retention mode could not be set to none: {e}. Set it \
@@ -319,8 +321,9 @@ async fn set_bedrock_mode(
     let Some(provider) = bedrock_from(&config, env, build_client)? else {
         anyhow::bail!("no Bedrock key is configured; `lev setup --bedrock-key ...` first");
     };
-    let written = provider.set_account_retention(mode.trim()).await?;
-    println!("Bedrock account data retention mode: {}", written.mode);
+    let mode = mode.trim();
+    provider.set_account_retention(mode).await?;
+    println!("Bedrock account data retention mode: {mode}");
     Ok(())
 }
 
