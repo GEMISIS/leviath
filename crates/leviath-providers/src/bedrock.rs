@@ -74,7 +74,34 @@ pub struct BedrockProvider {
     /// Models Bedrock's own CountTokens refused, so the Anthropic route is
     /// tried first for them next time. See `count`.
     count_route: crate::provider::ModelMemo,
+    /// The account's data retention mode (`none`, `default`, `aws_review`,
+    /// `provider_data_share` or `inherit`), once read. `None` until
+    /// [`Self::account_retention`] has answered, or when a gateway fronts
+    /// the control plane and it cannot be asked.
+    retention_mode: std::sync::RwLock<Option<String>>,
 }
+
+/// The account's data retention setting as Bedrock reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountRetention {
+    /// `none`, `default`, `aws_review`, `provider_data_share` (legacy) or
+    /// `inherit`.
+    pub mode: String,
+    /// When it was last set, as Bedrock spells it (a timestamp string or
+    /// epoch seconds, depending on the plane that answered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<serde_json::Value>,
+}
+
+/// The retention modes Bedrock accepts on `PUT /data-retention`, least
+/// permissive first. `inherit` defers to a broader scope.
+pub const RETENTION_MODES: &[&str] = &[
+    "none",
+    "default",
+    "aws_review",
+    "provider_data_share",
+    "inherit",
+];
 
 impl BedrockProvider {
     /// A provider for `region` with the key, and nothing else configured.
@@ -91,7 +118,78 @@ impl BedrockProvider {
             capability_overrides: HashMap::new(),
             learned: LearnedModels::default(),
             count_route: crate::provider::ModelMemo::default(),
+            retention_mode: std::sync::RwLock::new(None),
         }
+    }
+
+    /// `GET /data-retention` on the control plane: the account's data
+    /// retention mode. Remembered, so [`Provider::live_retention`] can answer
+    /// without a network call. `None` when a gateway fronts the control
+    /// plane, which cannot be asked.
+    pub async fn account_retention(&self) -> Result<Option<AccountRetention>> {
+        let Some(control) = self.control_base() else {
+            return Ok(None);
+        };
+        let url = format!("{control}/data-retention");
+        let body = self.get_json(&url, true).await?;
+        let read: AccountRetention = serde_json::from_value(body).map_err(|e| {
+            ProviderError::ApiError(format!("Bedrock's data retention answer is not one: {e}"))
+        })?;
+        self.remember_retention(&read.mode);
+        Ok(Some(read))
+    }
+
+    /// `PUT /data-retention` on the control plane: set the account's data
+    /// retention mode. `none` is zero data retention; `aws_review` is what
+    /// Claude Fable 5 and Mythos 5 need. Refused here for a word Bedrock does
+    /// not take, before any request is made.
+    pub async fn set_account_retention(&self, mode: &str) -> Result<AccountRetention> {
+        if !RETENTION_MODES.contains(&mode) {
+            return Err(ProviderError::ApiError(format!(
+                "'{mode}' is not a Bedrock data retention mode: {}",
+                RETENTION_MODES.join(", ")
+            )));
+        }
+        let Some(control) = self.control_base() else {
+            return Err(ProviderError::ApiError(
+                "a gateway fronts Bedrock's control plane, so the account's data retention \
+                 mode cannot be set from here"
+                    .to_string(),
+            ));
+        };
+        let url = format!("{control}/data-retention");
+        let builder = crate::provider::apply_request_timeout(
+            crate::provider::side_call_client().put(&url),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .header("authorization", format!("Bearer {}", self.api_key))
+        .json(&serde_json::json!({ "mode": mode }));
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::transport("setting Bedrock's data retention", &e))?;
+        let response = classify_response(response, None).await?;
+        let body = crate::provider::decode_json(response).await?;
+        let written: AccountRetention = serde_json::from_value(body).map_err(|e| {
+            ProviderError::ApiError(format!("Bedrock's data retention answer is not one: {e}"))
+        })?;
+        self.remember_retention(&written.mode);
+        Ok(written)
+    }
+
+    /// The mode read or written most recently, if any.
+    pub fn retention_mode(&self) -> Option<String> {
+        self.retention_mode
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn remember_retention(&self, mode: &str) {
+        *self
+            .retention_mode
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode.to_string());
     }
 
     /// The constructor the registry calls: with the operator's per-model
@@ -551,6 +649,53 @@ impl Provider for BedrockProvider {
         PROVIDER_NAME
     }
 
+    /// The account's mode, once read, decides. A model that allows mode
+    /// `none` keeps nothing under any mode; Claude Fable 5 and Mythos 5 keep
+    /// 30 days under `aws_review` and are unavailable below it; `default`
+    /// leaves each model to its own policy, under which AWS may keep flagged
+    /// content for abuse detection.
+    fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
+        use crate::retention::{Control, Retention, RetentionPolicy, Source};
+        let mode = self.retention_mode()?;
+        let covered = crate::retention::is_covered_claude(model);
+        let (retention, note) = match (mode.as_str(), covered) {
+            (_, true) => (
+                Retention::Days(30),
+                format!(
+                    "the account's data retention mode is {mode}; this model needs \
+                     aws_review and keeps prompts and outputs up to 30 days inside AWS \
+                     for the human review Anthropic requires"
+                ),
+            ),
+            ("none", false) => (
+                Retention::Zero,
+                "the account's data retention mode is none: nothing is written to \
+                 durable storage or shared with the model provider"
+                    .to_string(),
+            ),
+            ("default", false) => (
+                Retention::Unknown,
+                "the account's data retention mode is default: the model's own policy \
+                 applies, and AWS may keep content flagged for abuse detection; set the \
+                 mode to none for a guarantee"
+                    .to_string(),
+            ),
+            (_, false) => (
+                Retention::Zero,
+                format!(
+                    "the account's data retention mode is {mode}; a model that allows \
+                     mode none keeps nothing whatever the account mode"
+                ),
+            ),
+        };
+        Some(RetentionPolicy {
+            retention,
+            control: Control::Account,
+            source: Source::Live,
+            note,
+        })
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the
         // listing and the card said, what this build was compiled with.
@@ -594,6 +739,18 @@ impl Provider for BedrockProvider {
         let count = learned.len();
         self.learned.replace(learned);
         tracing::debug!(models = count, "learned Bedrock model capabilities");
+        // Best effort, like the price file: an account whose key cannot read
+        // the setting (an SCP, an older key) still runs, with the table's
+        // answer standing in until `lev providers retention` asks again.
+        match self.account_retention().await {
+            Ok(Some(read)) => {
+                tracing::debug!(mode = %read.mode, "read Bedrock's data retention mode")
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "Bedrock's data retention mode could not be read")
+            }
+        }
         Ok(())
     }
 

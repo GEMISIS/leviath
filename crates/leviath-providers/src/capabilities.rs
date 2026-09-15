@@ -391,6 +391,12 @@ pub struct ModelCapabilityOverride {
     /// Mime type patterns the model can hand back.
     #[serde(default)]
     pub output_types: Option<Vec<String>>,
+    /// What the provider keeps of this model's requests, replacing the
+    /// compiled-in answer: `"zero"`, `"30d"`, `"indefinite"` or `"unknown"`.
+    /// For a model whose retention differs from its provider's, or one the
+    /// table has never heard of.
+    #[serde(default)]
+    pub retention: Option<crate::retention::Retention>,
 }
 
 impl ModelCapabilityOverride {
@@ -451,6 +457,8 @@ impl From<ModelCapabilities> for ModelCapabilityOverride {
             // Nor what mime it takes; that is a separate answer.
             input_types: None,
             output_types: None,
+            // Nor what the provider keeps of its requests.
+            retention: None,
         }
     }
 }

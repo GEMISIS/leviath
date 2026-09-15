@@ -165,6 +165,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "zero_retention": {
+          "type": "boolean",
+          "description": "Ask every provider for zero data retention (OpenAI store=false, OpenRouter zdr routing) and refuse a stage whose model cannot give it. `lev providers retention` shows what each provider keeps."
+        },
+        "zero_retention_agreements": {
+          "type": "array",
+          "description": "Providers this organisation holds a zero data retention agreement with, by registry name (openai, anthropic, google). No API can read such a contract, so it is declared here.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -732,6 +743,10 @@
               "type": "string"
             },
             "description": "Mime type patterns the model can hand back in a reply."
+          },
+          "retention": {
+            "type": "string",
+            "description": "What the provider keeps of this model's requests, replacing the compiled-in answer: zero, <N>d (30d), indefinite or unknown."
           }
         }
       }

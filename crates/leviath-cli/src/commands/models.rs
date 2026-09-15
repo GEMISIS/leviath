@@ -651,19 +651,32 @@ async fn show_with_registry_within(
     //    was found, so it is merged last. Printing the override alone would
     //    report `Default` for every field the operator did not mention, which
     //    is not what the run will use.
+    // What the provider keeps of this model's requests, with the operator's
+    // settings on top: the documented answer, since a listing here is a
+    // fresh provider that has not read its account.
+    let settings = crate::commands::run::session::retention_settings(&config);
+    let retention_of = |provider: &str| {
+        leviath_providers::retention::resolve(
+            leviath_providers::retention::builtin(provider, model_id),
+            provider,
+            model_id,
+            &settings,
+        )
+    };
     match (found, user_caps) {
         (Some(info), Some(user_caps)) => {
             let caps = user_caps.apply_to(info.capabilities);
             let mime = user_caps.apply_mime(info.mime);
-            print_model_detail(
-                model_id,
-                info.display_name.as_deref(),
-                &info.provider,
-                &caps,
-                &mime,
-                Source::Override,
-                info.pricing,
-            );
+            print_model_detail(ModelDetail {
+                id: model_id,
+                display_name: info.display_name.as_deref(),
+                provider: &info.provider,
+                caps: &caps,
+                mime: &mime,
+                source: Source::Override,
+                listed_pricing: info.pricing,
+                retention: &retention_of(&info.provider),
+            });
         }
         (Some(info), None) => {
             let source = if info.learned {
@@ -671,26 +684,28 @@ async fn show_with_registry_within(
             } else {
                 Source::Table
             };
-            print_model_detail(
-                model_id,
-                info.display_name.as_deref(),
-                &info.provider,
-                &info.capabilities,
-                &info.mime,
+            print_model_detail(ModelDetail {
+                id: model_id,
+                display_name: info.display_name.as_deref(),
+                provider: &info.provider,
+                caps: &info.capabilities,
+                mime: &info.mime,
                 source,
-                info.pricing,
-            );
+                listed_pricing: info.pricing,
+                retention: &retention_of(&info.provider),
+            });
         }
         (None, Some(user_caps)) => {
-            print_model_detail(
-                model_id,
-                None,
-                "config (user override)",
-                &user_caps.apply_to(ModelCapabilities::default()),
-                &user_caps.apply_mime(leviath_providers::ModelMime::text_only()),
-                Source::Override,
-                None,
-            );
+            print_model_detail(ModelDetail {
+                id: model_id,
+                display_name: None,
+                provider: "config (user override)",
+                caps: &user_caps.apply_to(ModelCapabilities::default()),
+                mime: &user_caps.apply_mime(leviath_providers::ModelMime::text_only()),
+                source: Source::Override,
+                listed_pricing: None,
+                retention: &retention_of("config"),
+            });
         }
         (None, None) => {
             // 4. Not found anywhere - print a helpful message with a TOML snippet.
@@ -852,15 +867,30 @@ fn describe_source(source: &str) -> &str {
 }
 
 /// Print a detailed capability sheet for a single model.
-fn print_model_detail(
-    id: &str,
-    display_name: Option<&str>,
-    provider: &str,
-    caps: &ModelCapabilities,
-    mime: &leviath_providers::ModelMime,
+/// Everything one `lev models show` entry prints, gathered so the renderer
+/// takes a name for each thing rather than eight positions.
+struct ModelDetail<'a> {
+    id: &'a str,
+    display_name: Option<&'a str>,
+    provider: &'a str,
+    caps: &'a ModelCapabilities,
+    mime: &'a leviath_providers::ModelMime,
     source: Source,
     listed_pricing: Option<ModelPricing>,
-) {
+    retention: &'a leviath_providers::retention::RetentionPolicy,
+}
+
+fn print_model_detail(detail: ModelDetail<'_>) {
+    let ModelDetail {
+        id,
+        display_name,
+        provider,
+        caps,
+        mime,
+        source,
+        listed_pricing,
+        retention,
+    } = detail;
     println!("Model:    {}", id);
     if let Some(name) = display_name {
         println!("Name:     {}", name);
@@ -893,6 +923,8 @@ fn print_model_detail(
         caps.max_output_tokens,
         fmt_tokens(caps.max_output_tokens)
     );
+    println!("  Retention:      {}", retention.summary());
+    println!("                  {}", retention.note);
 
     print_model_pricing(provider, id, listed_pricing);
 }
@@ -1017,33 +1049,36 @@ mod tests {
         };
         // Should not panic
         let mime = leviath_providers::ModelMime::new(&["text/*", "image/*"], &["text/*"]);
-        print_model_detail(
-            "test-model",
-            Some("Test Model"),
-            "test",
-            &caps,
-            &mime,
-            Source::Table,
-            None,
-        );
-        print_model_detail(
-            "test-model",
-            None,
-            "test",
-            &caps,
-            &mime,
-            Source::Override,
-            None,
-        );
-        print_model_detail(
-            "test-model",
-            None,
-            "test",
-            &caps,
-            &mime,
-            Source::Listing,
-            Some(ModelPricing::flat(0.5, 1.5)),
-        );
+        print_model_detail(ModelDetail {
+            id: "test-model",
+            display_name: Some("Test Model"),
+            provider: "test",
+            caps: &caps,
+            mime: &mime,
+            source: Source::Table,
+            listed_pricing: None,
+            retention: &leviath_providers::retention::builtin("test", "test-model"),
+        });
+        print_model_detail(ModelDetail {
+            id: "test-model",
+            display_name: None,
+            provider: "test",
+            caps: &caps,
+            mime: &mime,
+            source: Source::Override,
+            listed_pricing: None,
+            retention: &leviath_providers::retention::builtin("test", "test-model"),
+        });
+        print_model_detail(ModelDetail {
+            id: "test-model",
+            display_name: None,
+            provider: "test",
+            caps: &caps,
+            mime: &mime,
+            source: Source::Listing,
+            listed_pricing: Some(ModelPricing::flat(0.5, 1.5)),
+            retention: &leviath_providers::retention::builtin("test", "test-model"),
+        });
     }
 
     #[test]
@@ -1394,30 +1429,32 @@ mod tests {
             limits_source: LimitsSource::Builtin,
         };
         // Should not panic with all features disabled
-        print_model_detail(
-            "test-model",
-            Some("Test"),
-            "test",
-            &caps,
-            &leviath_providers::ModelMime::text_only(),
-            Source::Table,
-            None,
-        );
+        print_model_detail(ModelDetail {
+            id: "test-model",
+            display_name: Some("Test"),
+            provider: "test",
+            caps: &caps,
+            mime: &leviath_providers::ModelMime::text_only(),
+            source: Source::Table,
+            listed_pricing: None,
+            retention: &leviath_providers::retention::builtin("test", "test-model"),
+        });
     }
 
     #[test]
     fn print_model_detail_user_override_source() {
         let caps = ModelCapabilities::default();
         // Should not panic with user override flag set
-        print_model_detail(
-            "override-model",
-            None,
-            "custom",
-            &caps,
-            &leviath_providers::ModelMime::text_only(),
-            Source::Override,
-            None,
-        );
+        print_model_detail(ModelDetail {
+            id: "override-model",
+            display_name: None,
+            provider: "custom",
+            caps: &caps,
+            mime: &leviath_providers::ModelMime::text_only(),
+            source: Source::Override,
+            listed_pricing: None,
+            retention: &leviath_providers::retention::builtin("test", "test-model"),
+        });
     }
 
     // ─── fmt_tokens additional ──────────────────────────────────────────

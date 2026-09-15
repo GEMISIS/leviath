@@ -4214,6 +4214,7 @@ enabled = false
                 output_per_mtok: Some(25.0),
                 input_types: Some(vec!["text/*".to_string(), "image/*".to_string()]),
                 output_types: None,
+                retention: Some(leviath_providers::retention::Retention::Days(30)),
             },
         );
         let mut tool_perms = HashMap::new();

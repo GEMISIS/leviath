@@ -1011,6 +1011,17 @@ pub trait Provider: Send + Sync {
         self.serves_model_from_table(model_key)
     }
 
+    /// What this provider has *read* about its retention of `model`'s
+    /// requests, when it can read anything: Bedrock keeps a data retention
+    /// mode on the account and answers from it once primed. `None`, the
+    /// default, means the compiled-in table ([`crate::retention::builtin`])
+    /// stands, which is the honest answer for a provider whose retention is
+    /// a matter of documentation and contract rather than an API.
+    fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
+        let _ = model;
+        None
+    }
+
     /// Every model id this provider will accept, when it is in a position to
     /// say so.
     ///

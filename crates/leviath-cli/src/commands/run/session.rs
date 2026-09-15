@@ -334,11 +334,45 @@ pub(crate) fn build_provider_registry_from_config_probing(
         build_client,
         reachable,
     )?;
-    Ok(attach_script_layer(
-        registry,
-        crate::config::providers_dir(),
-        config,
-    ))
+    Ok(
+        attach_script_layer(registry, crate::config::providers_dir(), config)
+            .with_retention(retention_settings(config)),
+    )
+}
+
+/// The data retention settings `config.toml` carries, in the registry's
+/// form: the request for zero retention, the declared agreements, and the
+/// `retention` keys on `[model_capabilities]` and `[model_providers]`
+/// entries. A `[model_providers]` entry spells it as any other key (they are
+/// forwarded to a script verbatim), so a word that is not a retention is
+/// warned about and ignored rather than failing the load.
+pub(crate) fn retention_settings(
+    config: &Config,
+) -> leviath_providers::retention::RetentionSettings {
+    let provider_declarations = config
+        .model_providers
+        .iter()
+        .filter_map(|(name, entry)| {
+            let word = entry.extra.get("retention")?.as_str()?;
+            match leviath_providers::retention::Retention::parse(word) {
+                Ok(retention) => Some((name.clone(), retention)),
+                Err(e) => {
+                    tracing::warn!(provider = %name, "ignoring [model_providers] retention: {e}");
+                    None
+                }
+            }
+        })
+        .collect();
+    leviath_providers::retention::RetentionSettings {
+        zero_requested: config.providers.zero_retention,
+        agreements: config.providers.zero_retention_agreements.clone(),
+        model_overrides: config
+            .model_capabilities
+            .iter()
+            .filter_map(|(model, caps)| caps.retention.map(|r| (model.clone(), r)))
+            .collect(),
+        provider_declarations,
+    }
 }
 
 /// [`build_provider_registry_from_config_with`], with the script-provider
@@ -357,12 +391,10 @@ pub(crate) fn build_provider_registry_live(
         &provider_creds_from_config(config),
         build_client,
     )?;
-    Ok(attach_live_script_layer(
-        registry,
-        crate::config::providers_dir(),
-        config,
-        reloader,
-    ))
+    Ok(
+        attach_live_script_layer(registry, crate::config::providers_dir(), config, reloader)
+            .with_retention(retention_settings(config)),
+    )
 }
 
 /// [`attach_script_layer`], with the layer reading `reloader` on every load.
@@ -1028,6 +1060,61 @@ mod tests {
                 .iter()
                 .any(|c| c.name == "bedrock")
         );
+    }
+
+    /// The switch, the agreements, and both kinds of `retention` key reach
+    /// the registry's settings; a `[model_providers]` word that is not a
+    /// retention is dropped with a warning rather than failing the load.
+    #[test]
+    fn retention_settings_carry_the_switch_the_agreements_and_the_keys() {
+        use leviath_providers::retention::Retention;
+        let mut config = Config::default();
+        assert_eq!(
+            retention_settings(&config),
+            leviath_providers::retention::RetentionSettings::default()
+        );
+        config.providers.zero_retention = true;
+        config.providers.zero_retention_agreements = vec!["openai".to_string()];
+        config.model_capabilities.insert(
+            "gpt-5.5".to_string(),
+            leviath_providers::ModelCapabilityOverride {
+                retention: Some(Retention::Indefinite),
+                ..Default::default()
+            },
+        );
+        config.model_capabilities.insert(
+            "no-say".to_string(),
+            leviath_providers::ModelCapabilityOverride::default(),
+        );
+        config.model_providers.insert(
+            "cerebras".to_string(),
+            toml::from_str("api_key = \"k\"\nretention = \"zero\"").unwrap(),
+        );
+        config.model_providers.insert(
+            "vague".to_string(),
+            toml::from_str("api_key = \"k\"\nretention = \"sometimes\"").unwrap(),
+        );
+        config.model_providers.insert(
+            "silent".to_string(),
+            toml::from_str("api_key = \"k\"\nretention = 3").unwrap(),
+        );
+        let settings = retention_settings(&config);
+        assert!(settings.zero_requested);
+        assert_eq!(settings.agreements, vec!["openai".to_string()]);
+        assert_eq!(
+            settings.model_overrides.get("gpt-5.5"),
+            Some(&Retention::Indefinite)
+        );
+        assert!(!settings.model_overrides.contains_key("no-say"));
+        assert_eq!(
+            settings.provider_declarations.get("cerebras"),
+            Some(&Retention::Zero)
+        );
+        assert!(!settings.provider_declarations.contains_key("vague"));
+        assert!(!settings.provider_declarations.contains_key("silent"));
+        // And the built registry carries them.
+        let registry = build_provider_registry_from_config(&config).unwrap();
+        assert_eq!(registry.retention_settings(), &settings);
     }
 
     #[test]

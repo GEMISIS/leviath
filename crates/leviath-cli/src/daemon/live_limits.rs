@@ -43,6 +43,9 @@ struct Applied {
     /// `mime_types.toml` as it read last time, so an edit to the file is a
     /// change to apply the way an edit to the config is.
     mime_types_file: Option<String>,
+    /// The data retention settings, so `lev providers retention set zero`
+    /// reaches the registry every request is built against.
+    retention: leviath_providers::retention::RetentionSettings,
 }
 
 impl Applied {
@@ -53,6 +56,7 @@ impl Applied {
             mime: config.mime.clone(),
             mime_types: config.mime_types.clone(),
             mime_types_file: std::fs::read_to_string(crate::config::mime_types_path()).ok(),
+            retention: crate::commands::run::session::retention_settings(config),
         }
     }
 }
@@ -124,6 +128,14 @@ impl LiveLimits {
             max_attempts: config.limits.inference_retry_attempts,
             base_delay_ms: config.limits.inference_retry_base_ms,
         });
+        // The registry every request is built against carries the retention
+        // settings: the per-request fields (OpenAI's `store`, OpenRouter's
+        // `provider.zdr`) go out only while zero retention is asked for, and
+        // the ask is a config key, so it follows the file like the limits.
+        // Every world is built with a registry, so this is a plain read.
+        ecs.resource_mut::<leviath_runtime::pipeline::Providers>()
+            .0
+            .set_retention(crate::commands::run::session::retention_settings(config));
         // Read at every fan-out split, so a ceiling lowered mid-run stops the
         // next split rather than waiting for the next run.
         ecs.insert_resource(leviath_runtime::fanout::FanOutBudget(
@@ -205,6 +217,30 @@ mod tests {
             !live.apply(&config, &mut world),
             "an unchanged config must not touch the pools of a running daemon"
         );
+    }
+
+    /// `zero_retention` flipped in the file reaches the world's registry on
+    /// the next pass, and counts as a change on its own.
+    #[test]
+    fn the_retention_settings_follow_the_config() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut world = world(&runtime, 8);
+        let live = applier();
+        let mut config = Config::default();
+        assert!(live.apply(&config, &mut world));
+        let asked = |world: &PipelineWorld| {
+            world
+                .world()
+                .get_resource::<leviath_runtime::pipeline::Providers>()
+                .expect("the world has a registry")
+                .0
+                .retention_settings()
+                .zero_requested
+        };
+        assert!(!asked(&world));
+        config.providers.zero_retention = true;
+        assert!(live.apply(&config, &mut world), "the switch is a change");
+        assert!(asked(&world));
     }
 
     #[test]

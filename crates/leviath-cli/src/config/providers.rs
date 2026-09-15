@@ -200,6 +200,19 @@ pub struct ProviderConfig {
     /// failover target that needs a model to send (that is `fallback_order`).
     #[serde(default)]
     pub provider_order: Vec<String>,
+    /// Ask every provider for zero data retention, and refuse a stage whose
+    /// model cannot give it rather than send the request and hope. What each
+    /// provider keeps, and how the request reaches it (a per-request field,
+    /// an account setting, a contract), is `lev providers retention`.
+    #[serde(default)]
+    pub zero_retention: bool,
+    /// Providers this organisation holds a zero data retention agreement
+    /// with, by registry name (`openai`, `anthropic`, `google`). No API can
+    /// read such a contract, so it is declared here; with it, the provider
+    /// counts as keeping nothing. A model that retains regardless (Claude
+    /// Fable 5, Mythos 5) is not moved by it.
+    #[serde(default)]
+    pub zero_retention_agreements: Vec<String>,
 }
 
 /// Hand-written so the API keys can never be printed.
@@ -234,6 +247,8 @@ impl std::fmt::Debug for ProviderConfig {
             .field("codex_replay_reasoning", &self.codex_replay_reasoning)
             .field("anthropic_cache_ttl", &self.anthropic_cache_ttl)
             .field("fallback_order", &self.fallback_order)
+            .field("zero_retention", &self.zero_retention)
+            .field("zero_retention_agreements", &self.zero_retention_agreements)
             .finish()
     }
 }
@@ -270,6 +285,8 @@ impl Default for ProviderConfig {
             anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
+            zero_retention: false,
+            zero_retention_agreements: Vec::new(),
         }
     }
 }

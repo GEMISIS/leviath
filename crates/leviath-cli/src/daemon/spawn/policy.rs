@@ -18,6 +18,7 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
         fallback_model: config.fallback_model.clone(),
         fallback_order: parse_fallback_order(&config.providers.fallback_order),
         provider_order: config.providers.provider_order.clone(),
+        retention: crate::commands::run::session::retention_settings(config),
     }
 }
 

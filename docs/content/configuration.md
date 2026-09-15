@@ -112,7 +112,17 @@ codex_replay_reasoning = true       # replay each turn's reasoning on the next r
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 provider_order      = ["codex", "openrouter", "openai"]   # a bare name's route preference
+zero_retention      = false          # ask every provider for zero data retention (see below)
+zero_retention_agreements = []       # providers you hold a zero data retention contract with
 ```
+
+`zero_retention` asks every provider for zero data retention and refuses, at spawn, a stage whose
+model cannot give it. What each provider keeps, how the request reaches it, and which models
+retain regardless is the subject of [data retention](/docs/providers#data-retention);
+`lev providers retention` prints it for this install and `lev providers retention set zero`
+writes the switch. `zero_retention_agreements` names the providers (`openai`, `anthropic`,
+`google`) your organisation holds a zero data retention contract with: no API can read such a
+contract, so it is declared here, and a declared provider counts as keeping nothing.
 
 `ollama_enabled` turns Ollama on. It is opt-in like every other provider: it needs no key and
 answers on a well-known local port, which used to be reason enough to register it on every
@@ -819,7 +829,13 @@ max_context_tokens   = 32768
 max_output_tokens    = 4096
 input_types          = ["text/*", "image/*"]   # what it takes in a request
 output_types         = ["text/*"]              # what it can hand back
+retention            = "zero"                  # what the provider keeps of its requests
 ```
+
+`retention` replaces what Leviath believes the provider keeps of this model's requests: `zero`,
+`30d` (any number of days), `indefinite` or `unknown`. It is per model, for one whose policy
+differs from its provider's or one the compiled-in table has never heard of, and it wins over
+everything else `lev providers retention` knows.
 
 `input_types` and `output_types` are mime type patterns, and they replace the provider's
 list rather than adding to it, so name `text/*` too. They are how a local vision model gets
@@ -938,13 +954,17 @@ described in [its own section](#openai-compatible-endpoints) below.
 script   = "groq"        # defaults to <name>.rhai
 api_key  = "..."
 base_url = "https://api.groq.com/openai/v1"
+retention = "zero"       # what this host keeps of its requests, if you know
 
 [model_providers.groq.rate_limit]
 requests_per_minute = 30
 tokens_per_minute   = 100000
 ```
 
-Any other key you add is forwarded verbatim to the script's `initialize(config)`.
+Any other key you add is forwarded verbatim to the script's `initialize(config)`. `retention` is
+forwarded too, and Leviath reads it as well: Leviath knows nothing about a custom host's data
+retention, so `zero`, `30d`, `indefinite` or `unknown` here is what `lev providers retention`
+and the `zero_retention` switch go by for it.
 
 `serves` is the one key that is not forwarded: it names the models this provider answers for, so a
 blueprint entry naming one of them with no provider can resolve here.
