@@ -278,6 +278,8 @@ api_token = "{EXTRA_VALUE}"
     write_meta(&runs, &child);
     let mut listed = meta(LISTED_CHILD, &blueprint);
     listed.started_at -= 20;
+    // As the daemon records it: the manifest file, not its directory.
+    listed.agent_path = blueprint.join("agent.leviath").display().to_string();
     write_meta(&runs, &listed);
     let mut other = meta(OTHER_RUN, &blueprint);
     other.started_at -= 30;
@@ -473,6 +475,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
             &format!("runs/{CHILD_RUN}/meta.json"),
             &format!("runs/{LISTED_CHILD}/meta.json"),
+            &format!("runs/{LISTED_CHILD}/blueprint/agent.leviath"),
         ] {
             assert!(
                 member_names.iter().any(|n| n.ends_with(expected)),
@@ -1068,16 +1071,11 @@ fn ctrl(c: char) -> crossterm::event::Event {
     key_with(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
-async fn drive(
-    ui: &mut Rage,
-    env: &RageEnv,
-    events: Vec<crossterm::event::Event>,
-) -> anyhow::Result<Option<Outcome>> {
+async fn drive(ui: &mut Rage, events: Vec<crossterm::event::Event>) -> anyhow::Result<LoopExit> {
     let mut terminal = test_terminal();
     let mut source = TestEventSource::new(events);
     run_loop(
         ui,
-        env,
         &mut terminal,
         &mut source,
         std::time::Duration::from_millis(1),
@@ -1094,29 +1092,29 @@ async fn the_screen_walks_every_step_and_writes_the_bundle() {
             output: Some(root.join("tui.zip")),
             ..Default::default()
         };
-        let mut ui = Rage::new(&args, &env).unwrap();
+        let ui = Rage::new(&args, &env).unwrap();
         assert_eq!(ui.step, Step::About);
         // Down to "A run", choose it, choose the newest run, type a note,
-        // build, read the summary, done.
-        let outcome = drive(
-            &mut ui,
-            &env,
-            vec![
-                key(KeyCode::Down),
-                key(KeyCode::Enter),
-                key(KeyCode::Enter),
-                key(KeyCode::Char('h')),
-                key(KeyCode::Char('i')),
-                ctrl('s'),
-                key(KeyCode::Enter),
-            ],
-        )
-        .await
-        .unwrap()
-        .expect("a bundle");
-        assert!(outcome.zip_path.exists());
-        assert!(outcome.sections.iter().any(|s| s.name == "runs/"));
-        let members = unzip(&outcome.zip_path);
+        // build, read the summary, done. The terminal is taken twice: once
+        // for the questions, once for the summary.
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('h')),
+            key(KeyCode::Char('i')),
+            ctrl('s'),
+            key(KeyCode::Enter),
+        ]);
+        execute_with(&args, &env, &mut setup, &mut events, true)
+            .await
+            .unwrap();
+        assert_eq!(setup.enable_calls, 2);
+        let zip = root.join("tui.zip");
+        assert!(zip.exists());
+        let members = unzip(&zip);
+        assert!(names(&members).iter().any(|n| n.contains("runs/")));
         let readme = String::from_utf8_lossy(member(&members, "README.md")).into_owned();
         assert!(readme.contains("hi"), "{readme}");
     })
@@ -1137,19 +1135,35 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         let mut ui = Rage::new(&args, &env).unwrap();
         assert_eq!(ui.step, Step::Summary, "everything was answered by flags");
         let mut terminal = test_terminal();
-        // A key the summary does not answer to, then one it does.
+        // The loop hands the terminal back for the build, then shows it.
         let mut source =
             TestEventSource::new(vec![key(KeyCode::Char('x')), key(KeyCode::Char('q'))]);
-        let outcome = run_loop(
+        assert!(matches!(
+            run_loop(
+                &mut ui,
+                &mut terminal,
+                &mut source,
+                std::time::Duration::from_millis(1)
+            )
+            .await
+            .unwrap(),
+            LoopExit::Build
+        ));
+        ui.outcome = Some(
+            build(&env, &ui.selection(), ui.output.as_deref())
+                .await
+                .unwrap(),
+        );
+        // A key the summary does not answer to, then one it does.
+        let exit = run_loop(
             &mut ui,
-            &env,
             &mut terminal,
             &mut source,
             std::time::Duration::from_millis(1),
         )
         .await
         .unwrap();
-        assert!(outcome.is_some());
+        assert!(matches!(exit, LoopExit::Finished(_)));
         let text = terminal.backend().text();
         assert!(text.contains("BEFORE YOU SHARE THIS FILE"), "{text}");
         assert!(text.contains("Your bundle"), "{text}");
@@ -1259,21 +1273,22 @@ async fn a_build_that_fails_is_shown_then_returned() {
             output: Some(root.join("nowhere").join("s.zip")),
             ..Default::default()
         };
-        let mut ui = Rage::new(&args, &env).unwrap();
-        let mut terminal = test_terminal();
-        let mut source = TestEventSource::new(vec![key(KeyCode::Esc)]);
-        let err = run_loop(
-            &mut ui,
-            &env,
-            &mut terminal,
-            &mut source,
-            std::time::Duration::from_millis(1),
-        )
-        .await
-        .unwrap_err();
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+        let err = execute_with(&args, &env, &mut setup, &mut events, true)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("cannot write"), "{err}");
+        // What the summary showed before Esc: the failure, in red.
+        let mut ui = Rage::new(&args, &env).unwrap();
+        ui.error = Some("cannot write it".to_string());
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| super::render::draw(frame, &ui))
+            .unwrap();
         let text = terminal.backend().text();
         assert!(text.contains("could not be written"), "{text}");
+        assert!(text.contains("cannot write it"), "{text}");
     })
     .await
 }
@@ -1287,12 +1302,10 @@ async fn going_back_and_quitting_from_each_step() {
 
         // Esc on the first step quits.
         let mut ui = Rage::new(&args, &env).unwrap();
-        assert!(
-            drive(&mut ui, &env, vec![key(KeyCode::Esc)])
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            drive(&mut ui, vec![key(KeyCode::Esc)]).await.unwrap(),
+            LoopExit::Quit
+        ));
 
         // Setting up -> note -> Esc goes back to the category, whose chooser
         // reopens on the category that was chosen; Ctrl-C quits anywhere.
@@ -1436,18 +1449,17 @@ async fn the_loop_survives_ticks_releases_and_reports_terminal_failures() {
             Some(crossterm::event::Event::Key(release)),
             Some(key(KeyCode::Esc)),
         ]);
-        assert!(
+        assert!(matches!(
             run_loop(
                 &mut ui,
-                &env,
                 &mut terminal,
                 &mut source,
                 std::time::Duration::from_millis(1)
             )
             .await
-            .unwrap()
-            .is_none()
-        );
+            .unwrap(),
+            LoopExit::Quit
+        ));
 
         // An event source that fails.
         let mut ui = Rage::new(&args, &env).unwrap();
@@ -1455,7 +1467,6 @@ async fn the_loop_survives_ticks_releases_and_reports_terminal_failures() {
         assert!(
             run_loop(
                 &mut ui,
-                &env,
                 &mut terminal,
                 &mut failing,
                 std::time::Duration::from_millis(1)
@@ -1493,6 +1504,21 @@ async fn the_loop_survives_ticks_releases_and_reports_terminal_failures() {
             note: Some("n".to_string()),
             ..Default::default()
         };
+        // The second take of the terminal, for the summary, can fail too.
+        let mut setup = TestSetup::new();
+        setup.enable_fails_on_call = Some(2);
+        assert!(
+            execute_with(&preset, &env, &mut setup, &mut events, true)
+                .await
+                .is_err()
+        );
+        let mut setup = TestSetup::new();
+        setup.create_fails_on_call = Some(2);
+        assert!(
+            execute_with(&preset, &env, &mut setup, &mut events, true)
+                .await
+                .is_err()
+        );
         let mut setup = TestSetup::new();
         setup.draw_should_fail = true;
         assert!(

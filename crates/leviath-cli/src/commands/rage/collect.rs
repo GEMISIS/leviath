@@ -451,10 +451,10 @@ fn copy_run(
         Ok(meta) => {
             let value = serde_json::to_value(meta.redacted()).unwrap_or_default();
             bundle.json(format!("{dest}/{META_FILE}"), scrubber, value);
-            let blueprint = Path::new(&meta.agent_path);
+            let blueprint = blueprint_dir_of(&meta.agent_path);
             if blueprint.is_dir() {
                 copy_text_tree(
-                    blueprint,
+                    &blueprint,
                     &format!("{dest}/blueprint"),
                     MAX_TREE_DEPTH,
                     scrubber,
@@ -463,7 +463,10 @@ fn copy_run(
             } else {
                 bundle.skip(
                     format!("{dest}/blueprint/"),
-                    format!("the blueprint directory {} is not on disk", meta.agent_path),
+                    format!(
+                        "the blueprint directory {} is not on disk",
+                        blueprint.display()
+                    ),
                 );
             }
         }
@@ -502,6 +505,18 @@ fn copy_run(
     copy_stages(&dir, &dest, scrubber, bundle);
     copy_archive(&dir, &dest, scrubber, bundle);
     copy_blobs(&dir, &dest, include_blobs, BLOB_CAP, blob_budget, bundle);
+}
+
+/// The directory a run's `agent_path` names. The daemon records the
+/// manifest file itself, so a file's parent is the blueprint; a directory is
+/// taken as it is.
+fn blueprint_dir_of(agent_path: &str) -> PathBuf {
+    let path = Path::new(agent_path);
+    if path.is_file() {
+        path.parent().map(Path::to_path_buf).unwrap_or_default()
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// `stages/<n>/`: the per-stage logs, context and taint audit.

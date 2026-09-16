@@ -110,34 +110,28 @@ fn draw_note(frame: &mut Frame, area: Rect, ui: &Rage) {
     frame.render_widget(&ui.note, inner);
 }
 
+/// The summary is drawn only once the bundle was built or the build failed;
+/// the loop hands the terminal back before the build runs.
 fn draw_summary(frame: &mut Frame, area: Rect, ui: &Rage) {
-    match (&ui.outcome, &ui.error) {
-        (Some(outcome), _) => draw_outcome(frame, area, outcome),
-        (None, Some(error)) => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    "The bundle could not be written.",
-                    Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(error.clone()),
-            ];
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(bordered(" Failed ", C_ERROR)),
-                area,
-            );
-        }
-        (None, None) => frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Gathering files…",
-                Style::default().fg(C_ACCENT),
-            )))
-            .block(bordered(" Building ", C_BORDER)),
-            area,
-        ),
+    if let Some(outcome) = &ui.outcome {
+        draw_outcome(frame, area, outcome);
+        return;
     }
+    let error = ui.error.clone().unwrap_or_default();
+    let lines = vec![
+        Line::from(Span::styled(
+            "The bundle could not be written.",
+            Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(error),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(bordered(" Failed ", C_ERROR)),
+        area,
+    );
 }
 
 /// The written bundle: sections, what was left out, and the warning in red.
