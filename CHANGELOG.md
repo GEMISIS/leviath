@@ -80,6 +80,11 @@ same list.
 
 ### Fixed
 
+- The `lev setup` provider window no longer moves the Providers screen
+  under it. The screen kept drawing its highlight and viewport from the
+  cursor the window was steering, so every arrow press in the window also
+  walked the list behind it.
+
 - An OpenAI-compatible endpoint entry carrying `retention` refused to load
   as having an unknown key, though the docs said to write it there.
 - Under `[providers] zero_retention`, the run-title call and compaction

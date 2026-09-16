@@ -96,7 +96,7 @@ fn draw_provider_modal(frame: &mut Frame, area: Rect, wizard: &Wizard, index: us
         screen.push(button_line(button.label(), focused));
     }
     let screen = screen.wrapped(inner.width as usize);
-    draw_screen(frame, inner, popup, &screen, wizard);
+    draw_screen(frame, inner, popup, &screen, wizard.cursor, wizard.scroll);
 }
 
 /// The help overlay's content, matching the bindings in `input.rs`.
@@ -256,12 +256,14 @@ fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // The screen's own cursor and scroll, not the modal's while one is up.
     draw_screen(
         frame,
         inner,
         area,
         &build_screen(wizard).wrapped(inner.width as usize),
-        wizard,
+        wizard.screen_cursor(),
+        wizard.screen_scroll(),
     );
 }
 
@@ -287,7 +289,12 @@ pub(crate) fn row_at(area: Rect, wizard: &Wizard, column: u16, row: u16) -> Opti
     }
 
     let screen = build_screen(wizard).wrapped(inner.width as usize);
-    let offset = first_visible(&screen, wizard, inner.height as usize);
+    let offset = first_visible(
+        &screen,
+        wizard.screen_cursor(),
+        wizard.screen_scroll(),
+        inner.height as usize,
+    );
     let line = offset + (row - inner.y) as usize;
     // The row that owns this line is the last one starting at or before it,
     // and only if the line is still inside the screen's content.
@@ -455,21 +462,21 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
 /// The first line to show, given where the user last scrolled and where the
 /// cursor is.
 ///
-/// The cursor wins. `wizard.scroll` is what the wheel and the page keys move,
-/// but a selection the user cannot see is worse than a lost scroll position,
-/// so an off-screen cursor pulls the viewport back to it.
-fn first_visible(screen: &Screen, wizard: &Wizard, height: usize) -> usize {
+/// The cursor wins. `scroll` is what the wheel and the page keys move, but a
+/// selection the user cannot see is worse than a lost scroll position, so an
+/// off-screen cursor pulls the viewport back to it.
+fn first_visible(screen: &Screen, cursor: usize, scroll: usize, height: usize) -> usize {
     let total = screen.lines.len();
     let max = total.saturating_sub(height);
-    let mut offset = wizard.scroll.min(max);
-    let Some(&start) = screen.rows.get(wizard.cursor) else {
+    let mut offset = scroll.min(max);
+    let Some(&start) = screen.rows.get(cursor) else {
         return offset;
     };
     // The row runs to the start of the next one, so a two-line field scrolls
     // into view whole rather than showing its label with the help cut off.
     let end = screen
         .rows
-        .get(wizard.cursor + 1)
+        .get(cursor + 1)
         .copied()
         .unwrap_or(total)
         .max(start + 1);
@@ -483,11 +490,18 @@ fn first_visible(screen: &Screen, wizard: &Wizard, height: usize) -> usize {
 
 /// Render a built screen into `inner`, with a scrollbar on `outer`'s border
 /// when there is more than fits.
-fn draw_screen(frame: &mut Frame, inner: Rect, outer: Rect, screen: &Screen, wizard: &Wizard) {
+fn draw_screen(
+    frame: &mut Frame,
+    inner: Rect,
+    outer: Rect,
+    screen: &Screen,
+    cursor: usize,
+    scroll: usize,
+) {
     // At least one row: the floor in `draw` leaves the body three rows and its
     // border takes two.
     let height = inner.height as usize;
-    let offset = first_visible(screen, wizard, height);
+    let offset = first_visible(screen, cursor, scroll, height);
     frame.render_widget(
         Paragraph::new(screen.lines.clone()).scroll((offset.min(u16::MAX as usize) as u16, 0)),
         inner,
@@ -594,7 +608,10 @@ fn build_providers(wizard: &Wizard) -> Screen {
         };
         let mut spans = vec![
             Span::styled(format!("{mark} "), Style::default().fg(colour)),
-            Span::styled(row.provider.display, name_style(position == wizard.cursor)),
+            Span::styled(
+                row.provider.display,
+                name_style(position == wizard.screen_cursor()),
+            ),
         ];
         let entries = wizard.endpoints_under(row.provider.id).len();
         if let Some(var) = row.from_env {
@@ -1404,6 +1421,39 @@ mod tests {
         assert!(modal.contains(" Set up Anthropic "), "{modal}");
         assert!(modal.contains("[ Verify and use ]"), "{modal}");
         assert!(!modal.contains("Which provider?"), "{modal}");
+    }
+
+    /// The Providers screen keeps its own cursor while a modal is up: moving
+    /// over the modal's card and buttons must not move the highlight, or the
+    /// viewport, of the screen underneath it.
+    #[test]
+    fn the_modal_leaves_the_screen_underneath_where_it_was() {
+        let (_dir, mut w) = wizard();
+        w.providers[0].selected = true;
+        w.enter(Step::Providers);
+        let add_row = w.visible_providers().len();
+        w.cursor = add_row;
+        w.open_provider_modal(0);
+        assert!(
+            w.on_add_provider(),
+            "the screen's cursor stays on the add row"
+        );
+        w.scroll_end();
+        assert!(
+            w.on_add_provider(),
+            "the modal's cursor moved, the screen's did not"
+        );
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("› [ Add a"),
+            "the add row keeps its marker under the modal:\n{screen}"
+        );
+        assert!(
+            screen.contains("› [ Cancel ]"),
+            "the modal's own cursor is on its last button:\n{screen}"
+        );
+        w.cancel_modal();
+        assert_eq!(w.cursor, add_row);
     }
 
     /// Hit-testing on the Providers screen maps onto the listed providers,

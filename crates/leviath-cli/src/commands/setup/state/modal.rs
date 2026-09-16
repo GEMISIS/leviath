@@ -106,7 +106,7 @@ impl Wizard {
     /// Whether the Providers screen's cursor is on its "Add a provider" row,
     /// which sits after the listed providers and before the button.
     pub(crate) fn on_add_provider(&self) -> bool {
-        self.step == Step::Providers && self.cursor == self.visible_providers().len()
+        self.step == Step::Providers && self.screen_cursor() == self.visible_providers().len()
     }
 
     /// Start adding a provider: the chooser opens on the categories.
@@ -262,6 +262,26 @@ impl Wizard {
     /// The provider row the open modal is set up on.
     pub(crate) fn modal_index(&self) -> Option<usize> {
         self.modal.as_ref().map(|m| m.index)
+    }
+
+    /// The cursor the screen underneath is drawn with.
+    ///
+    /// While a modal is open, `cursor` is the modal's, moving over its card
+    /// and buttons. The Providers screen it covers keeps the cursor it had
+    /// when the modal opened, so the keys that move through the modal leave
+    /// the highlight underneath where the user put it.
+    pub(crate) fn screen_cursor(&self) -> usize {
+        self.modal
+            .as_ref()
+            .map_or(self.cursor, |modal| modal.snapshot.cursor)
+    }
+
+    /// The scroll offset the screen underneath is drawn with, on the same
+    /// footing as [`Self::screen_cursor`].
+    pub(crate) fn screen_scroll(&self) -> usize {
+        self.modal
+            .as_ref()
+            .map_or(self.scroll, |modal| modal.snapshot.scroll)
     }
 
     /// How many cursor rows the modal's card has above its buttons: an
