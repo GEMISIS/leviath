@@ -445,9 +445,23 @@ impl BuiltinTools {
             );
         }
 
-        match std::fs::write(&path, content) {
+        // `append` lets a model write a file too large for one reply in parts:
+        // a call cut off by the output cap is refused, and this is the way
+        // the refusal tells it to go on.
+        let append = args.get("append").and_then(|v| v.as_bool()) == Some(true);
+        let (written, verb) = if append {
+            let written = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()));
+            (written, "appended")
+        } else {
+            (std::fs::write(&path, content), "wrote")
+        };
+        match written {
             Ok(()) => format!(
-                "Successfully wrote {} bytes to '{}'",
+                "Successfully {verb} {} bytes to '{}'",
                 content.len(),
                 path_str
             ),

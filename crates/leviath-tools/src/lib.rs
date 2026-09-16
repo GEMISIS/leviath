@@ -1117,6 +1117,69 @@ mod tests {
         assert!(!workdir.exists(), "the workspace must stay gone");
     }
 
+    /// A file too large for one reply is written in parts: the first part
+    /// creates it (append creates a missing file too), each later part goes on
+    /// the end, and a plain write still replaces the whole file.
+    #[tokio::test]
+    async fn write_file_appends_parts_and_a_plain_write_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        let first = tools
+            .execute(
+                "write_file",
+                json!({"path": "doc/report.md", "content": "# Title\n", "append": true}),
+            )
+            .await;
+        assert_eq!(first, "Successfully appended 8 bytes to 'doc/report.md'");
+        let second = tools
+            .execute(
+                "write_file",
+                json!({"path": "doc/report.md", "content": "Body.\n", "append": true}),
+            )
+            .await;
+        assert!(
+            second.starts_with("Successfully appended 6 bytes"),
+            "{second}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("doc/report.md")).unwrap(),
+            "# Title\nBody.\n"
+        );
+
+        let replaced = tools
+            .execute(
+                "write_file",
+                json!({"path": "doc/report.md", "content": "new", "append": false}),
+            )
+            .await;
+        assert!(
+            replaced.starts_with("Successfully wrote 3 bytes"),
+            "{replaced}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("doc/report.md")).unwrap(),
+            "new"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_append_fails_when_path_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::create_dir(dir.path().join("adir")).unwrap();
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "adir", "content": "x", "append": true}),
+            )
+            .await;
+        assert!(
+            result.starts_with("[error] Failed to write 'adir'"),
+            "{result}"
+        );
+    }
+
     #[tokio::test]
     async fn write_file_missing_content_arg() {
         let dir = tempfile::tempdir().unwrap();

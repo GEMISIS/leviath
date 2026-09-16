@@ -156,7 +156,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "write_file".to_string(),
-                description: "Write content to a file, creating it (and any parent directories) if necessary. Use this to create new files or completely replace existing file content.".to_string(),
+                description: "Write content to a file, creating it (and any parent directories) if necessary. Use this to create new files or completely replace existing file content. Set append to add to the end of the file instead, which is how to write a file too large for one call: the first part without append, each later part with append.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -166,7 +166,11 @@ impl BuiltinTools {
                         },
                         "content": {
                             "type": "string",
-                            "description": "The full content to write to the file"
+                            "description": "The content to write: the whole file, or with append the part to add"
+                        },
+                        "append": {
+                            "type": "boolean",
+                            "description": "Add content to the end of the file instead of replacing it, creating the file if it does not exist. Defaults to false."
                         }
                     },
                     "required": ["path", "content"]

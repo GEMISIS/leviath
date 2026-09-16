@@ -779,6 +779,11 @@ type ProcessResponseQuery = (
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
     Option<&'static mut crate::persistence::TokenTotals>,
+    // For a stage that ends on cut-off tool calls: the error status, and the
+    // `[error]` line in the stage log that says why.
+    Option<&'static mut crate::components::AgentState>,
+    Option<&'static mut StageIoBuffer>,
+    Option<&'static StageCursor>,
 );
 
 /// Process-response system: route each `ProcessResponse` agent by whether its
@@ -790,7 +795,7 @@ pub(crate) fn process_response(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, result, mut progress, totals) in agents.iter_mut() {
+    for (entity, result, mut progress, totals, state, buffer, cursor) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         progress.iterations += 1; // per-stage inference count (for max_iterations)
         // Whatever the reply held, the cap it did not fit under is not worth
@@ -804,23 +809,42 @@ pub(crate) fn process_response(
         e.remove::<ProcessResponse>();
         // A call the cap cut off mid-argument arrives as text. Its refusal is
         // this path's nudge, so it spends the same budget a cut-off text
-        // reply does. Without the bound a model whose call does not fit even
-        // the model's maximum sends it again, paid in full each time, until
-        // an opt-in `max_iterations` stops it. Both conditions are needed:
-        // text arguments alone can also be a torn journal record.
+        // reply does. Both conditions are needed: text arguments alone can
+        // also be a torn journal record, and a reply the cap stopped after
+        // its calls were complete ran them as usual.
         let cut_off_call = result.cut_off_at.is_some()
             && result.tool_calls.iter().any(|c| c.arguments.is_string());
+        let cut_off_text = result.cut_off_at.is_some() && result.tool_calls.is_empty();
         if cut_off_call {
             if progress.cut_off_nudges >= MAX_CUT_OFF_NUDGES {
-                tracing::warn!(
-                    cut_offs = progress.cut_off_nudges + 1,
-                    tools = ?result.tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-                    "a tool call was cut off by the output limit again; ending the stage"
-                );
-                e.insert(ResolveTransition);
+                // Nothing in this reply can run, and the model has been told
+                // how to split the call as many times as the budget allows. A
+                // stage error, not a stage end: an `error` edge takes the run
+                // to recovery with the reason, and without one the run fails
+                // rather than reporting complete with the work undone.
+                let tools: Vec<&str> = result.tool_calls.iter().map(|c| c.name.as_str()).collect();
+                let message = cut_off_stage_error(progress.cut_off_nudges + 1, &tools);
+                tracing::warn!(stage_error = %message, "ending the stage");
+                if let Some(mut buffer) = buffer {
+                    let idx = cursor.map_or(0, |c| c.index);
+                    buffer.logs.push((idx, format!("[error] {message}")));
+                }
+                if let Some(mut state) = state {
+                    state.status = AgentStatus::Error {
+                        message: message.clone(),
+                    };
+                }
+                e.insert(StageOutcome::Errored(message))
+                    .insert(ResolveTransition);
                 continue;
             }
             progress.cut_off_nudges += 1;
+        } else if !cut_off_text {
+            // Counted in a row: a reply that was not cut off (any number of
+            // ordinary tool calls, or an answer) shows the model got past it,
+            // so a later cut-off starts a fresh budget. A cut-off text reply
+            // is counted by `handle_empty_response`.
+            progress.cut_off_nudges = 0;
         }
         if result.tool_calls.is_empty() {
             e.insert(ReadyForTransition);
@@ -1040,29 +1064,6 @@ pub(crate) fn handle_empty_response(
                 .insert(ReadyToInfer);
         }
     }
-}
-
-/// How many times a stage sends a cut-off reply back before accepting what
-/// it has. The first retry goes out with the cap raised to the model's
-/// maximum, so a second cut-off means the reply does not fit the model at all
-/// and the nudge asks for it in pieces; a third means the model is not
-/// listening, and the stage ends rather than paying for a fourth. A cut-off
-/// text reply and a cut-off tool call draw on the same count.
-pub(crate) const MAX_CUT_OFF_NUDGES: usize = 3;
-
-/// The `[System]` line sent back with a cut-off reply.
-///
-/// It names the cause and the two ways out, because the reply that got cut
-/// off was almost always a single oversized write, and a model told only "you
-/// have not written the file yet" sends the same write again.
-pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
-    format!(
-        "Your previous reply was cut off by the output limit after {cut_off_at} output tokens, \
-         so it was not used. Do not send it again as it was. Either make it shorter, or split \
-         the work into smaller pieces: for a file, write the first part, then add each further \
-         part with a separate call. The output limit has been raised to the model's maximum \
-         for your next reply."
-    )
 }
 
 /// How many text-only replies an image stage is nudged back before it is let

@@ -25,7 +25,7 @@ Read and modify files relative to the agent's working directory.
 | --- | --- | --- |
 | `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. A file that is not text (an image, a PDF, a model) is stored as a typed [part](/docs/mime) on the result instead, so a model that takes the type sees the bytes and one that does not sees a one-line stand-in. | `path` |
 | `read_files` | Read several files in one call, separated by path headers. | `paths` (array) |
-| `write_file` | Write content to a file, creating parent directories as needed. | `path`, `content` |
+| `write_file` | Write content to a file, creating parent directories as needed. With `append`, add to the end instead of replacing, so a file too large for one reply can be written in parts. | `path`, `content`, `append` (optional) |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
 | `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, where every future run on the machine can call it. Refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run). | `name`, `source`, `overwrite` (optional, default false) |

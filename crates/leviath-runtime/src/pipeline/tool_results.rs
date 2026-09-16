@@ -506,10 +506,22 @@ pub(crate) fn apply_file_tracking(
         let (body, verb) = match call.name.as_str() {
             "read_file" if ft.track_reads => (result.as_str().to_string(), "stored"),
             "write_file" if ft.track_writes => {
-                match call.arguments.get("content").and_then(|v| v.as_str()) {
-                    Some(c) => (c.to_string(), "written"),
-                    None => continue,
-                }
+                let Some(c) = call.arguments.get("content").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                // An appended part goes after what is already tracked for the
+                // path, so the region keeps showing the whole file.
+                let appended = call.arguments.get("append").and_then(|v| v.as_bool()) == Some(true);
+                let prior = appended
+                    .then(|| {
+                        window
+                            .get_region(&ft.region)
+                            .and_then(|region| region.get_by_key(path))
+                    })
+                    .flatten()
+                    .map(|e| e.content.to_string())
+                    .unwrap_or_default();
+                (format!("{prior}{c}"), "written")
             }
             _ => continue,
         };

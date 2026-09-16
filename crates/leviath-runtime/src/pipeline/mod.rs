@@ -118,14 +118,18 @@ pub(crate) use tools::{
 };
 pub use tools::{DynamicTools, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]
-pub(crate) use tools::{barrier_then, cut_off_arguments_refusal, invalid_args_refusal};
+pub(crate) use tools::{barrier_then, invalid_args_refusal};
+mod cut_off;
+pub(crate) use cut_off::{
+    MAX_CUT_OFF_NUDGES, cut_off_arguments_refusal, cut_off_nudge, cut_off_stage_error,
+};
 mod part_routing;
 mod response;
 pub use response::StageLedger;
 #[cfg(test)]
 pub(crate) use response::{
-    GlobalNudge, MAX_CUT_OFF_NUDGES, MAX_NO_IMAGE_NUDGES, edited_path, no_image_nudge,
-    stage_expects_image, to_inference_result,
+    GlobalNudge, MAX_NO_IMAGE_NUDGES, edited_path, no_image_nudge, stage_expects_image,
+    to_inference_result,
 };
 pub(crate) use response::{
     InferenceResults, ProcessResponse, ReadyForTools, ReadyForTransition, ResolveTransition,

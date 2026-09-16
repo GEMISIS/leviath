@@ -28,7 +28,9 @@ frame that never closes, for probing the daemon's read caps.
 Set `LV_MOCK_CUT_OFF=1` to answer the Anthropic route's first turn with a
 `tool_use` whose input stopped mid-argument (`stop_reason: "max_tokens"`), the
 shape a reply cut off by the output cap takes. `LV_MOCK_CUT_OFF=always` answers
-every turn that way. Like the real API, the route refuses any request whose
+every turn that way. Only a request that offers the tool is cut off, so a stage
+without it (an error edge's recovery stage) gets "done". Like the real API, the
+route refuses any request whose
 history carries a `tool_use` input that is not an object.
 
 Set `LV_MOCK_SPLIT_UTF8=1` to answer a streamed completion with CJK and an
@@ -230,8 +232,12 @@ class Handler(BaseHTTPRequestHandler):
                 "message": f"{bad}: Input should be an object"}}, 400)
         seen_tool = anthropic_seen_tool(req)
         want_tool = TOOL is not None and not seen_tool
-        if CUT_OFF == "always" or (CUT_OFF and not seen_tool):
-            content = [{"type": "tool_use", "id": f"toolu_cut_{CALLS[0]}", "name": TOOL or "write_file",
+        # Only a request that offers the tool can be answered with a call to
+        # it, so a recovery stage without it gets a plain answer.
+        cut_tool = TOOL or "write_file"
+        offered = any(t.get("name") == cut_tool for t in req.get("tools") or [])
+        if offered and (CUT_OFF == "always" or (CUT_OFF and not seen_tool)):
+            content = [{"type": "tool_use", "id": f"toolu_cut_{CALLS[0]}", "name": cut_tool,
                         "input": '{"path": "report.md", "content": "# A long rep'}]
             stop = "max_tokens"
         elif want_tool:

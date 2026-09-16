@@ -11967,6 +11967,51 @@ fn apply_file_tracking_tracks_reads_and_writes() {
     assert_eq!(w.get_region("files").unwrap().content.len(), 2);
 }
 
+/// A file written in parts is tracked whole: each appended part goes after
+/// what the region already holds for the path, a first append with nothing
+/// tracked starts it, and a plain write replaces it.
+#[test]
+fn apply_file_tracking_keeps_appended_parts_together() {
+    let ft = ftc(false, true, None);
+    let mut w = hashmap_window();
+    let write = |id: &str, args: serde_json::Value| fcall(id, "write_file", args);
+    let track = |w: &mut ContextWindow, call: crate::components::ToolCall| {
+        let mut merged = vec![(call.tool_id.clone(), "Successfully wrote".into())];
+        apply_file_tracking(w, &ft, &[call], &mut merged);
+    };
+    let body = |w: &ContextWindow| {
+        w.get_region("files")
+            .unwrap()
+            .get_by_key("r.md")
+            .unwrap()
+            .content
+            .to_string()
+    };
+
+    track(
+        &mut w,
+        write(
+            "1",
+            serde_json::json!({"path": "r.md", "content": "# T\n", "append": true}),
+        ),
+    );
+    assert_eq!(body(&w), "# T\n");
+    track(
+        &mut w,
+        write(
+            "2",
+            serde_json::json!({"path": "r.md", "content": "part", "append": true}),
+        ),
+    );
+    assert_eq!(body(&w), "# T\npart");
+    track(
+        &mut w,
+        write("3", serde_json::json!({"path": "r.md", "content": "whole"})),
+    );
+    assert_eq!(body(&w), "whole");
+    assert_eq!(w.get_region("files").unwrap().content.len(), 1);
+}
+
 #[test]
 fn apply_file_tracking_noop_without_a_hashmap_region() {
     let ft = ftc(true, true, None);
@@ -18654,25 +18699,98 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
     assert!(text.contains("51 characters arrived, ending `"), "{text}");
     assert!(text.contains("# Local LLM hardw`"), "{text}");
     assert!(jrx.try_recv().is_err(), "nothing reached the tool lane");
+    // No `StageProgress` on this agent: read as the first cut-off.
+    assert!(text.contains("Send the call again"), "{text}");
     assert!(call_had_no_effect(&cut_off_arguments_refusal(
         "write_file",
-        "{"
+        "{",
+        1
     )));
+}
+
+/// The refusal reads the stage's count of cut-offs in a row, so a model on
+/// its second one is told to split rather than resend.
+#[tokio::test]
+async fn dispatch_tools_escalates_the_refusal_with_the_cut_offs_in_a_row() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&["write_file"]),
+            cut_off_batch(serde_json::json!("{\"path\": \"a"), Some(64_000)),
+            conv_window(),
+            StageProgress {
+                cut_off_nudges: 2,
+                ..Default::default()
+            },
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    let text = conversation_text(&world, e);
+    assert!(text.contains("That is 2 replies in a row"), "{text}");
+    assert!(text.contains("\"append\": true"), "{text}");
 }
 
 /// The tail quoted back is the last forty characters, or all of a shorter
 /// argument, and is cut on a character boundary.
 #[test]
 fn cut_off_arguments_refusal_quotes_the_tail() {
-    let short = cut_off_arguments_refusal("t", "{\"a\": 1");
+    let short = cut_off_arguments_refusal("t", "{\"a\": 1", 1);
     assert!(
         short.contains("(7 characters arrived, ending `{\"a\": 1`)"),
         "{short}"
     );
-    let long = cut_off_arguments_refusal("t", &format!("{}é", "x".repeat(60)));
+    let long = cut_off_arguments_refusal("t", &format!("{}é", "x".repeat(60)), 1);
     assert!(
         long.contains(&format!("ending `{}é`", "x".repeat(39))),
         "{long}"
+    );
+}
+
+/// The first cut-off may be the stage's own cap, which the retry lifts, so
+/// the model may resend. From the second in a row the call cannot fit: the
+/// refusal says not to resend, says how to split this tool's call, and counts
+/// down to the stage error.
+#[test]
+fn cut_off_arguments_refusal_escalates_and_says_how_to_split() {
+    let first = cut_off_arguments_refusal("write_file", "{", 1);
+    assert!(
+        first.contains("may use up to the model's maximum output"),
+        "{first}"
+    );
+    assert!(first.contains("Send the call again"), "{first}");
+    assert!(
+        first.contains("then add each later part with write_file and \"append\": true"),
+        "{first}"
+    );
+    assert!(!first.contains("stage ends"), "{first}");
+
+    let second = cut_off_arguments_refusal("edit_file", "{", 2);
+    assert!(second.contains("That is 2 replies in a row"), "{second}");
+    assert!(
+        second.contains("Do not send it again as it was"),
+        "{second}"
+    );
+    assert!(second.contains("smaller piece of text"), "{second}");
+    assert!(
+        second.contains("ends with an error if your next 2 replies are cut off too"),
+        "{second}"
+    );
+
+    let last = cut_off_arguments_refusal("shell", "{", MAX_CUT_OFF_NUDGES);
+    assert!(
+        last.contains("spread the work over several calls"),
+        "{last}"
+    );
+    assert!(
+        last.contains("ends with an error if your next reply is cut off too"),
+        "{last}"
     );
 }
 
@@ -18769,8 +18887,10 @@ fn cut_off_batch(
 }
 
 /// A model that keeps sending a call too large for the model's own maximum
-/// is sent back with the refusal three times, as a cut-off text reply is, and
-/// then the stage ends instead of paying for the same call again.
+/// is sent back with the refusal three times in a row, and then the stage
+/// ends as a stage ERROR: the run's status, the stage log and the outcome an
+/// `error` edge follows all carry the reason. An agent without a state or a
+/// log buffer still gets the outcome.
 #[test]
 fn process_response_ends_the_stage_after_the_cut_off_budget() {
     let mut world = World::new();
@@ -18795,10 +18915,97 @@ fn process_response_ends_the_stage_after_the_cut_off_budget() {
             ProcessResponse,
         ))
         .id();
+    let observed = world
+        .spawn((
+            cut_off_batch(serde_json::json!("{\"path\": \"a"), Some(8_192)),
+            StageProgress {
+                cut_off_nudges: MAX_CUT_OFF_NUDGES,
+                ..Default::default()
+            },
+            agent_state(),
+            StageIoBuffer::default(),
+            StageCursor { index: 2 },
+            ProcessResponse,
+        ))
+        .id();
     run_process(&mut world);
-    assert!(world.get::<ResolveTransition>(spent).is_some());
-    assert!(world.get::<ReadyForTools>(spent).is_none());
-    assert!(world.get::<ProcessResponse>(spent).is_none());
+    let message = cut_off_stage_error(MAX_CUT_OFF_NUDGES + 1, &["write_file"]);
+    for e in [spent, observed] {
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
+        assert!(world.get::<ProcessResponse>(e).is_none());
+        assert_eq!(
+            world.get::<StageOutcome>(e),
+            Some(&StageOutcome::Errored(message.clone()))
+        );
+    }
+    assert_eq!(
+        world.get::<AgentState>(observed).unwrap().status,
+        AgentStatus::Error {
+            message: message.clone()
+        }
+    );
+    assert_eq!(
+        world.get::<StageIoBuffer>(observed).unwrap().logs,
+        vec![(2, format!("[error] {message}"))]
+    );
+    assert!(
+        message.starts_with("4 replies in a row were cut off by the output limit"),
+        "{message}"
+    );
+    assert!(message.contains("(write_file)"), "{message}");
+}
+
+/// Counted in a row, so ordinary work is never mistaken for a cut-off: a
+/// reply with any number of valid calls, a plain answer, or a reply the cap
+/// stopped after its calls were complete all clear the count. A cut-off text
+/// reply leaves it for `handle_empty_response` to count.
+#[test]
+fn process_response_counts_cut_offs_in_a_row() {
+    let mut world = World::new();
+    let two_so_far = || StageProgress {
+        cut_off_nudges: 2,
+        ..Default::default()
+    };
+    let mut many_valid = cut_off_batch(serde_json::json!({ "path": "a" }), None);
+    many_valid.tool_calls = (0..25)
+        .map(|i| {
+            fcall(
+                &format!("c{i}"),
+                "write_file",
+                serde_json::json!({ "path": "a", "content": "x", "append": true }),
+            )
+        })
+        .collect();
+    let valid = world
+        .spawn((many_valid, two_so_far(), ProcessResponse))
+        .id();
+    let answer = world
+        .spawn((infer_result_only(false), two_so_far(), ProcessResponse))
+        .id();
+    let complete_then_capped = world
+        .spawn((
+            cut_off_batch(serde_json::json!({ "path": "a" }), Some(8_192)),
+            two_so_far(),
+            ProcessResponse,
+        ))
+        .id();
+    let mut cut_text = infer_result_only(false);
+    cut_text.cut_off_at = Some(8_192);
+    let cut_off_text = world.spawn((cut_text, two_so_far(), ProcessResponse)).id();
+    run_process(&mut world);
+    for e in [valid, answer, complete_then_capped] {
+        assert_eq!(world.get::<StageProgress>(e).unwrap().cut_off_nudges, 0);
+        assert!(world.get::<StageOutcome>(e).is_none());
+    }
+    assert!(world.get::<ReadyForTools>(valid).is_some());
+    assert_eq!(
+        world
+            .get::<StageProgress>(cut_off_text)
+            .unwrap()
+            .cut_off_nudges,
+        2
+    );
 }
 
 /// Only a call whose arguments were cut off spends the budget: a cap that
