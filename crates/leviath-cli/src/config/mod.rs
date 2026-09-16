@@ -4334,6 +4334,7 @@ enabled = false
                 exporter: TelemetryExporterKind::Stdout,
                 endpoint: Some("http://collector:4318".to_string()),
                 service_name: Some("leviath-prod".to_string()),
+                daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
             },
             sandbox: Some(leviath_core::ToolSandboxConfig {
                 kind: leviath_core::SandboxKind::Container,

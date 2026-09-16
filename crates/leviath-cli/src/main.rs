@@ -707,6 +707,16 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // ignored with nothing in the log. A missing file still loads as
     // defaults; only a broken one is fatal, and the parse error lands in
     // `daemon.log` for whoever finds the daemon not running.
+    //
+    // The file is attached before the config is read for exactly that reason:
+    // a refusal to start has to be the first line in it, whichever way the
+    // daemon was started. The cap follows `[observability]` once the host is
+    // up (`telemetry_reload`).
+    if let Some(path) = leviath_cli::logging::daemon_log_path()
+        && leviath_cli::logging::attach_daemon_log(path.clone())
+    {
+        info!(path = %path.display(), "leviath daemon writing its log here");
+    }
     let config = leviath_cli::config::Config::load()
         .map_err(|e| anyhow::anyhow!("daemon refusing to start on a broken config: {e}"))?;
     let runs_dir = leviath_cli::runstate::runs_dir();

@@ -12,8 +12,12 @@
 //! `enabled = true`, start a run to watch it, and nothing arrives - which looks
 //! exactly like a collector that is not listening.
 //!
+//! The cap on the daemon's own log file (`daemon_log_max_bytes`) rides along:
+//! every refresh hands it to the file writer, so raising it is a config edit
+//! rather than a restart.
+//!
 //! What does **not** move is the base subscriber `logging::init` installs
-//! before any config is read: the fmt layer, its stderr writer, and its
+//! before any config is read: the fmt layer, its writers, and its
 //! `info`/`debug` filter. Those come from `--verbose` on the process's own
 //! command line, not from `[observability]`, and a `tracing` subscriber can
 //! only be set once per process. Changing how verbose the daemon's own log is
@@ -37,6 +41,10 @@ use leviath_core::telemetry::NoopSink;
 /// schedule as before.
 type InstallLayer = Box<dyn Fn(Option<leviath_telemetry::LogLayer>) -> bool + Send + Sync>;
 
+/// How the daemon-log cap reaches the file writer; injected for the same
+/// reason as [`InstallLayer`].
+type SetCap = Box<dyn Fn(u64) -> bool + Send + Sync>;
+
 /// Keeps the telemetry pipeline in step with `[observability]`.
 pub struct TelemetryReload {
     /// The config the installed pipeline was built from. `None` before the
@@ -44,21 +52,26 @@ pub struct TelemetryReload {
     /// path as every later change.
     applied: Mutex<Option<ObservabilityConfig>>,
     install_layer: InstallLayer,
+    set_cap: SetCap,
 }
 
 impl TelemetryReload {
-    /// One that forwards the OTLP log bridge to the process subscriber.
+    /// One that forwards the OTLP log bridge and the log cap to the process
+    /// subscriber.
     pub fn for_daemon() -> Arc<Self> {
-        Arc::new(Self::with_installer(Box::new(
-            crate::logging::set_otel_layer,
-        )))
+        Arc::new(Self::with_installers(
+            Box::new(crate::logging::set_otel_layer),
+            Box::new(crate::logging::set_daemon_log_cap),
+        ))
     }
 
-    /// One that reports its layer changes to `install_layer` instead.
-    fn with_installer(install_layer: InstallLayer) -> Self {
+    /// One that reports its layer changes to `install_layer` and its cap
+    /// changes to `set_cap` instead.
+    fn with_installers(install_layer: InstallLayer, set_cap: SetCap) -> Self {
         Self {
             applied: Mutex::new(None),
             install_layer,
+            set_cap,
         }
     }
 
@@ -78,6 +91,9 @@ impl TelemetryReload {
         world: &mut leviath_runtime::PipelineWorld,
         cfg: &ObservabilityConfig,
     ) -> bool {
+        // Cheap, and applied before the equality check so the cap the file
+        // writer holds is the file's on every refresh, including the first.
+        (self.set_cap)(cfg.daemon_log_max_bytes);
         let mut applied = self.lock();
         if applied.as_ref() == Some(cfg) {
             return false;
@@ -122,7 +138,7 @@ impl TelemetryReload {
 mod tests {
     use super::*;
     use leviath_core::config::TelemetryExporterKind;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     /// What the injected installer was last asked for: 1 for a layer, 2 for
     /// clearing the slot, 0 for never called.
@@ -140,13 +156,46 @@ mod tests {
 
     /// A reload whose installs land in a counter only the calling test holds.
     fn reload() -> (TelemetryReload, Installs) {
+        let (reload, installs, _caps) = reload_with_cap();
+        (reload, installs)
+    }
+
+    /// The same, also handing back the cap the reload last asked for.
+    fn reload_with_cap() -> (TelemetryReload, Installs, Arc<AtomicU64>) {
         let installs: Installs = Arc::new(AtomicUsize::new(0));
         let recorder = Arc::clone(&installs);
-        let reload = TelemetryReload::with_installer(Box::new(move |layer| {
-            recorder.store(if layer.is_some() { 1 } else { 2 }, Ordering::SeqCst);
-            true
-        }));
-        (reload, installs)
+        let caps = Arc::new(AtomicU64::new(0));
+        let cap_recorder = Arc::clone(&caps);
+        let reload = TelemetryReload::with_installers(
+            Box::new(move |layer| {
+                recorder.store(if layer.is_some() { 1 } else { 2 }, Ordering::SeqCst);
+                true
+            }),
+            Box::new(move |cap| {
+                cap_recorder.store(cap, Ordering::SeqCst);
+                true
+            }),
+        );
+        (reload, installs, caps)
+    }
+
+    /// The log cap is handed over on every refresh, changed or not, so the
+    /// file writer always holds what the file says.
+    #[test]
+    fn every_refresh_hands_the_log_cap_to_the_file_writer() {
+        let (reload, _installs, caps) = reload_with_cap();
+        let (_rt, mut world) = world();
+        let mut first = cfg(false, TelemetryExporterKind::Stdout);
+        first.daemon_log_max_bytes = 123;
+        assert!(reload.refresh_into(&mut world, &first));
+        assert_eq!(caps.load(Ordering::SeqCst), 123);
+
+        first.daemon_log_max_bytes = 456;
+        assert!(
+            reload.refresh_into(&mut world, &first),
+            "a cap change is a config change"
+        );
+        assert_eq!(caps.load(Ordering::SeqCst), 456);
     }
 
     fn cfg(enabled: bool, exporter: TelemetryExporterKind) -> ObservabilityConfig {
@@ -155,6 +204,7 @@ mod tests {
             exporter,
             endpoint: None,
             service_name: None,
+            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
         }
     }
 
@@ -261,6 +311,7 @@ mod tests {
             exporter: TelemetryExporterKind::Otlp,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             service_name: Some("leviath-test".to_string()),
+            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
         };
         assert!(reload.refresh_into(&mut world, &otlp));
         assert_eq!(

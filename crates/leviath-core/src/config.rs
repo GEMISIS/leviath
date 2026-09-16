@@ -43,11 +43,17 @@ impl Default for TitleConfig {
     }
 }
 
-/// Configuration for structured observability export.
+/// The default cap on the daemon's own log file: 5 MiB, with one rolled
+/// backup, so a long-lived daemon holds at most about 10 MiB of its own
+/// output on disk.
+pub const DEFAULT_DAEMON_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Configuration for structured observability export, and for the daemon's
+/// own log file.
 ///
-/// Off by default: telemetry costs a background export pipeline and most
-/// interactive users have the dashboard instead. When enabled, spans, metrics
-/// and log records for every run flow to the configured exporter.
+/// Export is off by default: telemetry costs a background export pipeline and
+/// most interactive users have the dashboard instead. When enabled, spans,
+/// metrics and log records for every run flow to the configured exporter.
 ///
 /// Example config:
 /// ```toml
@@ -56,8 +62,9 @@ impl Default for TitleConfig {
 /// exporter = "otlp"
 /// endpoint = "http://localhost:4318"
 /// service_name = "leviath"
+/// daemon_log_max_bytes = 5242880
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
     /// Whether to export telemetry at all (default: false).
     #[serde(default)]
@@ -76,6 +83,31 @@ pub struct ObservabilityConfig {
     /// The `service.name` resource attribute. Falls back to
     /// `OTEL_SERVICE_NAME`, then to `"leviath"`.
     pub service_name: Option<String>,
+
+    /// Bytes the daemon's own log file (`daemon.log` under the data
+    /// directory) may reach before it is rolled to `daemon.log.1`, replacing
+    /// the previous one. `0` never rolls. Default: 5 MiB.
+    #[serde(default = "default_daemon_log_max_bytes")]
+    pub daemon_log_max_bytes: u64,
+}
+
+fn default_daemon_log_max_bytes() -> u64 {
+    DEFAULT_DAEMON_LOG_MAX_BYTES
+}
+
+impl Default for ObservabilityConfig {
+    /// Export off, the OTLP exporter when it is turned on, and the default
+    /// log cap. Hand-written so the empty-table serde default and `Default`
+    /// agree on the cap.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            exporter: TelemetryExporterKind::Otlp,
+            endpoint: None,
+            service_name: None,
+            daemon_log_max_bytes: DEFAULT_DAEMON_LOG_MAX_BYTES,
+        }
+    }
 }
 
 /// Which telemetry exporter to build.
@@ -249,6 +281,7 @@ enabled = false
         assert_eq!(cfg.exporter, TelemetryExporterKind::Otlp);
         assert!(cfg.endpoint.is_none());
         assert!(cfg.service_name.is_none());
+        assert_eq!(cfg.daemon_log_max_bytes, DEFAULT_DAEMON_LOG_MAX_BYTES);
         // An empty TOML table and the hand-written Default must agree.
         let parsed: ObservabilityConfig = toml::from_str("").unwrap();
         assert_eq!(parsed, cfg);
@@ -261,12 +294,14 @@ enabled = true
 exporter = "stdout"
 endpoint = "http://collector:4318"
 service_name = "leviath-prod"
+daemon_log_max_bytes = 1048576
 "#;
         let cfg: ObservabilityConfig = toml::from_str(toml_str).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.exporter, TelemetryExporterKind::Stdout);
         assert_eq!(cfg.endpoint.as_deref(), Some("http://collector:4318"));
         assert_eq!(cfg.service_name.as_deref(), Some("leviath-prod"));
+        assert_eq!(cfg.daemon_log_max_bytes, 1_048_576);
         let serialized = toml::to_string(&cfg).unwrap();
         let back: ObservabilityConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(back, cfg);
