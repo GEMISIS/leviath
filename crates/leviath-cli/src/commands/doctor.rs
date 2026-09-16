@@ -256,45 +256,6 @@ pub(crate) fn format_report(checks: &[Check]) -> String {
 /// The environment variable the bundled `web_search` script reads.
 const SEARCH_KEY: &str = "BRAVE_API_KEY";
 
-/// Whether each enabled browser sign-in provider can actually answer.
-///
-/// Nothing for a provider that is not enabled, so the report says nothing
-/// about one nobody asked for. The failure this exists to name is "enabled but
-/// never signed in": without it the first inference fails with a bare HTTP 401
-/// and nothing pointing at the one command that fixes it.
-fn signin_checks(config: &Config) -> Vec<Check> {
-    crate::commands::setup::catalog::providers()
-        .into_iter()
-        .filter(|p| crate::commands::setup::catalog::signin_enabled(config, p.id))
-        .map(|p| signin_check(p.id))
-        .collect()
-}
-
-/// The check for one enabled sign-in provider.
-fn signin_check(id: &'static str) -> Check {
-    let grant = leviath_providers::oauth::ProviderAuthStore::default_path()
-        .and_then(|path| leviath_providers::oauth::ProviderAuthStore::load(&path).ok())
-        .and_then(|store| store.get(id).cloned());
-    let account = leviath_providers::oauth::profile(id).map_or(id, |p| p.account_name);
-    match grant {
-        None => Check::warn(
-            id,
-            format!("enabled but not signed in; run `lev auth login {id}`"),
-        ),
-        Some(grant) => {
-            let claims = grant.claims();
-            let who = grant
-                .email
-                .or(claims.email)
-                .unwrap_or_else(|| "signed in".to_string());
-            match grant.plan_type.or(claims.plan_type) {
-                Some(plan) => Check::ok(id, format!("{who} ({account} {plan} plan)")),
-                None => Check::ok(id, who),
-            }
-        }
-    }
-}
-
 /// Whether the bundled research agents can actually search the web.
 ///
 /// Two independent things have to be true, and getting either wrong is silent:
@@ -1031,6 +992,9 @@ pub(crate) async fn run_checks_with(
     // Same shape and the same reason: it warns rather than failing, and it
     // runs before anything that could stop the report early.
     checks.extend(signin_checks(&config));
+    if !args.offline {
+        checks.extend(quota_checks(&config, &registry).await);
+    }
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
     checks.push(check);
@@ -1139,7 +1103,9 @@ pub async fn execute(args: DoctorArgs, daemon: DaemonTarget<'_>) -> anyhow::Resu
 }
 
 mod resolve;
+mod signin;
 use resolve::{probe_model, resolve_check};
+use signin::{quota_checks, signin_checks};
 mod resolve_notes;
 use resolve_notes::*;
 

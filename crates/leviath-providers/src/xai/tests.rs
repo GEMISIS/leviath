@@ -461,3 +461,194 @@ fn the_debug_form_never_prints_a_key() {
             .is_none()
     );
 }
+
+/// A signed-in provider whose account host is `account`.
+fn subscription(url: &str, account: &str) -> XaiProvider {
+    signed_in(
+        url,
+        Arc::new(Signin {
+            refreshes: AtomicUsize::new(0),
+        }),
+    )
+    .with_account_url(Some(format!("{account}/")))
+}
+
+#[tokio::test]
+async fn a_subscription_reports_its_billing_windows() {
+    let credits = serde_json::json!({ "config": {
+        "currentPeriod": { "end": "2026-09-23T22:25:42.311757+00:00" },
+        "onDemandCap": { "val": 10 }, "onDemandUsed": { "val": 4 }, "prepaidBalance": { "val": 0 }
+    }});
+    let monthly =
+        serde_json::json!({ "config": { "used": { "val": 2 }, "monthlyLimit": { "val": 0 } } });
+    let (account, _) = spawn_mock_sequence(vec![
+        (200, "OK", credits.to_string().into_bytes()),
+        (200, "OK", monthly.to_string().into_bytes()),
+    ])
+    .await;
+    let report = subscription("http://127.0.0.1:1", &account)
+        .quota()
+        .await
+        .expect("a subscription has quota")
+        .expect("read");
+    assert_eq!(report.windows.len(), 2);
+    assert_eq!(report.windows[0].used, Some(4.0));
+    assert!(
+        keyed("http://127.0.0.1:1").quota().await.is_none(),
+        "a key has no quota"
+    );
+}
+
+#[tokio::test]
+async fn billing_that_cannot_be_read_says_why() {
+    let (account, _) = spawn_mock_sequence(vec![
+        (500, "Internal Server Error", b"down".to_vec()),
+        (500, "Internal Server Error", b"down".to_vec()),
+    ])
+    .await;
+    let err = subscription("http://127.0.0.1:1", &account)
+        .quota()
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(err.to_string().contains("500"), "{err}");
+    let (account, _) = spawn_mock_sequence(vec![
+        (200, "OK", b"{}".to_vec()),
+        (200, "OK", b"{}".to_vec()),
+    ])
+    .await;
+    let err = subscription("http://127.0.0.1:1", &account)
+        .quota()
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(err.to_string().contains("shape"), "{err}");
+}
+
+#[tokio::test]
+async fn a_limit_with_no_retry_after_waits_for_the_billing_period() {
+    let credits = serde_json::json!({ "config": {
+        "currentPeriod": { "end": "2999-01-01T00:00:00+00:00" },
+        "onDemandCap": { "val": 1 }, "onDemandUsed": { "val": 1 }
+    }});
+    let (url, _) = spawn_mock_sequence(vec![(429, "Too Many Requests", b"slow".to_vec())]).await;
+    let (account, _) = spawn_mock_sequence(vec![
+        (200, "OK", credits.to_string().into_bytes()),
+        (500, "Internal Server Error", vec![]),
+    ])
+    .await;
+    let err = subscription(&url, &account)
+        .infer(&request("grok-4.3"))
+        .await
+        .unwrap_err();
+    match err {
+        crate::provider::ProviderError::RateLimitExceeded { retry_after_secs } => {
+            assert!(
+                retry_after_secs.unwrap_or(0) > 86_400,
+                "{retry_after_secs:?}"
+            )
+        }
+        other => panic!("expected a rate limit, got {other}"),
+    }
+    // With no quota to read, the wait is unknown rather than invented.
+    let (url, _) = spawn_mock_sequence(vec![(429, "Too Many Requests", vec![])]).await;
+    let err = subscription(&url, "http://127.0.0.1:1")
+        .infer(&request("grok-4.3"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::provider::ProviderError::RateLimitExceeded {
+            retry_after_secs: None
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_subscription_takes_each_models_efforts_from_its_catalogue() {
+    let v2 = serde_json::json!({ "data": [
+        { "id": "grok-4.3", "supports_reasoning_effort": true, "reasoning_efforts": [ { "value": "high" } ] },
+        { "id": "grok-4.6", "supports_reasoning_effort": false }
+    ]});
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", models_body()),
+        (500, "Internal Server Error", vec![]),
+        (500, "Internal Server Error", vec![]),
+        (500, "Internal Server Error", vec![]),
+        (200, "OK", sse("a", 0)),
+        (200, "OK", sse("b", 0)),
+    ])
+    .await;
+    let (account, _) = spawn_mock_sequence(vec![(200, "OK", v2.to_string().into_bytes())]).await;
+    let provider = subscription(&url, &account).with_reasoning_effort(Some("high".into()));
+    provider.prime_capabilities().await.expect("primed");
+    provider.infer(&request("grok-4.3")).await.unwrap();
+    // The table says grok-4.6 takes an effort; the subscription says it does
+    // not, and a caller's own low effort is taken off it too.
+    let mut titled = request("grok-4.6");
+    titled.extra = serde_json::json!({ "reasoning": { "effort": "low" } });
+    provider.infer(&titled).await.unwrap();
+    let bodies = bodies.lock().unwrap().clone();
+    assert!(bodies[4].contains("\"effort\":\"high\""), "{}", bodies[4]);
+    assert!(!bodies[5].contains("effort"), "{}", bodies[5]);
+
+    // A catalogue that cannot be read leaves the table in charge.
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", models_body()),
+        (500, "Internal Server Error", vec![]),
+        (500, "Internal Server Error", vec![]),
+        (500, "Internal Server Error", vec![]),
+    ])
+    .await;
+    let provider = subscription(&url, "http://127.0.0.1:1");
+    provider
+        .prime_capabilities()
+        .await
+        .expect("primed without efforts");
+    assert!(provider.sends_effort("grok-4.3", "low"));
+}
+
+#[tokio::test]
+async fn a_subscription_quotes_its_retention_setting_once_read() {
+    let (account, _) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        br#"{"codingDataRetentionOptOut":true}"#.to_vec(),
+    )])
+    .await;
+    let provider = subscription("http://127.0.0.1:1", &account);
+    assert!(
+        provider.live_retention("grok-4.3").is_none(),
+        "unread is unknown"
+    );
+    provider.refresh_retention().await;
+    let policy = provider.live_retention("grok-4.3").expect("read");
+    assert!(policy.note.contains("opt-out is on"), "{}", policy.note);
+    assert_eq!(policy.source, crate::retention::Source::Live);
+    // Read once: the mock has nothing left to answer, and nothing is asked.
+    provider.refresh_retention().await;
+
+    let (account, _) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        br#"{"codingDataRetentionOptOut":false}"#.to_vec(),
+    )])
+    .await;
+    let off = subscription("http://127.0.0.1:1", &account);
+    off.refresh_retention().await;
+    assert!(
+        off.live_retention("grok-4.3")
+            .unwrap()
+            .note
+            .contains("opt-out is off")
+    );
+
+    // An account that cannot be read stays unknown; a key never asks.
+    let dead = subscription("http://127.0.0.1:1", "http://127.0.0.1:1");
+    dead.refresh_retention().await;
+    assert!(dead.live_retention("grok-4.3").is_none());
+    let key = keyed("http://127.0.0.1:1");
+    key.refresh_retention().await;
+    assert!(key.live_retention("grok-4.3").is_none());
+    let _ = subscription("http://x", "http://y").with_account_url(None);
+}

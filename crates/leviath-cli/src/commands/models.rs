@@ -1,5 +1,7 @@
 //! `lev models` - Inspect available models and their capabilities.
 
+mod marks;
+
 use clap::{Args, Subcommand};
 use leviath_providers::capabilities::builtin_catalog;
 use leviath_providers::{ModelCapabilities, ModelInfo, ModelPricing};
@@ -30,7 +32,7 @@ pub enum ModelsCommand {
 #[derive(Args)]
 pub struct ListArgs {
     /// Filter by provider name (anthropic, openai, google, openrouter,
-    /// bedrock, ollama)
+    /// bedrock, xai, grok, meta, codex, ollama)
     #[arg(short, long)]
     pub provider: Option<String>,
     /// Accepted for scripts written before the listing went live by default;
@@ -51,6 +53,10 @@ pub struct ListArgs {
     /// as `image/png` or `image/*`.
     #[arg(long, value_name = "MIME_TYPE")]
     pub accepts: Option<String>,
+    /// Keep only models that can hand back this mime type, written as
+    /// `video/mp4` or `video/*`.
+    #[arg(long, value_name = "MIME_TYPE")]
+    pub produces: Option<String>,
 }
 
 /// One model in `lev models list --json`.
@@ -81,6 +87,14 @@ struct ModelRow {
     pricing: Option<ModelPricing>,
     /// Mime type patterns the model takes and can hand back.
     mime: leviath_providers::ModelMime,
+    /// What the provider keeps of this model's requests, with the config's
+    /// settings on top.
+    retention: leviath_providers::retention::RetentionPolicy,
+    /// Why this model's retention conflicts with the config, when it does:
+    /// zero retention is on and the model keeps something, or a
+    /// `[model_capabilities]` entry declares zero and the provider's own
+    /// account says otherwise.
+    retention_conflict: Option<String>,
 }
 
 /// Arguments for `lev models show`.
@@ -266,6 +280,9 @@ async fn list_with_registry_within(
     let mut answers: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
     if !args.offline {
         registry.prime_capabilities(prime_within, &[]).await;
+        // What a provider reads about retention from its account (Bedrock's
+        // mode, a Grok account's setting), so a conflict is judged by it.
+        let _ = tokio::time::timeout(prime_within, registry.refresh_retention()).await;
         // `resolvable_names`, not `provider_names`: a script provider is
         // reachable only through `get`, so a sweep built on the registered
         // names alone silently omits every one of them.
@@ -382,6 +399,16 @@ async fn list_with_registry_within(
         });
     }
 
+    if let Some(wanted) = &args.produces {
+        let pattern = wanted.trim().to_ascii_lowercase();
+        if !pattern.contains('/') {
+            anyhow::bail!(
+                "--produces takes a mime type such as video/mp4 or image/*, not '{wanted}'"
+            );
+        }
+        entries.retain(|e| marks::produces(&e.mime, &pattern));
+    }
+
     // Provider, then newest first, then id: a live listing runs to hundreds
     // of rows and the one somebody is looking for is usually the recent one.
     entries.sort_by(|a, b| {
@@ -393,10 +420,19 @@ async fn list_with_registry_within(
 
     // JSON before the emptiness guard: an empty catalog is an empty array, not
     // an error, and a caller polling this should not have to parse a nudge.
+    let settings = crate::commands::run::session::retention_settings(&config);
+    let retention: Vec<_> = entries
+        .iter()
+        .map(|e| marks::retention_of(&registry, &settings, &e.provider, &e.id))
+        .collect();
+
     if args.json {
         let rows: Vec<ModelRow> = entries
             .into_iter()
-            .map(|e| ModelRow {
+            .zip(retention)
+            .map(|(e, (retention, retention_conflict))| ModelRow {
+                retention,
+                retention_conflict,
                 capabilities_overridden: overridden.contains(&e.id),
                 released_on: e.released.map(leviath_providers::learned::civil_date),
                 id: e.id,
@@ -439,7 +475,8 @@ async fn list_with_registry_within(
         return Ok(());
     }
 
-    print_listing(&entries, &overridden, &live_providers);
+    let conflicts: Vec<Option<String>> = retention.into_iter().map(|(_, c)| c).collect();
+    print_listing(&entries, &overridden, &live_providers, &conflicts);
     Ok(())
 }
 
@@ -488,6 +525,7 @@ fn print_listing(
     entries: &[ModelInfo],
     overridden: &std::collections::HashSet<String>,
     live_providers: &[String],
+    conflicts: &[Option<String>],
 ) {
     println!(
         "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<15} {:<11} {:>8} {:>8}",
@@ -504,7 +542,8 @@ fn print_listing(
     );
     println!("{}", "-".repeat(134));
 
-    for entry in entries {
+    let mut tiered = false;
+    for (index, entry) in entries.iter().enumerate() {
         let provider_col = if overridden.contains(&entry.id) {
             format!("*{}", entry.provider)
         } else {
@@ -522,18 +561,20 @@ fn print_listing(
         let rates = entry
             .pricing
             .or_else(|| leviath_providers::pricing::published_rates(&entry.provider, &entry.id));
+        tiered |= rates.is_some_and(|p| p.long_context.is_some());
         // `n/a` rather than a blank: a blank reads as "free" or "forgot", and
         // a run on this model reports its cost as unavailable, which is what
         // the column should say too.
-        let (input, output) = match rates {
-            Some(p) => (fmt_rate(p.input_per_mtok), fmt_rate(p.output_per_mtok)),
-            None => (UNPRICED.to_owned(), UNPRICED.to_owned()),
+        let (input, output) = marks::price_columns(rates);
+        let id = match conflicts.get(index).is_some_and(Option::is_some) {
+            true => format!("!{}", entry.id),
+            false => entry.id.clone(),
         };
 
         let mime = mime_label(&entry.mime);
         println!(
             "{:<12} {:<44} {:<5} {:<6} {:<7} {:<7} {:<15} {:<11} {:>8} {:>8}",
-            provider_col, entry.id, temp, tools, ctx, out, mime, released, input, output
+            provider_col, id, temp, tools, ctx, out, mime, released, input, output
         );
     }
 
@@ -559,6 +600,27 @@ fn print_listing(
         .any(|id| entries.iter().any(|e| &e.id == id))
     {
         println!("* = capabilities overridden via [model_capabilities] in config");
+    }
+    if tiered {
+        println!("{}", marks::TIER_FOOTNOTE);
+    }
+    let conflicting: Vec<String> = entries
+        .iter()
+        .zip(conflicts)
+        .filter_map(|(e, c)| {
+            c.as_ref()
+                .map(|reason| format!("  {}/{}: {reason}", e.provider, e.id))
+        })
+        .collect();
+    if !conflicting.is_empty() {
+        println!(
+            "! {} model{} conflict with the retention settings in config:",
+            conflicting.len(),
+            if conflicting.len() == 1 { "" } else { "s" }
+        );
+        for line in conflicting {
+            println!("{line}");
+        }
     }
 }
 
@@ -713,14 +775,9 @@ async fn show_with_registry_within(
     // settings on top: the documented answer, since a listing here is a
     // fresh provider that has not read its account.
     let settings = crate::commands::run::session::retention_settings(&config);
-    let retention_of = |provider: &str| {
-        leviath_providers::retention::resolve(
-            leviath_providers::retention::builtin(provider, model_id),
-            provider,
-            model_id,
-            &settings,
-        )
-    };
+    let no_accounts = leviath_runtime::ProviderRegistry::new();
+    let retention_of =
+        |provider: &str| marks::retention_of(&no_accounts, &settings, provider, model_id);
     match (found, user_caps) {
         (Some(info), Some(user_caps)) => {
             let caps = user_caps.apply_to(info.capabilities);
@@ -891,6 +948,12 @@ fn print_model_pricing(provider: &str, model: &str, listed: Option<ModelPricing>
     println!("  Cached input:   ${:.4}", p.cached_input_per_mtok);
     println!("  Cache write:    ${:.4}", p.cache_write_per_mtok);
     println!("  Output:         ${:.4}", p.output_per_mtok);
+    if let Some(line) = marks::tier_line(&p) {
+        println!("  Long context:   {line}");
+    }
+    if let Some(line) = marks::unit_line(&p) {
+        println!("  Per unit:       {line}");
+    }
     if !published {
         println!("  Source:         the provider's own listing, read just now");
         return;
@@ -935,7 +998,10 @@ struct ModelDetail<'a> {
     mime: &'a leviath_providers::ModelMime,
     source: Source,
     listed_pricing: Option<ModelPricing>,
-    retention: &'a leviath_providers::retention::RetentionPolicy,
+    retention: &'a (
+        leviath_providers::retention::RetentionPolicy,
+        Option<String>,
+    ),
 }
 
 fn print_model_detail(detail: ModelDetail<'_>) {
@@ -981,8 +1047,12 @@ fn print_model_detail(detail: ModelDetail<'_>) {
         caps.max_output_tokens,
         fmt_tokens(caps.max_output_tokens)
     );
+    let (retention, conflict) = retention;
     println!("  Retention:      {}", retention.summary());
     println!("                  {}", retention.note);
+    if let Some(conflict) = conflict {
+        println!("  \u{26a0}  conflicts with config: {conflict}");
+    }
 
     print_model_pricing(provider, id, listed_pricing);
 }
@@ -1115,7 +1185,10 @@ mod tests {
             mime: &mime,
             source: Source::Table,
             listed_pricing: None,
-            retention: &leviath_providers::retention::builtin("test", "test-model"),
+            retention: &(
+                leviath_providers::retention::builtin("test", "test-model"),
+                Some("zero_retention is on".to_string()),
+            ),
         });
         print_model_detail(ModelDetail {
             id: "test-model",
@@ -1125,7 +1198,10 @@ mod tests {
             mime: &mime,
             source: Source::Override,
             listed_pricing: None,
-            retention: &leviath_providers::retention::builtin("test", "test-model"),
+            retention: &(
+                leviath_providers::retention::builtin("test", "test-model"),
+                Some("zero_retention is on".to_string()),
+            ),
         });
         print_model_detail(ModelDetail {
             id: "test-model",
@@ -1135,7 +1211,10 @@ mod tests {
             mime: &mime,
             source: Source::Listing,
             listed_pricing: Some(ModelPricing::flat(0.5, 1.5)),
-            retention: &leviath_providers::retention::builtin("test", "test-model"),
+            retention: &(
+                leviath_providers::retention::builtin("test", "test-model"),
+                Some("zero_retention is on".to_string()),
+            ),
         });
     }
 
@@ -1208,6 +1287,7 @@ mod tests {
                         all: false,
                         json: false,
                         accepts: None,
+                        produces: None,
                     }),
                 };
                 // Should succeed: prints the builtin table
@@ -1231,6 +1311,7 @@ mod tests {
                         all: false,
                         json: false,
                         accepts: None,
+                        produces: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1253,6 +1334,7 @@ mod tests {
                         all: false,
                         json: false,
                         accepts: None,
+                        produces: None,
                     }),
                 };
                 // Nothing registered, nothing in the built-in table, no script
@@ -1374,6 +1456,7 @@ mod tests {
                         all: false,
                         json: false,
                         accepts: None,
+                        produces: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1398,6 +1481,7 @@ mod tests {
                         all: false,
                         json: false,
                         accepts: None,
+                        produces: None,
                     }),
                 };
                 let result = execute(args).await;
@@ -1495,7 +1579,10 @@ mod tests {
             mime: &leviath_providers::ModelMime::text_only(),
             source: Source::Table,
             listed_pricing: None,
-            retention: &leviath_providers::retention::builtin("test", "test-model"),
+            retention: &(
+                leviath_providers::retention::builtin("test", "test-model"),
+                Some("zero_retention is on".to_string()),
+            ),
         });
     }
 
@@ -1511,7 +1598,10 @@ mod tests {
             mime: &leviath_providers::ModelMime::text_only(),
             source: Source::Override,
             listed_pricing: None,
-            retention: &leviath_providers::retention::builtin("test", "test-model"),
+            retention: &(
+                leviath_providers::retention::builtin("test", "test-model"),
+                Some("zero_retention is on".to_string()),
+            ),
         });
     }
 
@@ -1564,6 +1654,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1592,6 +1683,7 @@ mod tests {
                     all: false,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1612,6 +1704,7 @@ mod tests {
                     all: true,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1637,6 +1730,8 @@ mod tests {
             retires: None,
             pricing: Some(ModelPricing::flat(1.0, 2.0)),
             mime: leviath_providers::ModelMime::new(&["text/*", "image/*"], &["text/*"]),
+            retention: leviath_providers::retention::builtin("p", "m"),
+            retention_conflict: None,
         };
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -1664,6 +1759,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1684,6 +1780,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let err = list_with_registry(args, &build_provider_registry_from_config)
                     .await
@@ -1918,6 +2015,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let new_model = ModelInfo::new(
                     "mock-brand-new-model".to_string(),
@@ -1949,6 +2047,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let new_model = ModelInfo::new(
                     "mock-brand-new-model".to_string(),
@@ -1977,6 +2076,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let overriding_model =
                     ModelInfo::new(known_id, "mock".to_string(), ModelCapabilities::default())
@@ -2006,6 +2106,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 // A registry with exactly one provider that the builtin table
                 // also knows: its rows survive, everything else is filtered.
@@ -2040,6 +2141,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result =
                     list_with_registry(args, &mock_registry("anthropic", remote, false)).await;
@@ -2063,6 +2165,7 @@ mod tests {
                     all: true,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -2093,6 +2196,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 // The provider's own listing carries the model, so the row is
                 // live and the override is merged onto it and marked.
@@ -2151,6 +2255,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
                 assert!(result.is_ok());
@@ -2177,6 +2282,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -2295,6 +2401,7 @@ mod tests {
                     all: false,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2334,6 +2441,7 @@ mod tests {
                     all: false,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok(), "one broken script does not fail the sweep");
@@ -2365,6 +2473,7 @@ mod tests {
                     all: false,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2395,6 +2504,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2427,6 +2537,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let err = list_with_registry(args, &script_registry(dir))
                     .await
@@ -2471,6 +2582,7 @@ mod tests {
                     all: true,
                     json: true,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2499,6 +2611,7 @@ mod tests {
                     all: true,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
@@ -2631,6 +2744,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -2726,6 +2840,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_err());
@@ -2796,6 +2911,7 @@ mod tests {
             all: false,
             json: false,
             accepts: None,
+            produces: None,
         }));
     }
 
@@ -2904,6 +3020,7 @@ mod tests {
                     all: false,
                     json: false,
                     accepts: None,
+                    produces: None,
                 };
                 let err = list_with_registry(args, &cannot_build)
                     .await
@@ -3025,6 +3142,7 @@ mod live_listing_tests {
             all: false,
             json,
             accepts: None,
+            produces: None,
         }
     }
 
@@ -3050,6 +3168,7 @@ mod live_listing_tests {
             let args = ListArgs {
                 all: true,
                 accepts: Some("image/png".to_string()),
+                produces: None,
                 ..list_args(true, false)
             };
             let models = vec![learned_model("mock-live", Some(1), Some(1.0))];
@@ -3059,6 +3178,7 @@ mod live_listing_tests {
             let json = ListArgs {
                 all: true,
                 accepts: Some("audio/*".to_string()),
+                produces: None,
                 ..list_args(true, true)
             };
             let result = list_with_registry(json, &registry_with(models.clone(), false)).await;
@@ -3066,6 +3186,7 @@ mod live_listing_tests {
 
             let bare = ListArgs {
                 accepts: Some("png".to_string()),
+                produces: None,
                 ..list_args(true, false)
             };
             let err = list_with_registry(bare, &registry_with(models, false))
@@ -3227,12 +3348,57 @@ mod live_listing_tests {
         let overridden = std::collections::HashSet::new();
         let table = ModelInfo::new("t", "anthropic", ModelCapabilities::default());
         let live = learned_model("l", None, None);
-        print_listing(std::slice::from_ref(&table), &overridden, &[]);
+        print_listing(std::slice::from_ref(&table), &overridden, &[], &[None]);
         print_listing(
             std::slice::from_ref(&live),
             &overridden,
             &["mock".to_string()],
+            &[None],
         );
-        print_listing(&[table, live], &overridden, &["mock".to_string()]);
+        print_listing(&[table, live], &overridden, &["mock".to_string()], &[]);
+    }
+
+    #[test]
+    fn a_tiered_price_and_a_retention_conflict_are_marked_and_explained() {
+        let overridden = std::collections::HashSet::new();
+        let mut tiered = ModelInfo::new("grok-4.3", "xai", ModelCapabilities::default());
+        tiered.pricing = Some(ModelPricing {
+            long_context: Some(leviath_providers::pricing::PriceTier {
+                threshold_tokens: 200_000,
+                input_per_mtok: 2.5,
+                cached_input_per_mtok: 0.4,
+                cache_write_per_mtok: 2.5,
+                output_per_mtok: 5.0,
+            }),
+            ..ModelPricing::flat(1.25, 2.5)
+        });
+        let contributor = ModelInfo::new(
+            "muse-spark-1.3-contributor",
+            "meta",
+            ModelCapabilities::default(),
+        );
+        print_listing(
+            &[tiered.clone(), contributor.clone()],
+            &overridden,
+            &[],
+            &[None, Some("Meta trains on it".to_string())],
+        );
+        print_listing(
+            &[contributor.clone(), contributor],
+            &overridden,
+            &[],
+            &[Some("a".to_string()), Some("b".to_string())],
+        );
+        print_model_pricing("xai", "grok-4.3", tiered.pricing);
+        print_model_pricing(
+            "xai",
+            "grok-imagine-image",
+            Some(ModelPricing::per_unit(
+                leviath_providers::pricing::UnitPrice {
+                    usd: 0.02,
+                    unit: leviath_providers::pricing::PriceUnit::Image,
+                },
+            )),
+        );
     }
 }

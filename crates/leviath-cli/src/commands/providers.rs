@@ -10,6 +10,8 @@
 //! only by an explicit `provider/model`, so that turning it on never silently
 //! moves billing. Listing it here is the deliberate choice that opts it in.
 
+pub(crate) mod quota;
+
 use clap::{Args, Subcommand};
 
 use crate::commands::setup::catalog;
@@ -39,6 +41,8 @@ enum ProvidersCommand {
     Order(OrderArgs),
     /// What each provider keeps of a request, and ask for zero retention
     Retention(RetentionArgs),
+    /// How much of each signed-in subscription (Codex, Grok) is left
+    Quota(ListArgs),
 }
 
 #[derive(Args)]
@@ -112,6 +116,9 @@ pub async fn execute_with(args: ProvidersArgs, env: &ProvidersEnv) -> anyhow::Re
         None | Some(ProvidersCommand::List(ListArgs { json: false })) => list(false, env),
         Some(ProvidersCommand::List(ListArgs { json: true })) => list(true, env),
         Some(ProvidersCommand::Order(order)) => set_order(order, env),
+        Some(ProvidersCommand::Quota(ListArgs { json })) => {
+            quota::show(json, &env.config_path).await
+        }
         Some(ProvidersCommand::Retention(RetentionArgs {
             command: None,
             json,
