@@ -194,18 +194,20 @@ It is read per run, so a change takes effect on the next `lev run` with no resta
 
 ### Provider preference order
 
-`provider_order` decides which provider serves a **bare** model name - one a blueprint lists with no
-provider - when more than one you have configured serves it. Entries are plain provider names, best
-first. It generalizes `default_provider` from a single front-runner into a full ordering; leave it
-empty and `default_provider` alone decides, exactly as before.
+`provider_order` decides which providers may serve a **bare** model name - one a blueprint lists
+with no provider - and in what order when more than one of them serves it. Entries are plain
+provider names, best first. It generalizes `default_provider` from a single front-runner into a
+full ordering; leave it empty and `default_provider` alone serves bare names.
 
-Naming a provider here is also how you route a bare name onto a subscription transport. A ChatGPT
-(Codex) or Claude subscription is normally reachable only by an explicit `codex/...` or being your
-sole `default_provider`, so that enabling it never silently moves billing. Listing it in
-`provider_order` is the deliberate opt-in: put `codex` first and a stage that names `gpt-5.6-sol`
-with no provider runs on your plan, ahead of an OpenAI key that also serves that name. A provider
-you did not list stays at its old priority, and a subscription you did not list stays excluded from
-bare names.
+The list is the whole answer: a configured provider that is not in it never serves a bare name,
+however many models it carries. It is still reachable by an explicit `provider/model` in a
+blueprint or a `fallback_order` entry, and a stage that pins it while it is not configured is
+refused at spawn rather than quietly moved elsewhere. So configuring a key never silently moves a
+bare-named stage, and what it bills, onto a provider nobody listed; that holds for a ChatGPT
+(Codex) subscription as much as for an API key. Put `codex` first and a stage that names
+`gpt-5.6-sol` with no provider runs on your plan, ahead of an OpenAI key that also serves the
+name; leave it out and only a `codex/...` pin reaches it. `lev setup`'s priority modal is where
+a provider is taken in or out of the list.
 
 It shapes routes, not models: a blueprint that chose a different model per stage keeps each stage's
 model, the same way `default_provider` does. `lev doctor` flags an entry naming a provider that is

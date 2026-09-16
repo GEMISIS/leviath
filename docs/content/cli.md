@@ -887,8 +887,8 @@ The Defaults screen leads with **Provider priority** - the order a bare model na
 head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
 move the one under the cursor with `Shift+↑`/`Shift+↓`, or with `K`/`J` on a terminal that keeps
 Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
-or brings it back in; a provider left out is still configured, and still runs any stage that names
-it as `provider/model`, but bare model names prefer the listed ones. Configuring a new provider
+or brings it back in; a provider left out is still configured and still runs any stage that names
+it as `provider/model`, but a bare model name is never routed to it. Configuring a new provider
 does not add it to the order on its own, and at least one provider always stays in. It writes the
 same [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order`
 and `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare
@@ -996,10 +996,11 @@ serves it.
 | `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
 | `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review` or `inherit` |
 
-Naming a provider in the order is also how a subscription transport (Codex, Claude Code) becomes
-eligible for a bare model name - it is otherwise reachable only by an explicit `provider/model`, so
-that enabling it never silently moves billing. A name that is not a configured provider is refused
-rather than written, since it could never win a route.
+The order is the whole list of providers a bare model name may run on: a configured provider that
+is not in it, a subscription transport (Codex, Claude Code) as much as an API key, is reachable
+only by an explicit `provider/model`, so that configuring it never silently moves a stage or its
+billing. A name that is not a configured provider is refused rather than written, since it could
+never win a route.
 
 ### `lev mcp`
 

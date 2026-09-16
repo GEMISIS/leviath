@@ -24,9 +24,17 @@ same list.
   The wizard will not continue past that screen, or finish, with no
   provider configured. Configuring a provider no longer puts it in the
   provider priority on its own: the reorder modal takes a configured
-  provider in or out with Space, keeping at least one, and one left out
-  still runs any stage that names it as `provider/model`. The quit dialog
+  provider in or out with Space, keeping at least one. The quit dialog
   lists the choices that would be discarded.
+- A bare model name is served only by providers in `provider_order` (or
+  by `default_provider` alone when the order is empty). A configured
+  provider left out of the list is never chosen for a bare name and stays
+  reachable by an explicit `provider/model` or a `fallback_order` entry;
+  before, every configured provider could serve a bare name, ranked behind
+  the listed ones. The rule that kept a subscription transport off bare
+  names unless listed now applies to every provider, so that special case
+  is gone. `lev validate` and its `no-reachable-provider` lint judge open
+  entries the same way.
 - `PUT /api/config` takes `null` for `anthropic_key`, `openai_key`,
   `google_key`, `openrouter_key` and `bedrock_key` to clear a key, taking
   the provider out of the install the way the wizard's remove does; an

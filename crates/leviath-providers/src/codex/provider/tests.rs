@@ -485,13 +485,6 @@ fn a_subscription_call_costs_a_known_zero_rather_than_an_unknown() {
 }
 
 #[test]
-fn this_provider_never_wins_a_bare_model_name() {
-    // Enabling a subscription transport must not silently re-route existing
-    // stages onto the subscription.
-    assert!(provider("http://x", Static::new("t")).explicit_route_only());
-}
-
-#[test]
 fn no_model_is_offered_with_a_temperature() {
     let p = provider("http://x", Static::new("t"));
     assert!(!p.capabilities("gpt-5.6-sol").supports_temperature);

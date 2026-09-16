@@ -206,17 +206,24 @@ mod tests {
         LiveLimits::new(InteractionHub::new(), HostSettings::default())
     }
 
+    /// The applier reads `mime_types.toml` next to the config, so the config
+    /// path is pinned for both applies: a neighbouring test moving the home
+    /// between them would otherwise read as a changed file.
     #[test]
     fn the_first_apply_installs_everything_and_a_repeat_does_nothing() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut world = world(&runtime, 8);
-        let live = applier();
-        let config = Config::default();
-        assert!(live.apply(&config, &mut world), "boot applies");
-        assert!(
-            !live.apply(&config, &mut world),
-            "an unchanged config must not touch the pools of a running daemon"
-        );
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        temp_env::with_var("LEVIATH_CONFIG_PATH", Some(&config_path), || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut world = world(&runtime, 8);
+            let live = applier();
+            let config = Config::default();
+            assert!(live.apply(&config, &mut world), "boot applies");
+            assert!(
+                !live.apply(&config, &mut world),
+                "an unchanged config must not touch the pools of a running daemon"
+            );
+        });
     }
 
     /// `zero_retention` flipped in the file reaches the world's registry on

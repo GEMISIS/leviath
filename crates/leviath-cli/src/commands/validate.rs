@@ -594,10 +594,12 @@ fn print_model_resolution(
 
 /// Whether anything registered here can run this entry.
 ///
-/// A pinned entry needs its provider registered. An open one needs some provider
-/// to claim the model, which is the same question the resolver asks.
+/// A pinned entry needs its provider registered. An open one needs a provider
+/// in the preference to claim the model, which is the same question the
+/// resolver asks: a provider outside the preference never serves a bare name.
 fn model_is_reachable(
     entry: &leviath_core::blueprint::ModelEntry,
+    defaults: &leviath_runtime::pipeline::ModelDefaults,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> bool {
     if !entry.provider.is_empty() {
@@ -607,7 +609,7 @@ fn model_is_reachable(
     registry
         .native_providers()
         .iter()
-        .any(|(_, p)| p.serves_model(key).is_some())
+        .any(|(name, p)| defaults.is_preferred(name) && p.serves_model(key).is_some())
 }
 
 /// A model id without its vendor prefix, for comparing what was asked for
@@ -653,10 +655,10 @@ fn model_resolution_lines(
             .model
             .models
             .iter()
-            .filter(|e| model_is_reachable(e, registry))
+            .filter(|e| model_is_reachable(e, &defaults, registry))
             .count();
         if let Some(first) = stage.model.models.first()
-            && !model_is_reachable(first, registry)
+            && !model_is_reachable(first, &defaults, registry)
         {
             lines.push(format!(
                 "  {:<16}   prefers {}, which no configured provider serves - running {model}",

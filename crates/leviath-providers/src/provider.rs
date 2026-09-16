@@ -1078,26 +1078,6 @@ pub trait Provider: Send + Sync {
         None
     }
 
-    /// Whether this provider may only be reached by name.
-    ///
-    /// A blueprint entry that names a model without a provider asks every
-    /// registered provider whether it serves that name, and the first one that
-    /// says yes wins. That is right for providers a user configured to be
-    /// interchangeable, and wrong for one whose selection changes what gets
-    /// billed: enabling a subscription transport must not silently re-route
-    /// existing bare-named stages onto the subscription.
-    ///
-    /// A provider answering `true` is still reachable by an explicit
-    /// `provider/model` reference, an explicit `fallback_order` entry, or by
-    /// being the configured `default_provider`. It is only excluded from
-    /// winning a route nobody asked it to serve.
-    ///
-    /// `false` by default, which is the behaviour every provider had before
-    /// this existed.
-    fn explicit_route_only(&self) -> bool {
-        false
-    }
-
     /// Prove the stored credential works *right now*, and report the models it
     /// reaches.
     ///
@@ -2376,7 +2356,6 @@ mod tests {
                 ModelCapabilities::default()
             }
         }
-        assert!(!Ordinary.explicit_route_only());
         assert!(Ordinary.served_catalog().is_none());
         // The rest of the stub is part of the same contract; answering it here
         // keeps the impl honest rather than leaving unreachable bodies.

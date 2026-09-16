@@ -43,13 +43,13 @@ pub struct ModelDefaults {
     /// The user's ordered provider preference, from `[providers] provider_order`,
     /// best first (e.g. `["codex", "openrouter", "openai"]`).
     ///
-    /// This is what decides, for a bare model name that more than one configured
-    /// provider serves, which one wins - generalizing [`provider`](Self::provider)
-    /// from a single front-runner into a full ordering. Empty means "use
-    /// [`provider`](Self::provider) alone", which is the historical behavior. Naming a provider
-    /// here is also a deliberate choice to route bare names through it, so a
-    /// subscription transport that is otherwise reachable only by an explicit
-    /// `provider/model` becomes eligible at the priority it is listed.
+    /// This is the whole set of providers a bare model name may run on, and
+    /// the order among them when more than one serves it - generalizing
+    /// [`provider`](Self::provider) from a single front-runner into a full
+    /// ordering. Empty means "use [`provider`](Self::provider) alone". A
+    /// configured provider not named here is never chosen for a bare name and
+    /// stays reachable by an explicit `provider/model` or a fallback entry,
+    /// so configuring one cannot silently move a stage, or its billing.
     pub provider_order: Vec<String>,
     /// The operator's data retention settings, from `config.toml` as it
     /// stands at spawn: whether zero retention is asked for (in which case a
@@ -88,7 +88,10 @@ impl ModelDefaults {
     /// Whether `name` is named in the preference at all. A provider reachable
     /// only by an explicit route (a subscription transport) is exempt from that
     /// restriction for a bare name exactly when the user named it here.
-    fn is_preferred(&self, name: &str) -> bool {
+    /// Whether `name` is in the preference: the only providers an open
+    /// route (a bare model name) may land on. A configured provider left out
+    /// is reachable by an explicit `provider/model` and nothing else.
+    pub fn is_preferred(&self, name: &str) -> bool {
         self.order().contains(&name)
     }
 }
@@ -310,14 +313,14 @@ fn resolve_candidates_in_order(
         }
         let mut routed = false;
         for (name, provider) in candidates_for_model {
-            // A provider that may only be reached by name does not win an open
-            // route. Selecting one changes what gets billed - a subscription
-            // transport spends a plan rather than an API balance - so enabling
-            // it must not silently move every bare-named stage onto it. It is
-            // still reachable by an explicit `provider/model`, a fallback
-            // entry, or being named in the preference, which is the deliberate
-            // choice that exempts it.
-            if provider.explicit_route_only() && !defaults.is_preferred(name) {
+            // Only a provider in the preference wins an open route. A bare
+            // model name is the blueprint leaving the route to the machine,
+            // and the preference is the machine's answer: a configured
+            // provider left out of it is still reachable by an explicit
+            // `provider/model` or a fallback entry, and never chosen on its
+            // own, so configuring a key cannot silently move every bare-named
+            // stage (and what it bills) onto a provider nobody listed.
+            if !defaults.is_preferred(name) {
                 continue;
             }
             if let Some(id) = provider.serves_model(key) {
@@ -2029,8 +2032,8 @@ mod tests {
     #[test]
     fn an_entry_with_no_provider_resolves_to_whoever_serves_the_model() {
         // What a blueprint that names models rather than routes produces. The
-        // author asks for `gpt-5.5`; which providers can reach it is a property
-        // of the machine, so every registered one is asked.
+        // author asks for `gpt-5.5`; which providers may reach it is the
+        // machine's preference, so every provider in it is asked, in order.
         let cfg = model_cfg_open(vec!["gpt-5.5"]);
         let registry = registry_serving(&[
             ("anthropic", &[][..]),
@@ -2039,15 +2042,24 @@ mod tests {
         ]);
         let defaults = ModelDefaults {
             provider: "openrouter".to_string(),
+            provider_order: vec!["openrouter".to_string(), "openai".to_string()],
             ..Default::default()
         };
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
         assert_eq!(
             pairs(&got),
             vec![("openrouter", "gpt-5.5"), ("openai", "gpt-5.5")],
-            "both routes are offered, the user's default provider first, and \
+            "both preferred routes are offered, in the preference's order, and \
              the provider that does not serve it is not offered at all"
         );
+        // A configured provider left out of the preference is never chosen for
+        // a bare name, however well it serves it.
+        let only_default = ModelDefaults {
+            provider: "openrouter".to_string(),
+            ..Default::default()
+        };
+        let got = resolve_stage_candidates(&cfg, None, &only_default, &registry);
+        assert_eq!(pairs(&got), vec![("openrouter", "gpt-5.5")]);
     }
 
     #[test]
@@ -2056,7 +2068,11 @@ mod tests {
         // a fallback list is for. It warns rather than failing the stage.
         let cfg = model_cfg_open(vec!["nobody-serves-this", "claude-sonnet-5"]);
         let registry = registry_serving(&[("anthropic", &["claude-sonnet-5"][..])]);
-        let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            ..Default::default()
+        };
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
         assert_eq!(pairs(&got), vec![("anthropic", "claude-sonnet-5")]);
     }
 
@@ -3335,12 +3351,11 @@ mod tests {
         tools.into_iter().map(|t| t.name).collect()
     }
 
-    // ── explicit-route-only providers ───────────────────────────────────────
+    // ── providers outside the preference ────────────────────────────────────
 
-    /// A provider serving one model, optionally only reachable by name.
+    /// A provider serving one model.
     struct Named {
         model: String,
-        by_name_only: bool,
     }
 
     #[async_trait::async_trait]
@@ -3366,25 +3381,21 @@ mod tests {
         fn serves_model(&self, model_key: &str) -> Option<String> {
             (model_key == self.model).then(|| model_key.to_string())
         }
-        fn explicit_route_only(&self) -> bool {
-            self.by_name_only
-        }
     }
 
-    fn two_providers(open_first: bool) -> ProviderRegistry {
+    /// An API key and a subscription transport, both serving the same name.
+    fn two_providers() -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
         registry.register(
             "openai".to_string(),
             Arc::new(Named {
                 model: "gpt-5.6-sol".to_string(),
-                by_name_only: !open_first,
             }),
         );
         registry.register(
             "codex".to_string(),
             Arc::new(Named {
                 model: "gpt-5.6-sol".to_string(),
-                by_name_only: true,
             }),
         );
         registry
@@ -3409,7 +3420,6 @@ mod tests {
         use leviath_providers::Provider as _;
         let p = Named {
             model: "m".to_string(),
-            by_name_only: false,
         };
         assert_eq!(p.name(), "named");
         assert_eq!(p.max_context_tokens("m"), 100_000);
@@ -3436,18 +3446,19 @@ mod tests {
         assert!(runtime.block_on(p.infer(&request)).is_err());
     }
 
-    /// Enabling a subscription transport must not silently move billing.
+    /// Configuring a provider must not silently move a stage, or its billing.
     ///
     /// `model_key` compares only the last path segment, so `openai` and `codex`
-    /// both answer to a bare `gpt-5.6-sol`. Without the exclusion, adding one
-    /// line of config re-routes every existing bare-named stage onto a plan.
+    /// both answer to a bare `gpt-5.6-sol`. Only the preference decides who
+    /// serves it: with `openai` the sole preferred provider, a configured
+    /// `codex` is never chosen for the bare name.
     #[test]
-    fn a_by_name_only_provider_never_wins_an_open_route() {
+    fn a_provider_outside_the_preference_never_wins_an_open_route() {
         let picked = resolve_stage_candidates(
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_of("openai"),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked.len(), 1, "codex joined an open route: {picked:?}");
         assert_eq!(picked[0].provider, "openai");
@@ -3460,7 +3471,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_of("codex"),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked[0].provider, "codex");
     }
@@ -3472,7 +3483,7 @@ mod tests {
             &model_cfg(vec![("codex", "gpt-5.6-sol")]),
             None,
             &defaults_of("openai"),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].provider, "codex");
@@ -3485,7 +3496,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             Some("codex/gpt-5.6-sol"),
             &defaults_of("openai"),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked[0].provider, "codex");
     }
@@ -3504,11 +3515,11 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_of("anthropic"),
-            &two_providers(false),
+            &two_providers(),
         );
         assert!(
             picked.iter().all(|e| e.provider != "codex"),
-            "a by-name-only provider was reached anyway: {picked:?}"
+            "a provider outside the preference was reached anyway: {picked:?}"
         );
         assert!(
             picked.iter().all(|e| e.provider != "openai"),
@@ -3536,7 +3547,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_ordered("openai", &["codex", "openai"]),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked[0].provider, "codex", "{picked:?}");
     }
@@ -3550,7 +3561,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_ordered("openai", &["openai", "codex"]),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked[0].provider, "openai", "{picked:?}");
         assert!(
@@ -3568,7 +3579,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_ordered("openai", &["openrouter", "openai"]),
-            &two_providers(true),
+            &two_providers(),
         );
         assert!(
             picked.iter().all(|e| e.provider != "codex"),
@@ -3603,7 +3614,7 @@ mod tests {
             &model_cfg_open(vec!["gpt-5.6-sol"]),
             None,
             &defaults_ordered("openai", &[]),
-            &two_providers(true),
+            &two_providers(),
         );
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].provider, "openai");
