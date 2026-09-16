@@ -100,6 +100,22 @@ pub(super) fn mime_blocks(content: &EntryContent) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// The `tool_use` block for one call a stored assistant turn made.
+///
+/// A call the output cap cut off is stored as the partial text of its
+/// arguments, and every provider that takes tool input wants an object, so
+/// the input goes through [`leviath_providers::tool_input_object`]. Sent as a
+/// bare string, Anthropic refuses the request, and the refusal is permanent:
+/// every later request of the run carried it again.
+pub(super) fn tool_use_block(tc: &leviath_core::SerializedToolCall) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: tc.id.clone(),
+        name: tc.name.clone(),
+        input: leviath_providers::tool_input_object(&tc.arguments),
+        thought_signature: tc.thought_signature.clone(),
+    }
+}
+
 /// [`content_blocks`] with the mime blocks left out: inline text and the
 /// stand-in for each stored part, but not the bytes. For an assistant turn,
 /// whose media is lifted into a following user turn because a provider rejects

@@ -317,12 +317,8 @@ fn converse_block(
         ContentBlock::ToolUse {
             id, name, input, ..
         } => {
-            // Converse wants an object. A call cut off mid-argument is kept
-            // as the text it was, wrapped so the model sees what happened.
-            let input = match input {
-                Value::Object(_) => input.clone(),
-                other => json!({ "_raw": other }),
-            };
+            // Converse wants an object; see `tool_input_object`.
+            let input = crate::provider::tool_input_object(input);
             Some(json!({ "toolUse": { "toolUseId": id, "name": name, "input": input } }))
         }
         ContentBlock::ToolResult {

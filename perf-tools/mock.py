@@ -25,6 +25,12 @@ Routes:
 Set `LV_MOCK_OVERSIZE_MIB=N` to answer every completion with N MiB of one
 frame that never closes, for probing the daemon's read caps.
 
+Set `LV_MOCK_CUT_OFF=1` to answer the Anthropic route's first turn with a
+`tool_use` whose input stopped mid-argument (`stop_reason: "max_tokens"`), the
+shape a reply cut off by the output cap takes. `LV_MOCK_CUT_OFF=always` answers
+every turn that way. Like the real API, the route refuses any request whose
+history carries a `tool_use` input that is not an object.
+
 Set `LV_MOCK_SPLIT_UTF8=1` to answer a streamed completion with CJK and an
 emoji in the text, written to the socket in two flushes that cut the emoji
 in half, the way a transport boundary lands inside a character.
@@ -61,6 +67,9 @@ REQUIRE_HEADER = os.environ.get("LV_MOCK_REQUIRE_HEADER", "").partition("=")
 # `LV_MOCK_DUMP=path` appends one JSON line per completion request (path,
 # headers, body), so a probe can assert what was sent.
 DUMP = os.environ.get("LV_MOCK_DUMP")
+# `LV_MOCK_CUT_OFF=1` cuts the first Anthropic tool call off mid-argument;
+# `always` cuts every turn off.
+CUT_OFF = os.environ.get("LV_MOCK_CUT_OFF", "")
 IMAGE_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
 
@@ -108,6 +117,19 @@ def anthropic_text(req):
         else:
             parts.append(content or "")
     return "\n".join(str(p) for p in parts)
+
+
+def anthropic_bad_tool_input(req):
+    """The first history `tool_use` whose input is not an object, named by the
+    path the real API puts in its refusal, or None."""
+    for i, m in enumerate(req.get("messages", [])):
+        content = m.get("content", "")
+        if not isinstance(content, list):
+            continue
+        for j, b in enumerate(content):
+            if isinstance(b, dict) and b.get("type") == "tool_use" and not isinstance(b.get("input"), dict):
+                return f"messages.{i}.content.{j}.tool_use.input"
+    return None
 
 
 def anthropic_seen_tool(req):
@@ -201,8 +223,18 @@ class Handler(BaseHTTPRequestHandler):
     def _anthropic(self, req):
         """The Anthropic Messages shape of the same decision, always buffered."""
         CALLS[0] += 1
-        want_tool = TOOL is not None and not anthropic_seen_tool(req)
-        if want_tool:
+        bad = anthropic_bad_tool_input(req)
+        if bad:
+            return self._json({"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": f"{bad}: Input should be an object"}}, 400)
+        seen_tool = anthropic_seen_tool(req)
+        want_tool = TOOL is not None and not seen_tool
+        if CUT_OFF == "always" or (CUT_OFF and not seen_tool):
+            content = [{"type": "tool_use", "id": f"toolu_cut_{CALLS[0]}", "name": TOOL or "write_file",
+                        "input": '{"path": "report.md", "content": "# A long rep'}]
+            stop = "max_tokens"
+        elif want_tool:
             content = [
                 {"type": "tool_use", "id": f"toolu_{i + 1}", "name": TOOL,
                  "input": json.loads(c["function"]["arguments"])}

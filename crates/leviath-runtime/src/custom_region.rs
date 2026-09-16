@@ -432,9 +432,11 @@ fn message_from_json(value: &serde_json::Value) -> Result<leviath_providers::Mes
             blocks.push(leviath_providers::ContentBlock::ToolUse {
                 id: id.to_string(),
                 name: name.to_string(),
+                // A script copies a stored call's arguments, and a call the
+                // output cap cut off is stored as its partial text.
                 input: call
                     .get("arguments")
-                    .cloned()
+                    .map(leviath_providers::tool_input_object)
                     .unwrap_or(serde_json::Value::Object(Default::default())),
                 thought_signature: call
                     .get("thought_signature")
@@ -1146,6 +1148,22 @@ mod tests {
         // Indexing a missing key yields Null, so this covers absent-or-null
         // without a short-circuit branch the coverage gate can't see taken.
         assert_eq!(blocks[0]["thought_signature"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn render_assistant_tool_call_wraps_arguments_that_are_not_an_object() {
+        // A script copies a stored call's arguments from `ctx.entries`, and a
+        // call the output cap cut off is stored as its partial text. Providers
+        // want an object, so the text goes out wrapped.
+        let src = r#"
+            fn render(ctx) {
+                #{ messages: [#{ role: "assistant", tool_calls: [#{ id: "c", name: "n", arguments: "{\"a\":" }] }] }
+            }
+        "#;
+        let region = region_with(&[("x", EntryKind::Text)]);
+        let (_, messages) = render(&region, Some(&script(src)), false);
+        let blocks = serde_json::to_value(&messages[0].content).unwrap();
+        assert_eq!(blocks[0]["input"], json!({ "_raw": "{\"a\":" }));
     }
 
     // ─── on_write ────────────────────────────────────────────────────────

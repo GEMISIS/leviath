@@ -760,14 +760,7 @@ impl ContextWindow {
                                     });
                                 } else {
                                     let mut blocks = mime::text_blocks(&entry.content);
-                                    for tc in tool_calls {
-                                        blocks.push(leviath_providers::ContentBlock::ToolUse {
-                                            id: tc.id.clone(),
-                                            name: tc.name.clone(),
-                                            input: tc.arguments.clone(),
-                                            thought_signature: tc.thought_signature.clone(),
-                                        });
-                                    }
+                                    blocks.extend(tool_calls.iter().map(mime::tool_use_block));
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
                                         content: leviath_providers::MessageContent::Blocks(blocks),

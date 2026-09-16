@@ -815,6 +815,51 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_cut_off_call_assembles_as_an_object() {
+        // A run saved with a cut-off call in its conversation is resumed with
+        // that call as it was stored. The request built from it must still be
+        // one a provider accepts: the stored text is wrapped, not sent as a
+        // bare string that Anthropic refuses on every attempt.
+        let (mut world, entity) = agent_world();
+        world
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .get_region_mut("conversation")
+            .unwrap()
+            .kind = RegionKind::SlidingWindow {
+            max_items: 100,
+            eviction_strategy: Default::default(),
+        };
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        let mut call = pending_call("c1", "shell", None);
+        call.arguments = "not json {".to_string();
+        restore_pending_batch(&mut world, entity, &pending_batch(vec![call]), &[]);
+
+        let assembled = world.get::<ContextWindow>(entity).unwrap().assemble();
+        let inputs: Vec<serde_json::Value> = assembled
+            .messages
+            .iter()
+            .filter_map(|msg| match &msg.content {
+                leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+                leviath_providers::MessageContent::Text(_) => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                leviath_providers::ContentBlock::ToolUse { input, .. } => Some(input.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs, vec![serde_json::json!({ "_raw": "not json {" })]);
+    }
+
+    #[test]
     fn pending_batch_routes_results_through_the_restored_stage_routing() {
         // Stage 1 routes results to `knowledge`: the replayed result's full text
         // lands there and the conversation keeps the pointer - identical to the

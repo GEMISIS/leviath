@@ -51,6 +51,25 @@ pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
 }
 
+/// A tool call's input as a request may carry it: always an object.
+///
+/// An object goes out as it is. Anything else becomes `{"_raw": <value>}`.
+/// The usual case is a call the output cap cut off: `parse_tool_arguments`
+/// keeps its partial text as a string, and the conversation stores it that
+/// way, because the string is how the runtime knows the call was cut off.
+/// Anthropic, Bedrock and Ollama all refuse a string where tool input goes,
+/// and the refusal is not transient: every later request of the run, resumed
+/// or not, carried the same text and got the same answer. Wrapping it here,
+/// where a request is built, leaves the stored call untouched and still
+/// shows the model what it sent, next to the refusal that says why it did
+/// not run.
+pub fn tool_input_object(input: &serde_json::Value) -> serde_json::Value {
+    match input {
+        serde_json::Value::Object(_) => input.clone(),
+        other => serde_json::json!({ "_raw": other }),
+    }
+}
+
 /// Model names remembered for the life of the process.
 ///
 /// What a provider learns about a model by being refused (no temperature,
