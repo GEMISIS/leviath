@@ -1,17 +1,20 @@
 //! Agent hierarchy tree building and endpoints.
 
-use axum::extract::Path as AxumPath;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 
+use super::run_index::RunSnapshot;
 use super::types::*;
-use crate::runstate::{self, RunMeta};
 
-pub(super) fn build_tree(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<AgentTreeNode> {
-    runs.iter()
-        .filter(|r| r.parent_run_id.as_deref() == parent_id)
+/// The runs under `parent_id` (the roots when `None`) as a tree, each node
+/// carrying its subtree's spend. A walk of the snapshot's parent map, so a
+/// thousand runs cost a thousand node visits rather than a scan per level.
+pub(super) fn build_tree(snapshot: &RunSnapshot, parent_id: Option<&str>) -> Vec<AgentTreeNode> {
+    snapshot
+        .under(parent_id)
         .map(|r| {
-            let children = build_tree(runs, Some(&r.run_id));
+            let children = build_tree(snapshot, Some(&r.run_id));
             AgentTreeNode {
                 run_id: r.run_id.clone(),
                 agent_name: r.agent_name.clone(),
@@ -59,11 +62,14 @@ fn subtree_spend(
     (total.filter(|_| unpriced == 0), unpriced)
 }
 
-pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<TreeStatusNode> {
-    runs.iter()
-        .filter(|r| r.parent_run_id.as_deref() == parent_id)
+pub(super) fn build_tree_status(
+    snapshot: &RunSnapshot,
+    parent_id: Option<&str>,
+) -> Vec<TreeStatusNode> {
+    snapshot
+        .under(parent_id)
         .map(|r| {
-            let children = build_tree_status(runs, Some(&r.run_id));
+            let children = build_tree_status(snapshot, Some(&r.run_id));
             let subtree_prompt: usize = r.prompt_tokens
                 + children
                     .iter()
@@ -97,24 +103,25 @@ pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Ve
         .collect()
 }
 
-pub(super) async fn agents_tree() -> Json<Vec<AgentTreeNode>> {
-    let runs = runstate::list_runs();
-    let tree = build_tree(&runs, None);
+pub(super) async fn agents_tree(State(state): State<AppState>) -> Json<Vec<AgentTreeNode>> {
+    let snapshot = state.caches.run_index.snapshot().await;
+    let tree = build_tree(&snapshot, None);
     Json(tree)
 }
 
 pub(super) async fn agent_tree_status(
+    State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TreeStatusNode>, ApiError> {
-    let runs = runstate::list_runs();
-    let root = runs.iter().find(|r| r.run_id == id).ok_or((
+    let snapshot = state.caches.run_index.snapshot().await;
+    let root = snapshot.get(&id).ok_or((
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
             error: format!("Agent run '{}' not found", id),
         }),
     ))?;
 
-    let children = build_tree_status(&runs, Some(&id));
+    let children = build_tree_status(&snapshot, Some(&id));
     let subtree_prompt: usize = root.prompt_tokens
         + children
             .iter()
@@ -150,7 +157,18 @@ pub(super) async fn agent_tree_status(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::runstate::{self, RunMeta};
+
+    fn snap(runs: Vec<RunMeta>) -> RunSnapshot {
+        RunSnapshot::new(runs.into_iter().map(Arc::new).collect())
+    }
+
+    fn test_state() -> AppState {
+        crate::commands::serve::testutil::state_with_agent_paths(Vec::new())
+    }
 
     fn make_meta(id: &str, name: &str, parent: Option<&str>) -> RunMeta {
         let mut meta = RunMeta::new(
@@ -169,14 +187,14 @@ mod tests {
     #[test]
     fn build_tree_empty() {
         let runs: Vec<RunMeta> = vec![];
-        let tree = build_tree(&runs, None);
+        let tree = build_tree(&snap(runs), None);
         assert!(tree.is_empty());
     }
 
     #[test]
     fn build_tree_single_root() {
         let runs = vec![make_meta("run-1", "agent-a", None)];
-        let tree = build_tree(&runs, None);
+        let tree = build_tree(&snap(runs), None);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].run_id, "run-1");
         assert!(tree[0].children.is_empty());
@@ -188,7 +206,7 @@ mod tests {
             make_meta("parent", "agent-a", None),
             make_meta("child", "agent-b", Some("parent")),
         ];
-        let tree = build_tree(&runs, None);
+        let tree = build_tree(&snap(runs), None);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].run_id, "parent");
         assert_eq!(tree[0].children.len(), 1);
@@ -201,7 +219,7 @@ mod tests {
             make_meta("root-1", "a", None),
             make_meta("root-2", "b", None),
         ];
-        let tree = build_tree(&runs, None);
+        let tree = build_tree(&snap(runs), None);
         assert_eq!(tree.len(), 2);
     }
 
@@ -213,7 +231,7 @@ mod tests {
             make_meta("c2", "c", Some("r")),
             make_meta("gc", "d", Some("c1")),
         ];
-        let tree = build_tree(&runs, None);
+        let tree = build_tree(&snap(runs), None);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].children.len(), 2);
         let c1 = &tree[0].children[0];
@@ -233,7 +251,7 @@ mod tests {
         waiting.status = crate::runstate::RunStatus::WaitingInput;
         let mut interactive = make_meta("c", "b", Some("p"));
         interactive.status = crate::runstate::RunStatus::CompleteInteractive;
-        let runs = vec![waiting, interactive];
+        let runs = snap(vec![waiting, interactive]);
 
         let tree = build_tree(&runs, None);
         assert_eq!(tree[0].status, "waiting_input");
@@ -247,7 +265,7 @@ mod tests {
     #[test]
     fn build_tree_status_empty() {
         let runs: Vec<RunMeta> = vec![];
-        let tree = build_tree_status(&runs, None);
+        let tree = build_tree_status(&snap(runs), None);
         assert!(tree.is_empty());
     }
 
@@ -260,7 +278,7 @@ mod tests {
         child.prompt_tokens = 100;
         child.completion_tokens = 50;
         let runs = vec![parent, child];
-        let tree = build_tree_status(&runs, None);
+        let tree = build_tree_status(&snap(runs), None);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].subtree_prompt_tokens, 110); // 10 + 100
         assert_eq!(tree[0].subtree_completion_tokens, 55); // 5 + 50
@@ -275,7 +293,7 @@ mod tests {
         let mut grandchild = make_meta("gc", "c", Some("c"));
         grandchild.prompt_tokens = 30;
         let runs = vec![root, child, grandchild];
-        let tree = build_tree_status(&runs, None);
+        let tree = build_tree_status(&snap(runs), None);
         assert_eq!(tree[0].subtree_prompt_tokens, 60); // 10 + 20 + 30
     }
 
@@ -286,16 +304,14 @@ mod tests {
             make_meta("c1", "b", Some("r")),
             make_meta("c2", "c", Some("r")),
         ];
-        let subtree = build_tree(&runs, Some("r"));
+        let subtree = build_tree(&snap(runs), Some("r"));
         assert_eq!(subtree.len(), 2);
     }
 
     // ─── agents_tree / agent_tree_status (real runstate, unique run ids) ────
     //
-    // `runstate::list_runs()` reads the real on-disk runs directory (there's
-    // no test-isolated override in this crate's test suite), so these tests
-    // use unique run-id prefixes and only assert on their own entries, then
-    // clean up afterward.
+    // These read a runs directory the test isolates, with unique run ids and
+    // assertions only on their own entries, and clean up afterward.
 
     struct RunCleanup<'a>(&'a [&'a str]);
     impl Drop for RunCleanup<'_> {
@@ -316,7 +332,7 @@ mod tests {
                 let meta = make_meta(run_id, "agent-tree-test", None);
                 runstate::create_run(&meta).unwrap();
 
-                let Json(tree) = agents_tree().await;
+                let Json(tree) = agents_tree(State(test_state())).await;
                 assert!(tree.iter().any(|n| n.run_id == run_id));
             },
         )
@@ -325,10 +341,12 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tree_status_returns_not_found_for_missing_id() {
-        let (status, Json(body)) =
-            agent_tree_status(AxumPath("definitely-not-a-real-run-id".to_string()))
-                .await
-                .unwrap_err();
+        let (status, Json(body)) = agent_tree_status(
+            State(test_state()),
+            AxumPath("definitely-not-a-real-run-id".to_string()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.error.contains("definitely-not-a-real-run-id"));
     }
@@ -352,9 +370,10 @@ mod tests {
                 child.completion_tokens = 3;
                 runstate::create_run(&child).unwrap();
 
-                let Json(node) = agent_tree_status(AxumPath(run_id.to_string()))
-                    .await
-                    .unwrap();
+                let Json(node) =
+                    agent_tree_status(State(test_state()), AxumPath(run_id.to_string()))
+                        .await
+                        .unwrap();
                 assert_eq!(node.run_id, run_id);
                 assert_eq!(node.subtree_prompt_tokens, 30);
                 assert_eq!(node.subtree_completion_tokens, 5);

@@ -7,8 +7,10 @@ mod agents;
 mod artifact_types;
 mod auth;
 mod blobs;
+mod blocking;
 mod blueprint_types;
 mod blueprints;
+mod caches;
 mod config;
 mod config_health;
 mod config_types;
@@ -22,6 +24,7 @@ mod mime;
 mod polling;
 mod providers;
 mod request_limits;
+mod run_index;
 mod runs;
 mod scripts;
 mod scripts_mime;
@@ -385,6 +388,7 @@ async fn execute_with_shutdown(
     let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
 
     let state = AppState {
+        caches: Default::default(),
         update_check: Default::default(),
         update_jobs: update_job::UpdateJobs::with_runner(upgrade),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
@@ -403,6 +407,15 @@ async fn execute_with_shutdown(
             allow_local_network,
         }),
     };
+
+    // Fill the run index before the first request asks for it, so the console
+    // opening onto a thousand runs finds them parsed rather than paying for
+    // the parse itself. Off the bind path: a slow disk delays the warm-up, not
+    // the "listening" line. Guarded like the loops below, for the same reason.
+    let warm_state = state.clone();
+    let _warm_guard = AbortOnDrop(tokio::spawn(async move {
+        warm_state.caches.run_index.snapshot().await;
+    }));
 
     // Background world-event consumer: subscribes to the daemon's pushed
     // `WorldEvent` stream and forwards each event to WebSocket subscribers.
@@ -1232,6 +1245,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -1571,7 +1585,8 @@ model = "claude-sonnet-4-6"
             },
         ];
 
-        let tree = tree::build_tree_status(&runs, None);
+        let snapshot = run_index::RunSnapshot::new(runs.into_iter().map(Arc::new).collect());
+        let tree = tree::build_tree_status(&snapshot, None);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].run_id, "parent-1");
         assert_eq!(tree[0].children.len(), 1);

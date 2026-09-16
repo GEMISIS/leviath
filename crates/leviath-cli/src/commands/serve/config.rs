@@ -648,6 +648,7 @@ mod tests {
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -696,6 +697,7 @@ mod tests {
         }
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(config),
@@ -756,6 +758,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -770,6 +773,7 @@ mod tests {
     fn test_state_with_keys() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -986,6 +990,7 @@ mod tests {
     async fn get_config_agent_paths_included() {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -1024,6 +1029,7 @@ mod tests {
     fn test_state_listing_models() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -1234,6 +1240,7 @@ mod tests {
     fn state_with_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -1262,6 +1269,7 @@ mod tests {
     fn state_watching_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
@@ -2385,6 +2393,7 @@ mod tests {
         // passes while exercising none of what it is named for.
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {

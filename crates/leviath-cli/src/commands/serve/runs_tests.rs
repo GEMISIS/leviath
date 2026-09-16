@@ -80,8 +80,18 @@ fn resolve_err(pairs: &[(&str, &str)]) -> String {
     }
 }
 
-fn ids(runs: &[RunMeta]) -> Vec<&str> {
+fn ids(runs: &[Arc<RunMeta>]) -> Vec<&str> {
     runs.iter().map(|m| m.run_id.as_str()).collect()
+}
+
+fn arcs(runs: Vec<RunMeta>) -> Vec<Arc<RunMeta>> {
+    runs.into_iter().map(Arc::new).collect()
+}
+
+/// A state that talks to no daemon and starts with nothing remembered, so every
+/// handler call here reads the isolated runs directory afresh.
+fn test_state() -> AppState {
+    crate::commands::serve::testutil::state_with_agent_paths(Vec::new())
 }
 
 // ─── query resolution ───────────────────────────────────────────────────────
@@ -333,7 +343,11 @@ fn a_malformed_cursor_is_refused() {
 
 #[test]
 fn runs_sort_by_the_chosen_key_in_the_chosen_direction() {
-    let mut runs = vec![meta_at("b", 200), meta_at("a", 100), meta_at("c", 300)];
+    let mut runs = arcs(vec![
+        meta_at("b", 200),
+        meta_at("a", 100),
+        meta_at("c", 300),
+    ]);
     sort_runs(&mut runs, &resolve_ok(&[]));
     assert_eq!(ids(&runs), vec!["c", "b", "a"]);
 
@@ -346,7 +360,11 @@ fn runs_sort_by_the_chosen_key_in_the_chosen_direction() {
 /// colliding run it happened to resume past.
 #[test]
 fn runs_sharing_a_sort_value_are_broken_apart_by_id() {
-    let mut runs = vec![meta_at("b", 100), meta_at("c", 100), meta_at("a", 100)];
+    let mut runs = arcs(vec![
+        meta_at("b", 100),
+        meta_at("c", 100),
+        meta_at("a", 100),
+    ]);
     sort_runs(&mut runs, &resolve_ok(&[]));
     assert_eq!(ids(&runs), vec!["c", "b", "a"], "descending id tie-break");
 
@@ -372,8 +390,8 @@ fn a_missing_last_progress_at_falls_back_to_started_at() {
 /// property rather than on one hand-picked page.
 #[test]
 fn paging_all_the_way_through_visits_every_run_exactly_once() {
-    let all: Vec<RunMeta> = (0..25)
-        .map(|i| meta_at(&format!("run-{i:02}"), i))
+    let all: Vec<Arc<RunMeta>> = (0..25)
+        .map(|i| Arc::new(meta_at(&format!("run-{i:02}"), i)))
         .collect();
 
     let mut seen: Vec<String> = Vec::new();
@@ -407,7 +425,7 @@ fn paging_all_the_way_through_visits_every_run_exactly_once() {
 /// run one extra empty request, every single time.
 #[test]
 fn no_cursor_is_emitted_on_the_last_page() {
-    let all: Vec<RunMeta> = (0..3).map(|i| meta_at(&format!("r{i}"), i)).collect();
+    let all = arcs((0..3).map(|i| meta_at(&format!("r{i}"), i)).collect());
     let (page, next) = paginate(all, &resolve_ok(&[("limit", "3")]));
     assert_eq!(page.len(), 3);
     assert!(next.is_none(), "exactly-full page must not promise more");
@@ -424,8 +442,8 @@ fn an_empty_list_pages_to_nothing() {
 /// the window, the way an offset would.
 #[test]
 fn a_run_arriving_at_the_head_does_not_shift_the_next_page() {
-    let all: Vec<RunMeta> = (0..6)
-        .map(|i| meta_at(&format!("run-{i}"), i * 10))
+    let all: Vec<Arc<RunMeta>> = (0..6)
+        .map(|i| Arc::new(meta_at(&format!("run-{i}"), i * 10)))
         .collect();
     let resolved = resolve_ok(&[("limit", "2")]);
     let mut sorted = all.clone();
@@ -435,7 +453,7 @@ fn a_run_arriving_at_the_head_does_not_shift_the_next_page() {
 
     // A brand new run arrives at the head between the two requests.
     let mut with_new = all.clone();
-    with_new.push(meta_at("run-9", 999));
+    with_new.push(Arc::new(meta_at("run-9", 999)));
     let raw = next.expect("more pages");
     let resolved2 = resolve_ok(&[("limit", "2"), ("cursor", &raw)]);
     let mut sorted2 = with_new;
@@ -585,8 +603,8 @@ fn a_files_highlight_reports_the_matching_path() {
 /// service against a run set nothing prunes.
 #[test]
 fn a_filesystem_search_stops_after_the_scan_budget_and_says_so() {
-    let runs: Vec<RunMeta> = (0..MAX_SEARCH_SCAN + 10)
-        .map(|i| meta_at(&format!("run-{i:05}"), i as i64))
+    let runs: Vec<Arc<RunMeta>> = (0..MAX_SEARCH_SCAN + 10)
+        .map(|i| Arc::new(meta_at(&format!("run-{i:05}"), i as i64)))
         .collect();
     let (kept, truncated) = apply_search(runs, &resolve_ok(&[("q", "x"), ("q_in", "logs")]));
     assert!(
@@ -600,8 +618,8 @@ fn a_filesystem_search_stops_after_the_scan_budget_and_says_so() {
 /// otherwise a plain title search would stop working past 500 runs.
 #[test]
 fn an_in_memory_search_is_not_budgeted_however_many_runs_there_are() {
-    let runs: Vec<RunMeta> = (0..MAX_SEARCH_SCAN + 10)
-        .map(|i| meta_at(&format!("run-{i:05}"), i as i64))
+    let runs: Vec<Arc<RunMeta>> = (0..MAX_SEARCH_SCAN + 10)
+        .map(|i| Arc::new(meta_at(&format!("run-{i:05}"), i as i64)))
         .collect();
     let (kept, truncated) = apply_search(
         runs,
@@ -613,7 +631,7 @@ fn an_in_memory_search_is_not_budgeted_however_many_runs_there_are() {
 
 #[test]
 fn without_a_query_search_keeps_everything_untouched() {
-    let runs: Vec<RunMeta> = (0..3).map(|i| meta_at(&format!("r{i}"), i)).collect();
+    let runs = arcs((0..3).map(|i| meta_at(&format!("r{i}"), i)).collect());
     let (kept, truncated) = apply_search(runs, &resolve_ok(&[]));
     assert_eq!(kept.len(), 3);
     assert!(!truncated);
@@ -622,7 +640,10 @@ fn without_a_query_search_keeps_everything_untouched() {
 // ─── the handler, over real files ───────────────────────────────────────────
 
 async fn page_of(pairs: &[(&str, &str)]) -> Page<RunItem> {
-    list_runs(Query(query(pairs))).await.expect("page").0
+    list_runs(State(test_state()), Query(query(pairs)))
+        .await
+        .expect("page")
+        .0
 }
 
 fn item_ids(page: &Page<RunItem>) -> Vec<String> {
@@ -1490,7 +1511,7 @@ async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
 #[tokio::test]
 async fn a_bad_request_is_reported_rather_than_served() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-bad", |_d| async move {
-        let (status, _) = list_runs(Query(query(&[("sort", "nonsense")])))
+        let (status, _) = list_runs(State(test_state()), Query(query(&[("sort", "nonsense")])))
             .await
             .expect_err("should be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1645,9 +1666,12 @@ async fn a_bulk_sweep_never_forces_an_unreadable_run() {
         )
         .unwrap();
 
-        let resp = delete_runs(Query(delete_query(&[("ids", "run-corrupt")])))
-            .await
-            .expect("the sweep runs");
+        let resp = delete_runs(
+            State(test_state()),
+            Query(delete_query(&[("ids", "run-corrupt")])),
+        )
+        .await
+        .expect("the sweep runs");
 
         assert!(resp.deleted.is_empty());
         assert!(resp.skipped[0].reason.contains("force=true"));
@@ -1665,9 +1689,12 @@ async fn a_bulk_delete_by_age_takes_the_old_finished_runs_and_leaves_the_rest() 
         live.status = RunStatus::Running;
         create_run(&live).unwrap();
 
-        let resp = delete_runs(Query(delete_query(&[("before", "200")])))
-            .await
-            .expect("the sweep runs");
+        let resp = delete_runs(
+            State(test_state()),
+            Query(delete_query(&[("before", "200")])),
+        )
+        .await
+        .expect("the sweep runs");
 
         assert_eq!(resp.deleted, vec!["run-ancient".to_string()]);
         // The live run is old enough by the clock and is still not swept: it is
@@ -1687,10 +1714,10 @@ async fn a_bulk_delete_by_id_reports_a_verdict_for_every_run_it_was_given() {
         create_run(&finished("run-done", 1)).unwrap();
         create_run(&meta_at("run-live", 2)).unwrap();
 
-        let resp = delete_runs(Query(delete_query(&[(
-            "ids",
-            "run-done,run-live,run-gone",
-        )])))
+        let resp = delete_runs(
+            State(test_state()),
+            Query(delete_query(&[("ids", "run-done,run-live,run-gone")])),
+        )
         .await
         .expect("the sweep runs");
 
@@ -1801,9 +1828,12 @@ async fn a_bulk_delete_reports_the_sub_agent_runs_it_removed() {
         create_run(&finished("run-parent", 1)).unwrap();
         create_run(&finished_child("run-kid", "run-parent", 2)).unwrap();
 
-        let resp = delete_runs(Query(delete_query(&[("ids", "run-parent")])))
-            .await
-            .expect("the sweep runs");
+        let resp = delete_runs(
+            State(test_state()),
+            Query(delete_query(&[("ids", "run-parent")])),
+        )
+        .await
+        .expect("the sweep runs");
 
         // Deepest first, which is the order they were removed in.
         assert_eq!(
@@ -1826,9 +1856,12 @@ async fn a_bulk_delete_naming_a_parent_and_its_child_counts_each_once() {
         create_run(&finished("run-parent", 1)).unwrap();
         create_run(&finished_child("run-kid", "run-parent", 2)).unwrap();
 
-        let resp = delete_runs(Query(delete_query(&[("ids", "run-parent,run-kid")])))
-            .await
-            .expect("the sweep runs");
+        let resp = delete_runs(
+            State(test_state()),
+            Query(delete_query(&[("ids", "run-parent,run-kid")])),
+        )
+        .await
+        .expect("the sweep runs");
 
         assert_eq!(
             resp.deleted,
@@ -1850,7 +1883,7 @@ async fn a_bulk_delete_with_no_predicate_is_refused() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-nothing", |_d| async move {
         create_run(&finished("run-done", 1)).unwrap();
 
-        let (code, body) = delete_runs(Query(delete_query(&[])))
+        let (code, body) = delete_runs(State(test_state()), Query(delete_query(&[])))
             .await
             .expect_err("a predicate is required");
 
@@ -1868,7 +1901,7 @@ async fn a_bulk_delete_naming_more_runs_than_the_cap_is_refused() {
         .collect::<Vec<_>>()
         .join(",");
 
-    let (code, body) = delete_runs(Query(delete_query(&[("ids", &many)])))
+    let (code, body) = delete_runs(State(test_state()), Query(delete_query(&[("ids", &many)])))
         .await
         .expect_err("over the cap");
 

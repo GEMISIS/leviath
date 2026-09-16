@@ -451,6 +451,7 @@ mod tests {
     fn state() -> AppState {
         let (tx, _) = broadcast::channel(4);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: fixed_config(Config::default()),

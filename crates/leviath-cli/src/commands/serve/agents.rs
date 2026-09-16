@@ -178,9 +178,10 @@ pub(super) async fn spawn_agent(
 }
 
 pub(super) async fn list_agents(
+    State(state): State<AppState>,
     Query(query): Query<ListAgentsQuery>,
 ) -> Json<Vec<serde_json::Value>> {
-    let mut runs = runstate::list_runs();
+    let mut runs = state.caches.run_index.snapshot().await.into_runs();
 
     if let Some(ref status_filter) = query.status {
         let filters: Vec<&str> = status_filter.split(',').collect();
@@ -210,12 +211,15 @@ pub(super) async fn get_agent(
         })
 }
 
-pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<serde_json::Value>> {
+pub(super) async fn agent_children(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<Vec<serde_json::Value>> {
     let now = leviath_core::duration::now_secs();
-    let children: Vec<serde_json::Value> = runstate::list_runs()
-        .into_iter()
-        .filter(|r| r.parent_run_id.as_deref() == Some(&id))
-        .map(|r| run_json(&r, now))
+    let snapshot = state.caches.run_index.snapshot().await;
+    let children: Vec<serde_json::Value> = snapshot
+        .under(Some(&id))
+        .map(|r| run_json(r, now))
         .collect();
     Json(children)
 }
@@ -917,6 +921,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -946,6 +951,7 @@ mod tests {
 
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -1222,6 +1228,7 @@ mod tests {
     fn test_state_with_agent_paths(paths: Vec<PathBuf>, control: ControlClient) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -3366,6 +3373,7 @@ system_prompt = "Plan the work"
         use axum::routing::delete;
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -3425,6 +3433,7 @@ system_prompt = "Plan the work"
         use axum::routing::post;
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

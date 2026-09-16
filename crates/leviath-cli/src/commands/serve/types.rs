@@ -158,6 +158,8 @@ pub(crate) struct AppState {
     /// The update runs `POST /api/update` has started, and the machine to start
     /// another on. On the state for the same reason the cache above is.
     pub(super) update_jobs: super::update_job::UpdateJobs,
+    /// What the read routes remember between requests; see `caches`.
+    pub(super) caches: super::caches::ServeCaches,
 }
 
 impl AppState {
