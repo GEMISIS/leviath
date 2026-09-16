@@ -1320,7 +1320,6 @@ mod tests {
         // observable consequence of the provider having been built at all.
         let provider = registry.get("codex").expect("registered");
         assert!(provider.served_catalog().is_none());
-        assert!(provider.explicit_route_only());
     }
 
     /// The file backend reaches no OS store at all, which is the default and

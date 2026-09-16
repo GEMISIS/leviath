@@ -738,13 +738,14 @@ so `openai` and `codex` both answer to a bare `gpt-5.6-sol`. Turning this
 provider on would otherwise move billing for every such stage with one line of
 config and nothing saying so.
 
-So it is only reachable deliberately: an explicit `codex/...` in a blueprint or
-`--model`, an explicit `fallback_order` entry, naming it in
+So it is only reachable deliberately, which is the rule for every configured
+provider: an explicit `codex/...` in a blueprint or `--model`, an explicit
+`fallback_order` entry, naming it in
 [`provider_order`](/docs/configuration#provider-preference-order), or being your
 `default_provider`. Naming it in `provider_order` is how you say a bare name
-*should* prefer the subscription: put `codex` first there and a stage that lists
+*should* run on the subscription: put `codex` first there and a stage that lists
 `gpt-5.6-sol` with no provider runs on your plan, ahead of an OpenAI key that
-also serves it.
+also serves it; leave it out and no bare name ever lands on it.
 
 ### Measured caveats
 

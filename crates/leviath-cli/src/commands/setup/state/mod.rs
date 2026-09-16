@@ -648,10 +648,10 @@ impl Wizard {
         self.defaults = vec![
             Field {
                 label: "Provider priority",
-                help: "The order a bare model name prefers, best first. Its head is your default \
-                       provider. Enter opens a modal to drag the order and to add or drop \
-                       configured providers; one left out still runs any stage that names it \
-                       as provider/model.",
+                help: "The providers a bare model name may run on, best first. Its head is your \
+                       default provider. Enter opens a modal to drag the order and to add or \
+                       drop configured providers; one left out is never chosen for a bare \
+                       model name, and still runs any stage that names it as provider/model.",
                 value: FieldValue::Order(order),
             },
             Field {

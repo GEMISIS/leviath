@@ -45,7 +45,9 @@ impl Wizard {
             .map(str::to_string)
             .collect();
         explain.push(
-            "A provider left out still runs any stage that names it as provider/model.".to_string(),
+            "A provider left out is never chosen for a bare model name; it still runs any \
+             stage that names it as provider/model."
+                .to_string(),
         );
         self.reorder = Some(Reorder::new("Provider priority", explain, items));
     }

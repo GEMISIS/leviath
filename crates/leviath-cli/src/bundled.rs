@@ -1278,9 +1278,13 @@ mod tests {
 
                 // A real default provider, because the reordering only runs
                 // when one is set and registered. Passing the empty default
-                // skips that block entirely and tests nothing.
+                // skips that block entirely and tests nothing. Every provider
+                // is in the preference, since a bare name only resolves to a
+                // provider listed there and this test is about which model
+                // wins, not which providers are allowed.
                 let defaults = leviath_runtime::pipeline::ModelDefaults {
                     provider: "openrouter".to_string(),
+                    provider_order: providers.iter().map(|(n, _)| (*n).to_string()).collect(),
                     ..Default::default()
                 };
                 let (got_provider, got_model) = leviath_runtime::pipeline::resolve_stage_model(

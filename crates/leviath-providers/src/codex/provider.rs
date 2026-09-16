@@ -472,14 +472,6 @@ impl Provider for CodexProvider {
         leviath_core::sync::lock(&self.served).clone()
     }
 
-    fn explicit_route_only(&self) -> bool {
-        // A bare `gpt-5.6-sol` in a blueprint must not silently start spending
-        // a subscription because this provider happens to be configured. It is
-        // reachable by an explicit `codex/` prefix, an explicit fallback entry,
-        // or by being the configured default.
-        true
-    }
-
     fn pricing(&self, _model: &str) -> Option<crate::ModelPricing> {
         // A subscription is a flat monthly fee, so a call's marginal cost is a
         // known zero rather than an unknown. Saying so keeps a subscription run

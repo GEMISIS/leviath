@@ -450,10 +450,12 @@ impl LintEnv {
             }
         }
 
-        // The open entries, asked the way the resolver asks: does *any*
-        // registered provider claim this model. A script provider is not in
-        // `native_providers`, so the machine's default is offered the question
-        // too, matching `resolve_stage_candidates`.
+        // The open entries, asked the way the resolver asks: does a provider
+        // in the preference claim this model. A provider outside the
+        // preference never serves a bare name, so it is not asked. A script
+        // provider is not in `native_providers`, so the machine's default is
+        // offered the question too, matching `resolve_stage_candidates`.
+        let defaults = crate::daemon::spawn::model_defaults(config);
         let default_script = registry.script_provider_named(&config.default_provider);
         for model in entries()
             .filter(|e| e.provider.is_empty())
@@ -463,7 +465,7 @@ impl LintEnv {
             let routed = registry
                 .native_providers()
                 .iter()
-                .any(|(_, p)| p.serves_model(key).is_some())
+                .any(|(name, p)| defaults.is_preferred(name) && p.serves_model(key).is_some())
                 || default_script
                     .as_ref()
                     .is_some_and(|p| p.serves_model(key).is_some());
