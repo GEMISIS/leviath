@@ -28,6 +28,14 @@ fn a_short_value_is_not_searched_for() {
 }
 
 #[test]
+fn two_values_of_one_length_are_both_known() {
+    let s = scrubber(&["secret-value-b", "secret-value-a", "secret-value-a"]);
+    let (out, count) = s.scrub("secret-value-a secret-value-b");
+    assert_eq!(out, "[REDACTED] [REDACTED]");
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn a_longer_value_that_contains_a_shorter_one_goes_whole() {
     let s = scrubber(&["secretpart1", "secretpart1-and-more"]);
     let (out, count) = s.scrub("x secretpart1-and-more y");

@@ -27,7 +27,7 @@
 //! written, and flushed to stderr when it lets go. Nothing is lost, and
 //! nothing lands on the screen while somebody is looking at it.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -169,15 +169,16 @@ where
 /// other command keeps stderr alone.
 ///
 /// Returns `false` on a second call: the file is attached once for the life
-/// of the process. When stderr is not a terminal the stderr copy stops here,
-/// so a detached daemon writes the file alone.
-pub fn attach_daemon_log(path: PathBuf) -> bool {
+/// of the process. `mirror_stderr` is whether stderr is a terminal, decided
+/// by the caller; when it is not, the stderr copy stops here, so a detached
+/// daemon writes the file alone.
+pub fn attach_daemon_log(path: PathBuf, mirror_stderr: bool) -> bool {
     let _ = path.parent().map(leviath_sys::create_private_dir_all);
     let log = daemon_log::DaemonLog::new(path, leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES);
     if DAEMON_LOG.set(log).is_err() {
         return false;
     }
-    STDERR_MIRROR.store(std::io::stderr().is_terminal(), Ordering::Relaxed);
+    STDERR_MIRROR.store(mirror_stderr, Ordering::Relaxed);
     true
 }
 
@@ -378,6 +379,14 @@ mod tests {
             "release hands the buffer to stderr and empties it"
         );
 
+        // A daemon whose stderr is not a terminal writes its file alone: the
+        // stderr writer accepts and drops. Same test, same reason: the flag
+        // is process-wide.
+        STDERR_MIRROR.store(false, Ordering::Relaxed);
+        assert_eq!(writer().write(b"\n").expect("muted"), 1);
+        writer().flush().expect("a muted flush is a no-op");
+        STDERR_MIRROR.store(true, Ordering::Relaxed);
+
         // Past the cap the oldest bytes go, the count is kept for the release
         // to report, and the release clears it. Same test, same reason: the
         // flag and the counter are process-wide.
@@ -410,22 +419,20 @@ mod tests {
         assert_eq!(daemon_writer().write(b"x").expect("discarded"), 1);
         daemon_writer().flush().expect("nothing to flush");
 
+        // Attached as if stderr were a terminal, so the mirror flag stays as
+        // it is: the terminal-hold test owns that flag and exercises the
+        // muted arms itself.
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("logs").join("daemon.log");
-        assert!(attach_daemon_log(path.clone()), "the first attach wins");
         assert!(
-            !attach_daemon_log(path.clone()),
+            attach_daemon_log(path.clone(), true),
+            "the first attach wins"
+        );
+        assert!(
+            !attach_daemon_log(path.clone(), true),
             "and the second is refused"
         );
         assert!(set_daemon_log_cap(1024 * 1024));
-
-        // Whether stderr still mirrors is a fact about the test runner's
-        // stderr; both answers must leave the writer working.
-        let mirrored = STDERR_MIRROR.load(Ordering::Relaxed);
-        STDERR_MIRROR.store(false, Ordering::Relaxed);
-        assert_eq!(writer().write(b"\n").expect("muted"), 1);
-        writer().flush().expect("muted flush");
-        STDERR_MIRROR.store(mirrored, Ordering::Relaxed);
 
         // The layer `init` installs, on a subscriber this thread controls.
         let subscriber = tracing_subscriber::registry().with(daemon_file_layer("info"));

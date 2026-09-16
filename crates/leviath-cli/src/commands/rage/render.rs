@@ -15,6 +15,9 @@ use super::{Outcome, human_bytes};
 use crate::tui::theme::*;
 use crate::tui::widgets::footer::{Hint, draw_hint_bar, hint};
 
+/// How many left-out files the summary lists before saying "and N more".
+const SKIPPED_SHOWN: usize = 4;
+
 /// Draw one frame.
 pub(crate) fn draw(frame: &mut Frame, ui: &Rage) {
     let area = frame.area();
@@ -183,24 +186,37 @@ fn draw_outcome(frame: &mut Frame, area: Rect, outcome: &Outcome) {
             )),
         ]));
     }
+    // Notes first: rare, and worth more than one more "not present".
+    for note in &outcome.notes {
+        lines.push(Line::from(Span::styled(
+            format!("  note: {note}"),
+            Style::default().fg(C_WARN),
+        )));
+    }
     if !outcome.skipped.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Left out:",
             Style::default().fg(C_DIM),
         )));
-        for skipped in &outcome.skipped {
+        // The pane does not scroll, and a long list of files that were not
+        // there would push the warning below it off the screen. The printed
+        // summary and `manifest.json` carry the whole list.
+        for skipped in outcome.skipped.iter().take(SKIPPED_SHOWN) {
             lines.push(Line::from(vec![
                 Span::styled(format!("  {}", skipped.path), Style::default().fg(C_MUTED)),
                 Span::styled(format!("  {}", skipped.reason), Style::default().fg(C_DIM)),
             ]));
         }
-    }
-    for note in &outcome.notes {
-        lines.push(Line::from(Span::styled(
-            format!("  note: {note}"),
-            Style::default().fg(C_WARN),
-        )));
+        if outcome.skipped.len() > SKIPPED_SHOWN {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  and {} more, listed in manifest.json",
+                    outcome.skipped.len() - SKIPPED_SHOWN
+                ),
+                Style::default().fg(C_DIM),
+            )));
+        }
     }
     frame.render_widget(
         Paragraph::new(lines)
