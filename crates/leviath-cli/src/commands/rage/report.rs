@@ -129,7 +129,7 @@ const LAYOUT: &[(&str, &str)] = &[
     ("tools/, providers/", "Drop-in Rhai scripts"),
     (
         "logs/",
-        "`daemon.log`, `daemon.stdio.log` and `dashboard.log`, with their rolled copies",
+        "`daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies",
     ),
     (
         "runs/<id>/",

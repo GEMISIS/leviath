@@ -512,11 +512,11 @@
         "service_name": {
           "type": "string"
         },
-        "daemon_log_max_bytes": {
+        "log_file_max_bytes": {
           "type": "integer",
           "minimum": 0,
           "default": 5242880,
-          "description": "Bytes the daemon's own log file may reach before it is rolled to daemon.log.1. 0 never rolls. 5 MiB by default."
+          "description": "Bytes a log file Leviath writes for itself (daemon.log, serve-<name>.log) may reach before it is rolled to <name>.1. 0 never rolls. 5 MiB by default."
         }
       }
     },

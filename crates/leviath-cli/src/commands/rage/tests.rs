@@ -230,6 +230,12 @@ api_token = "{EXTRA_VALUE}"
         format!("info daemon up\nkey {CONFIG_KEY} leaked\n{SLACK_TOKEN}\n"),
     );
     write(&data.join("daemon.log.1"), "older\n");
+    write(
+        &data.join("serve-3000.log"),
+        format!("serve up {SLACK_TOKEN}\n"),
+    );
+    write(&data.join("serve-3000.log.1"), "older serve\n");
+    write(&data.join("serve-notes.txt"), "not a log");
     write(&data.join("dashboard.log"), "2026-09-16 opened\n");
 
     // Installed blueprints, with a tree deeper than the bundle copies.
@@ -465,6 +471,8 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "logs/daemon.log",
             "logs/daemon.log.1",
             "logs/dashboard.log",
+            "logs/serve-3000.log",
+            "logs/serve-3000.log.1",
             &format!("runs/{ROOT_RUN}/meta.json"),
             &format!("runs/{ROOT_RUN}/context.json"),
             &format!("runs/{ROOT_RUN}/final_output"),
@@ -486,6 +494,10 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
         assert!(
             !member_names.iter().any(|n| n.contains(OTHER_RUN)),
             "an unrelated run is not part of the family"
+        );
+        assert!(
+            !member_names.iter().any(|n| n.contains("serve-notes")),
+            "only log files beside the serve logs are taken"
         );
         assert!(
             member_names.iter().all(|n| n.starts_with("leviath-rage-")),

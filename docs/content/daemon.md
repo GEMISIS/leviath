@@ -59,14 +59,19 @@ The daemon writes its log to `~/.leviath/daemon.log`, however it was started. In
 the same lines also print to your terminal. A daemon started for you in the background has no
 terminal, so the file is the only record.
 
-The file is capped. When it reaches `[observability] daemon_log_max_bytes` (5 MiB by default) it
+The file is capped. When it reaches `[observability] log_file_max_bytes` (5 MiB by default) it
 is renamed to `daemon.log.1` and a fresh file starts, so the two together never pass about
 10 MiB. Raise the cap in `config.toml` and the next run applies it, with no restart. `0` never
 rolls.
 
 A daemon under `lev daemon install` also has `daemon.stdio.log`, where the supervisor keeps what
-the process writes outside its log: a fatal start-up error, or a panic. `lev rage` packs all three
-files into a bug report. See [Reporting issues](/docs/reporting-issues).
+the process writes outside its log: a fatal start-up error, or a panic.
+
+`lev serve` keeps a log of its own the same way, `~/.leviath/serve-<name>.log`, one per server.
+The name is `--name`, or the port when you give none, so two servers side by side never share a
+file and a restart on the same port keeps rolling the same one. The same cap applies; a server
+reads it when it starts. `lev rage` packs all of these files into a bug report. See
+[Reporting issues](/docs/reporting-issues).
 
 ## What happens when it restarts
 

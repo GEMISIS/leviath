@@ -79,6 +79,21 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// The stem of this server's log file: `--name`, else the port.
+pub fn log_name(args: &ServeArgs) -> String {
+    args.name.clone().unwrap_or_else(|| args.port.to_string())
+}
+
+/// `--name` as a value parser: it becomes a file name, so it is held to the
+/// same characters a run id is.
+pub fn parse_log_name(value: &str) -> Result<String, String> {
+    if leviath_core::paths::is_safe_path_component(value) {
+        Ok(value.to_string())
+    } else {
+        Err("a server name is letters, digits, `.`, `_` and `-` only".to_string())
+    }
+}
+
 /// Run `lev serve`: expose the HTTP + WebSocket API over the daemon.
 ///
 /// `upgrade` is how `POST /api/update` runs a package manager. Injected rather
@@ -1762,6 +1777,7 @@ system_prompt = "Run"
     fn test_serve_args_defaults() {
         let args = ServeArgs {
             port: 3000,
+            name: None,
             host: "127.0.0.1".to_string(),
             cors: None,
             token: Some("test-token".to_string()),
@@ -1865,6 +1881,7 @@ system_prompt = "Run"
                 // of execute()'s bootstrap logic.
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -1943,6 +1960,7 @@ system_prompt = "Run"
 
             let args = ServeArgs {
                 port: 0,
+                name: None,
                 host: "127.0.0.1".to_string(),
                 cors: None,
                 token: Some("test-token".to_string()),
@@ -2023,6 +2041,7 @@ system_prompt = "Run"
 
                 let base = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2038,6 +2057,7 @@ system_prompt = "Run"
 
                 // One flag without the other.
                 let lone = ServeArgs {
+                    name: None,
                     tls_cert: Some(cert.clone()),
                     ..base.clone()
                 };
@@ -2056,6 +2076,7 @@ system_prompt = "Run"
                 let key = dir.path().join("key.pem");
                 std::fs::write(&key, tls::tests::TEST_KEY).expect("write");
                 let unreadable = ServeArgs {
+                    name: None,
                     tls_cert: Some(cert),
                     tls_key: Some(key),
                     ..base
@@ -2095,6 +2116,7 @@ system_prompt = "Run"
 
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2147,6 +2169,7 @@ system_prompt = "Run"
                 with_tracing(|| {});
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: Some("*".to_string()),
                     token: Some("test-token".to_string()),
@@ -2238,6 +2261,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 with_tracing(|| {});
                 let args = ServeArgs {
+                    name: None,
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: None,
@@ -2314,6 +2338,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: Some("https://example.com".to_string()),
                     token: Some("test-token".to_string()),
@@ -2353,6 +2378,7 @@ system_prompt = "Run"
             // fail, exercising execute()'s `?` on the SocketAddr parse.
             let args = ServeArgs {
                 port: 0,
+                name: None,
                 host: "not a valid host".to_string(),
                 cors: None,
                 token: Some("test-token".to_string()),
@@ -2394,6 +2420,7 @@ system_prompt = "Run"
 
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2430,6 +2457,7 @@ system_prompt = "Run"
 
         let args = ServeArgs {
             port: 0,
+            name: None,
             host: "127.0.0.1".to_string(),
             cors: None,
             token: Some("test-token".to_string()),
@@ -2487,6 +2515,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 let args = ServeArgs {
                     port: 8080,
+                    name: None,
                     host: "192.0.2.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2528,6 +2557,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 let args = ServeArgs {
                     port,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2560,6 +2590,7 @@ system_prompt = "Run"
         temp_env::async_with_vars([("LEVIATH_API_TOKEN", None::<&str>)], async {
             let args = ServeArgs {
                 port: 0,
+                name: None,
                 host: "127.0.0.1".to_string(),
                 cors: None,
                 token: None,
@@ -2587,6 +2618,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2640,6 +2672,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("test-token".to_string()),
@@ -2690,6 +2723,7 @@ system_prompt = "Run"
             fn args_with(cors: Option<&str>) -> ServeArgs {
                 ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: cors.map(str::to_string),
                     token: Some("t".to_string()),
@@ -2762,6 +2796,7 @@ system_prompt = "Run"
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("t".to_string()),
@@ -2837,6 +2872,7 @@ system_prompt = "Run"
                     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                     let args = ServeArgs {
                         port: 0,
+                        name: None,
                         host: "127.0.0.1".to_string(),
                         cors: None,
                         token: Some("t".to_string()),
@@ -2939,6 +2975,7 @@ system_prompt = "Run"
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("t".to_string()),
@@ -2996,6 +3033,7 @@ system_prompt = "Run"
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     port: 0,
+                    name: None,
                     host: "127.0.0.1".to_string(),
                     cors: None,
                     token: Some("t".to_string()),
@@ -3061,6 +3099,7 @@ system_prompt = "Run"
     fn limits_args() -> ServeArgs {
         ServeArgs {
             port: 0,
+            name: None,
             host: "127.0.0.1".to_string(),
             cors: None,
             token: Some("test-token".to_string()),
@@ -3122,6 +3161,7 @@ system_prompt = "Run"
                 )
                 .unwrap();
                 let (addr, handle) = boot(ServeArgs {
+                    name: None,
                     request_timeout_secs: Some(3),
                     ..limits_args()
                 })
@@ -3171,6 +3211,7 @@ system_prompt = "Run"
             |_fake_dir| async move {
                 with_tracing(|| {});
                 let (addr, handle) = boot(ServeArgs {
+                    name: None,
                     request_timeout_secs: Some(1),
                     max_concurrent_requests: Some(1),
                     ..limits_args()
@@ -3207,5 +3248,35 @@ system_prompt = "Run"
             },
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod log_name_tests {
+    use super::{ServeArgs, log_name, parse_log_name};
+    use clap::Parser;
+
+    /// The args as `lev serve` parses them, so `--name` goes through the
+    /// value parser rather than around it.
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        serve: ServeArgs,
+    }
+
+    #[test]
+    fn a_server_is_named_by_flag_or_by_port() {
+        let named = Cli::parse_from(["lev", "--name", "api-1", "--port", "4000"]).serve;
+        assert_eq!(log_name(&named), "api-1");
+        let unnamed = Cli::parse_from(["lev", "--port", "4000"]).serve;
+        assert_eq!(log_name(&unnamed), "4000");
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_a_file_name_is_refused() {
+        assert_eq!(parse_log_name("api.v2_x").unwrap(), "api.v2_x");
+        let err = parse_log_name("../etc").unwrap_err();
+        assert!(err.contains("letters, digits"), "{err}");
+        assert!(Cli::try_parse_from(["lev", "--name", "a/b"]).is_err());
     }
 }

@@ -194,6 +194,23 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()> {
+        // A server is long-lived and often runs under nohup or a supervisor,
+        // so it keeps its own capped log like the daemon does: one file per
+        // server, named for `--name` or the port. The cap is read once here,
+        // since a server has no reload path for `[observability]`.
+        let log_name = commands::serve::log_name(&args);
+        if let Some(path) = leviath_cli::logging::serve_log_path(&log_name)
+            && leviath_cli::logging::attach_log_file(
+                path.clone(),
+                std::io::IsTerminal::is_terminal(&io::stderr()),
+            )
+        {
+            let cap = leviath_cli::config::Config::load()
+                .map(|config| config.observability.log_file_max_bytes)
+                .unwrap_or(leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES);
+            leviath_cli::logging::set_log_file_cap(cap);
+            info!(path = %path.display(), "leviath serve writing its log here");
+        }
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
         ensure_daemon_running().await?;
@@ -717,7 +734,7 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // daemon was started. The cap follows `[observability]` once the host is
     // up (`telemetry_reload`).
     if let Some(path) = leviath_cli::logging::daemon_log_path()
-        && leviath_cli::logging::attach_daemon_log(
+        && leviath_cli::logging::attach_log_file(
             path.clone(),
             std::io::IsTerminal::is_terminal(&io::stderr()),
         )
