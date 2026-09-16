@@ -1155,11 +1155,18 @@ enabled      = true
 exporter     = "otlp"    # otlp | stdout | none
 endpoint     = "http://localhost:4318"
 service_name = "leviath"
+daemon_log_max_bytes = 5242880   # the daemon's own log file; 0 never rolls
 ```
 
 `endpoint` falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`. Leviath
 exports OTLP over **HTTP/protobuf**, so a collector's gRPC port (4317) will not work.
 `service_name` falls back to `OTEL_SERVICE_NAME`, then `"leviath"`.
+
+`daemon_log_max_bytes` sizes the daemon's own log, `~/.leviath/daemon.log`. When the file reaches
+the cap it is renamed to `daemon.log.1`, replacing the previous one, and a fresh file starts. The
+default is 5 MiB, so the daemon never holds more than about 10 MiB of its own output. Set `0` to
+let the file grow without limit. A change takes effect on the next run, with no restart. See
+[the daemon page](/docs/daemon#where-it-logs) for what the file holds.
 
 ## Environment variables
 

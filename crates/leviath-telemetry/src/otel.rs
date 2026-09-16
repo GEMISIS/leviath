@@ -1374,6 +1374,7 @@ mod tests {
             exporter: leviath_core::config::TelemetryExporterKind::Otlp,
             endpoint: Some(format!("http://{addr}")),
             service_name: Some("leviath-test".to_string()),
+            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
         };
         let sink = OtelSink::from_config(&cfg).unwrap();
         sink.emit(run_started("r1", 0));

@@ -184,8 +184,8 @@ same records and does not expire them. Widen `[limits] finished_retention_secs` 
 polling less often than the default five minutes.
 
 If it is none of those, the spawn itself failed and no run was ever created. `lev run` reports
-that on the spot, and the daemon logs it at `error` level, so check there rather than in the
-listing.
+that on the spot, and the daemon logs it at `error` level in `~/.leviath/daemon.log`, so check
+there rather than in the listing.
 
 This matters most to anything that schedules work by spawning agents and watching for them.
 Poll the listing rather than timing how long a run "should" take: a wall-clock deadline that is

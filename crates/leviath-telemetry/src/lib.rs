@@ -82,6 +82,7 @@ mod tests {
             exporter,
             endpoint: None,
             service_name: None,
+            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
         }
     }
 
@@ -116,6 +117,7 @@ mod tests {
             exporter: TelemetryExporterKind::Otlp,
             endpoint: Some("not a url at all".to_string()),
             service_name: None,
+            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
         };
         assert!(build_sink(&cfg).is_none());
     }

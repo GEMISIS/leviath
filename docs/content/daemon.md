@@ -53,6 +53,20 @@ lev daemon stop
 lev daemon restart
 ```
 
+## Where it logs
+
+The daemon writes its log to `~/.leviath/daemon.log`, however it was started. In the foreground
+the same lines also print to your terminal. A daemon started for you in the background has no
+terminal, so the file is the only record.
+
+The file is capped. When it reaches `[observability] daemon_log_max_bytes` (5 MiB by default) it
+is renamed to `daemon.log.1` and a fresh file starts, so the two together never pass about
+10 MiB. Raise the cap in `config.toml` and the next run applies it, with no restart. `0` never
+rolls.
+
+A daemon under `lev daemon install` also has `daemon.stdio.log`, where the supervisor keeps what
+the process writes outside its log: a fatal start-up error, or a panic.
+
 ## What happens when it restarts
 
 On start, the daemon reloads any runs that were interrupted, so a crash or a restart does not lose
@@ -257,7 +271,8 @@ and only one of them is a setting in `config.toml`:
   nothing re-reads the config into it, so a blueprint's per-agent servers keep the grace window the
   daemon started with.
 - How verbose the daemon's own log is. Its `tracing` subscriber is installed from `--verbose` on the
-  command line before any config is read, and a process can install one only once.
+  command line before any config is read, and a process can install one only once. The size cap on
+  the log file is not one of these; it reloads with the rest of `[observability]`.
 - A provider key you exported as an environment variable instead of writing it to the file. The
   daemon inherited its environment when it started, and an export in your shell afterwards never
   reaches it.
