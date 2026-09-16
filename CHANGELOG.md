@@ -80,6 +80,18 @@ same list.
 
 ### Fixed
 
+- `lev doctor` no longer fails its `resolve` check with "resolved to
+  'anthropic', which is not configured" on an install whose only provider
+  is something else and whose config sets no `override_model` or
+  `fallback_model`. That placeholder was the resolver's last resort for a
+  stage naming no model, not a finding about the config. The check now
+  passes on the first configured provider in `provider_order` (or
+  `default_provider`), the inference and daemon checks that used to be
+  skipped run with a model picked from that provider's catalogue, and the
+  inference line names which. With nothing in the preference configured
+  the check fails loudly, naming the provider the config asked for and
+  what is registered. `GET /api/doctor` reports the same.
+
 - The mkcert recipe on the API page prefixes both mkcert commands with
   `TRUST_STORES=system,nss`, and the page and the troubleshooting guide
   explain the `keytool -list` / `Keystore file does not exist` stop that

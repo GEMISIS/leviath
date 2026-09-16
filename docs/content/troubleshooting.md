@@ -72,11 +72,13 @@ An agent needs at least one [provider](/docs/providers). Run `lev setup`: an API
 Claude subscription you sign in to, or a local [Ollama](https://ollama.com) all count, and the last
 two need no key.
 
-`lev doctor` says which provider your defaults actually resolve to, and which ones it tried to get
-there. That matters because a stage naming no model of its own falls back to `anthropic`. So a
-machine with only an OpenRouter key can resolve to a provider it has no credential for, spawn, and
-sit at iteration 0. When your configured `default_provider` is the one being passed over, the
-`resolve` line says that too.
+`lev doctor` says which provider your defaults actually resolve to. With no provider configured
+its `resolve` line fails and names the one your config asked for, `default_provider` or the first
+entry of `provider_order`, and lists what is registered. A config that names a provider but no
+`override_model` or `fallback_model` is fine: the line passes on that provider, and the inference
+check picks a model from its catalogue to probe with, since each stage of a real run uses the
+model its blueprint names. When your configured `default_provider` is being passed over for one
+that is configured, the `resolve` line says that too.
 
 ## Every run dies immediately with a payment or auth error
 

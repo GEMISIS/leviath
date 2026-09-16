@@ -67,8 +67,10 @@ impl ModelDefaults {
     ///
     /// Every routing decision reads the preference through here, so the
     /// empty-`provider_order` case reduces to exactly the single-default
-    /// behavior that shipped before an order could be configured.
-    fn order(&self) -> Vec<&str> {
+    /// behavior that shipped before an order could be configured. Public so
+    /// `lev doctor` can judge a config by the same preference the router
+    /// uses, rather than by a copy of this rule.
+    pub fn order(&self) -> Vec<&str> {
         match self.provider_order.is_empty() {
             true => vec![self.provider.as_str()],
             false => self.provider_order.iter().map(String::as_str).collect(),

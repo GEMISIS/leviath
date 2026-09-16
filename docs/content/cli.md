@@ -828,7 +828,7 @@ rest, and the one that fails is the diagnosis.
 | Check | What it proves | A failure means |
 |---|---|---|
 | `config` | `config.toml` parses and a provider registry can be built. The OK line also carries notes for a file that loads with problems in it: keys nothing reads, and `[model_providers.*]` script entries whose `.rhai` file is not on disk | The config file is malformed |
-| `resolve` | Your defaults pick a provider that is actually registered | A key is missing or misspelled |
+| `resolve` | Your defaults pick a provider that is actually registered. With no `override_model` or `fallback_model` set it passes on the first configured provider in your preference, and the next check picks a model from that provider's catalogue | Nothing in `default_provider` or `provider_order` is configured: a key is missing or misspelled, or `lev setup` has not been run |
 | `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
 | `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |
 

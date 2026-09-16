@@ -9,11 +9,14 @@
 //!    see rather than inspecting this process, because the daemon's environment
 //!    is fixed at exec time and is not the shell `doctor` was typed in.
 //! 3. `resolve` - the user's defaults pick a provider that is actually
-//!    registered. This is the check that catches a stage resolving to
-//!    `anthropic/claude-sonnet-4-6` (the hard-coded last resort in
-//!    [`ModelConfig::provider`](leviath_core::blueprint::ModelConfig::provider))
-//!    on a machine with no Anthropic key - the root cause of a fleet of runs
-//!    that spawned, sat at iteration 0, and never took a turn.
+//!    registered: the model the config names when it names one, otherwise
+//!    the first configured provider in the preference, with the model to
+//!    probe picked from its catalogue. Fails, naming the provider the config
+//!    asked for, when nothing in the preference is configured. The placeholder
+//!    a model-less stage carries
+//!    ([`ModelConfig::provider`](leviath_core::blueprint::ModelConfig::provider))
+//!    is the resolver's last resort, not a finding, and is never reported as
+//!    one.
 //! 4. `inference` - one real call to that provider, straight through
 //!    [`Provider::infer`]. No world, no run, nothing on disk.
 //! 5. `daemon` - a throwaway one-stage agent spawned over the control socket
@@ -39,11 +42,9 @@ use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{
     ControlClient, ControlRequest, ControlResponse, DaemonIdentity,
 };
-use leviath_runtime::pipeline::{providers_tried, resolve_stage_model};
 
 use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::Config;
-use crate::daemon::spawn::model_defaults;
 
 /// `lev doctor --help`. What each check proves, and what a failure at it means.
 pub const DOCTOR_LONG_ABOUT: &str = "\
@@ -61,9 +62,11 @@ fails is the diagnosis:
              is missing from [security] allow_env_vars - each of which silently
              downgrades every web_search to a keyless Wikipedia lookup.
   resolve    your default provider/model picks a provider that is actually
-             registered. Fails when a key is missing or misspelled - and
-             catches the case where a blueprint with no model falls back to
-             anthropic on a machine that has no Anthropic key.
+             registered. With no override_model or fallback_model set it
+             passes on the first configured provider in your preference and
+             the next check probes a model from its catalogue. Fails when
+             nothing in default_provider or provider_order is configured: a
+             key missing or misspelled, or lev setup never run.
   inference  one real call to that provider. Fails on a bad key, an unknown
              model id, or a billing problem; the provider's own error is
              printed verbatim, status line and response body included.
@@ -640,70 +643,7 @@ fn broken_config_check(fault: &crate::config::ConfigFault) -> Check {
     )
 }
 
-// ─── Check 2: resolve ─────────────────────────────────────────────────────────
-
-/// What check 2 settled on, when it settled on something usable. The handle is
-/// carried rather than looked up again so the later checks cannot disagree with
-/// the one that reported.
-struct Resolved {
-    provider_name: String,
-    model: String,
-    provider: Arc<dyn Provider>,
-}
-
-/// Run the real stage-model fallback chain against an **empty** [`ModelConfig`],
-/// so what comes back is what the user's config alone would pick for a stage
-/// that states no preference of its own.
-///
-/// The guard afterwards is the one [`leviath_runtime::pipeline::resolve_stages`]
-/// applies at spawn: the last resort in the chain is unchecked and hands back
-/// `anthropic`/`claude-sonnet-4-6` whether or not anything answers to that name.
-/// Resolving through [`ProviderRegistry::get`] rather than `has` makes the same
-/// decision (native first, then the script layer) while keeping the handle, so
-/// the provider cannot go missing between deciding to use it and using it.
-fn resolve_check(
-    config: &Config,
-    model_override: Option<&str>,
-    registry: &ProviderRegistry,
-) -> (Check, Option<Resolved>) {
-    let empty = ModelConfig {
-        models: Vec::new(),
-        allow_user_default: true,
-        parameters: std::collections::HashMap::new(),
-        request_timeout_secs: None,
-    };
-    let defaults = model_defaults(config);
-    let (provider_name, model) = resolve_stage_model(&empty, model_override, &defaults, registry);
-
-    match registry.get(&provider_name) {
-        Some(provider) => (
-            Check::ok(
-                "resolve",
-                format!(
-                    "{provider_name} / {model}{}{}",
-                    default_provider_note(config, &provider_name, model_override, registry),
-                    qualified_user_model_notes(config, model_override),
-                ),
-            ),
-            Some(Resolved {
-                provider_name,
-                model,
-                provider,
-            }),
-        ),
-        None => (
-            Check::fail(
-                "resolve",
-                format!(
-                    "resolved to '{provider_name}', which is not configured (tried: {}). \
-                     Configure it with `lev setup`, or add it to config.toml.",
-                    providers_tried(&empty, model_override, &defaults)
-                ),
-            ),
-            None,
-        ),
-    }
-}
+// ─── Check 2: resolve: see `resolve.rs` ─────────────────────────────────────
 
 // ─── Check 3: inference ───────────────────────────────────────────────────────
 
@@ -1096,7 +1036,29 @@ pub(crate) async fn run_checks_with(
         return checks;
     }
 
-    let check = inference_check(resolved.provider.as_ref(), &resolved.model).await;
+    // A config that names no model of its own is probed with one from the
+    // provider's catalogue, and the line says which, since nothing else does.
+    let (model, picked) = match resolved.model.clone() {
+        Some(model) => (model, false),
+        None => match probe_model(resolved.provider.as_ref()).await {
+            Some(model) => (model, true),
+            None => {
+                checks.push(Check::warn(
+                    "inference",
+                    format!(
+                        "skipped: '{}' lists no model to probe with. Set `override_model` \
+                         in config.toml, or pass `--model`, to check one.",
+                        resolved.provider_name
+                    ),
+                ));
+                return checks;
+            }
+        },
+    };
+    let mut check = inference_check(resolved.provider.as_ref(), &model).await;
+    if picked {
+        check.detail = format!("{model}: {}", check.detail);
+    }
     let inference_failed = check.status == CheckStatus::Fail;
     checks.push(check);
     if inference_failed {
@@ -1121,7 +1083,7 @@ pub(crate) async fn run_checks_with(
                 daemon_check(
                     client,
                     &resolved.provider_name,
-                    &resolved.model,
+                    &model,
                     DAEMON_TIMEOUT,
                     DAEMON_POLL,
                     stage.path(),
@@ -1170,6 +1132,8 @@ pub async fn execute(args: DoctorArgs, daemon: DaemonTarget<'_>) -> anyhow::Resu
     execute_with_registry(args, &build_provider_registry_from_config, daemon).await
 }
 
+mod resolve;
+use resolve::{probe_model, resolve_check};
 mod resolve_notes;
 use resolve_notes::*;
 
