@@ -45,7 +45,7 @@ mod test_support;
 pub use anthropic::AnthropicProvider;
 pub use bedrock::BedrockProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMime};
-pub use capability_cache::CapabilityCache;
+pub use capability_cache::{CapabilityCache, CheckOutcome, ProviderCheck};
 pub use claude_code::ClaudeCodeProvider;
 pub use codex::{CodexProvider, ProviderAuthStore, ProviderGrant};
 pub use endpoint::EndpointProvider;

@@ -154,7 +154,7 @@ pub(crate) async fn verify_via_registry_with(
 ///
 /// The raw strings are HTTP-shaped (`API error 401: {"type":"error",...}`) and
 /// the status code is the only part that tells the user what to *do*.
-fn describe(raw: &str) -> String {
+pub(crate) fn describe(raw: &str) -> String {
     if raw.contains("401") || raw.contains("Unauthorized") || raw.contains("invalid_api_key") {
         "rejected - check the key".to_string()
     } else if raw.contains("403") {

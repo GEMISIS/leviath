@@ -76,6 +76,10 @@ pub struct ProviderRow {
     pub outcome: Outcome,
     /// A verification is in flight.
     pub checking: bool,
+    /// When `outcome` was learned, Unix seconds: the check this wizard ran,
+    /// or one another surface recorded in the capability cache. `None`
+    /// whenever the outcome is `Skipped`.
+    pub checked_at: Option<i64>,
 
     /// For a [`Credential::Signin`] row, who is signed in, as a line to show.
     /// `None` means nobody is. Read when the wizard is built, and again from

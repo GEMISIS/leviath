@@ -38,6 +38,8 @@ pub struct EndpointRow {
     pub outcome: Outcome,
     /// A check is in flight.
     pub checking: bool,
+    /// When `outcome` was learned, Unix seconds; `None` when it is `Skipped`.
+    pub checked_at: Option<i64>,
 }
 
 /// The rows one entry occupies on the setup modal, in order.
@@ -181,6 +183,7 @@ impl EndpointRow {
             default_model: None,
             outcome: Outcome::Skipped,
             checking: false,
+            checked_at: None,
         }
     }
 
@@ -200,6 +203,30 @@ impl EndpointRow {
             default_model: None,
             outcome: Outcome::Skipped,
             checking: false,
+            checked_at: None,
+        }
+    }
+
+    /// The token a check of this entry is fingerprinted by, or `None` for a
+    /// server that wants none.
+    pub(crate) fn secret(&self) -> Option<&str> {
+        (!self.api_key.is_empty()).then_some(self.api_key.as_str())
+    }
+
+    /// Keep the default model in step with the listing: a pick the listing
+    /// no longer names is dropped, and the first id it does name is offered
+    /// when nothing was picked yet.
+    pub(crate) fn settle_default_model(&mut self) {
+        let choices = self.model_choices();
+        if self
+            .default_model
+            .as_ref()
+            .is_some_and(|m| !choices.contains(m))
+        {
+            self.default_model = None;
+        }
+        if self.default_model.is_none() {
+            self.default_model = choices.first().cloned();
         }
     }
 
@@ -399,6 +426,7 @@ impl Wizard {
             EndpointField::BaseUrl | EndpointField::ApiKey | EndpointField::Headers
         ) {
             row.outcome = Outcome::Skipped;
+            row.checked_at = None;
         }
     }
 
@@ -462,9 +490,9 @@ impl Wizard {
         }
     }
 
-    /// Route a verifier's reply to the entry it answers for. `true` when one
-    /// took it.
-    pub(super) fn settle_endpoint_reply(&mut self, reply: &VerifyReply) -> bool {
+    /// Route a verifier's reply to the entry it answers for, stamped `now`.
+    /// `true` when one took it.
+    pub(super) fn settle_endpoint_reply(&mut self, reply: &VerifyReply, now: i64) -> bool {
         let Some(row) = self
             .endpoints
             .iter_mut()
@@ -474,19 +502,8 @@ impl Wizard {
         };
         row.checking = false;
         row.outcome = reply.outcome.clone();
-        // A pick that the listing no longer names is dropped; the first id
-        // the listing does name is offered when nothing was picked yet.
-        let choices = row.model_choices();
-        if row
-            .default_model
-            .as_ref()
-            .is_some_and(|m| !choices.contains(m))
-        {
-            row.default_model = None;
-        }
-        if row.default_model.is_none() {
-            row.default_model = choices.first().cloned();
-        }
+        row.checked_at = Some(now);
+        row.settle_default_model();
         true
     }
 

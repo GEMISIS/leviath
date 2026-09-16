@@ -24,6 +24,7 @@ pub mod dispatch;
 pub(crate) mod held_checkpoints;
 pub(crate) mod lint;
 pub mod logging;
+pub(crate) mod provider_checks;
 pub(crate) mod read_path_report;
 pub(crate) mod render;
 pub mod runstate;

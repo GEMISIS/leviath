@@ -1178,9 +1178,25 @@ pub(crate) fn with_isolated_config_path<R>(
     f: impl FnOnce(&std::path::Path) -> R,
 ) -> R {
     let fake_dir = make_fake_config_dir(unique);
-    let result = temp_env::with_vars(config_isolation_vars(&fake_dir), || f(&fake_dir));
+    let result = temp_env::with_vars(wrapper_isolation_vars(&fake_dir), || f(&fake_dir));
     let _ = std::fs::remove_dir_all(&fake_dir);
     result
+}
+
+/// [`config_isolation_vars`] plus `LEVIATH_HOME`, for the two wrappers.
+///
+/// A command under test writes more than its config: `lev models` records
+/// each provider's answer in the shared capability cache, which lives under
+/// the home. Pinning the home to the same scratch directory keeps every
+/// home-relative write out of the real `~/.leviath`. Kept out of the base
+/// list because the callers that extend it choose their own home.
+#[cfg(test)]
+fn wrapper_isolation_vars(
+    fake_dir: &std::path::Path,
+) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut vars = config_isolation_vars(fake_dir);
+    vars.push(("LEVIATH_HOME", Some(fake_dir.as_os_str().to_os_string())));
+    vars
 }
 
 /// Async counterpart of [`with_isolated_config_path`] for `#[tokio::test]`s.
@@ -1195,7 +1211,7 @@ where
 {
     let fake_dir = make_fake_config_dir(unique);
     let result =
-        temp_env::async_with_vars(config_isolation_vars(&fake_dir), f(fake_dir.clone())).await;
+        temp_env::async_with_vars(wrapper_isolation_vars(&fake_dir), f(fake_dir.clone())).await;
     let _ = std::fs::remove_dir_all(&fake_dir);
     result
 }

@@ -148,6 +148,7 @@ fn entry_status_line(wizard: &Wizard, entry: usize) -> Line<'static> {
             if more > 0 {
                 text.push_str(&format!(" and {more} more"));
             }
+            text.push_str(&super::checked_when(row.checked_at));
             Line::from(vec![
                 Span::styled(
                     format!("    {GLYPH_COMPLETE} "),
@@ -261,6 +262,9 @@ mod tests {
         );
         assert!(screen.contains("(8 detected)"), "{screen}");
         assert!(screen.contains("Default model: m3"), "{screen}");
+        w.endpoints[0].checked_at = Some(chrono::Utc::now().timestamp());
+        let screen = rendered(&w);
+        assert!(screen.contains("and 2 more · checked just now"), "{screen}");
 
         w.endpoints[0].outcome = Outcome::Failed {
             message: "unreachable - check your network".to_string(),

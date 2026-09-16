@@ -136,6 +136,17 @@ same list.
   sending a call too big for its own maximum was paid in full for every
   attempt until `max_iterations` stopped it.
 
+- `lev setup` no longer shows every configured provider as "not checked
+  yet". What a provider said the last time anything asked it is recorded in
+  `~/.leviath/model_capabilities.json`, beside its model list: by the daemon
+  when it reads the model lists at start-up, by `lev models` for each
+  provider it lists live, and by the wizard's own checks. The wizard opens on
+  that record, with its models and "checked 2 hours ago", as long as it was
+  made with the key the config holds now. The file stores an HMAC of the
+  key under a random per-install key kept in
+  `~/.leviath/provider-check.key`, never the key, and `lev rage` never packs
+  that file.
+
 - `lev doctor` no longer fails its `resolve` check with "resolved to
   'anthropic', which is not configured" on an install whose only provider
   is something else and whose config sets no `override_model` or

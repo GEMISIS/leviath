@@ -181,9 +181,11 @@ pub(crate) async fn setup_daemon_host_with(
     // conservative default. Best-effort: a home that does not resolve (path is
     // `None`), or a file that cannot be written, just leaves the pre-cache
     // behaviour in place.
+    let cache_path = leviath_core::paths::capability_cache_path();
     providers.save_capability_cache(
-        leviath_core::paths::capability_cache_path().as_deref(),
+        cache_path.as_deref(),
         chrono::Utc::now().timestamp(),
+        &crate::provider_checks::fingerprints(cache_path.as_deref(), &config),
     );
     // Keeps that registry in step with `config.toml` from here on: a run
     // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves

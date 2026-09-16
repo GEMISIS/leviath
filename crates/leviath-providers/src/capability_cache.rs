@@ -26,6 +26,46 @@ use std::path::Path;
 /// version is ignored rather than misread.
 const CACHE_VERSION: u32 = 1;
 
+/// What asking a provider concluded, the last time anything asked.
+///
+/// Every surface that checks a provider records here: the daemon after a
+/// prime, `lev setup` after its check, `lev models` after a live listing. So
+/// the wizard can open on "checked an hour ago, 12 models" rather than
+/// "not checked yet" for a provider something else proved works, and a key
+/// rejected on the last listing is shown as rejected until it is checked
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCheck {
+    /// When the provider was asked, Unix seconds.
+    pub checked_at: i64,
+    /// A fingerprint of the credential the check used, made by the caller,
+    /// so a check made with a key that has since changed reads as no check
+    /// at all. Never the credential, and never something a credential can be
+    /// guessed back from: this file travels in bug reports, so the CLI's
+    /// fingerprint is keyed with a secret that stays on the machine. `None`
+    /// for a provider with nothing to fingerprint: a local server, or a
+    /// sign-in kept elsewhere.
+    pub credential: Option<String>,
+    /// What it said.
+    pub outcome: CheckOutcome,
+}
+
+/// The answer a provider gave when it was last asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckOutcome {
+    /// It answered, and listed this many models.
+    Reachable {
+        /// How many models it listed; the ids are under the provider's entry.
+        models: usize,
+    },
+    /// It refused or could not be reached.
+    Failed {
+        /// What went wrong, as shown to a person.
+        message: String,
+    },
+}
+
 /// The primed catalogue of every provider, keyed by provider name then model id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityCache {
@@ -38,6 +78,10 @@ pub struct CapabilityCache {
     saved_at: i64,
     /// provider name -> (model id -> what that provider's listing said).
     providers: BTreeMap<String, BTreeMap<String, LearnedModel>>,
+    /// provider name -> what it said the last time anything asked it.
+    /// Defaulted so a file written before checks were recorded still loads.
+    #[serde(default)]
+    checks: BTreeMap<String, ProviderCheck>,
 }
 
 impl CapabilityCache {
@@ -47,6 +91,7 @@ impl CapabilityCache {
             version: CACHE_VERSION,
             saved_at,
             providers: BTreeMap::new(),
+            checks: BTreeMap::new(),
         }
     }
 
@@ -58,9 +103,53 @@ impl CapabilityCache {
         (cache.version == CACHE_VERSION).then_some(cache)
     }
 
+    /// The cache at `path` to add to, stamped `now`: what is there, or an
+    /// empty one when nothing readable is. A writer starts here so a check
+    /// recorded by one surface survives a save by another.
+    pub fn load_or_new(path: &Path, now: i64) -> Self {
+        let mut cache = Self::load(path).unwrap_or_else(|| Self::new(now));
+        cache.saved_at = now;
+        cache
+    }
+
     /// Record one provider's primed catalogue, replacing any it held.
     pub fn set(&mut self, provider: &str, models: BTreeMap<String, LearnedModel>) {
         self.providers.insert(provider.to_string(), models);
+    }
+
+    /// Record the model ids a listing named, keeping what a prime learned
+    /// about the ones it already held and dropping the ones it no longer
+    /// names. For a surface that has the ids but not the limits (`lev setup`,
+    /// `lev models`), so it neither wipes the daemon's numbers nor keeps a
+    /// model the provider stopped serving.
+    pub fn set_model_ids(&mut self, provider: &str, ids: &[String]) {
+        let known = self.providers.remove(provider).unwrap_or_default();
+        let models = ids
+            .iter()
+            .map(|id| {
+                let learned = known.get(id).cloned().unwrap_or_default();
+                (id.clone(), learned)
+            })
+            .collect();
+        self.providers.insert(provider.to_string(), models);
+    }
+
+    /// Record what a provider said when it was asked.
+    pub fn record_check(&mut self, provider: &str, check: ProviderCheck) {
+        self.checks.insert(provider.to_string(), check);
+    }
+
+    /// What a provider said the last time anything asked it, if anything has.
+    pub fn check(&self, provider: &str) -> Option<&ProviderCheck> {
+        self.checks.get(provider)
+    }
+
+    /// The model ids the cache holds for a provider, in listing order.
+    pub fn model_ids(&self, provider: &str) -> Vec<String> {
+        self.providers
+            .get(provider)
+            .map(|models| models.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// One provider's catalogue, if the cache holds it.
@@ -210,6 +299,90 @@ mod tests {
         // An unknown model, and an unknown provider.
         assert_eq!(cache.context_window("openrouter", "nope"), None);
         assert_eq!(cache.context_window("anthropic", "x-ai/grok-4"), None);
+    }
+
+    #[test]
+    fn a_check_is_recorded_kept_across_a_reload_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model_capabilities.json");
+        let mut cache = sample();
+        cache.record_check(
+            "openrouter",
+            ProviderCheck {
+                checked_at: 1_000,
+                credential: Some("0123abcd0123abcd".to_string()),
+                outcome: CheckOutcome::Reachable { models: 1 },
+            },
+        );
+        cache.record_check(
+            "openai",
+            ProviderCheck {
+                checked_at: 900,
+                credential: None,
+                outcome: CheckOutcome::Failed {
+                    message: "rejected - check the key".to_string(),
+                },
+            },
+        );
+        cache.save(&path).unwrap();
+        // Another writer starts from the file and keeps what is there.
+        let later = CapabilityCache::load_or_new(&path, 2_000);
+        assert_eq!(later.age_secs(2_000), 0);
+        assert_eq!(later.check("openrouter").unwrap().checked_at, 1_000);
+        assert_eq!(
+            later.check("openai").unwrap().outcome,
+            CheckOutcome::Failed {
+                message: "rejected - check the key".to_string()
+            }
+        );
+        assert!(later.check("anthropic").is_none());
+        assert_eq!(later.model_ids("openrouter"), ["anthropic/claude-opus-5"]);
+        assert!(later.model_ids("anthropic").is_empty());
+        // No file: an empty cache stamped now.
+        let fresh = CapabilityCache::load_or_new(&dir.path().join("none.json"), 5);
+        assert_eq!(fresh, CapabilityCache::new(5));
+    }
+
+    #[test]
+    fn a_file_written_before_checks_existed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.json");
+        std::fs::write(
+            &old,
+            serde_json::json!({ "version": 1, "saved_at": 1, "providers": {} }).to_string(),
+        )
+        .unwrap();
+        let cache = CapabilityCache::load(&old).unwrap();
+        assert!(cache.check("openrouter").is_none());
+    }
+
+    #[test]
+    fn listed_ids_keep_what_a_prime_learned_and_drop_the_rest() {
+        let mut cache = sample();
+        cache.set_model_ids(
+            "openrouter",
+            &[
+                "anthropic/claude-opus-5".to_string(),
+                "new/model".to_string(),
+            ],
+        );
+        let models = cache.get("openrouter").unwrap();
+        assert_eq!(
+            models["anthropic/claude-opus-5"].max_context_tokens,
+            Some(200_000),
+            "the learned window survives"
+        );
+        assert_eq!(models["new/model"], LearnedModel::default());
+        cache.set_model_ids("openrouter", &["new/model".to_string()]);
+        assert!(
+            !cache
+                .get("openrouter")
+                .unwrap()
+                .contains_key("anthropic/claude-opus-5")
+        );
+        // A provider the cache never held gets the ids with nothing learned.
+        cache.set_model_ids("anthropic", &["claude-opus-5".to_string()]);
+        assert_eq!(cache.model_ids("anthropic"), ["claude-opus-5"]);
     }
 
     #[test]
