@@ -17,7 +17,7 @@ fn event(value: serde_json::Value) -> String {
 
 /// Run one event through the parser with a fresh turn.
 fn parse_one(value: serde_json::Value) -> Option<Option<crate::provider::Result<StreamChunk>>> {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = event(value);
     parse_event(&mut buffer, &mut turn)
 }
@@ -32,7 +32,7 @@ fn chunk(value: serde_json::Value) -> StreamChunk {
 
 #[test]
 fn a_partial_event_is_left_in_the_buffer() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "event: response.created\ndata: {\"type\":\"resp".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
     assert!(!buffer.is_empty(), "the partial frame was eaten");
@@ -116,19 +116,77 @@ fn an_event_with_no_output_index_falls_back_to_the_first_slot() {
 }
 
 #[test]
-fn a_finished_reasoning_item_yields_its_sealed_blob() {
-    let c = chunk(serde_json::json!({
-        "type": "response.output_item.done",
-        "output_index": 0,
-        "item": {
-            "id": "rs_03942a3c50",
-            "type": "reasoning",
-            "encrypted_content": "sealed-bytes",
-            "summary": [{ "type": "summary_text", "text": "thinking" }],
-        },
+fn a_finished_reasoning_item_is_held_until_the_response_ends() {
+    let mut turn = Turn::new(crate::codex::DIALECT);
+    for (n, blob) in ["first", "second"].into_iter().enumerate() {
+        let mut buffer = event(serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": n,
+            "item": {
+                "id": "rs_03942a3c50",
+                "type": "reasoning",
+                "encrypted_content": blob,
+                "summary": [{ "type": "summary_text", "text": "thinking" }],
+            },
+        }));
+        assert!(
+            parse_event(&mut buffer, &mut turn).is_none(),
+            "a summary or an item must not surface mid-stream"
+        );
+    }
+    let mut buffer = event(serde_json::json!({
+        "type": "response.completed",
+        "response": { "status": "completed", "output": [] },
     }));
-    assert_eq!(c.reasoning.as_deref(), Some("sealed-bytes"));
-    assert_eq!(c.delta, "", "a summary must not leak into the answer");
+    let done = parse_event(&mut buffer, &mut turn)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let blob = done.reasoning.expect("sealed on completion");
+    assert_eq!(
+        crate::responses::reasoning::items_for("codex", &blob),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn a_response_cut_short_still_keeps_its_reasoning() {
+    let mut turn = Turn::new(crate::codex::DIALECT);
+    let mut buffer = event(serde_json::json!({
+        "type": "response.output_item.done",
+        "item": { "type": "reasoning", "encrypted_content": "partial" },
+    }));
+    assert!(parse_event(&mut buffer, &mut turn).is_none());
+    let mut buffer = event(serde_json::json!({
+        "type": "response.incomplete",
+        "response": { "status": "incomplete" },
+    }));
+    let done = parse_event(&mut buffer, &mut turn)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(done.reasoning.unwrap().contains("partial"));
+}
+
+#[test]
+fn a_priced_route_records_its_own_cost_and_a_subscription_does_not() {
+    let completed = serde_json::json!({
+        "type": "response.completed",
+        "response": { "usage": { "input_tokens": 10, "output_tokens": 2, "cost_in_usd_ticks": 3271500 } },
+    });
+    let mut priced = crate::codex::DIALECT;
+    priced.reported_cost = true;
+    let mut turn = Turn::new(priced);
+    let mut buffer = event(completed.clone());
+    let tokens = parse_event(&mut buffer, &mut turn)
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .tokens
+        .unwrap();
+    let cost = tokens.reported_cost_usd.expect("a reported cost");
+    assert!((cost - 0.00032715).abs() < 1e-12, "{cost}");
+    assert_eq!(chunk(completed).tokens.unwrap().reported_cost_usd, None);
 }
 
 #[test]
@@ -220,7 +278,7 @@ fn usage_is_zero_when_the_server_reports_none() {
 fn a_turn_that_called_a_tool_finishes_as_a_tool_call() {
     // The terminal event says `completed` either way, so the finish reason has
     // to come from what arrived earlier in the same response.
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = event(serde_json::json!({
         "type": "response.output_item.added",
         "output_index": 0,
@@ -335,7 +393,7 @@ fn the_bookkeeping_events_are_ignored() {
 
 #[test]
 fn an_event_with_no_data_line_is_skipped() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "event: ping\n\n".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
     assert!(buffer.is_empty(), "the frame was not consumed");
@@ -343,28 +401,28 @@ fn an_event_with_no_data_line_is_skipped() {
 
 #[test]
 fn an_unparseable_data_line_is_skipped() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "event: x\ndata: {not json\n\n".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
 }
 
 #[test]
 fn an_event_with_no_type_is_skipped() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "data: {\"delta\":\"x\"}\n\n".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
 }
 
 #[test]
 fn a_completed_event_with_no_response_object_is_skipped() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "data: {\"type\":\"response.completed\"}\n\n".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
 }
 
 #[test]
 fn an_incomplete_event_with_no_response_object_is_skipped() {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(crate::codex::DIALECT);
     let mut buffer = "data: {\"type\":\"response.incomplete\"}\n\n".to_string();
     assert!(parse_event(&mut buffer, &mut turn).is_none());
 }
@@ -372,7 +430,7 @@ fn an_incomplete_event_with_no_response_object_is_skipped() {
 #[test]
 fn an_item_event_with_no_item_is_skipped() {
     for kind in ["response.output_item.added", "response.output_item.done"] {
-        let mut turn = Turn::default();
+        let mut turn = Turn::new(crate::codex::DIALECT);
         let mut buffer = format!("data: {{\"type\":\"{kind}\"}}\n\n");
         assert!(parse_event(&mut buffer, &mut turn).is_none(), "{kind}");
     }
@@ -419,9 +477,10 @@ async fn a_whole_tool_calling_turn_collects_into_one_response() {
             .collect::<Vec<_>>(),
     );
 
-    let response = crate::provider::collect_stream(Box::pin(codex_sse_stream(bytes)))
-        .await
-        .expect("collected");
+    let response =
+        crate::provider::collect_stream(Box::pin(sse_stream(bytes, crate::codex::DIALECT)))
+            .await
+            .expect("collected");
 
     assert_eq!(response.tool_calls.len(), 1);
     let call = &response.tool_calls[0];
@@ -455,9 +514,13 @@ async fn a_reasoning_blob_survives_collection() {
             .map(|f| Ok(bytes::Bytes::from(f)))
             .collect::<Vec<_>>(),
     );
-    let response = crate::provider::collect_stream(Box::pin(codex_sse_stream(bytes)))
-        .await
-        .expect("collected");
+    let response =
+        crate::provider::collect_stream(Box::pin(sse_stream(bytes, crate::codex::DIALECT)))
+            .await
+            .expect("collected");
     assert_eq!(response.content, "42");
-    assert_eq!(response.reasoning.as_deref(), Some("sealed"));
+    assert_eq!(
+        crate::responses::reasoning::items_for("codex", response.reasoning.as_deref().unwrap()),
+        ["sealed"]
+    );
 }

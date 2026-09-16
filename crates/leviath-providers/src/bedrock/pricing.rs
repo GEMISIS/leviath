@@ -84,6 +84,8 @@ impl Partial {
             cached_input_per_mtok: self.cache_read.unwrap_or(input),
             cache_write_per_mtok: self.cache_write.filter(|w| *w > 0.0).unwrap_or(input),
             output_per_mtok: output,
+            long_context: None,
+            unit: None,
         })
     }
 }

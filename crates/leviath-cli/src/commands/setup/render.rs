@@ -1411,7 +1411,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("Ollama (local)  Local and custom · Text and images"),
+            screen.contains("Ollama  Local and custom · Text and images"),
             "{screen}"
         );
         assert!(screen.contains("not checked yet"), "{screen}");
@@ -1807,10 +1807,7 @@ mod tests {
         let (_dir, mut w, index) = codex_card();
 
         let waiting = rendered(&w);
-        assert!(
-            waiting.contains(" Set up OpenAI Codex (ChatGPT subscription) "),
-            "{waiting}"
-        );
+        assert!(waiting.contains(" Set up OpenAI Codex "), "{waiting}");
         assert!(waiting.contains("Not signed in yet"), "{waiting}");
         assert!(waiting.contains("Sign in with your browser"), "{waiting}");
         assert!(waiting.contains("Nothing to type here."), "{waiting}");

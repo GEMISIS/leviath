@@ -769,6 +769,14 @@ impl Config {
             config.providers.bedrock_api_key =
                 std::env::var(leviath_providers::bedrock::KEY_ENV).ok();
         }
+        if config.providers.xai_api_key.is_none() {
+            config.providers.xai_api_key = std::env::var("XAI_API_KEY").ok();
+        }
+        // Not Meta's own `MODEL_API_KEY`: a name that generic could belong to
+        // anything on the machine.
+        if config.providers.meta_api_key.is_none() {
+            config.providers.meta_api_key = std::env::var("META_AI_API_KEY").ok();
+        }
         // The region AWS's own tooling reads, so a machine set up for the AWS
         // CLI is set up for this. Blank is unset: an exported empty variable
         // is not a region.
@@ -806,6 +814,12 @@ impl Config {
         }
         if config.providers.bedrock_base_url.is_none() {
             config.providers.bedrock_base_url = std::env::var("BEDROCK_BASE_URL").ok();
+        }
+        if config.providers.xai_base_url.is_none() {
+            config.providers.xai_base_url = std::env::var("XAI_BASE_URL").ok();
+        }
+        if config.providers.meta_base_url.is_none() {
+            config.providers.meta_base_url = std::env::var("META_AI_BASE_URL").ok();
         }
 
         config.fill_from_credential_store();
@@ -861,12 +875,16 @@ impl Config {
         let google = take("google");
         let openrouter = take("openrouter");
         let bedrock = take("bedrock");
+        let xai = take("xai");
+        let meta = take("meta");
 
         self.providers.anthropic_api_key = self.providers.anthropic_api_key.take().or(anthropic);
         self.providers.openai_api_key = self.providers.openai_api_key.take().or(openai);
         self.providers.google_api_key = self.providers.google_api_key.take().or(google);
         self.openrouter_api_key = self.openrouter_api_key.take().or(openrouter);
         self.providers.bedrock_api_key = self.providers.bedrock_api_key.take().or(bedrock);
+        self.providers.xai_api_key = self.providers.xai_api_key.take().or(xai);
+        self.providers.meta_api_key = self.providers.meta_api_key.take().or(meta);
     }
 
     /// This config with every provider API key removed.
@@ -883,6 +901,8 @@ impl Config {
         copy.providers.google_api_key = None;
         copy.openrouter_api_key = None;
         copy.providers.bedrock_api_key = None;
+        copy.providers.xai_api_key = None;
+        copy.providers.meta_api_key = None;
         copy
     }
 
@@ -894,6 +914,8 @@ impl Config {
             ("google", self.providers.google_api_key.as_deref()),
             ("openrouter", self.openrouter_api_key.as_deref()),
             ("bedrock", self.providers.bedrock_api_key.as_deref()),
+            ("xai", self.providers.xai_api_key.as_deref()),
+            ("meta", self.providers.meta_api_key.as_deref()),
         ]
         .into_iter()
         .filter_map(|(name, key)| {

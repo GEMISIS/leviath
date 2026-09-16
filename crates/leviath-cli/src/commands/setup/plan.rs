@@ -160,6 +160,12 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         Some(&before.providers.zero_retention),
         Some(&after.providers.zero_retention),
     );
+    push_if_changed(
+        &mut out,
+        "file uploads",
+        Some(&before.providers.file_uploads),
+        Some(&after.providers.file_uploads),
+    );
     let listed = |names: &[String]| (!names.is_empty()).then(|| names.join(", "));
     push_if_changed(
         &mut out,

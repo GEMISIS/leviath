@@ -164,6 +164,21 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::meshy::CATALOG,
         crate::meshy::table_capabilities,
     ))
+    .chain(rows(
+        "xai",
+        crate::xai::catalog::CATALOG,
+        crate::xai::catalog::table_capabilities,
+    ))
+    .chain(rows(
+        "grok",
+        crate::xai::catalog::CATALOG,
+        crate::xai::catalog::table_capabilities,
+    ))
+    .chain(rows(
+        "meta",
+        crate::meta::CATALOG,
+        crate::meta::table_capabilities,
+    ))
     .collect()
 }
 
@@ -628,6 +643,16 @@ mod table_tests {
                 "bedrock",
                 crate::bedrock::catalog::MODELS,
                 crate::bedrock::catalog::FALLBACK_CAPABILITIES,
+            ),
+            (
+                "xai",
+                crate::xai::catalog::MODELS,
+                crate::xai::catalog::FALLBACK_CAPABILITIES,
+            ),
+            (
+                "meta",
+                crate::meta::MODELS,
+                crate::meta::FALLBACK_CAPABILITIES,
             ),
         ]
     }

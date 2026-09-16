@@ -6,8 +6,8 @@
 //! assumed.
 
 use super::*;
-use crate::codex::store::{ProviderAuthStore, ProviderGrant};
-use crate::codex::token::RefreshError;
+use crate::oauth::store::{ProviderAuthStore, ProviderGrant};
+use crate::oauth::token::RefreshError;
 use crate::provider::{Message, MessageContent, SystemBlock};
 use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
 use std::sync::atomic::{AtomicUsize, Ordering};

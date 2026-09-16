@@ -7,6 +7,7 @@
 
 use super::*;
 use leviath_core::CredentialStore as _;
+use leviath_providers::{codex, grok};
 use leviath_testkit::spawn_mock_server;
 use std::sync::Mutex;
 
@@ -21,6 +22,10 @@ pub(crate) fn browser_that_redirects(
         let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
         let redirect = pairs.get("redirect_uri").expect("a redirect").clone();
         let state = pairs.get("state").expect("a state").clone();
+        let path = url::Url::parse(&redirect)
+            .expect("a redirect URL")
+            .path()
+            .to_string();
         // `127.0.0.1`, not the `localhost` in the redirect URI. The listener
         // binds the v4 loopback (as the Codex CLI does), and `localhost`
         // resolves to `::1` first on some machines, which would connect to
@@ -39,8 +44,7 @@ pub(crate) fn browser_that_redirects(
             use tokio::io::AsyncWriteExt as _;
             if let Ok(mut socket) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
                 let request = format!(
-                    "GET {}?code=the-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                    codex::CALLBACK_PATH
+                    "GET {path}?code=the-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 );
                 let _ = socket.write_all(request.as_bytes()).await;
                 let _ = socket.flush().await;
@@ -98,6 +102,7 @@ pub(crate) fn env_for(
     opener: leviath_mcp::BrowserOpener,
 ) -> LoginEnv {
     LoginEnv {
+        profile: &codex::PROFILE,
         opener,
         store_path: dir.path().join("provider-auth.json"),
         credential_store: None,
@@ -302,7 +307,9 @@ async fn both_registered_ports_are_tried_before_giving_up() {
         probe.local_addr().expect("addr").port()
     };
 
-    let (_listener, port) = bind(&[taken, spare]).await.expect("one of the two");
+    let (_listener, port) = bind(&codex::PROFILE, &[taken, spare])
+        .await
+        .expect("one of the two");
     assert_eq!(port, spare, "the free port was not tried");
 }
 
@@ -313,7 +320,10 @@ async fn neither_port_available_names_the_codex_cli() {
         .await
         .expect("bind");
     let taken = held.local_addr().expect("addr").port();
-    let err = bind(&[taken]).await.unwrap_err().to_string();
+    let err = bind(&codex::PROFILE, &[taken])
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Codex CLI"), "got {err}");
     assert!(err.contains(&taken.to_string()), "got {err}");
 }
@@ -333,7 +343,7 @@ fn signing_out_removes_the_grant_and_reports_it() {
     );
     store.save(&path).expect("save");
 
-    assert!(logout(&path, None).expect("logout"));
+    assert!(logout(&codex::PROFILE, &path, None).expect("logout"));
     assert!(
         ProviderAuthStore::load(&path)
             .expect("load")
@@ -341,7 +351,7 @@ fn signing_out_removes_the_grant_and_reports_it() {
             .is_none()
     );
     // And a second attempt says there was nothing to do.
-    assert!(!logout(&path, None).expect("logout"));
+    assert!(!logout(&codex::PROFILE, &path, None).expect("logout"));
 }
 
 #[tokio::test]
@@ -444,7 +454,7 @@ fn a_store_that_refuses_the_write_fails_the_sign_out() {
         );
     }
     store.save(&path).expect("save");
-    assert!(logout(&path, Some(&Refusing)).is_err());
+    assert!(logout(&codex::PROFILE, &path, Some(&Refusing)).is_err());
 }
 
 /// A credential store that answers reads and refuses writes.
@@ -465,7 +475,7 @@ impl leviath_core::CredentialStore for Refusing {
 #[test]
 fn signing_out_of_nothing_is_not_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
-    assert!(!logout(&dir.path().join("absent.json"), None).expect("logout"));
+    assert!(!logout(&codex::PROFILE, &dir.path().join("absent.json"), None).expect("logout"));
 }
 
 #[test]
@@ -486,10 +496,10 @@ fn signing_out_clears_the_os_entry_too() {
     );
     store.save_with(&path, Some(&keychain)).expect("save");
 
-    assert!(logout(&path, Some(&keychain)).expect("logout"));
+    assert!(logout(&codex::PROFILE, &path, Some(&keychain)).expect("logout"));
     assert_eq!(
         keychain
-            .get(&codex::grant_account("codex"))
+            .get(&leviath_providers::oauth::grant_account("codex"))
             .expect("a readable store"),
         None
     );
@@ -498,6 +508,7 @@ fn signing_out_clears_the_os_entry_too() {
 #[test]
 fn the_production_environment_uses_the_registered_ports_and_issuer() {
     let env = LoginEnv::new(
+        &codex::PROFILE,
         browser_that_does_nothing(),
         PathBuf::from("/tmp/does-not-matter"),
         None,
@@ -506,4 +517,229 @@ fn the_production_environment_uses_the_registered_ports_and_issuer() {
     );
     assert_eq!(env.issuer, "https://auth.openai.com");
     assert_eq!(env.ports, vec![1455, 1457]);
+}
+
+/// An id token carrying `nonce`, the way xAI's issuer answers.
+fn id_token_with_nonce(nonce: &str) -> String {
+    let claims = serde_json::json!({ "email": "grok@example.com", "nonce": nonce }).to_string();
+    format!("aGVhZGVy.{}.c2ln", base64url(claims.as_bytes()))
+}
+
+/// A browser that plays the redirect and remembers the nonce it was sent, so a
+/// mock issuer can echo it.
+fn grok_env(issuer: &str, dir: &tempfile::TempDir, seen: Arc<Mutex<Vec<String>>>) -> LoginEnv {
+    let mut env = env_for(issuer, dir, browser_that_redirects(seen));
+    env.profile = &grok::PROFILE;
+    env
+}
+
+#[tokio::test]
+async fn a_grok_sign_in_redirects_to_its_own_loopback_and_sends_a_nonce() {
+    // The exchange answers before the nonce is known, so this issuer echoes a
+    // fixed one and the check is expected to refuse it: the URL is what this
+    // test reads.
+    let body = serde_json::json!({
+        "access_token": "at-1",
+        "refresh_token": "rt-1",
+        "id_token": id_token_with_nonce("not-the-one-sent"),
+    });
+    let issuer = spawn_mock_server(200, "OK", body.to_string().into_bytes()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let err = login(&grok_env(&issuer, &dir, Arc::clone(&seen)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("nonce mismatch"), "got {err}");
+
+    let url = seen.lock().expect("recorder")[0].clone();
+    let parsed = url::Url::parse(&url).expect("a URL");
+    assert_eq!(parsed.path(), "/oauth2/authorize");
+    let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+    assert_eq!(pairs["client_id"], grok::CLIENT_ID);
+    assert!(
+        pairs["redirect_uri"].starts_with("http://127.0.0.1:"),
+        "{}",
+        pairs["redirect_uri"]
+    );
+    assert!(pairs["redirect_uri"].ends_with("/callback"));
+    assert!(pairs["nonce"].len() >= 16, "nonce too short");
+    assert_eq!(pairs["referrer"], "leviath");
+    assert!(!pairs.contains_key("codex_cli_simplified_flow"));
+    // Nothing was stored for a reply that failed the check.
+    assert!(
+        ProviderAuthStore::load(&dir.path().join("provider-auth.json"))
+            .expect("load")
+            .get("grok")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_grok_reply_that_echoes_the_nonce_is_stored_under_grok() {
+    // A two-step mock: the browser stub reads the nonce off the URL and the
+    // issuer is only started once it is known.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let issuer_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let issuer = format!("http://{}", listener.local_addr().expect("addr"));
+    let slot = Arc::clone(&issuer_slot);
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0u8; 65536];
+        let _ = socket.read(&mut buf).await;
+        let nonce = slot.lock().expect("slot").clone().unwrap_or_default();
+        let body = serde_json::json!({
+            "access_token": "at-grok",
+            "refresh_token": "rt-grok",
+            "id_token": id_token_with_nonce(&nonce),
+        })
+        .to_string();
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(reply.as_bytes()).await;
+    });
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let redirecting = browser_that_redirects(Arc::clone(&seen));
+    let nonce_sink = Arc::clone(&issuer_slot);
+    let opener: leviath_mcp::BrowserOpener = Arc::new(move |url: &str| {
+        let parsed = url::Url::parse(url).expect("a URL");
+        let nonce = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "nonce")
+            .map(|(_, v)| v.into_owned());
+        *nonce_sink.lock().expect("slot") = nonce;
+        redirecting(url)
+    });
+    let mut env = env_for(&issuer, &dir, opener);
+    env.profile = &grok::PROFILE;
+    let grant = login(&env).await.expect("sign-in");
+    assert_eq!(grant.email.as_deref(), Some("grok@example.com"));
+    let stored = ProviderAuthStore::load(&dir.path().join("provider-auth.json")).expect("load");
+    assert_eq!(
+        stored.get("grok").expect("grok grant").refresh_token,
+        "rt-grok"
+    );
+    assert!(stored.get("codex").is_none());
+}
+
+#[tokio::test]
+async fn signing_out_of_grok_revokes_the_refresh_token_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    let mut store = ProviderAuthStore::default();
+    store.set(
+        "grok",
+        ProviderGrant {
+            access_token: "at".to_string(),
+            refresh_token: "rt-to-revoke".to_string(),
+            ..Default::default()
+        },
+    );
+    store.save(&path).expect("save");
+    let (issuer, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", b"{}".to_vec()).await;
+    revoke(
+        &grok::PROFILE,
+        &reqwest::Client::new(),
+        &issuer,
+        &path,
+        None,
+    )
+    .await
+    .expect("revoked");
+    let request = seen.lock().unwrap().join("\n");
+    assert!(request.contains("POST /oauth2/revoke"), "{request}");
+    assert!(request.contains("token=rt-to-revoke"), "{request}");
+    assert!(
+        request.contains("token_type_hint=refresh_token"),
+        "{request}"
+    );
+}
+
+#[tokio::test]
+async fn a_revocation_the_issuer_refuses_or_cannot_hear_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    let mut store = ProviderAuthStore::default();
+    store.set("grok", ProviderGrant::default());
+    store.save(&path).expect("save");
+    let issuer = spawn_mock_server(500, "Internal Server Error", b"no".to_vec()).await;
+    let err = revoke(
+        &grok::PROFILE,
+        &reqwest::Client::new(),
+        &issuer,
+        &path,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("500"), "{err}");
+    let err = revoke(
+        &grok::PROFILE,
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        &path,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("could not reach"), "{err}");
+}
+
+#[tokio::test]
+async fn nothing_to_revoke_is_not_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("provider-auth.json");
+    // An issuer with no revocation endpoint.
+    revoke(
+        &codex::PROFILE,
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        &path,
+        None,
+    )
+    .await
+    .expect("codex has nothing to revoke at");
+    // A revocation endpoint, and no grant.
+    revoke(
+        &grok::PROFILE,
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        &path,
+        None,
+    )
+    .await
+    .expect("no grant, no call");
+    // A store that cannot be read.
+    std::fs::write(&path, "{ not json").expect("write");
+    assert!(
+        revoke(
+            &grok::PROFILE,
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1",
+            &path,
+            None
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_taken_grok_port_names_the_grok_cli() {
+    let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let taken = held.local_addr().expect("addr").port();
+    let err = bind(&grok::PROFILE, &[taken])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Grok CLI"), "got {err}");
+    assert!(err.contains("Grok sign-in"), "got {err}");
 }

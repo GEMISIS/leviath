@@ -58,7 +58,7 @@ impl Wizard {
         // so the wizard cannot report a sign-in working that a run would not
         // find.
         let mut options = if signin {
-            crate::commands::run::session::codex_options(&self.base)
+            crate::commands::run::session::signin_options(&self.base, &id)
         } else {
             HashMap::new()
         };

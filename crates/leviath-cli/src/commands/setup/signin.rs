@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::state::{SigninAction, SigninEvent, SigninRequest};
-use crate::commands::auth::codex::{self as codex_login, LoginEnv};
+use crate::commands::auth::oauth::{self as oauth_login, LoginEnv};
 
 /// Takes and forgets browser sign-ins.
 pub trait ProviderAuthorizer {
@@ -38,7 +38,7 @@ pub trait ProviderAuthorizer {
     fn sign_in(
         &self,
         provider_id: &str,
-        announce: codex_login::Announce,
+        announce: oauth_login::Announce,
     ) -> impl std::future::Future<Output = anyhow::Result<String>> + Send;
 
     /// Forget `provider_id`'s stored grant.
@@ -75,10 +75,11 @@ pub struct LiveAuthorizer {
     pub client: reqwest::Client,
     /// The OAuth issuer, and the loopback ports its client id is registered
     /// against. Overridden only by tests, which point them at a local mock and
-    /// port zero so a whole sign-in runs without a browser or a fixed port.
-    pub issuer: String,
+    /// port zero so a whole sign-in runs without a browser or a fixed port;
+    /// `None` is each provider's own.
+    pub issuer: Option<String>,
     /// See [`Self::issuer`].
-    pub ports: Vec<u16>,
+    pub ports: Option<Vec<u16>>,
 }
 
 impl LiveAuthorizer {
@@ -97,11 +98,11 @@ impl LiveAuthorizer {
             .credential_store;
         Self {
             opener,
-            store_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+            store_path: leviath_providers::oauth::ProviderAuthStore::default_path(),
             credential_store: crate::credentials::store_for(kind).map(|store| store.map(Arc::from)),
             client: leviath_net::client(leviath_net::ClientTimeouts::default()),
-            issuer: leviath_providers::codex::ISSUER.to_string(),
-            ports: leviath_providers::codex::CALLBACK_PORTS.to_vec(),
+            issuer: None,
+            ports: None,
         }
     }
 
@@ -126,16 +127,25 @@ impl LiveAuthorizer {
     /// Assembled before the flow starts so a missing home or an unreachable
     /// keychain is reported without a browser having opened onto a sign-in
     /// there is nowhere to store.
-    fn login_env(&self, announce: codex_login::Announce) -> anyhow::Result<LoginEnv> {
+    fn login_env(
+        &self,
+        profile: &'static leviath_providers::oauth::OAuthProfile,
+        announce: oauth_login::Announce,
+    ) -> anyhow::Result<LoginEnv> {
         let mut env = LoginEnv::new(
+            profile,
             self.opener.clone(),
             self.store_path()?,
             self.credential_store()?,
             self.client.clone(),
             announce,
         );
-        env.issuer = self.issuer.clone();
-        env.ports = self.ports.clone();
+        if let Some(issuer) = &self.issuer {
+            env.issuer = issuer.clone();
+        }
+        if let Some(ports) = &self.ports {
+            env.ports = ports.clone();
+        }
         Ok(env)
     }
 }
@@ -144,32 +154,39 @@ impl ProviderAuthorizer for LiveAuthorizer {
     async fn sign_in(
         &self,
         provider_id: &str,
-        announce: codex_login::Announce,
+        announce: oauth_login::Announce,
     ) -> anyhow::Result<String> {
-        unsupported(provider_id)?;
-        let grant = codex_login::login(&self.login_env(announce)?).await?;
+        let profile = profile_for(provider_id)?;
+        let grant = oauth_login::login(&self.login_env(profile, announce)?).await?;
         Ok(describe(&grant))
     }
 
     async fn sign_out(&self, provider_id: &str) -> anyhow::Result<()> {
-        unsupported(provider_id)?;
-        codex_login::logout(&self.store_path()?, self.credential_store()?.as_deref())?;
+        let profile = profile_for(provider_id)?;
+        let path = self.store_path()?;
+        let store = self.credential_store()?;
+        let issuer = self.issuer.as_deref().unwrap_or(profile.issuer);
+        // Best effort, before forgetting: a revocation that fails leaves a
+        // token that expires on its own, and is no reason to keep the grant.
+        if let Err(e) =
+            oauth_login::revoke(profile, &self.client, issuer, &path, store.as_deref()).await
+        {
+            tracing::warn!("{e}");
+        }
+        oauth_login::logout(profile, &path, store.as_deref())?;
         Ok(())
     }
 }
 
-/// Refuse a provider this does not know how to sign in.
+/// How `provider_id` signs in, or the refusal for a provider that does not.
 ///
-/// Codex is the only one today. A second would be a match here rather than a
-/// second implementation of the trait, since the wizard's side of it is the
-/// same either way.
-fn unsupported(provider_id: &str) -> anyhow::Result<()> {
-    if provider_id == leviath_providers::codex::PROVIDER_NAME {
-        return Ok(());
-    }
-    Err(anyhow::anyhow!(
-        "'{provider_id}' does not sign in with a browser"
-    ))
+/// One lookup rather than a second implementation of the trait per provider:
+/// the wizard's side of a sign-in is the same whichever issuer it goes to.
+fn profile_for(
+    provider_id: &str,
+) -> anyhow::Result<&'static leviath_providers::oauth::OAuthProfile> {
+    leviath_providers::oauth::profile(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("'{provider_id}' does not sign in with a browser"))
 }
 
 /// The identity line a signed-in grant shows as.
@@ -222,7 +239,7 @@ pub async fn signin_loop<A: ProviderAuthorizer>(
 fn announcer(
     events: &mpsc::UnboundedSender<SigninEvent>,
     provider_id: &str,
-) -> codex_login::Announce {
+) -> oauth_login::Announce {
     let events = events.clone();
     let provider_id = provider_id.to_string();
     Arc::new(move |url: &str| {

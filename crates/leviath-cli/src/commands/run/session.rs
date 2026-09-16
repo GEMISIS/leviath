@@ -78,6 +78,18 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             config.providers.bedrock_base_url.as_deref(),
             &config.providers.bedrock_headers,
         ),
+        (
+            leviath_providers::xai::PROVIDER_NAME,
+            config.providers.xai_api_key.as_deref(),
+            config.providers.xai_base_url.as_deref(),
+            &config.providers.xai_headers,
+        ),
+        (
+            leviath_providers::meta::PROVIDER_NAME,
+            config.providers.meta_api_key.as_deref(),
+            config.providers.meta_base_url.as_deref(),
+            &config.providers.meta_headers,
+        ),
     ];
     for (name, key, base_url, headers) in keyed {
         // A blank key is not a key: `lev setup` writes empty strings for
@@ -248,7 +260,81 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         });
     }
 
+    // Grok billed to a subscription: the xAI API over a browser sign-in, so it
+    // takes xAI's host and headers, and the grant location a run reads.
+    if config.providers.grok_enabled {
+        creds.push(
+            ProviderCreds {
+                name: leviath_providers::grok::PROVIDER_NAME.to_string(),
+                api_key: None,
+                base_url: config
+                    .providers
+                    .xai_base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .map(str::to_string),
+                model_capabilities: caps.clone(),
+                request_timeout_secs: config.request_timeout_secs,
+                rate_limit: config
+                    .rate_limits
+                    .get(leviath_providers::grok::PROVIDER_NAME)
+                    .cloned(),
+                options: grok_options(config),
+            }
+            .with_headers(
+                config
+                    .providers
+                    .xai_headers
+                    .iter()
+                    .map(|(header, value)| (header.clone(), value.clone()))
+                    .collect(),
+            ),
+        );
+    }
+
     creds
+}
+
+/// The `options` a browser sign-in provider's [`ProviderCreds`] carries, by
+/// provider id: Codex's own, Grok's, or none for anything else.
+///
+/// Shared with `lev setup` and `lev serve`, whose credential checks have to
+/// build the provider the same way a run does.
+pub(crate) fn signin_options(
+    config: &Config,
+    id: &str,
+) -> std::collections::HashMap<String, String> {
+    match id {
+        "codex" => codex_options(config),
+        "grok" => grok_options(config),
+        _ => std::collections::HashMap::new(),
+    }
+}
+
+/// What every sign-in provider's options carry: where the grant is, and
+/// whether it is in the OS credential store.
+fn grant_options(config: &Config) -> std::collections::HashMap<String, String> {
+    let mut options = std::collections::HashMap::new();
+    // Extended from an `Option` rather than branched on: with no home
+    // there is no path, the option is simply absent, and the registry
+    // skips the provider - which it is tested to do.
+    options.extend(
+        leviath_providers::oauth::ProviderAuthStore::default_path()
+            .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
+    );
+    // The runtime has no view of `[security]`, and a grant only the CLI
+    // could read would leave the keychain backend silently signing the
+    // daemon out.
+    if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
+        options.insert("credential_store".to_string(), "keychain".to_string());
+    }
+    options
+}
+
+/// The `options` a Grok [`ProviderCreds`] carries.
+fn grok_options(config: &Config) -> std::collections::HashMap<String, String> {
+    grant_options(config)
 }
 
 /// The `options` a Codex [`ProviderCreds`] carries.
@@ -257,14 +343,7 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
 /// the same way this does. It reads the grant from disk, so a wizard that
 /// pointed somewhere else would be checking a sign-in no run would ever use.
 pub(crate) fn codex_options(config: &Config) -> std::collections::HashMap<String, String> {
-    let mut options = std::collections::HashMap::new();
-    // Extended from an `Option` rather than branched on: with no home
-    // there is no path, the option is simply absent, and the registry
-    // skips the provider - which it is tested to do.
-    options.extend(
-        leviath_providers::codex::ProviderAuthStore::default_path()
-            .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
-    );
+    let mut options = grant_options(config);
     options.extend(
         config
             .providers
@@ -290,12 +369,6 @@ pub(crate) fn codex_options(config: &Config) -> std::collections::HashMap<String
         "replay_reasoning".to_string(),
         config.providers.codex_replay_reasoning.to_string(),
     );
-    // The runtime has no view of `[security]`, and a grant only the CLI
-    // could read would leave the keychain backend silently signing the
-    // daemon out.
-    if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
-        options.insert("credential_store".to_string(), "keychain".to_string());
-    }
     options
 }
 

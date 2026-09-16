@@ -11,6 +11,7 @@
 //! one a stage uses is a routing decision, not a configuration accident.
 //!
 //! **`crate::openai_compat` is deliberately not reused.** The Responses API
+//! (shared with the other providers that speak it, in [`crate::responses`])
 //! differs from Chat Completions in the request root (`input` rather than
 //! `messages`, `instructions` rather than a system message), in the streaming
 //! event vocabulary, and in the usage field names. Forcing it through
@@ -36,26 +37,11 @@
 //!   always empty, so every output item has to be accumulated from the stream.
 
 pub mod catalog;
-pub mod claims;
 pub mod headers;
 pub mod provider;
-pub mod refresh;
-pub mod request;
-pub mod store;
-pub mod stream;
-pub mod token;
 pub mod usage;
 
-pub use claims::CodexClaims;
-// Public for the sake of `expiry`: the HTTP API reports when an access
-// token lapses, and reading it from the token beats storing a second copy
-// beside the grant that could disagree with it.
 pub use provider::CodexProvider;
-pub use refresh::HttpRefresh;
-pub use store::{ProviderAuthStore, ProviderGrant, grant_account};
-pub use token::{
-    CodexTokenSource, Credentials, RefreshError, RefreshTransport, RefreshedTokens, TokenSource,
-};
 pub use usage::{Quota, QuotaWindow};
 
 /// The registry name this provider is known by, and the model prefix a
@@ -101,3 +87,54 @@ pub const SCOPE: &str =
 /// rather than dressing up as the Codex CLI. Overridable in config for the day
 /// that changes.
 pub const DEFAULT_ORIGINATOR: &str = "leviath";
+
+/// How a ChatGPT account signs in.
+///
+/// Refresh is JSON where the code exchange is form-encoded, which is the
+/// issuer's choice. The two authorize parameters put the workspace list in
+/// the id token (where the account id the route wants comes from) and select
+/// the Codex CLI's simplified consent page.
+pub const PROFILE: crate::oauth::OAuthProfile = crate::oauth::OAuthProfile {
+    provider: PROVIDER_NAME,
+    account_name: "ChatGPT",
+    issuer: ISSUER,
+    authorize_path: "/oauth/authorize",
+    token_path: "/oauth/token",
+    revoke_path: None,
+    client_id: CLIENT_ID,
+    scope: SCOPE,
+    // The registered redirect is the literal string, and the issuer compares
+    // it as one.
+    redirect_host: "localhost",
+    callback_ports: &CALLBACK_PORTS,
+    callback_path: CALLBACK_PATH,
+    refresh_body: crate::oauth::TokenBody::Json,
+    authorize_params: &[
+        ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
+        ("originator", DEFAULT_ORIGINATOR),
+    ],
+    nonce: false,
+    port_conflict: "The Codex CLI reserves the same ones: quit any `codex login` that is waiting and try again.",
+};
+
+/// This route's Responses rules, all measured against a live Plus account.
+///
+/// `temperature` and `max_output_tokens` are `400 Unsupported parameter` on
+/// every model it serves, so a stage's output cap cannot be enforced here.
+/// `prompt_cache_retention` is read-only (the server sets 24 hours).
+pub const DIALECT: crate::responses::Dialect = crate::responses::Dialect {
+    provider: PROVIDER_NAME,
+    rejected_parameters: &[
+        "temperature",
+        "max_output_tokens",
+        "max_tokens",
+        "prompt_cache_retention",
+    ],
+    output_cap: false,
+    temperature: false,
+    verbosity: true,
+    reasoning_summary: true,
+    reported_cost: false,
+    cache_key: true,
+};

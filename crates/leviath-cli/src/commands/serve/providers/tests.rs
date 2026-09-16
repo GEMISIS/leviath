@@ -6,13 +6,13 @@
 //! test rather than a mocked stand-in for it.
 
 use super::*;
-use crate::commands::auth::codex::tests::{browser_that_redirects, id_token};
+use crate::commands::auth::oauth::tests::{browser_that_redirects, id_token};
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
 use axum::routing::{get, post};
 use leviath_providers::ProviderGrant;
-use leviath_providers::codex::ProviderAuthStore;
+use leviath_providers::oauth::ProviderAuthStore;
 use tokio::sync::broadcast;
 use tower::ServiceExt as _;
 
@@ -31,10 +31,10 @@ fn fixed_now() -> u64 {
 fn admin(issuer: String, opener: leviath_mcp::BrowserOpener) -> ProviderAdmin {
     ProviderAdmin {
         opener,
-        issuer,
+        issuer: Some(issuer),
         // The registered ports are the production value; a test that bound
         // them would fight whatever the developer has signed in.
-        ports: vec![0],
+        ports: Some(vec![0]),
         in_flight: Arc::new(Mutex::new(HashMap::new())),
         now: fixed_now,
         usage_url: None,
@@ -378,7 +378,7 @@ async fn a_sign_out_that_cannot_read_the_store_is_an_error() {
 async fn a_login_that_never_starts_reports_why() {
     let dir = tempfile::tempdir().unwrap();
     let mut admin = quiet_admin();
-    admin.ports = Vec::new();
+    admin.ports = Some(Vec::new());
     let app = app_at(dir.path(), state_with(admin, Config::default()));
 
     let (status, body) = send(&app, "POST", "/api/providers/codex/login").await;
@@ -502,8 +502,8 @@ fn the_default_admin_points_at_this_machine() {
         );
         admin
     });
-    assert_eq!(admin.issuer, leviath_providers::codex::ISSUER);
-    assert_eq!(admin.ports, leviath_providers::codex::CALLBACK_PORTS);
+    assert_eq!(admin.issuer, None);
+    assert_eq!(admin.ports, None);
     assert!(
         leviath_core::sync::lock(&admin.in_flight).is_empty(),
         "nothing is in flight before anything is asked"

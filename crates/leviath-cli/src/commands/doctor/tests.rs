@@ -1999,7 +1999,7 @@ async fn a_registry_that_will_not_build_is_reported_as_a_failed_check() {
 fn the_codex_check_says_nothing_when_it_is_not_enabled() {
     // The report has no business mentioning a provider nobody asked for.
     let config = Config::default();
-    assert!(codex_check(&config).is_none());
+    assert!(signin_checks(&config).is_empty());
 }
 
 #[test]
@@ -2010,7 +2010,7 @@ fn the_codex_check_warns_when_it_is_enabled_but_not_signed_in() {
     temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
         let mut config = Config::default();
         config.providers.codex_enabled = true;
-        let check = codex_check(&config).expect("a check");
+        let check = signin_checks(&config).pop().expect("a check");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
             check.detail.contains("lev auth login codex"),
@@ -2025,8 +2025,8 @@ fn the_codex_check_reports_the_account_once_signed_in() {
     let dir = tempfile::tempdir().expect("tempdir");
     temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
         let path =
-            leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+        let mut store = leviath_providers::oauth::ProviderAuthStore::default();
         store.set(
             "codex",
             leviath_providers::ProviderGrant {
@@ -2041,14 +2041,14 @@ fn the_codex_check_reports_the_account_once_signed_in() {
 
         let mut config = Config::default();
         config.providers.codex_enabled = true;
-        let check = codex_check(&config).expect("a check");
+        let check = signin_checks(&config).pop().expect("a check");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
             check.detail.contains("someone@example.com"),
             "{}",
             check.detail
         );
-        assert!(check.detail.contains("plus"), "{}", check.detail);
+        assert!(check.detail.contains("ChatGPT plus"), "{}", check.detail);
     });
 }
 
@@ -2059,8 +2059,8 @@ fn the_codex_check_falls_back_when_the_grant_names_no_account() {
     let dir = tempfile::tempdir().expect("tempdir");
     temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
         let path =
-            leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+        let mut store = leviath_providers::oauth::ProviderAuthStore::default();
         store.set(
             "codex",
             leviath_providers::ProviderGrant {
@@ -2073,10 +2073,34 @@ fn the_codex_check_falls_back_when_the_grant_names_no_account() {
 
         let mut config = Config::default();
         config.providers.codex_enabled = true;
-        let check = codex_check(&config).expect("a check");
+        let check = signin_checks(&config).pop().expect("a check");
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.detail, "signed in");
     });
+}
+
+#[test]
+fn every_enabled_sign_in_provider_gets_its_own_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.providers.grok_enabled = true;
+        let checks = signin_checks(&config);
+        let names: Vec<_> = checks.iter().map(|c| c.name).collect();
+        assert_eq!(names, ["codex", "grok"]);
+        assert!(
+            checks[1].detail.contains("lev auth login grok"),
+            "{}",
+            checks[1].detail
+        );
+    });
+    // A provider with no sign-in profile names itself as the account.
+    assert!(
+        signin_check("not-a-provider")
+            .detail
+            .contains("not-a-provider")
+    );
 }
 
 /// `yolo.toml` is checked only when it is there: no file is no finding, a

@@ -293,6 +293,38 @@ pub fn builtin(provider: &str, model: &str) -> RetentionPolicy {
             Control::Fixed,
             "local inference: nothing leaves the machine",
         ),
+        "xai" => RetentionPolicy::new(
+            Retention::Days(30),
+            Control::Agreement,
+            "xAI keeps API requests and responses 30 days for abuse monitoring, never \
+             for training; Leviath never asks it to store a response, and zero data \
+             retention is an arrangement with xAI for a team or enterprise (declare it in \
+             [providers] zero_retention_agreements)",
+        ),
+        "grok" => RetentionPolicy::new(
+            Retention::Unknown,
+            Control::Fixed,
+            "billed to a Grok subscription, so that account's terms apply rather than \
+             the API's; the account's coding data retention setting is shown by `lev \
+             providers retention`, and xAI does not say whether it covers these requests",
+        ),
+        "meta" => {
+            if model.to_ascii_lowercase().contains("-contributor") {
+                RetentionPolicy::new(
+                    Retention::Indefinite,
+                    Control::Fixed,
+                    "a contributor-tier model: Meta prices it lower in exchange for the \
+                     right to train future models on its prompts and completions",
+                )
+            } else {
+                RetentionPolicy::new(
+                    Retention::Unknown,
+                    Control::Fixed,
+                    "Meta does not train on a standard-tier model's prompts or \
+                     completions and publishes no retention window for them",
+                )
+            }
+        }
         "codex" => RetentionPolicy::new(
             Retention::Unknown,
             Control::Fixed,

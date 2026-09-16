@@ -103,6 +103,56 @@ pub(crate) fn codex(_model: &str) -> ModelMime {
     ModelMime::new(&["text/*", "image/*"], TEXT)
 }
 
+/// xAI (and a Grok subscription, which reaches the same models): the chat
+/// models read images and PDFs; Imagine makes images and video; the speech
+/// routes turn text into audio and audio into text.
+pub(crate) fn xai(model: &str) -> ModelMime {
+    let m = lower(model);
+    if m.starts_with("grok-imagine-image") {
+        return ModelMime::new(&["text/*", "image/*"], &["image/*"]);
+    }
+    if m.starts_with("grok-imagine-video-1.5") {
+        return ModelMime::new(&["text/*", "image/*", "audio/*"], &["video/*"]);
+    }
+    if m.starts_with("grok-imagine-video") {
+        return ModelMime::new(&["text/*", "image/*", "video/*"], &["video/*"]);
+    }
+    if m.starts_with("grok-tts") {
+        return ModelMime::new(TEXT, &["audio/*"]);
+    }
+    if m.starts_with("grok-stt") {
+        return ModelMime::new(&["audio/*"], TEXT);
+    }
+    published_modality("xai", model).unwrap_or_else(|| ModelMime::new(VISION_DOC, TEXT))
+}
+
+/// Meta: Muse Spark reads text, images, audio, video and PDFs; Muse Image makes
+/// and edits images; Muse Voice Transcribe reads WAV audio and nothing else.
+pub(crate) fn meta(model: &str) -> ModelMime {
+    let m = lower(model);
+    if m.starts_with("muse-image") {
+        return ModelMime::new(&["text/*", "image/*"], &["image/*"]);
+    }
+    if m.starts_with("muse-voice-transcribe") {
+        return ModelMime::new(&["audio/wav"], TEXT);
+    }
+    published_modality("meta", model).unwrap_or_else(|| ModelMime::new(GEMINI_INPUT, TEXT))
+}
+
+/// Whether `model` on `provider` is a media model: one served by an endpoint
+/// of its own (image, video or speech) rather than the chat request shape, so
+/// what it takes is not narrowed to what a chat body can carry.
+pub fn is_media_model(provider: &str, model: &str) -> bool {
+    let m = lower(model);
+    match provider {
+        "xai" | "grok" => {
+            m.starts_with("grok-imagine") || m.starts_with("grok-tts") || m.starts_with("grok-stt")
+        }
+        "meta" => m.starts_with("muse-image") || m.starts_with("muse-voice"),
+        _ => false,
+    }
+}
+
 /// A local model, by the names the vision builds are published under.
 pub(crate) fn ollama(model: &str) -> ModelMime {
     let m = lower(model);
@@ -130,6 +180,8 @@ pub(crate) fn by_prefix(model: &str) -> ModelMime {
         Some(("anthropic", rest)) => anthropic(rest),
         Some(("openai", rest)) => openai(rest),
         Some(("google", rest)) => gemini(rest),
+        Some(("x-ai", rest)) => xai(rest),
+        Some(("meta", rest)) => meta(rest),
         _ => ModelMime::text_only(),
     }
 }
@@ -150,14 +202,18 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
         "openrouter" => by_prefix(model),
         "meshy" => crate::meshy::mime_for(model),
         "bedrock" => crate::bedrock::catalog::mime_for(model),
+        "xai" | "grok" => xai(model),
+        "meta" => meta(model),
         _ => ModelMime::text_only(),
     };
     // What the vendor takes, narrowed to what the request shape Leviath sends
     // it can carry: Gemini takes video, the Chat Completions body has no slot
     // for it. Meshy has a shape of its own and is not narrowed.
     let shape = match provider {
+        _ if is_media_model(provider, model) => None,
         "anthropic" => Some(WireShape::Anthropic),
-        "codex" => Some(WireShape::Codex),
+        "codex" | "xai" | "grok" => Some(WireShape::Responses),
+        "meta" => Some(WireShape::ResponsesAv),
         "bedrock" => Some(WireShape::Bedrock),
         "openai" | "google" | "gemini" | "ollama" | "openrouter" => Some(WireShape::OpenAi),
         _ => None,

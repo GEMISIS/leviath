@@ -6,7 +6,7 @@
 //! checks that the OS store is actually reachable, and moves secrets between the
 //! two.
 
-pub mod codex;
+pub mod oauth;
 
 use crate::config::Config;
 use clap::{Args, Subcommand};
@@ -27,9 +27,8 @@ enum AuthCommand {
     /// Sign in to a provider that authenticates with a browser
     ///
     /// Opens the provider's sign-in page, waits for the redirect, and stores
-    /// the grant outside `config.toml`. `codex` is the one provider that works
-    /// this way today; the argument is required anyway so a second one does
-    /// not change what an existing command line means.
+    /// the grant outside `config.toml`. `codex` (a ChatGPT plan) and `grok` (a
+    /// SuperGrok or X Premium+ plan) work this way.
     Login {
         /// Which provider to sign in to.
         provider: String,
@@ -92,10 +91,12 @@ pub struct AuthEnv {
     pub grant_path: Option<std::path::PathBuf>,
     /// The client the token exchange goes out on.
     pub client: reqwest::Client,
-    /// The OAuth issuer. Overridden only in tests.
-    pub issuer: String,
-    /// The loopback ports to bind, in order.
-    pub ports: Vec<u16>,
+    /// The OAuth issuer, overridden only in tests. `None` is the provider's
+    /// own.
+    pub issuer: Option<String>,
+    /// The loopback ports to bind, in order, overridden only in tests. `None`
+    /// is the ports the provider's client id is registered against.
+    pub ports: Option<Vec<u16>>,
 }
 
 impl AuthEnv {
@@ -103,13 +104,13 @@ impl AuthEnv {
     pub fn real() -> Self {
         Self {
             opener: std::sync::Arc::new(leviath_sys::open_url),
-            grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+            grant_path: leviath_providers::oauth::ProviderAuthStore::default_path(),
             // `leviath_net::client` rather than the provider builder: this is
             // one OAuth exchange, not inference, and it cannot fail to build,
             // so there is no error arm here that nothing could ever take.
             client: leviath_net::client(leviath_net::ClientTimeouts::default()),
-            issuer: leviath_providers::codex::ISSUER.to_string(),
-            ports: leviath_providers::codex::CALLBACK_PORTS.to_vec(),
+            issuer: None,
+            ports: None,
         }
     }
 }
@@ -129,7 +130,7 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
         }
         AuthCommand::Logout { provider } => {
             let config = Config::load_from_path_public(&path)?;
-            logout(&config, &provider, env.grant_path)
+            logout(&config, &provider, env).await
         }
         AuthCommand::Migrate { to_file, dry_run } => {
             migrate(&path, to_file, dry_run, env.grant_path.as_deref())
@@ -137,16 +138,32 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
     }
 }
 
-/// The providers `lev auth login` knows how to sign in to.
-const OAUTH_PROVIDERS: &[&str] = &[leviath_providers::codex::PROVIDER_NAME];
+/// The providers `lev auth login` knows how to sign in to: every row the
+/// setup catalog offers as a browser sign-in.
+fn oauth_providers() -> Vec<&'static str> {
+    crate::commands::setup::catalog::providers()
+        .into_iter()
+        .filter(|p| p.credential == crate::commands::setup::catalog::Credential::Signin)
+        .map(|p| p.id)
+        .collect()
+}
 
 /// The error for a provider name that does not sign in with a browser.
 fn not_an_oauth_provider(provider: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "'{provider}' does not sign in with a browser. Providers that do: {}. \
          An API key goes in `lev setup` instead.",
-        OAUTH_PROVIDERS.join(", ")
+        oauth_providers().join(", ")
     )
+}
+
+/// How `provider` signs in, or the refusal for one that does not.
+fn profile_for(provider: &str) -> anyhow::Result<&'static leviath_providers::oauth::OAuthProfile> {
+    oauth_providers()
+        .contains(&provider)
+        .then(|| leviath_providers::oauth::profile(provider))
+        .flatten()
+        .ok_or_else(|| not_an_oauth_provider(provider))
 }
 
 /// The error for a machine with nowhere to put the grant.
@@ -168,14 +185,13 @@ async fn login_with(
     env: AuthEnv,
     resolved: crate::credentials::Resolved,
 ) -> anyhow::Result<()> {
-    if provider != leviath_providers::codex::PROVIDER_NAME {
-        return Err(not_an_oauth_provider(provider));
-    }
+    let profile = profile_for(provider)?;
     let store = resolved
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .map(std::sync::Arc::from);
 
-    let mut login_env = codex::LoginEnv::new(
+    let mut login_env = oauth::LoginEnv::new(
+        profile,
         env.opener,
         env.grant_path.ok_or_else(no_home)?,
         store,
@@ -186,32 +202,46 @@ async fn login_with(
             println!("\nOpen this page to sign in:\n\n  {url}\n");
         }),
     );
-    login_env.issuer = env.issuer;
-    login_env.ports = env.ports;
+    if let Some(issuer) = env.issuer {
+        login_env.issuer = issuer;
+    }
+    if let Some(ports) = env.ports {
+        login_env.ports = ports;
+    }
 
-    let grant = codex::login(&login_env).await?;
+    let grant = oauth::login(&login_env).await?;
     let who = grant.email.as_deref().unwrap_or("this account");
     match grant.plan_type.as_deref() {
-        Some(plan) => println!("Signed in as {who} on the ChatGPT {plan} plan."),
+        Some(plan) => println!(
+            "Signed in as {who} on the {} {plan} plan.",
+            profile.account_name
+        ),
         None => println!("Signed in as {who}."),
     }
-    if !config.providers.codex_enabled {
+    if !crate::commands::setup::catalog::signin_enabled(config, provider) {
         println!(
             "\nThe provider is not enabled yet. Run `lev setup` and select it, or set \
-             `codex_enabled = true` under `[providers]`."
+             `{provider}_enabled = true` under `[providers]`."
         );
     }
     Ok(())
 }
 
-/// Forget a provider's stored sign-in.
-fn logout(
-    config: &Config,
-    provider: &str,
-    grant_path: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
+/// Forget a provider's stored sign-in, revoking it at the issuer first when
+/// the issuer can.
+async fn logout(config: &Config, provider: &str, env: AuthEnv) -> anyhow::Result<()> {
+    let profile = profile_for(provider)?;
+    if let Some(path) = env.grant_path.as_deref()
+        && let Ok(store) = crate::credentials::store_for(config.security.credential_store)
+    {
+        let issuer = env.issuer.as_deref().unwrap_or(profile.issuer);
+        let store: Option<std::sync::Arc<dyn CredentialStore>> = store.map(std::sync::Arc::from);
+        if let Err(e) = oauth::revoke(profile, &env.client, issuer, path, store.as_deref()).await {
+            eprintln!("Warning: {e}. The sign-in is forgotten here either way.");
+        }
+    }
     let resolved = crate::credentials::store_for(config.security.credential_store);
-    logout_with(provider, grant_path, resolved)
+    logout_with(provider, env.grant_path, resolved)
 }
 
 /// Core of [`logout`] with the credential backend already resolved.
@@ -220,11 +250,9 @@ fn logout_with(
     grant_path: Option<std::path::PathBuf>,
     resolved: crate::credentials::Resolved,
 ) -> anyhow::Result<()> {
-    if provider != leviath_providers::codex::PROVIDER_NAME {
-        return Err(not_an_oauth_provider(provider));
-    }
+    let profile = profile_for(provider)?;
     let store = resolved.map_err(|e| anyhow::anyhow!("{e}"))?;
-    let removed = codex::logout(&grant_path.ok_or_else(no_home)?, store.as_deref())?;
+    let removed = oauth::logout(profile, &grant_path.ok_or_else(no_home)?, store.as_deref())?;
     match removed {
         true => println!(
             "Signed out of {provider}. It is still enabled in config.toml, so runs will fail \
@@ -321,7 +349,7 @@ pub(crate) fn status_with(
     // rather than propagating, because this is the command someone runs when
     // something is already wrong.
     let oauth_providers = oauth_provider_summaries(
-        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
+        leviath_providers::oauth::ProviderAuthStore::default_path().as_deref(),
         backend.as_deref(),
     );
 
@@ -346,7 +374,7 @@ fn oauth_provider_summaries(
     store: Option<&dyn CredentialStore>,
 ) -> Vec<(String, String)> {
     let Some(all) =
-        path.and_then(|p| leviath_providers::codex::ProviderAuthStore::load_with(p, store).ok())
+        path.and_then(|p| leviath_providers::oauth::ProviderAuthStore::load_with(p, store).ok())
     else {
         return Vec::new();
     };
@@ -388,8 +416,8 @@ fn providers_in_file(path: &std::path::Path) -> Vec<String> {
 
 /// Whether the parsed config file carries a key for `provider`.
 ///
-/// `openrouter_api_key` sits at the top level while the other three live under
-/// `[providers]` - a historical split the config struct still reflects.
+/// `openrouter_api_key` sits at the top level while every other key lives under
+/// `[providers]`, as the config struct lays them out.
 fn file_has_key(value: &toml::Table, provider: &str) -> bool {
     let field = format!("{provider}_api_key");
     if provider == "openrouter" {
@@ -606,7 +634,7 @@ fn apply_migration_with(
             let signed_in = provider_grant_names(grant_path, Some(store.as_ref()));
             migrate_provider_grants(grant_path, Some(store.as_ref()), None)?;
             for name in signed_in {
-                let account = leviath_providers::codex::grant_account(&name);
+                let account = leviath_providers::oauth::grant_account(&name);
                 if let Err(e) = store.delete(&account) {
                     tracing::warn!("could not remove the sign-in for '{name}': {e}");
                 }
@@ -661,7 +689,7 @@ fn migrate_provider_grants(
     if !path.exists() {
         return Ok(());
     }
-    let store = leviath_providers::codex::ProviderAuthStore::load_with(path, source)?;
+    let store = leviath_providers::oauth::ProviderAuthStore::load_with(path, source)?;
     store.save_with(path, destination)
 }
 
@@ -670,7 +698,7 @@ fn provider_grant_names(
     path: Option<&std::path::Path>,
     store: Option<&dyn CredentialStore>,
 ) -> Vec<String> {
-    path.and_then(|p| leviath_providers::codex::ProviderAuthStore::load_with(p, store).ok())
+    path.and_then(|p| leviath_providers::oauth::ProviderAuthStore::load_with(p, store).ok())
         .map(|s| s.names())
         .unwrap_or_default()
 }
@@ -1457,8 +1485,8 @@ mod tests {
                 // `migrate` writes to whatever it is handed.
                 grant_path: Some(path.with_file_name("provider-auth.json")),
                 client: reqwest::Client::new(),
-                issuer: leviath_providers::codex::ISSUER.to_string(),
-                ports: vec![0],
+                issuer: None,
+                ports: Some(vec![0]),
             },
         )
     }
@@ -1536,7 +1564,7 @@ mod tests {
 
     /// A grant file holding one signed-in provider.
     fn write_grant_store(path: &std::path::Path) {
-        let mut store = leviath_providers::codex::ProviderAuthStore::default();
+        let mut store = leviath_providers::oauth::ProviderAuthStore::default();
         store.set(
             "codex",
             leviath_providers::ProviderGrant {
@@ -1596,7 +1624,7 @@ mod tests {
         let grants = dir.path().join("provider-auth.json");
         let store = leviath_core::MemoryStore::new();
 
-        let mut initial = leviath_providers::codex::ProviderAuthStore::default();
+        let mut initial = leviath_providers::oauth::ProviderAuthStore::default();
         initial.set(
             "codex",
             leviath_providers::ProviderGrant {
@@ -1670,7 +1698,7 @@ mod tests {
         // so the cleanup has a sign-in to try to delete. A different store
         // would leave nothing there and the loop would never run.
         let store = Undeletable::default();
-        let mut initial = leviath_providers::codex::ProviderAuthStore::default();
+        let mut initial = leviath_providers::oauth::ProviderAuthStore::default();
         initial.set(
             "codex",
             leviath_providers::ProviderGrant {
@@ -1867,19 +1895,19 @@ mod tests {
                     AuthArgs::login_for_test("codex"),
                     AuthEnv {
                         opener: stub_browser(),
-                        grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                        grant_path: leviath_providers::oauth::ProviderAuthStore::default_path(),
                         client: reqwest::Client::new(),
-                        issuer,
+                        issuer: Some(issuer),
                         // Never the registered ports: a test must not fight the
                         // developer's own Codex CLI for them.
-                        ports: vec![0],
+                        ports: Some(vec![0]),
                     },
                 )
                 .await
                 .expect("sign-in succeeds");
 
-                let store = leviath_providers::codex::ProviderAuthStore::default_path()
-                    .and_then(|p| leviath_providers::codex::ProviderAuthStore::load(&p).ok())
+                let store = leviath_providers::oauth::ProviderAuthStore::default_path()
+                    .and_then(|p| leviath_providers::oauth::ProviderAuthStore::load(&p).ok())
                     .expect("a store");
                 assert_eq!(store.get("codex").expect("a grant").refresh_token, "rt-1");
             },
@@ -1902,7 +1930,7 @@ mod tests {
         write_grant_store(&grants);
 
         run_auth(&path, AuthArgs::logout_for_test("codex")).expect("logout succeeds");
-        let store = leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
+        let store = leviath_providers::oauth::ProviderAuthStore::load(&grants).expect("a store");
         assert!(store.get("codex").is_none());
 
         // And again, which reports there was nothing to do.
@@ -1951,10 +1979,10 @@ mod tests {
                     AuthArgs::login_for_test("codex"),
                     AuthEnv {
                         opener: stub_browser(),
-                        grant_path: leviath_providers::codex::ProviderAuthStore::default_path(),
+                        grant_path: leviath_providers::oauth::ProviderAuthStore::default_path(),
                         client: reqwest::Client::new(),
-                        issuer,
-                        ports: vec![0],
+                        issuer: Some(issuer),
+                        ports: Some(vec![0]),
                     },
                 )
                 .await
@@ -1972,8 +2000,8 @@ mod tests {
             opener: std::sync::Arc::new(|_| false),
             grant_path: None,
             client: reqwest::Client::new(),
-            issuer: "http://127.0.0.1:1".to_string(),
-            ports: vec![0],
+            issuer: Some("http://127.0.0.1:1".to_string()),
+            ports: Some(vec![0]),
         };
         let err = login_with(&Config::default(), "codex", env, Ok(None))
             .await
@@ -1996,8 +2024,8 @@ mod tests {
             opener: std::sync::Arc::new(|_| false),
             grant_path: Some(std::path::PathBuf::from("/does/not/matter")),
             client: reqwest::Client::new(),
-            issuer: "http://127.0.0.1:1".to_string(),
-            ports: vec![0],
+            issuer: Some("http://127.0.0.1:1".to_string()),
+            ports: Some(vec![0]),
         };
         let err = login_with(
             &Config::default(),
@@ -2029,8 +2057,8 @@ mod tests {
             opener: stub_browser(),
             grant_path: Some(dir.path().join("provider-auth.json")),
             client: reqwest::Client::new(),
-            issuer,
-            ports: vec![0],
+            issuer: Some(issuer),
+            ports: Some(vec![0]),
         };
         let err = login_with(&Config::default(), "codex", env, Ok(None))
             .await
@@ -2064,13 +2092,13 @@ mod tests {
             opener: stub_browser(),
             grant_path: Some(grants.clone()),
             client: reqwest::Client::new(),
-            issuer,
-            ports: vec![0],
+            issuer: Some(issuer),
+            ports: Some(vec![0]),
         };
         login_with(&Config::default(), "codex", env, Ok(None))
             .await
             .expect("sign-in succeeds");
-        let store = leviath_providers::codex::ProviderAuthStore::load(&grants).expect("a store");
+        let store = leviath_providers::oauth::ProviderAuthStore::load(&grants).expect("a store");
         assert_eq!(
             store.get("codex").expect("a grant").plan_type.as_deref(),
             Some("plus")
@@ -2097,8 +2125,9 @@ mod tests {
     #[test]
     fn the_real_environment_points_at_this_machine() {
         let env = AuthEnv::real();
-        assert_eq!(env.issuer, leviath_providers::codex::ISSUER);
-        assert_eq!(env.ports, leviath_providers::codex::CALLBACK_PORTS.to_vec());
+        // Each provider's own issuer and ports: nothing is pinned to one.
+        assert_eq!(env.issuer, None);
+        assert_eq!(env.ports, None);
         assert!(env.grant_path.is_some(), "a home resolves in a test run");
     }
 
@@ -2133,7 +2162,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
             let grants =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+                leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
 
             // Nothing signed in yet, and nowhere to look at all.
             assert!(oauth_provider_summaries(Some(&grants), None).is_empty());
@@ -2155,7 +2184,7 @@ mod tests {
                 "https://api.openai.com/auth": { "chatgpt_plan_type": "pro" },
             })
             .to_string();
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {
@@ -2175,7 +2204,7 @@ mod tests {
             );
 
             // And with no account at all, the name alone.
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {

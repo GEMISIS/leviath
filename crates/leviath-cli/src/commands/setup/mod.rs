@@ -89,6 +89,20 @@ pub struct SetupArgs {
     #[arg(long)]
     pub bedrock_region: Option<String>,
 
+    /// xAI API key, for Grok models billed to an xAI API balance
+    #[arg(long)]
+    pub xai_key: Option<String>,
+
+    /// Meta Model API key, for Muse models (also read from META_AI_API_KEY)
+    #[arg(long)]
+    pub meta_key: Option<String>,
+
+    /// Upload media parts to a provider's own file storage once and send the
+    /// id after, on the providers that have one (default: true). Off keeps
+    /// every part inline. Zero data retention turns uploads off regardless
+    #[arg(long)]
+    pub file_uploads: Option<bool>,
+
     /// Ask every provider for zero data retention (ZDR): nothing of a prompt
     /// or reply is kept once the reply is returned. Bedrock's account mode
     /// is set to none, OpenAI is sent store=false, OpenRouter routes only to
@@ -134,6 +148,12 @@ pub struct SetupArgs {
     /// watching a browser, so on this path sign in with `lev auth login codex`.
     #[arg(long)]
     pub codex: Option<bool>,
+
+    /// Enable Grok billed to a SuperGrok or X Premium+ plan instead of an xAI
+    /// API balance. Like `--codex`, this only flips the switch: sign in with
+    /// `lev auth login grok`
+    #[arg(long)]
+    pub grok: Option<bool>,
 
     /// Install the bundled agent blueprints without asking
     #[arg(long)]
@@ -266,6 +286,15 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref r) = args.bedrock_region {
         config.providers.bedrock_region = Some(r.clone());
     }
+    if let Some(ref k) = args.xai_key {
+        config.providers.xai_api_key = Some(k.clone());
+    }
+    if let Some(ref k) = args.meta_key {
+        config.providers.meta_api_key = Some(k.clone());
+    }
+    if let Some(on) = args.file_uploads {
+        config.providers.file_uploads = on;
+    }
     if let Some(on) = args.zero_retention {
         config.providers.zero_retention = on;
     }
@@ -290,6 +319,9 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
     if let Some(enabled) = args.codex {
         config.providers.codex_enabled = enabled;
+    }
+    if let Some(enabled) = args.grok {
+        config.providers.grok_enabled = enabled;
     }
     if let Some(ref e) = args.claude_code_effort {
         config.providers.claude_code_effort = Some(e.clone());
@@ -327,7 +359,7 @@ fn configured_providers(config: &Config) -> Vec<String> {
         // `--codex true` make an unauthenticated provider the host default,
         // and the very next run would fail on a credential nobody was asked
         // for.
-        .filter(|id| *id != leviath_providers::codex::PROVIDER_NAME || codex_grant_exists())
+        .filter(|id| kind(id) != Some(catalog::Credential::Signin) || grant_exists(id))
         .collect();
     // A provider that needed no credential sorts last, and the first name in
     // this list is what `--default-provider` picks when nothing else says.
@@ -354,11 +386,11 @@ fn configured_providers(config: &Config) -> Vec<String> {
         .collect()
 }
 
-/// Whether a Codex sign-in has actually been taken.
-fn codex_grant_exists() -> bool {
-    leviath_providers::codex::ProviderAuthStore::default_path()
-        .and_then(|path| leviath_providers::codex::ProviderAuthStore::load(&path).ok())
-        .is_some_and(|store| store.get(leviath_providers::codex::PROVIDER_NAME).is_some())
+/// Whether a sign-in to `provider` has actually been taken.
+fn grant_exists(provider: &str) -> bool {
+    leviath_providers::oauth::ProviderAuthStore::default_path()
+        .and_then(|path| leviath_providers::oauth::ProviderAuthStore::load(&path).ok())
+        .is_some_and(|store| store.get(provider).is_some())
 }
 
 /// Point `default_provider` at a provider this config can actually reach.
@@ -593,6 +625,10 @@ mod tests {
             claude_code: None,
             claude_code_effort: None,
             codex: None,
+            grok: None,
+            xai_key: None,
+            meta_key: None,
+            file_uploads: None,
             install_agents: false,
         }
     }
@@ -800,12 +836,12 @@ mod tests {
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
             let mut config = Config::default();
             config.providers.codex_enabled = true;
-            assert!(!codex_grant_exists());
+            assert!(!grant_exists("codex"));
             assert!(!configured_providers(&config).contains(&"codex".to_string()));
 
             let path =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+                leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {
@@ -816,7 +852,7 @@ mod tests {
             );
             store.save(&path).unwrap();
 
-            assert!(codex_grant_exists());
+            assert!(grant_exists("codex"));
             assert!(configured_providers(&config).contains(&"codex".to_string()));
 
             // And a grant with the provider turned off still does not count.
@@ -846,16 +882,18 @@ mod tests {
             // Codex counts as configured only once it is signed in, so the
             // grant has to exist before the question is asked.
             let grants =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
-            store.set(
-                "codex",
-                leviath_providers::ProviderGrant {
-                    access_token: "at".to_string(),
-                    refresh_token: "rt".to_string(),
-                    ..Default::default()
-                },
-            );
+                leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
+            for signed_in in ["codex", "grok"] {
+                store.set(
+                    signed_in,
+                    leviath_providers::ProviderGrant {
+                        access_token: "at".to_string(),
+                        refresh_token: "rt".to_string(),
+                        ..Default::default()
+                    },
+                );
+            }
             store.save(&grants).unwrap();
 
             for provider in crate::commands::setup::catalog::providers() {
@@ -923,8 +961,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
             let grants =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+                leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {

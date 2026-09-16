@@ -38,6 +38,8 @@ pub(crate) fn parse_pricing(entry: &serde_json::Value) -> Option<ModelPricing> {
         cached_input_per_mtok: rate("input_cache_read").unwrap_or(input),
         cache_write_per_mtok: rate("input_cache_write").unwrap_or(input),
         output_per_mtok: output,
+        long_context: None,
+        unit: None,
     })
 }
 

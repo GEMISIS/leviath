@@ -320,6 +320,10 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
             "reasoning": { "effort": "low" },
             "text": { "verbosity": "low" }
         }),
+        // The same `low` on the other Responses routes, for the same reason.
+        // Muse Spark always reasons and refuses `none`; a Grok that picks its
+        // own depth has the field taken back off by its provider.
+        "xai" | "grok" | "meta" => serde_json::json!({ "reasoning": { "effort": "low" } }),
         _ => serde_json::Value::Null,
     }
 }

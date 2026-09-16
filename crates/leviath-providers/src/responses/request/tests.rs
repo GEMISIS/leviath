@@ -39,8 +39,26 @@ fn request(system: Vec<SystemBlock>, messages: Vec<Message>) -> InferenceRequest
     }
 }
 
+/// Build for Codex's route with the given operator settings.
+fn build_codex(
+    req: &InferenceRequest,
+    effort: Option<&str>,
+    verbosity: &str,
+    replay: bool,
+) -> Value {
+    build(
+        req,
+        &crate::codex::DIALECT,
+        &Settings {
+            effort,
+            verbosity,
+            replay_reasoning: replay,
+        },
+    )
+}
+
 fn build_default(req: &InferenceRequest) -> Value {
-    build(req, "medium", "low", true)
+    build_codex(req, Some("medium"), "low", true)
 }
 
 /// Every `developer` item's text, in order.
@@ -428,7 +446,7 @@ fn reasoning_replay_can_be_turned_off_entirely() {
             reasoning: Some("sealed-blob".to_string()),
         }],
     );
-    let body = build(&req, "medium", "low", false);
+    let body = build_codex(&req, Some("medium"), "low", false);
     assert!(body.get("include").is_none(), "{body}");
     assert!(!body.to_string().contains("sealed-blob"));
 }
@@ -469,9 +487,9 @@ fn a_user_turn_never_carries_a_reasoning_item() {
 }
 
 #[test]
-fn effort_none_sends_no_reasoning_block_at_all() {
+fn no_effort_sends_no_reasoning_block_at_all() {
     let req = request(vec![], vec![user("go")]);
-    let body = build(&req, "none", "low", true);
+    let body = build_codex(&req, None, "low", true);
     assert!(body.get("reasoning").is_none(), "{body}");
     assert!(body.get("include").is_none(), "{body}");
     assert_eq!(body["text"]["verbosity"], "low");
@@ -480,7 +498,7 @@ fn effort_none_sends_no_reasoning_block_at_all() {
 #[test]
 fn effort_and_verbosity_reach_the_body() {
     let req = request(vec![], vec![user("go")]);
-    let body = build(&req, "xhigh", "high", true);
+    let body = build_codex(&req, Some("xhigh"), "high", true);
     assert_eq!(body["reasoning"]["effort"], "xhigh");
     assert_eq!(body["reasoning"]["summary"], "auto");
     assert_eq!(body["text"]["verbosity"], "high");
@@ -698,4 +716,70 @@ fn text_before_a_tool_result_is_flushed_as_its_own_item() {
 fn a_null_extra_changes_nothing() {
     let req = request(vec![], vec![user("go")]);
     assert_eq!(build_default(&req)["model"], "gpt-5.6-sol");
+}
+
+/// A route that takes an output cap, a temperature and reports its costs,
+/// and wants no verbosity, summary or cache key: every switch flipped from
+/// Codex's.
+const OPEN: Dialect = Dialect {
+    provider: "meta",
+    rejected_parameters: &["stop"],
+    output_cap: true,
+    temperature: true,
+    verbosity: false,
+    reasoning_summary: false,
+    reported_cost: true,
+    cache_key: false,
+};
+
+fn build_open(req: &InferenceRequest) -> Value {
+    build(
+        req,
+        &OPEN,
+        &Settings {
+            effort: Some("low"),
+            verbosity: "high",
+            replay_reasoning: true,
+        },
+    )
+}
+
+#[test]
+fn a_dialect_that_takes_the_cap_and_temperature_sends_them() {
+    let mut req = request(vec![], vec![user("go")]);
+    req.extra = json!({ "stop": ["x"] });
+    let body = build_open(&req);
+    assert_eq!(body["max_output_tokens"], 4096);
+    assert!(body["temperature"].as_f64().is_some(), "{body}");
+    assert!(body.get("text").is_none(), "{body}");
+    assert!(body.get("prompt_cache_key").is_none(), "{body}");
+    assert_eq!(body["reasoning"], json!({ "effort": "low" }));
+    assert!(
+        body.get("stop").is_none(),
+        "a rejected parameter survived: {body}"
+    );
+    assert_eq!(body["store"], false);
+}
+
+#[test]
+fn only_the_provider_that_sealed_reasoning_has_it_replayed() {
+    let sealed = crate::responses::reasoning::seal("meta", &["one".into(), "two".into()]).unwrap();
+    let req = request(
+        vec![],
+        vec![Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text("42".to_string()),
+            cache_breakpoint: false,
+            reasoning: Some(sealed),
+        }],
+    );
+    let items = build_open(&req)["input"].as_array().unwrap().clone();
+    assert_eq!(items[0]["encrypted_content"], "one");
+    assert_eq!(items[1]["encrypted_content"], "two");
+    assert_eq!(items[1]["summary"], json!([]));
+    let codex = build_default(&req).to_string();
+    assert!(
+        !codex.contains("\"one\""),
+        "Codex was handed Meta's reasoning: {codex}"
+    );
 }

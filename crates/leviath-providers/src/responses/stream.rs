@@ -1,39 +1,66 @@
-//! The Codex Responses stream, event by event.
+//! A Responses stream, event by event.
 //!
 //! A turn arrives as server-sent events: an output item opens, its text or its
 //! argument JSON arrives in slices, the item closes carrying its finished form,
 //! and the response ends with usage and a status.
 //!
 //! **`response.completed` cannot be used to read the output.** Measured against
-//! the live route: under the mandatory `store: false`, the terminal event's
+//! the live Codex route: under `store: false`, the terminal event's
 //! `response.output` array is *always* empty. Every tool call, every reasoning
 //! item and the assistant text exist only in the stream. A parser written
 //! against the terminal event compiles, connects, and silently never returns a
 //! tool call.
 //!
 //! So `response.output_item.done` is the source of truth for items, and the
-//! text deltas for prose. The terminal event contributes usage and status only.
+//! text deltas for prose. The terminal event contributes usage and status
+//! only, which also means a route that does fill `response.output` cannot
+//! have its items counted twice.
+//!
+//! Reasoning items are gathered across the response and sealed together under
+//! the provider's name when it ends (see [`super::reasoning`]).
 
 use crate::provider::{FinishReason, ProviderError, StreamChunk, TokenUsage, ToolCallDelta};
 use futures_core::Stream;
 
 /// State carried across events within one response.
-#[derive(Default)]
-pub(super) struct Turn {
+pub(crate) struct Turn {
     /// Whether any function call was seen, which decides the finish reason:
     /// the terminal event reports `completed` either way.
     saw_tool_call: bool,
+    /// The rules of the route this response came from.
+    dialect: super::Dialect,
+    /// Every reasoning item so far, in order, sealed when the response ends.
+    reasoning: Vec<String>,
 }
 
-/// Wrap a byte stream in the Codex server-sent-events framer.
+impl Turn {
+    /// A fresh response on `dialect`'s route.
+    pub(crate) fn new(dialect: super::Dialect) -> Self {
+        Self {
+            saw_tool_call: false,
+            dialect,
+            reasoning: Vec::new(),
+        }
+    }
+
+    /// The sealed reasoning gathered so far, emptied.
+    fn sealed_reasoning(&mut self) -> Option<String> {
+        super::reasoning::seal(self.dialect.provider, &std::mem::take(&mut self.reasoning))
+    }
+}
+
+/// Wrap a byte stream in the Responses server-sent-events framer.
 ///
 /// A closure over [`Turn`] rather than a bare `fn` because the finish reason
 /// depends on what arrived earlier in the same response.
-pub(super) fn codex_sse_stream<S>(inner: S) -> crate::provider::stream::FramedStream
+pub(crate) fn sse_stream<S>(
+    inner: S,
+    dialect: super::Dialect,
+) -> crate::provider::stream::FramedStream
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 {
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(dialect);
     crate::provider::stream::FramedStream::new(
         inner,
         Box::new(move |buffer: &mut String| parse_event(buffer, &mut turn)),
@@ -48,7 +75,7 @@ where
 /// `None` means "no complete event yet, or nothing worth emitting"; the caller
 /// polls again. `Some(None)` ends the stream. `Some(Some(..))` is a chunk or an
 /// error the server delivered inside a 200.
-pub(super) fn parse_event(
+pub(crate) fn parse_event(
     buffer: &mut String,
     turn: &mut Turn,
 ) -> Option<Option<crate::provider::Result<StreamChunk>>> {
@@ -141,21 +168,16 @@ pub(super) fn parse_event(
 
         // The finished item. Only the reasoning blob is taken from here: the
         // arguments already arrived as deltas, and re-emitting them would
-        // double every call's argument text.
+        // double every call's argument text. Kept until the response ends,
+        // so every item of a multi-step thought is replayed, not the last.
         "response.output_item.done" => {
             let item = json.get("item")?;
             if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
                 return None;
             }
             let blob = item.get("encrypted_content").and_then(|v| v.as_str())?;
-            Some(Some(Ok(StreamChunk {
-                delta: String::new(),
-                tool_calls: vec![],
-                tokens: None,
-                finish_reason: None,
-                reasoning: Some(blob.to_string()),
-                parts: Vec::new(),
-            })))
+            turn.reasoning.push(blob.to_string());
+            None
         }
 
         "response.completed" => {
@@ -163,12 +185,12 @@ pub(super) fn parse_event(
             Some(Some(Ok(StreamChunk {
                 delta: String::new(),
                 tool_calls: vec![],
-                tokens: Some(usage_of(response)),
+                tokens: Some(usage_of(response, &turn.dialect)),
                 finish_reason: Some(match turn.saw_tool_call {
                     true => FinishReason::ToolCall,
                     false => FinishReason::Complete,
                 }),
-                reasoning: None,
+                reasoning: turn.sealed_reasoning(),
                 parts: Vec::new(),
             })))
         }
@@ -178,9 +200,9 @@ pub(super) fn parse_event(
             Some(Some(Ok(StreamChunk {
                 delta: String::new(),
                 tool_calls: vec![],
-                tokens: Some(usage_of(response)),
+                tokens: Some(usage_of(response, &turn.dialect)),
                 finish_reason: Some(FinishReason::TokenLimit),
-                reasoning: None,
+                reasoning: turn.sealed_reasoning(),
                 parts: Vec::new(),
             })))
         }
@@ -210,7 +232,11 @@ fn output_index(json: &serde_json::Value) -> usize {
 /// difference; counting it whole would bill the cached prefix twice, once at
 /// the full rate and once at the cache rate. `reasoning_tokens` is a subset of
 /// `output_tokens` and is deliberately not added.
-fn usage_of(response: &serde_json::Value) -> TokenUsage {
+///
+/// A route that prices its own calls (xAI's `cost_in_usd_ticks`) has that
+/// figure recorded as the cost when its dialect says so, which carries every
+/// tier and tool charge the token counts alone cannot.
+fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsage {
     let usage = response.get("usage");
     let number = |node: Option<&serde_json::Value>, key: &str| -> usize {
         node.and_then(|n| n.get(key))
@@ -222,6 +248,11 @@ fn usage_of(response: &serde_json::Value) -> TokenUsage {
     let input = number(usage, "input_tokens");
     let cached = number(details, "cached_tokens");
     let written = number(details, "cache_write_tokens");
+    let reported = usage
+        .and_then(|u| u.get("cost_in_usd_ticks"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|_| dialect.reported_cost)
+        .map(|ticks| ticks / super::TICKS_PER_USD);
     TokenUsage::new(
         // Saturating because a server reporting details larger than its own
         // total is malformed, and clamping beats wrapping under
@@ -231,6 +262,7 @@ fn usage_of(response: &serde_json::Value) -> TokenUsage {
         written,
         number(usage, "output_tokens"),
     )
+    .with_reported_cost(reported)
 }
 
 /// The most useful sentence in a failure event.

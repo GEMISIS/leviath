@@ -157,10 +157,13 @@ type TransitionChoiceQuery = (
 fn routing_tool_choice(provider: &str) -> Option<serde_json::Value> {
     match provider {
         "anthropic" => Some(serde_json::json!({ "type": "none" })),
-        // Codex speaks the Responses API, which takes the same bare string.
-        // Without an arm here the fallback clears the tool array instead,
-        // which cold-reads the whole window on every stage transition.
-        "openai" | "openrouter" | "gemini" | "codex" => Some(serde_json::json!("none")),
+        // The Responses providers (Codex, xAI and Grok, Meta) take the same
+        // bare string. Without an arm here the fallback clears the tool array
+        // instead, which cold-reads the whole window on every stage
+        // transition.
+        "openai" | "openrouter" | "gemini" | "codex" | "xai" | "grok" | "meta" => {
+            Some(serde_json::json!("none"))
+        }
         _ => None,
     }
 }

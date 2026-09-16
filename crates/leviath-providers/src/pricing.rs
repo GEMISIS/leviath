@@ -134,12 +134,32 @@ impl TokenUsage {
     /// it. Applying one rate to all input is wrong in both directions at once,
     /// and wrong by more the better a run caches - which is backwards, since a
     /// well-cached run is the one whose cost is most worth trusting.
+    ///
+    /// A model with a long-context tier bills the whole call at the tier's
+    /// rates once its prompt (fresh, cached and written input together)
+    /// reaches the tier's threshold, which is how xAI, Google and Anthropic
+    /// each bill it.
     pub fn cost_usd(&self, pricing: &crate::pricing::ModelPricing) -> f64 {
         let per_mtok = |tokens: usize, rate: f64| tokens as f64 * rate / 1_000_000.0;
-        per_mtok(self.prompt_tokens, pricing.input_per_mtok)
-            + per_mtok(self.cached_tokens, pricing.cached_input_per_mtok)
-            + per_mtok(self.cache_write_tokens, pricing.cache_write_per_mtok)
-            + per_mtok(self.completion_tokens, pricing.output_per_mtok)
+        let prompt = self.prompt_tokens + self.cached_tokens + self.cache_write_tokens;
+        let (input, cached, written, output) = match pricing.long_context {
+            Some(tier) if prompt >= tier.threshold_tokens => (
+                tier.input_per_mtok,
+                tier.cached_input_per_mtok,
+                tier.cache_write_per_mtok,
+                tier.output_per_mtok,
+            ),
+            _ => (
+                pricing.input_per_mtok,
+                pricing.cached_input_per_mtok,
+                pricing.cache_write_per_mtok,
+                pricing.output_per_mtok,
+            ),
+        };
+        per_mtok(self.prompt_tokens, input)
+            + per_mtok(self.cached_tokens, cached)
+            + per_mtok(self.cache_write_tokens, written)
+            + per_mtok(self.completion_tokens, output)
     }
 }
 
@@ -158,6 +178,74 @@ pub struct ModelPricing {
     pub cache_write_per_mtok: f64,
     /// Output, per million tokens.
     pub output_per_mtok: f64,
+    /// The higher rates a call is billed at once its prompt reaches a size,
+    /// when the model has such a tier. Shown beside the base rates, never
+    /// used to rank or choose a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_context: Option<PriceTier>,
+    /// What the model charges per unit of media it makes or reads (an image,
+    /// a second of video, an hour of audio), for a model billed that way
+    /// rather than, or as well as, by the token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<UnitPrice>,
+}
+
+/// A long-context price tier: every rate a call is billed at once its prompt
+/// reaches [`Self::threshold_tokens`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PriceTier {
+    /// The prompt size, in tokens, at which the tier applies to the whole call.
+    pub threshold_tokens: usize,
+    /// Fresh input, per million tokens.
+    pub input_per_mtok: f64,
+    /// Input served from cache, per million tokens.
+    pub cached_input_per_mtok: f64,
+    /// Input written into the cache, per million tokens.
+    pub cache_write_per_mtok: f64,
+    /// Output, per million tokens.
+    pub output_per_mtok: f64,
+}
+
+/// What a media model charges per unit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UnitPrice {
+    /// USD per one [`Self::unit`].
+    pub usd: f64,
+    /// What is counted.
+    pub unit: PriceUnit,
+}
+
+/// The unit a [`UnitPrice`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceUnit {
+    /// One generated or edited image.
+    Image,
+    /// One second of generated video.
+    VideoSecond,
+    /// One hour of audio read or written.
+    AudioHour,
+    /// One million characters of text spoken.
+    MillionChars,
+}
+
+impl PriceUnit {
+    /// The short label a price column shows after the amount: `0.02/img`.
+    pub fn label(self) -> &'static str {
+        match self {
+            PriceUnit::Image => "img",
+            PriceUnit::VideoSecond => "s",
+            PriceUnit::AudioHour => "hr",
+            PriceUnit::MillionChars => "M chr",
+        }
+    }
+}
+
+impl UnitPrice {
+    /// What `quantity` units cost.
+    pub fn cost(self, quantity: f64) -> f64 {
+        self.usd * quantity
+    }
 }
 
 impl ModelPricing {
@@ -169,6 +257,16 @@ impl ModelPricing {
             cached_input_per_mtok: input_per_mtok,
             cache_write_per_mtok: input_per_mtok,
             output_per_mtok,
+            long_context: None,
+            unit: None,
+        }
+    }
+
+    /// Pricing for a model billed by the unit alone, with no token rates.
+    pub fn per_unit(price: UnitPrice) -> Self {
+        Self {
+            unit: Some(price),
+            ..Self::flat(0.0, 0.0)
         }
     }
 }
@@ -188,9 +286,49 @@ static RATE_TABLE: LazyLock<RateTable> = LazyLock::new(|| {
 struct RateTable {
     /// The day the rows were last refreshed, `YYYY-MM-DD`.
     read_on: String,
-    /// Every row, in file order.
+    /// Every token-priced row, in file order.
     #[serde(default)]
     rate: Vec<PublishedRate>,
+    /// Every unit-priced row (media models), in file order.
+    #[serde(default)]
+    unit_rate: Vec<PublishedUnitRate>,
+}
+
+/// One unit-priced row of the shipped price table: a media model billed per
+/// image, per second of video, per hour of audio, or per million characters.
+///
+/// Neither OpenRouter nor LiteLLM publishes these, so every row is `manual`
+/// and `cargo xtask prices` reports one that has gone unread too long rather
+/// than rewriting it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PublishedUnitRate {
+    /// The provider the row applies to.
+    pub provider: String,
+    /// The model-id prefix the row covers; the longest matching prefix wins.
+    pub prefix: String,
+    /// What is counted.
+    pub unit: PriceUnit,
+    /// USD per unit.
+    pub usd: f64,
+    /// Where the figure came from; `manual` for every row today.
+    pub source: String,
+    /// The day a person last checked the figure against the vendor's page.
+    pub checked_on: String,
+}
+
+/// A long-context tier as the table writes it, beside its row.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct PublishedTier {
+    /// The prompt size, in tokens, at which the tier applies.
+    pub threshold: usize,
+    /// Fresh input, USD per million tokens.
+    pub input: f64,
+    /// Input served from cache, USD per million tokens.
+    pub cache_read: f64,
+    /// Input written into the cache, USD per million tokens.
+    pub cache_write: f64,
+    /// Output, USD per million tokens.
+    pub output: f64,
 }
 
 /// One row of the shipped price table: what a family of models charges, and
@@ -215,18 +353,39 @@ pub struct PublishedRate {
     /// agreed, `openrouter` or `litellm` when only one listed it, `manual` for
     /// a row a person wrote, which `cargo xtask prices` never overwrites.
     pub source: String,
+    /// The long-context tier, when the model has one.
+    #[serde(default)]
+    pub long_context: Option<PublishedTier>,
 }
 
 impl PublishedRate {
-    /// The row as the four rates cost accounting bills by.
+    /// The row as the four rates cost accounting bills by, with its tier.
     pub fn pricing(&self) -> ModelPricing {
         ModelPricing {
             input_per_mtok: self.input,
             cached_input_per_mtok: self.cache_read,
             cache_write_per_mtok: self.cache_write,
             output_per_mtok: self.output,
+            long_context: self.long_context.map(|t| PriceTier {
+                threshold_tokens: t.threshold,
+                input_per_mtok: t.input,
+                cached_input_per_mtok: t.cache_read,
+                cache_write_per_mtok: t.cache_write,
+                output_per_mtok: t.output,
+            }),
+            unit: None,
         }
     }
+}
+
+/// The unit-priced row that prices `model` at `provider`, longest prefix
+/// first.
+pub fn published_unit_rate(provider: &str, model: &str) -> Option<&'static PublishedUnitRate> {
+    RATE_TABLE
+        .unit_rate
+        .iter()
+        .filter(|row| row.provider == provider && model.starts_with(&row.prefix))
+        .max_by_key(|row| row.prefix.len())
 }
 
 /// The day the rates in [`published_rates`] were last refreshed.
@@ -272,12 +431,27 @@ pub fn published_rate(provider: &str, model: &str) -> Option<&'static PublishedR
 /// OpenAI and Google quote a cached-input rate and charge nothing extra to
 /// write, so their write rate is the input rate.
 ///
-/// Discounts and multipliers that depend on how a request was made - batch,
-/// data residency, fast mode, long-context tiers - are deliberately not
-/// modelled. They would need per-request state this table does not see, and a
-/// wrong adjustment is worse than a plain list price.
+/// A long-context tier travels with its row and is applied per call by
+/// [`TokenUsage::cost_usd`], which sees the prompt size. Discounts that depend
+/// on how a request was sent - batch, data residency, fast mode - are
+/// deliberately not modelled: they need per-request state this table does not
+/// see, and a wrong adjustment is worse than a plain list price.
+///
+/// A media model's unit price comes from the table's unit rows, alone or
+/// beside its token rates.
 pub fn published_rates(provider: &str, model: &str) -> Option<ModelPricing> {
-    published_rate(provider, model).map(PublishedRate::pricing)
+    let unit = published_unit_rate(provider, model).map(|row| UnitPrice {
+        usd: row.usd,
+        unit: row.unit,
+    });
+    match (published_rate(provider, model), unit) {
+        (Some(row), unit) => Some(ModelPricing {
+            unit,
+            ..row.pricing()
+        }),
+        (None, Some(unit)) => Some(ModelPricing::per_unit(unit)),
+        (None, None) => None,
+    }
 }
 
 impl crate::ModelCapabilityOverride {
@@ -298,6 +472,8 @@ impl crate::ModelCapabilityOverride {
             cached_input_per_mtok: self.cached_input_per_mtok.unwrap_or(input),
             cache_write_per_mtok: self.cache_write_per_mtok.unwrap_or(input),
             output_per_mtok: output,
+            long_context: None,
+            unit: None,
         })
     }
 }
@@ -353,6 +529,110 @@ impl CostTotals {
     /// The run's cost, or `None` when any call could not be priced.
     pub fn total_usd(&self) -> Option<f64> {
         (self.unpriced_calls == 0).then_some(self.priced_usd)
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    fn tiered() -> ModelPricing {
+        ModelPricing {
+            long_context: Some(PriceTier {
+                threshold_tokens: 200_000,
+                input_per_mtok: 2.5,
+                cached_input_per_mtok: 0.4,
+                cache_write_per_mtok: 2.5,
+                output_per_mtok: 5.0,
+            }),
+            cached_input_per_mtok: 0.2,
+            ..ModelPricing::flat(1.25, 2.5)
+        }
+    }
+
+    #[test]
+    fn a_prompt_below_the_threshold_bills_the_base_rates() {
+        let usage = TokenUsage::new(199_999, 0, 0, 1_000_000);
+        let cost = usage.cost_usd(&tiered());
+        assert!((cost - (0.199_999 * 1.25 + 2.5)).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn a_prompt_at_the_threshold_bills_the_whole_call_at_the_tier() {
+        // Cached input counts toward the prompt: the threshold is the size of
+        // what was sent, not what was fresh.
+        let usage = TokenUsage::new(100_000, 100_000, 0, 1_000_000);
+        let cost = usage.cost_usd(&tiered());
+        assert!(
+            (cost - (0.1 * 2.5 + 0.1 * 0.4 + 5.0)).abs() < 1e-9,
+            "{cost}"
+        );
+    }
+
+    #[test]
+    fn a_unit_price_costs_its_quantity_and_labels_itself() {
+        let price = UnitPrice {
+            usd: 0.02,
+            unit: PriceUnit::Image,
+        };
+        assert!((price.cost(3.0) - 0.06).abs() < 1e-12);
+        let only = ModelPricing::per_unit(price);
+        assert_eq!(only.input_per_mtok, 0.0);
+        assert_eq!(only.unit, Some(price));
+        let labels: Vec<_> = [
+            PriceUnit::Image,
+            PriceUnit::VideoSecond,
+            PriceUnit::AudioHour,
+            PriceUnit::MillionChars,
+        ]
+        .into_iter()
+        .map(PriceUnit::label)
+        .collect();
+        assert_eq!(labels, ["img", "s", "hr", "M chr"]);
+    }
+
+    #[test]
+    fn the_extra_fields_stay_out_of_json_when_unset_and_read_back_when_set() {
+        let plain = serde_json::to_value(ModelPricing::flat(1.0, 2.0)).unwrap();
+        assert!(plain.get("long_context").is_none(), "{plain}");
+        assert!(plain.get("unit").is_none(), "{plain}");
+        let rich = tiered();
+        let back: ModelPricing =
+            serde_json::from_value(serde_json::to_value(rich).unwrap()).unwrap();
+        assert_eq!(back, rich);
+        let old: ModelPricing = serde_json::from_str(
+            r#"{"input_per_mtok":1,"cached_input_per_mtok":1,"cache_write_per_mtok":1,"output_per_mtok":2}"#,
+        )
+        .unwrap();
+        assert_eq!(old, ModelPricing::flat(1.0, 2.0));
+    }
+
+    #[test]
+    fn a_published_tier_and_unit_rows_price_like_their_views() {
+        let row = PublishedRate {
+            provider: "xai".into(),
+            prefix: "grok-4.3".into(),
+            input: 1.25,
+            cache_read: 0.2,
+            cache_write: 1.25,
+            output: 2.5,
+            source: "litellm".into(),
+            long_context: Some(PublishedTier {
+                threshold: 200_000,
+                input: 2.5,
+                cache_read: 0.4,
+                cache_write: 2.5,
+                output: 5.0,
+            }),
+        };
+        assert_eq!(row.pricing(), tiered());
+        for row in &RATE_TABLE.unit_rate {
+            let priced = published_rates(&row.provider, &row.prefix).expect("a unit row prices");
+            assert_eq!(priced.unit.map(|u| u.usd), Some(row.usd), "{row:?}");
+            assert_eq!(row.source, "manual", "{row:?}");
+            assert!(row.usd > 0.0, "{row:?}");
+        }
+        assert!(published_unit_rate("nobody", "nothing").is_none());
     }
 }
 
@@ -593,6 +873,8 @@ mod cost_tests {
             cached_input_per_mtok: 1.0,
             cache_write_per_mtok: 12.5,
             output_per_mtok: 50.0,
+            long_context: None,
+            unit: None,
         };
         // 1M fresh, 1M cached, 1M written, 1M out.
         let u = usage(1_000_000, 1_000_000, 1_000_000, 1_000_000);
@@ -701,6 +983,8 @@ mod cost_tests {
             cached_input_per_mtok: 0.3,
             cache_write_per_mtok: 3.75,
             output_per_mtok: 15.0,
+            long_context: None,
+            unit: None,
         };
         let computed = TokenUsage::new(1_000, 0, 0, 500);
         let mut totals = CostTotals::default();
