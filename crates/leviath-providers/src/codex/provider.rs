@@ -481,6 +481,14 @@ impl Provider for CodexProvider {
         leviath_core::sync::lock(&self.served).clone()
     }
 
+    async fn quota(&self) -> Option<Result<crate::quota::QuotaReport>> {
+        Some(
+            CodexProvider::quota(self)
+                .await
+                .map(|q| crate::quota::QuotaReport::from(&q)),
+        )
+    }
+
     fn pricing(&self, _model: &str) -> Option<crate::ModelPricing> {
         // A subscription is a flat monthly fee, so a call's marginal cost is a
         // known zero rather than an unknown. Saying so keeps a subscription run

@@ -1078,6 +1078,16 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// What a subscription has left, for a provider billed to one.
+    ///
+    /// `None` for every provider that is not (the default): a key-billed
+    /// provider has a balance on a vendor's console, not a usage window to
+    /// show. A subscription provider reads its account and answers `Some`,
+    /// with an error when that read failed.
+    async fn quota(&self) -> Option<Result<crate::quota::QuotaReport>> {
+        None
+    }
+
     /// Prove the stored credential works *right now*, and report the models it
     /// reaches.
     ///

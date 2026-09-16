@@ -158,6 +158,21 @@ pub(crate) struct ProviderInfo {
     /// neither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) signin: Option<serde_json::Value>,
+    /// What the subscription has left, read live from the account, when the
+    /// request asked for it with `?quota=true` and the provider is enabled
+    /// and signed in: `{"report": {...}}` or `{"error": "..."}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quota: Option<serde_json::Value>,
+}
+
+/// `GET /api/providers` query parameters.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ListQuery {
+    /// Read each signed-in subscription's usage too. Off by default: it is a
+    /// network read per provider, and a console polls this route while a
+    /// sign-in is waiting.
+    #[serde(default)]
+    quota: bool,
 }
 
 /// The providers that sign in with a browser, as the setup catalog lists them.
@@ -201,11 +216,58 @@ fn describe(
         signin: in_flight
             .get(id)
             .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null)),
+        quota: None,
     }
 }
 
+/// Each enabled, signed-in provider's usage, by id, read through a registry
+/// built the way a run builds one but over the grant file the sign-in routes
+/// wrote.
+async fn quotas(
+    config: &crate::config::Config,
+    providers: &[ProviderInfo],
+) -> HashMap<String, serde_json::Value> {
+    let creds: Vec<_> = providers
+        .iter()
+        .filter(|p| p.enabled && p.signed_in)
+        .map(|p| {
+            let mut options = crate::commands::run::session::signin_options(config, &p.id);
+            options.insert(
+                "auth_store_path".to_string(),
+                super::mcp::admin_paths().grants.display().to_string(),
+            );
+            leviath_runtime::provider_creds::ProviderCreds {
+                name: p.id.clone(),
+                api_key: None,
+                base_url: None,
+                model_capabilities: HashMap::new(),
+                request_timeout_secs: Some(20),
+                rate_limit: None,
+                options,
+            }
+        })
+        .collect();
+    let Ok(registry) = leviath_runtime::provider_creds::build_provider_registry(&creds) else {
+        return HashMap::new();
+    };
+    crate::commands::providers::quota::usage(config, &registry)
+        .await
+        .into_iter()
+        .map(|usage| {
+            let value = match usage.report {
+                Ok(report) => serde_json::json!({ "report": report }),
+                Err(error) => serde_json::json!({ "error": error }),
+            };
+            (usage.provider.to_string(), value)
+        })
+        .collect()
+}
+
 /// `GET /api/providers` - every browser-sign-in provider and its state.
-pub(super) async fn list_providers(State(state): State<AppState>) -> impl IntoResponse {
+pub(super) async fn list_providers(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+) -> impl IntoResponse {
     let config = state.current_config();
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it. The location comes from `admin_paths` rather
@@ -213,10 +275,16 @@ pub(super) async fn list_providers(State(state): State<AppState>) -> impl IntoRe
     let store =
         leviath_providers::oauth::ProviderAuthStore::load(&super::mcp::admin_paths().grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
-    let providers: Vec<ProviderInfo> = signin_providers()
+    let mut providers: Vec<ProviderInfo> = signin_providers()
         .into_iter()
         .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
         .collect();
+    if query.quota {
+        let mut read = quotas(&config, &providers).await;
+        for provider in &mut providers {
+            provider.quota = read.remove(&provider.id);
+        }
+    }
     Json(serde_json::json!({ "providers": providers })).into_response()
 }
 

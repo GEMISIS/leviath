@@ -11,6 +11,7 @@
 //! stays usable under a zero data retention arrangement. Reasoning is carried
 //! between turns by replaying the encrypted items the route hands back.
 
+pub(crate) mod account;
 pub mod catalog;
 
 use std::collections::HashMap;
@@ -56,6 +57,9 @@ pub const GROK_DIALECT: Dialect = Dialect {
     ..DIALECT
 };
 
+/// Each model's accepted reasoning efforts, by id.
+type Efforts = HashMap<String, Vec<String>>;
+
 /// Grok over xAI's API.
 pub struct XaiProvider {
     endpoint: Endpoint,
@@ -69,6 +73,14 @@ pub struct XaiProvider {
     learned: LearnedModels,
     /// Alias to canonical id, from the same listings.
     aliases: Arc<RwLock<HashMap<String, String>>>,
+    /// A subscription's account host (see [`account`]).
+    account_url: String,
+    /// Each model's reasoning efforts, from a subscription's `models-v2`.
+    /// `None` until read, and always for an API key, which has no such route;
+    /// the compiled rule answers then.
+    efforts: Arc<RwLock<Option<Efforts>>>,
+    /// A subscription's coding data retention opt-out, once read.
+    retention_opt_out: Arc<RwLock<Option<bool>>>,
 }
 
 impl XaiProvider {
@@ -87,7 +99,45 @@ impl XaiProvider {
             effort_refused: Default::default(),
             learned: Default::default(),
             aliases: Arc::new(RwLock::new(HashMap::new())),
+            account_url: crate::grok::ACCOUNT_BASE_URL.to_string(),
+            efforts: Arc::new(RwLock::new(None)),
+            retention_opt_out: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Point a subscription's account reads somewhere else. Tests use this.
+    #[must_use]
+    pub fn with_account_url(mut self, url: Option<String>) -> Self {
+        if let Some(url) = url {
+            self.account_url = url.trim_end_matches('/').to_string();
+        }
+        self
+    }
+
+    /// Whether `model` is sent the configured effort: what the subscription's
+    /// catalogue says when it has been read, else the compiled rule, and never
+    /// after the model has refused one.
+    fn sends_effort(&self, model: &str, effort: &str) -> bool {
+        if self.effort_refused.contains(model) {
+            return false;
+        }
+        let listed = self
+            .efforts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|all| all.get(model).cloned());
+        match listed {
+            Some(efforts) => efforts.iter().any(|e| e == effort),
+            None => catalog::takes_effort(model),
+        }
+    }
+
+    /// Read a subscription's account route at `path`.
+    async fn account(&self, path: &str) -> Result<serde_json::Value> {
+        self.endpoint
+            .get_json(&format!("{}{path}", self.account_url))
+            .await
     }
 
     /// Per-model corrections from `[model_capabilities]`.
@@ -157,7 +207,7 @@ impl XaiProvider {
         let effort = self
             .effort
             .as_deref()
-            .filter(|_| catalog::takes_effort(&model) && !self.effort_refused.contains(&model));
+            .filter(|effort| self.sends_effort(&model, effort));
         let mut body = self.body(request, effort);
         let mut response = self.endpoint.post_json("/responses", &body).await?;
         if effort.is_some() && response.status().as_u16() == 400 {
@@ -169,6 +219,27 @@ impl XaiProvider {
             tracing::info!(model = %model, "xAI refused a reasoning effort for this model; asking without one");
             body = self.body(request, None);
             response = self.endpoint.post_json("/responses", &body).await?;
+        }
+        // A subscription over its limit answers 429 with no `Retry-After`; the
+        // billing period's end is the real answer, and backing off blind
+        // against a limit that resets on a calendar is how a run sleeps
+        // through the reset.
+        if response.status().as_u16() == 429
+            && self.endpoint.is_signin()
+            && crate::provider::retry_after_secs(response.headers()).is_none()
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let wait = match self.quota().await {
+                Some(Ok(report)) => report.resets_in(now),
+                _ => None,
+            };
+            // Handed back rather than slept on here: a weekly reset is days
+            // away, and the runtime's retry policy decides what to do with it.
+            return Err(crate::provider::ProviderError::RateLimitExceeded {
+                retry_after_secs: wait,
+            });
         }
         let response =
             crate::provider::check_http_response(response, self.endpoint.rate_limiter.as_ref())
@@ -200,9 +271,13 @@ impl XaiProvider {
         // A caller's own `reasoning` (the titling lane asks for a low effort)
         // is taken off a model that picks its own depth or has refused one:
         // sent anyway, it is the whole request's 400.
+        let caller_effort = fields
+            .get("reasoning")
+            .and_then(|r| r.get("effort"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         if effort.is_none()
-            && (!catalog::takes_effort(&request.model)
-                || self.effort_refused.contains(&request.model))
+            && caller_effort.is_some_and(|asked| !self.sends_effort(&request.model, &asked))
         {
             fields.remove("reasoning");
             fields.remove("include");
@@ -294,6 +369,18 @@ impl Provider for XaiProvider {
                 }
             }
         }
+        if self.endpoint.is_signin() {
+            match self.account("/models-v2").await {
+                Ok(body) => {
+                    *self
+                        .efforts
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(account::efforts(&body));
+                }
+                Err(e) => tracing::debug!(error = %e, "Grok's model efforts could not be read"),
+            }
+        }
         tracing::debug!(
             provider = self.dialect.provider,
             models = listing.models.len(),
@@ -336,6 +423,71 @@ impl Provider for XaiProvider {
 
     fn served_catalog(&self) -> Option<Vec<String>> {
         self.learned.catalog()
+    }
+
+    /// A subscription's usage this week and this month. `None` for an API
+    /// key, whose balance lives on xAI's console.
+    async fn quota(&self) -> Option<Result<crate::quota::QuotaReport>> {
+        if !self.endpoint.is_signin() {
+            return None;
+        }
+        let credits = self.account("/billing?format=credits").await;
+        let monthly = self.account("/billing").await;
+        Some(
+            match account::quota(credits.as_ref().ok(), monthly.as_ref().ok()) {
+                Some(report) => Ok(report),
+                // Neither read answered: say why, from the first.
+                None => Err(match (credits, monthly) {
+                    (Err(e), _) | (_, Err(e)) => e,
+                    _ => crate::provider::ProviderError::InvalidResponse(
+                        "the Grok billing routes answered in a shape Leviath does not read"
+                            .to_string(),
+                    ),
+                }),
+            },
+        )
+    }
+
+    /// A subscription's retention setting, read once.
+    async fn refresh_retention(&self) {
+        let unread = self
+            .retention_opt_out
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        if !self.endpoint.is_signin() || !unread {
+            return;
+        }
+        match self.account("/user").await {
+            Ok(body) => {
+                *self
+                    .retention_opt_out
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    account::retention_opt_out(&body);
+            }
+            Err(e) => tracing::debug!(error = %e, "the Grok account could not be read"),
+        }
+    }
+
+    /// The subscription's answer with the account's own setting quoted, once
+    /// it has been read. The policy stays unknown either way: xAI does not
+    /// say whether "coding data" covers these requests.
+    fn live_retention(&self, model: &str) -> Option<crate::retention::RetentionPolicy> {
+        let opted_out = (*self
+            .retention_opt_out
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))?;
+        let base = crate::retention::builtin(self.dialect.provider, model);
+        Some(crate::retention::RetentionPolicy {
+            source: crate::retention::Source::Live,
+            note: format!(
+                "{}; this account's coding data retention opt-out is {}",
+                base.note,
+                if opted_out { "on" } else { "off" }
+            ),
+            ..base
+        })
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {

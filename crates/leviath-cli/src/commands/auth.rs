@@ -122,6 +122,21 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
         AuthCommand::Status => {
             let config = Config::load_from_path_public(&path)?;
             print!("{}", render_status(&status(&config, &path)));
+            // Read live, and only for a subscription that is switched on: a
+            // signed-in account is the one place the usage lives.
+            let registry =
+                crate::commands::run::session::build_provider_registry_from_config(&config)?;
+            let usage = crate::commands::providers::quota::usage(&config, &registry).await;
+            if !usage.is_empty() {
+                println!("\nSubscription usage:");
+                print!(
+                    "{}",
+                    crate::commands::providers::quota::render(
+                        &usage,
+                        crate::commands::providers::quota::now()
+                    )
+                );
+            }
             Ok(())
         }
         AuthCommand::Login { provider } => {

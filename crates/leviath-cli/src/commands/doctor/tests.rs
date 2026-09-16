@@ -5,6 +5,7 @@
 //! can make a billed call: the provider registry is always injected, and the
 //! isolation clears every provider key from the environment anyway.
 
+use super::signin::signin_check;
 use super::*;
 
 use leviath_providers::{

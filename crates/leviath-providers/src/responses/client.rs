@@ -140,7 +140,13 @@ impl Endpoint {
     /// GET a JSON listing at `path` under the base URL, with the shared
     /// listing error handling.
     pub async fn listing(&self, path: &str) -> Result<serde_json::Value> {
-        let response = self.send(|client| client.get(self.url(path))).await?;
+        self.get_json(&self.url(path)).await
+    }
+
+    /// GET JSON from `url`, which may be on another host of the same vendor,
+    /// with the bearer and the listing error handling.
+    pub async fn get_json(&self, url: &str) -> Result<serde_json::Value> {
+        let response = self.send(|client| client.get(url)).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
