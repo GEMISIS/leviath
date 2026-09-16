@@ -60,7 +60,9 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::compression::predicate::{NotForContentType, SizeAbove};
+use tower_http::compression::{CompressionLayer, CompressionLevel, Predicate};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::config::Config;
 
@@ -454,19 +456,7 @@ async fn execute_with_shutdown(
     // browser that any page may talk to this server.
     let cors = match args.cors.as_deref() {
         None => None,
-        Some("*") => Some(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                // `Access-Control-Allow-Headers: *` does NOT cover
-                // `Authorization` per the Fetch spec, so a browser sending the
-                // required bearer token would be blocked. List the headers the
-                // API actually needs explicitly.
-                .allow_headers([
-                    axum::http::header::AUTHORIZATION,
-                    axum::http::header::CONTENT_TYPE,
-                ]),
-        ),
+        Some("*") => Some(cors_layer(Any)),
         Some(origin) => {
             // An unparseable value must not fall back to `*` - that silently
             // turns a typo into "allow everything", the opposite of what was
@@ -474,19 +464,7 @@ async fn execute_with_shutdown(
             let value = origin.parse::<axum::http::HeaderValue>().map_err(|_| {
                 anyhow::anyhow!("--cors value '{origin}' is not a valid origin header")
             })?;
-            Some(
-                CorsLayer::new()
-                    .allow_origin(value)
-                    .allow_methods(Any)
-                    // `Access-Control-Allow-Headers: *` does NOT cover
-                    // `Authorization` per the Fetch spec, so a browser sending the
-                    // required bearer token would be blocked. List the headers the
-                    // API actually needs explicitly.
-                    .allow_headers([
-                        axum::http::header::AUTHORIZATION,
-                        axum::http::header::CONTENT_TYPE,
-                    ]),
-            )
+            Some(cors_layer(value))
         }
     };
 
@@ -595,6 +573,22 @@ async fn execute_with_shutdown(
         request_limits::Gate::new(request_limits),
         request_limits::limit_requests,
     ));
+    // Compressed bodies for a client that says it takes them. The fastest
+    // setting rather than the codec's default: a run listing is JSON with a
+    // great deal of repetition, so even the quick pass takes it to roughly a
+    // tenth, and the console on loopback should not wait on a slow one. Small
+    // bodies are left alone; so are byte ranges, images and event streams,
+    // and a body already carrying a `Content-Encoding`.
+    let app = app.layer(
+        CompressionLayer::new()
+            .quality(CompressionLevel::Fastest)
+            .compress_when(
+                SizeAbove::new(1024)
+                    .and(NotForContentType::GRPC)
+                    .and(NotForContentType::IMAGES)
+                    .and(NotForContentType::SSE),
+            ),
+    );
     // Applied by branching on the router rather than layering an `Option`:
     // `Option<CorsLayer>` is not a `Layer`, and a permissive-but-unused layer
     // would be exactly the default this change removes.
@@ -715,6 +709,32 @@ async fn serve_tls(
     // with a shutdown signal wired up this resolves to `Ok(())`, and an
     // unreachable `Err` branch is a region the coverage gate cannot forgive.
     let _ = server.handle(handle).serve(app.into_make_service()).await;
+}
+
+/// The CORS rules for `--cors`, whatever origin they are for.
+///
+/// Every request the console makes carries a bearer token, so every one is a
+/// preflighted request; without a `max-age` the browser asks permission again
+/// roughly every five seconds, which doubles the round trips a page costs.
+/// An hour is what Chrome will honour at most. The catalogue headers are
+/// exposed because a cross-origin script cannot read a response header it is
+/// not told about, and `Access-Control-Allow-Private-Network` answers the
+/// question a browser asks before letting a public page reach a loopback
+/// address.
+fn cors_layer(origin: impl Into<AllowOrigin>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(origin)
+        .allow_methods(Any)
+        // `Access-Control-Allow-Headers: *` does NOT cover `Authorization` per
+        // the Fetch spec, so a browser sending the required bearer token would
+        // be blocked. List the headers the API actually needs explicitly.
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+        .expose_headers([model_catalog::CATALOG_AGE, model_catalog::CATALOG_COMPLETE])
+        .max_age(std::time::Duration::from_secs(3600))
+        .allow_private_network(true)
 }
 
 /// The unauthenticated page at `GET /`.
@@ -2158,6 +2178,7 @@ system_prompt = "Run"
                           Origin: https://leviath.dev\r\n\
                           Access-Control-Request-Method: GET\r\n\
                           Access-Control-Request-Headers: authorization\r\n\
+                          Access-Control-Request-Private-Network: true\r\n\
                           Connection: close\r\n\r\n",
                     )
                     .await
@@ -2169,6 +2190,115 @@ system_prompt = "Run"
                     lower.contains("access-control-allow-headers")
                         && lower.contains("authorization"),
                     "preflight must allow the Authorization header, got:\n{lower}"
+                );
+                // One preflight an hour, not one every request; the catalogue
+                // headers readable from a page; a public page allowed to reach
+                // this loopback address.
+                assert!(
+                    lower.contains("access-control-max-age: 3600"),
+                    "preflight must be cacheable, got:\n{lower}"
+                );
+                assert!(
+                    lower.contains("access-control-allow-private-network: true"),
+                    "a private-network preflight must be answered, got:\n{lower}"
+                );
+
+                // The exposure travels on the answer itself, which is where a
+                // page reads a header from.
+                let mut actual = tokio::net::TcpStream::connect(addr).await.unwrap();
+                actual
+                    .write_all(
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                          Origin: https://leviath.dev\r\n\
+                          Authorization: Bearer test-token\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp = Vec::new();
+                actual.read_to_end(&mut resp).await.unwrap();
+                let lower = String::from_utf8_lossy(&resp).to_lowercase();
+                assert!(
+                    lower.contains("access-control-expose-headers")
+                        && lower.contains("x-leviath-catalog-age"),
+                    "the catalogue headers must be exposed, got:\n{lower}"
+                );
+
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// A client that says it takes gzip gets a body over a kilobyte compressed;
+    /// one that says nothing gets it as is.
+    #[tokio::test]
+    async fn execute_compresses_a_body_for_a_client_that_accepts_it() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-compression",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
+                };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(serve_for_test(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(std::future::pending()),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx
+                    .await
+                    .expect("server should report its bound address");
+
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                stream
+                    .write_all(
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                          Authorization: Bearer test-token\r\n\
+                          Accept-Encoding: gzip\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp = Vec::new();
+                stream.read_to_end(&mut resp).await.unwrap();
+                let lower = String::from_utf8_lossy(&resp).to_lowercase();
+                assert!(lower.starts_with("http/1.1 200"), "{lower}");
+                assert!(
+                    lower.contains("content-encoding: gzip"),
+                    "the config body is over a kilobyte and must come back gzipped, got:\n{lower}"
+                );
+                assert!(
+                    lower.contains("vary: accept-encoding"),
+                    "a compressed answer must say it varies on the request, got:\n{lower}"
+                );
+
+                let mut plain = tokio::net::TcpStream::connect(addr).await.unwrap();
+                plain
+                    .write_all(
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                          Authorization: Bearer test-token\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp = Vec::new();
+                plain.read_to_end(&mut resp).await.unwrap();
+                let lower = String::from_utf8_lossy(&resp).to_lowercase();
+                assert!(
+                    !lower.contains("content-encoding"),
+                    "a client that did not ask gets the body as is, got:\n{lower}"
                 );
 
                 handle.abort();
