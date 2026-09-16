@@ -65,6 +65,14 @@
         "meshy_api_key": {
           "type": "string"
         },
+        "xai_api_key": {
+          "description": "xAI API key, for Grok models billed to an xAI API balance. Env fallback XAI_API_KEY.",
+          "type": "string"
+        },
+        "meta_api_key": {
+          "description": "Meta Model API key, for Muse models. Env fallback META_AI_API_KEY.",
+          "type": "string"
+        },
         "bedrock_api_key": {
           "description": "AWS Bedrock API key, sent as a bearer token. Env fallback AWS_BEARER_TOKEN_BEDROCK.",
           "type": "string"
@@ -115,6 +123,20 @@
             "type": "string"
           }
         },
+        "xai_headers": {
+          "type": "object",
+          "description": "Extra headers on every request xAI's provider makes to its host, and a Grok subscription's too.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "meta_headers": {
+          "type": "object",
+          "description": "Extra headers on every request Meta's provider makes to its host.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "anthropic_base_url": {
           "type": "string"
         },
@@ -132,6 +154,14 @@
           "type": "string"
         },
         "openrouter_base_url": {
+          "type": "string"
+        },
+        "xai_base_url": {
+          "description": "Host to reach xAI on instead of https://api.x.ai/v1. A Grok subscription's requests go here too.",
+          "type": "string"
+        },
+        "meta_base_url": {
+          "description": "Host to reach Meta's Model API on instead of https://api.meta.ai/v1.",
           "type": "string"
         },
         "claude_code_enabled": {
@@ -154,6 +184,16 @@
           "description": "Offer Ollama. Opt-in like every other provider: it needs no key and answers on a well-known local port, so registering it unasked made a bare model name resolvable against whatever happened to be running on the machine. A config that sets `ollama_base_url` counts as having chosen it.",
           "type": "boolean",
           "default": false
+        },
+        "grok_enabled": {
+          "description": "Offer Grok billed to a SuperGrok or X Premium+ subscription instead of an xAI API balance. Sign in from `lev setup`, or with `lev auth login grok` on a headless machine.",
+          "type": "boolean",
+          "default": false
+        },
+        "file_uploads": {
+          "description": "Upload media parts to a provider's own file storage once and send the id after, on the providers that have file storage. Off keeps every part inline. Zero data retention turns uploads off whatever this says.",
+          "type": "boolean",
+          "default": true
         },
         "codex_enabled": {
           "description": "Offer the Codex transport, which bills inference to a ChatGPT subscription. Sign in from `lev setup`, or with `lev auth login codex` on a headless machine.",

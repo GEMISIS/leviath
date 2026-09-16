@@ -63,8 +63,12 @@ pub enum WireShape {
     OpenAi,
     /// Anthropic Messages: `image`, `document`.
     Anthropic,
-    /// Codex Responses: `input_image`, `input_file`.
-    Codex,
+    /// OpenAI Responses (Codex and the providers that share its client):
+    /// `input_image`, `input_file`.
+    Responses,
+    /// The Responses shape on a route that also takes `input_audio` and
+    /// `input_video` (Meta's Model API).
+    ResponsesAv,
     /// Bedrock Converse: `image`, `document`.
     Bedrock,
 }
@@ -74,7 +78,9 @@ impl WireShape {
     fn carries(self, family: Family) -> bool {
         matches!(
             (self, family),
-            (_, Family::Image | Family::Document) | (WireShape::OpenAi, Family::Audio)
+            (_, Family::Image | Family::Document)
+                | (WireShape::OpenAi, Family::Audio)
+                | (WireShape::ResponsesAv, Family::Audio | Family::Video)
         )
     }
 
@@ -137,7 +143,7 @@ mod shape_tests {
         let anthropic = WireShape::Anthropic.carried(everything());
         assert_eq!(anthropic.input, ["text/*", "image/*", "application/pdf"]);
         assert_eq!(
-            WireShape::Codex.carried(everything()).input,
+            WireShape::Responses.carried(everything()).input,
             anthropic.input
         );
         assert_eq!(
@@ -393,7 +399,7 @@ pub fn anthropic_block(block: &ContentBlock) -> Option<serde_json::Value> {
     }
     let source = serde_json::json!({
         "type": "base64",
-        "mime_type": part.mime_type,
+        "media_type": part.mime_type,
         "data": data,
     });
     Some(match family_of(&part.mime_type) {
@@ -405,9 +411,9 @@ pub fn anthropic_block(block: &ContentBlock) -> Option<serde_json::Value> {
     })
 }
 
-/// A mime block as a Codex Responses content part: `input_image`,
+/// A mime block as a Responses content part: `input_image`,
 /// `input_file`, or `input_text` carrying the stand-in.
-pub fn codex_part(block: &ContentBlock) -> Option<serde_json::Value> {
+pub fn responses_part(block: &ContentBlock) -> Option<serde_json::Value> {
     let ContentBlock::Mime {
         part, data, name, ..
     } = block
@@ -427,9 +433,19 @@ pub fn codex_part(block: &ContentBlock) -> Option<serde_json::Value> {
             "filename": name.clone().unwrap_or_else(|| "document.pdf".to_string()),
             "file_data": data_uri(&part.mime_type, data),
         }),
-        Family::Audio | Family::Video | Family::Other => {
-            serde_json::json!({ "type": "input_text", "text": part.stand_in })
-        }
+        // Only a route whose shape carries these is ever handed their bytes
+        // (Meta's); every other Responses route gets the stand-in, because its
+        // shape takes audio and video out of what the model is said to accept
+        // before anything is read.
+        Family::Audio => serde_json::json!({
+            "type": "input_audio",
+            "input_audio": { "data": data, "format": audio_format(&part.mime_type) },
+        }),
+        Family::Video => serde_json::json!({
+            "type": "input_video",
+            "video_url": data_uri(&part.mime_type, data),
+        }),
+        Family::Other => serde_json::json!({ "type": "input_text", "text": part.stand_in }),
     })
 }
 
@@ -807,7 +823,7 @@ mod tests {
         let png = ContentBlock::mime(&parts[0]).unwrap();
         assert_eq!(openai_part(&png).unwrap()["type"], "text");
         assert_eq!(anthropic_block(&png).unwrap()["type"], "text");
-        assert_eq!(codex_part(&png).unwrap()["type"], "input_text");
+        assert_eq!(responses_part(&png).unwrap()["type"], "input_text");
         assert_eq!(blocks_of(&MessageContent::Text("t".into())).len(), 0);
         let text = ContentBlock::Text { text: "t".into() };
         assert_eq!(with_data(text.clone(), "x"), text);
@@ -818,14 +834,21 @@ mod tests {
             "data:image/png;base64,AAAA"
         );
         assert_eq!(anthropic_block(&png).unwrap()["type"], "image");
+        // Anthropic's field is `media_type`; any other name is refused with
+        // "source.media_type: Field required".
         assert_eq!(
-            anthropic_block(&png).unwrap()["source"]["mime_type"],
+            anthropic_block(&png).unwrap()["source"]["media_type"],
             "image/png"
         );
-        assert_eq!(codex_part(&png).unwrap()["type"], "input_image");
+        assert!(
+            anthropic_block(&png).unwrap()["source"]
+                .get("mime_type")
+                .is_none()
+        );
+        assert_eq!(responses_part(&png).unwrap()["type"], "input_image");
         assert!(openai_part(&ContentBlock::Text { text: "x".into() }).is_none());
         assert!(anthropic_block(&ContentBlock::Text { text: "x".into() }).is_none());
-        assert!(codex_part(&ContentBlock::Text { text: "x".into() }).is_none());
+        assert!(responses_part(&ContentBlock::Text { text: "x".into() }).is_none());
 
         let make = |t: &str, name: &str| {
             let blob = Blob::new(MimeType::parse(t).unwrap(), vec![1, 2, 3]).named(name);
@@ -835,13 +858,24 @@ mod tests {
         let wav = make("audio/wav", "clip.wav");
         assert_eq!(openai_part(&wav).unwrap()["input_audio"]["format"], "wav");
         assert_eq!(anthropic_block(&wav).unwrap()["type"], "text");
-        assert_eq!(codex_part(&wav).unwrap()["type"], "input_text");
+        assert_eq!(responses_part(&wav).unwrap()["type"], "input_audio");
+        assert_eq!(
+            responses_part(&wav).unwrap()["input_audio"]["format"],
+            "wav"
+        );
         let pdf = make("application/pdf", "spec.pdf");
         assert_eq!(openai_part(&pdf).unwrap()["file"]["filename"], "spec.pdf");
         assert_eq!(anthropic_block(&pdf).unwrap()["type"], "document");
-        assert_eq!(codex_part(&pdf).unwrap()["type"], "input_file");
+        assert_eq!(responses_part(&pdf).unwrap()["type"], "input_file");
         let mp4 = make("video/mp4", "a.mp4");
         assert_eq!(openai_part(&mp4).unwrap()["type"], "text");
+        assert_eq!(responses_part(&mp4).unwrap()["type"], "input_video");
+        assert_eq!(
+            responses_part(&mp4).unwrap()["video_url"],
+            "data:video/mp4;base64,AQID"
+        );
+        let other = make("model/gltf-binary", "a.glb");
+        assert_eq!(responses_part(&other).unwrap()["type"], "input_text");
         let unnamed_pdf = {
             let blob = Blob::new(MimeType::parse("application/pdf").unwrap(), vec![1]);
             with_data(
@@ -854,7 +888,7 @@ mod tests {
             "document.pdf"
         );
         assert_eq!(
-            codex_part(&unnamed_pdf).unwrap()["filename"],
+            responses_part(&unnamed_pdf).unwrap()["filename"],
             "document.pdf"
         );
         assert!(ContentBlock::mime(&Part::text("t")).is_none());

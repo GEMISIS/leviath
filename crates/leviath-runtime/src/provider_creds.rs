@@ -540,6 +540,75 @@ pub fn build_provider_registry_probing(
                     );
                 }
             }
+            "xai" | "meta" => {
+                if let Some(ref key) = c.api_key {
+                    let client = clients.get_or_build(timeout, build_client)?;
+                    let effort = c.options.get("effort").cloned();
+                    let provider: Arc<dyn leviath_providers::Provider> = match c.name.as_str() {
+                        "xai" => Arc::new(
+                            leviath_providers::xai::XaiProvider::new(
+                                client,
+                                leviath_providers::xai::Auth::Key(key.clone()),
+                            )
+                            .with_overrides(caps)
+                            .with_rate_limit(c.rate_limit.as_ref())
+                            .with_request_timeout(timeout)
+                            .with_base_url(c.base_url.clone())
+                            .with_headers(c.headers()?)
+                            .with_reasoning_effort(effort),
+                        ),
+                        _ => Arc::new(
+                            leviath_providers::meta::MetaProvider::new(client, key.clone())
+                                .with_overrides(caps)
+                                .with_rate_limit(c.rate_limit.as_ref())
+                                .with_request_timeout(timeout)
+                                .with_base_url(c.base_url.clone())
+                                .with_headers(c.headers()?)
+                                .with_reasoning_effort(effort),
+                        ),
+                    };
+                    registry.register(c.name.clone(), provider);
+                }
+            }
+            "grok" => {
+                // Registered without reading the grant, for the reason the
+                // Codex arm below gives: a keychain read at daemon start can
+                // raise a GUI prompt, and a `grok/...` model failing at its
+                // first inference with "run `lev auth login grok`" is the
+                // better failure.
+                let Some(store_path) = c.options.get("auth_store_path") else {
+                    tracing::warn!(
+                        "the grok provider was configured without a grant location, \
+                         so it is skipped; this is a bug in leviath rather than in the config"
+                    );
+                    continue;
+                };
+                let client = clients.get_or_build(timeout, build_client)?;
+                let tokens = leviath_providers::oauth::OAuthTokenSource::new(
+                    leviath_providers::grok::PROVIDER_NAME,
+                    std::path::PathBuf::from(store_path),
+                    Arc::new(leviath_providers::oauth::HttpRefresh::new(
+                        client.clone(),
+                        &leviath_providers::grok::PROFILE,
+                    )),
+                )
+                .with_credential_store(credential_store(c));
+                registry.register(
+                    leviath_providers::grok::PROVIDER_NAME.to_string(),
+                    Arc::new(
+                        leviath_providers::xai::XaiProvider::new(
+                            client,
+                            leviath_providers::xai::Auth::Signin(Arc::new(tokens)),
+                        )
+                        .with_overrides(caps)
+                        .with_rate_limit(c.rate_limit.as_ref())
+                        .with_request_timeout(timeout)
+                        .with_base_url(c.base_url.clone())
+                        .with_headers(c.headers()?)
+                        .with_reasoning_effort(c.options.get("effort").cloned()),
+                    ),
+                );
+            }
             "ollama" => {
                 let url = c
                     .base_url
@@ -604,21 +673,14 @@ pub fn build_provider_registry_probing(
                     continue;
                 };
                 let store_path = std::path::PathBuf::from(store_path);
-                let credential_store = c
-                    .options
-                    .get("credential_store")
-                    .map(String::as_str)
-                    .and_then(|kind| match kind {
-                        "keychain" => leviath_providers::codex::store::store_for(
-                            leviath_core::CredentialStoreKind::Keychain,
-                        ),
-                        _ => None,
-                    });
+                let credential_store = credential_store(c);
                 let client = clients.get_or_build(timeout, build_client)?;
-                let tokens = leviath_providers::codex::CodexTokenSource::new(
+                let tokens = leviath_providers::oauth::OAuthTokenSource::new(
+                    leviath_providers::codex::PROVIDER_NAME,
                     store_path,
-                    Arc::new(leviath_providers::codex::refresh::HttpRefresh::new(
+                    Arc::new(leviath_providers::oauth::HttpRefresh::new(
                         client.clone(),
+                        &leviath_providers::codex::PROFILE,
                     )),
                 )
                 .with_credential_store(credential_store);
@@ -651,6 +713,17 @@ pub fn build_provider_registry_probing(
     }
 
     Ok(registry)
+}
+
+/// The OS credential store a sign-in provider's grant lives in, when its
+/// options name the keychain; `None` is the grant file.
+fn credential_store(c: &ProviderCreds) -> Option<Arc<dyn leviath_core::CredentialStore>> {
+    match c.options.get("credential_store").map(String::as_str) {
+        Some("keychain") => {
+            leviath_providers::oauth::store::store_for(leviath_core::CredentialStoreKind::Keychain)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -828,6 +901,8 @@ mod tests {
             "openrouter",
             "meshy",
             "bedrock",
+            "xai",
+            "meta",
         ] {
             let mut bad = ProviderCreds {
                 api_key: Some("sk-test".to_string()),
@@ -1188,6 +1263,8 @@ mod tests {
             "meshy",
             "bedrock",
             "ollama",
+            "xai",
+            "meta",
         ]
         .map(|name| {
             let mut cred = ProviderCreds::simple(name);

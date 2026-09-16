@@ -59,6 +59,8 @@ pub(super) struct RedactedConfig {
     pub(super) has_google_key: bool,
     pub(super) has_openrouter_key: bool,
     pub(super) has_bedrock_key: bool,
+    pub(super) has_xai_key: bool,
+    pub(super) has_meta_key: bool,
     /// The AWS region Bedrock is called in, when the config pins one. Always
     /// sent, `null` when unset, so a console can tell "unset" from a daemon
     /// too old to report it.
@@ -75,6 +77,12 @@ pub(super) struct RedactedConfig {
     /// Whether the Codex transport is on. Whether it is *signed in* is a
     /// separate question with a separate route: see `GET /api/providers`.
     pub(super) codex_enabled: bool,
+    /// Whether Grok billed to a subscription is on. Whether it is signed in
+    /// is `GET /api/providers`, as for Codex.
+    pub(super) grok_enabled: bool,
+    /// Whether media parts are uploaded to a provider's file storage and sent
+    /// by id. Zero data retention turns uploads off whatever this says.
+    pub(super) file_uploads: bool,
     /// Its reasoning effort, when the config pins one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) codex_reasoning_effort: Option<String>,
@@ -524,6 +532,12 @@ pub(super) struct WriteConfigReq {
     /// A Bedrock API key, sent as a bearer token.
     #[serde(default, deserialize_with = "double_option")]
     pub(super) bedrock_key: Option<Option<String>>,
+    /// An xAI API key.
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) xai_key: Option<Option<String>>,
+    /// A Meta Model API key.
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) meta_key: Option<Option<String>>,
     /// The AWS region Bedrock is called in. An empty string is refused with
     /// a 400: `""` is not a region, and losing the setting to a stray form
     /// field is worse than an error.
@@ -542,6 +556,11 @@ pub(super) struct WriteConfigReq {
     /// model name resolvable against whatever happens to be running there.
     pub(super) ollama_enabled: Option<bool>,
     pub(super) codex_enabled: Option<bool>,
+    /// Turn Grok billed to a subscription on or off. Its credential is a
+    /// browser sign-in, taken through `POST /api/providers/grok/login`.
+    pub(super) grok_enabled: Option<bool>,
+    /// Turn uploads of media parts to providers' file storage on or off.
+    pub(super) file_uploads: Option<bool>,
     /// How hard Codex thinks: `none`, `minimal`, `low`, `medium`, `high` or
     /// `xhigh`. Validated before anything is written.
     pub(super) codex_reasoning_effort: Option<String>,

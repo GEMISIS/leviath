@@ -46,7 +46,7 @@ pub(crate) fn admin_paths() -> AdminPaths {
     AdminPaths {
         config: Config::config_path(),
         store: AuthStore::default_path().unwrap_or_default(),
-        grants: leviath_providers::codex::ProviderAuthStore::default_path().unwrap_or_default(),
+        grants: leviath_providers::oauth::ProviderAuthStore::default_path().unwrap_or_default(),
     }
 }
 

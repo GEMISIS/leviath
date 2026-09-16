@@ -1,4 +1,4 @@
-//! The useful claims inside a ChatGPT OAuth token.
+//! The useful claims inside a subscription OAuth token.
 //!
 //! Both the id token and the access token are JWTs. Only the payload is read,
 //! and only the signature-independent facts are taken from it: when the access
@@ -21,7 +21,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 /// exactly what a debug line about a grant should show. The tokens themselves
 /// live on [`super::store::ProviderGrant`], whose `Debug` redacts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CodexClaims {
+pub struct GrantClaims {
     /// The signed-in address, for `lev auth status`.
     pub email: Option<String>,
     /// `free`, `plus`, `pro`, `business`, `enterprise`, `edu`. Gates which
@@ -63,15 +63,29 @@ pub fn expiry(jwt: &str) -> Option<u64> {
     payload(jwt)?.get("exp")?.as_u64()
 }
 
+/// The `tier` claim of an xAI access token, which names the subscription
+/// level the grant was issued under. `None` for any other issuer.
+pub fn tier(access_token: &str) -> Option<u64> {
+    payload(access_token)?.get("tier")?.as_u64()
+}
+
+/// The `nonce` claim of an id token, which a sign-in that sent one checks.
+pub fn nonce(id_token: &str) -> Option<String> {
+    payload(id_token)?
+        .get("nonce")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// The account facts carried in an id token.
 ///
-/// The interesting claims are namespaced under `https://api.openai.com/auth`,
+/// ChatGPT's interesting claims are namespaced under `https://api.openai.com/auth`,
 /// with the address sometimes at the top level and sometimes under
 /// `https://api.openai.com/profile`. Both are checked because both have been
 /// observed.
-pub fn parse(id_token: &str) -> CodexClaims {
+pub fn parse(id_token: &str) -> GrantClaims {
     let Some(claims) = payload(id_token) else {
-        return CodexClaims::default();
+        return GrantClaims::default();
     };
     let auth = claims.get("https://api.openai.com/auth");
     let profile = claims.get("https://api.openai.com/profile");
@@ -79,7 +93,7 @@ pub fn parse(id_token: &str) -> CodexClaims {
         node?.get(key)?.as_str().map(str::to_string)
     };
 
-    CodexClaims {
+    GrantClaims {
         email: claims
             .get("email")
             .and_then(serde_json::Value::as_str)
@@ -142,7 +156,7 @@ mod tests {
             assert_eq!(expiry(not_a_jwt), None, "expiry of {not_a_jwt:?}");
             assert_eq!(
                 parse(not_a_jwt),
-                CodexClaims::default(),
+                GrantClaims::default(),
                 "parse of {not_a_jwt:?}"
             );
         }
@@ -162,7 +176,7 @@ mod tests {
         }));
         assert_eq!(
             parse(&token),
-            CodexClaims {
+            GrantClaims {
                 email: Some("someone@example.com".to_string()),
                 plan_type: Some("plus".to_string()),
                 account_id: Some("0c77f491-84f6-4f73-81d4-a2937c9e94fb".to_string()),

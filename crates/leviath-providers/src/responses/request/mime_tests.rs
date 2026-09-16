@@ -32,6 +32,7 @@ fn text_and_mime_share_one_message_item() {
             ContentBlock::Text { text: "see".into() },
             png("a.png"),
         ]),
+        &crate::codex::DIALECT,
         false,
     );
     assert_eq!(input.len(), 1);
@@ -44,7 +45,12 @@ fn text_and_mime_share_one_message_item() {
 #[test]
 fn mime_alone_makes_an_item_with_no_empty_text_part() {
     let mut input = Vec::new();
-    push_message(&mut input, &message(vec![png("a.png")]), false);
+    push_message(
+        &mut input,
+        &message(vec![png("a.png")]),
+        &crate::codex::DIALECT,
+        false,
+    );
     let parts = input[0]["content"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["type"], "input_image");
@@ -70,6 +76,7 @@ fn mime_before_a_tool_call_is_flushed_ahead_of_it() {
             },
             png("b.png"),
         ]),
+        &crate::codex::DIALECT,
         false,
     );
     assert_eq!(input[0]["type"], "message");

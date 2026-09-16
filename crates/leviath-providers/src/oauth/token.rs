@@ -1,6 +1,6 @@
 //! Holding a bearer token that expires, and replacing it exactly once.
 //!
-//! The ChatGPT grant rotates: every refresh mints a new refresh token and
+//! A subscription grant rotates: every refresh mints a new refresh token and
 //! invalidates the one presented. Presenting a spent refresh token is not a
 //! retryable error, it is the end of the grant, and the user has to sign in
 //! through a browser again. That single fact shapes everything here.
@@ -202,7 +202,7 @@ impl Drop for LockFile {
 }
 
 /// The real token source: a cached grant, a rotating refresh, and a file.
-pub struct CodexTokenSource {
+pub struct OAuthTokenSource {
     /// The grant as this process last saw it.
     ///
     /// Taken through [`leviath_core::sync::lock`], whose docs explain why
@@ -227,9 +227,13 @@ pub struct CodexTokenSource {
     provider: String,
 }
 
-impl CodexTokenSource {
-    /// Build a source over the grant file at `store_path`.
-    pub fn new(store_path: PathBuf, transport: Arc<dyn RefreshTransport>) -> Self {
+impl OAuthTokenSource {
+    /// Build a source over `provider`'s grant in the file at `store_path`.
+    pub fn new(
+        provider: impl Into<String>,
+        store_path: PathBuf,
+        transport: Arc<dyn RefreshTransport>,
+    ) -> Self {
         Self {
             cached: Mutex::new(None),
             gate: tokio::sync::Mutex::new(()),
@@ -238,7 +242,7 @@ impl CodexTokenSource {
             credential_store: None,
             transport,
             clock: system_clock(),
-            provider: super::PROVIDER_NAME.to_string(),
+            provider: provider.into(),
         }
     }
 
@@ -256,13 +260,6 @@ impl CodexTokenSource {
     #[must_use]
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
-        self
-    }
-
-    /// Name this source's provider, for the grant key and error text.
-    #[must_use]
-    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
-        self.provider = provider.into();
         self
     }
 
@@ -339,7 +336,7 @@ fn credentials_of(grant: &ProviderGrant) -> Credentials {
 }
 
 #[async_trait]
-impl TokenSource for CodexTokenSource {
+impl TokenSource for OAuthTokenSource {
     async fn credentials(&self) -> Result<Credentials, RefreshError> {
         let grant = self.current().ok_or_else(|| self.not_signed_in())?;
         if grant.is_expired_at((self.clock)()) {

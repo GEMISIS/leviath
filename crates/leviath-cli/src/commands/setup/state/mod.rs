@@ -162,7 +162,7 @@ fn env_credentials(lookup: &dyn Fn(&str) -> Option<String>) -> HashMap<&'static 
 /// signed in" because a claim was missing would offer a second sign-in that
 /// replaces a working one.
 fn signed_in_as(path: Option<&std::path::Path>, provider: &str) -> Option<String> {
-    let grant = leviath_providers::codex::ProviderAuthStore::load(path?)
+    let grant = leviath_providers::oauth::ProviderAuthStore::load(path?)
         .ok()?
         .get(provider)
         .cloned()?;
@@ -202,7 +202,7 @@ impl Wizard {
                     .filter(|v| stored.is_none() && env_only.contains_key(v));
                 let signed_in = match provider.credential {
                     catalog::Credential::Signin => signed_in_as(
-                        leviath_providers::codex::ProviderAuthStore::default_path().as_deref(),
+                        leviath_providers::oauth::ProviderAuthStore::default_path().as_deref(),
                         provider.id,
                     ),
                     _ => None,
@@ -2025,7 +2025,7 @@ pub(super) mod tests {
         wizard.open_provider_modal(ollama);
         wizard.accept_modal();
         assert!(wizard.providers[ollama].selected);
-        assert_eq!(wizard.message.as_deref(), Some("Ollama (local) is set up."));
+        assert_eq!(wizard.message.as_deref(), Some("Ollama is set up."));
 
         // An endpoint preset needs an entry under it.
         let llama = wizard
@@ -2454,7 +2454,7 @@ pub(super) mod tests {
         assert_eq!(values, ["Text and images", "3D models and textures"]);
         let detail = picker.options[0].detail.as_str();
         assert!(detail.starts_with("Anthropic, OpenAI"), "{detail}");
-        assert_eq!(picker.options[1].detail, "Meshy (3D models)");
+        assert_eq!(picker.options[1].detail, "Meshy");
 
         // A kind: the providers themselves, one row of `providers` each.
         wizard.settle_picker_choice(1);
@@ -2474,7 +2474,7 @@ pub(super) mod tests {
         let picker = wizard.picker.as_ref().expect("open");
         assert_eq!(picker.title, "Add a provider: 3D models and textures");
         let values: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
-        assert_eq!(values, ["Meshy (3D models)"]);
+        assert_eq!(values, ["Meshy"]);
         assert_eq!(
             picker.options[0].detail,
             wizard.providers[meshy].provider.blurb
@@ -3932,7 +3932,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
             let path =
-                leviath_providers::codex::ProviderAuthStore::default_path().expect("a home is set");
+                leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
             std::fs::create_dir_all(path.parent().expect("a parent")).unwrap();
             // Nobody signed in, nowhere to look, and a file that will not parse
             // are all the same answer: nothing to report.
@@ -3940,7 +3940,7 @@ pub(super) mod tests {
             assert_eq!(signed_in_as(None, "codex"), None);
             std::fs::write(&path, "{ not json").unwrap();
             assert_eq!(signed_in_as(Some(&path), "codex"), None);
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {
@@ -3958,7 +3958,7 @@ pub(super) mod tests {
             );
 
             // A grant with an account but no plan says the account alone.
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {
@@ -3978,7 +3978,7 @@ pub(super) mod tests {
             // grant is what lets the provider answer, and reporting "not
             // signed in" over a missing claim would offer to replace a
             // working sign-in.
-            let mut store = leviath_providers::codex::ProviderAuthStore::default();
+            let mut store = leviath_providers::oauth::ProviderAuthStore::default();
             store.set(
                 "codex",
                 leviath_providers::ProviderGrant {

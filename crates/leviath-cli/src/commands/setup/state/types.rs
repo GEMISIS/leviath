@@ -228,10 +228,9 @@ impl DetailAction {
     pub(crate) fn label(self, row: &ProviderRow) -> String {
         let provider = row.provider.display;
         match self {
-            // Unnamed, unlike the key-page button. This provider's display
-            // name is a sentence ("OpenAI Codex (ChatGPT subscription)"), it
-            // is already the heading two lines above, and a button that
-            // repeats it reads as a different provider's.
+            // Unnamed, unlike the key-page button: the provider's name is
+            // already the heading two lines above, and a button that repeats
+            // it reads as a different provider's.
             Self::OpenSignup if row.provider.credential == Credential::Signin => {
                 "Open the subscription plans page".to_string()
             }

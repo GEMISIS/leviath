@@ -38,6 +38,17 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub bedrock_api_key: Option<String>,
 
+    /// xAI API key, for Grok models billed to an xAI API balance. Env
+    /// fallback `XAI_API_KEY`.
+    #[serde(default)]
+    pub xai_api_key: Option<String>,
+
+    /// Meta Model API key, for Muse models. Env fallback `META_AI_API_KEY`.
+    /// Meta's own examples name the variable `MODEL_API_KEY`, which is too
+    /// generic to read safely, so Leviath does not.
+    #[serde(default)]
+    pub meta_api_key: Option<String>,
+
     /// The AWS region whose Bedrock endpoints are called. Unset falls back
     /// to `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. Part of
     /// the address on every Bedrock host, so the one Bedrock setting a user
@@ -81,6 +92,15 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub bedrock_base_url: Option<String>,
 
+    /// Host to reach xAI on. See [`Self::anthropic_base_url`]. Also where a
+    /// Grok subscription's requests go, since the two share the API.
+    #[serde(default)]
+    pub xai_base_url: Option<String>,
+
+    /// Host to reach Meta's Model API on. See [`Self::anthropic_base_url`].
+    #[serde(default)]
+    pub meta_base_url: Option<String>,
+
     /// Extra headers on every request Anthropic's provider makes to its
     /// host: a gateway's own token, a tenant or cost-centre tag. Sent as
     /// written, after the provider's own headers. Meant for a gateway named
@@ -114,6 +134,14 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub bedrock_headers: std::collections::BTreeMap<String, String>,
 
+    /// Extra headers for xAI's provider. See [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub xai_headers: std::collections::BTreeMap<String, String>,
+
+    /// Extra headers for Meta's provider. See [`Self::anthropic_headers`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub meta_headers: std::collections::BTreeMap<String, String>,
+
     /// Whether the Claude Code CLI transport is enabled.
     ///
     /// **Opt-in, and never selected for the user.** The CLI injects its own
@@ -139,11 +167,10 @@ pub struct ProviderConfig {
 
     /// Whether to offer Ollama.
     ///
-    /// Ollama needs no key and answers on a well-known local port, so it used
-    /// to be registered on every machine whether or not anybody asked. That
-    /// made a bare model name in a blueprint resolvable against whatever
-    /// happened to be running locally, which is a surprising place for a run
-    /// to end up.
+    /// Ollama needs no key and answers on a well-known local port, so it is
+    /// opt-in: registered on every machine, it would make a bare model name in
+    /// a blueprint resolvable against whatever happened to be running
+    /// locally, which is a surprising place for a run to end up.
     ///
     /// Kept separate from `ollama_base_url` because the two say different
     /// things: this is "I chose Ollama", and the URL is "and it is not at the
@@ -190,6 +217,27 @@ pub struct ProviderConfig {
     /// blob starts being refused, this turns it off without a release.
     #[serde(default = "default_true")]
     pub codex_replay_reasoning: bool,
+
+    /// Whether to offer Grok billed to a subscription (SuperGrok, or X
+    /// Premium+ on a linked X account) rather than an xAI API balance.
+    ///
+    /// Opt-in for the reason Codex is: the credential is a browser sign-in,
+    /// and selecting it changes what gets billed. `lev setup` offers it, and
+    /// `lev auth login grok` does the sign-in.
+    #[serde(default)]
+    pub grok_enabled: bool,
+
+    /// Whether media parts (images, PDFs, audio, video) are uploaded to a
+    /// provider's own file storage once and referenced by id afterwards, on
+    /// the providers that have one.
+    ///
+    /// On by default: an upload is sent once rather than re-sent inline on
+    /// every turn, and a provider's file limit is far larger than what fits
+    /// inline. Off keeps every part inline, within each provider's inline
+    /// limit. [`Self::zero_retention`] turns uploads off regardless, since an
+    /// uploaded file is kept on the provider's servers until it is deleted.
+    #[serde(default = "default_true")]
+    pub file_uploads: bool,
 
     /// Prompt-cache lifetime for Anthropic: `"5m"` (default) or `"1h"`.
     ///
@@ -266,6 +314,8 @@ impl std::fmt::Debug for ProviderConfig {
             .field("google_api_key", &redacted(&self.google_api_key))
             .field("meshy_api_key", &redacted(&self.meshy_api_key))
             .field("bedrock_api_key", &redacted(&self.bedrock_api_key))
+            .field("xai_api_key", &redacted(&self.xai_api_key))
+            .field("meta_api_key", &redacted(&self.meta_api_key))
             // A region is not a secret.
             .field("bedrock_region", &self.bedrock_region)
             .field("claude_code_enabled", &self.claude_code_enabled)
@@ -278,6 +328,8 @@ impl std::fmt::Debug for ProviderConfig {
             .field("codex_reasoning_effort", &self.codex_reasoning_effort)
             .field("codex_verbosity", &self.codex_verbosity)
             .field("codex_replay_reasoning", &self.codex_replay_reasoning)
+            .field("grok_enabled", &self.grok_enabled)
+            .field("file_uploads", &self.file_uploads)
             .field("anthropic_cache_ttl", &self.anthropic_cache_ttl)
             .field("fallback_order", &self.fallback_order)
             .field("zero_retention", &self.zero_retention)
@@ -293,6 +345,8 @@ impl std::fmt::Debug for ProviderConfig {
             )
             .field("meshy_headers", &header_names(&self.meshy_headers))
             .field("bedrock_headers", &header_names(&self.bedrock_headers))
+            .field("xai_headers", &header_names(&self.xai_headers))
+            .field("meta_headers", &header_names(&self.meta_headers))
             .finish()
     }
 }
@@ -310,6 +364,8 @@ impl Default for ProviderConfig {
             google_api_key: None,
             meshy_api_key: None,
             bedrock_api_key: None,
+            xai_api_key: None,
+            meta_api_key: None,
             bedrock_region: None,
             anthropic_base_url: None,
             openai_base_url: None,
@@ -317,12 +373,16 @@ impl Default for ProviderConfig {
             openrouter_base_url: None,
             meshy_base_url: None,
             bedrock_base_url: None,
+            xai_base_url: None,
+            meta_base_url: None,
             anthropic_headers: std::collections::BTreeMap::new(),
             openai_headers: std::collections::BTreeMap::new(),
             google_headers: std::collections::BTreeMap::new(),
             openrouter_headers: std::collections::BTreeMap::new(),
             meshy_headers: std::collections::BTreeMap::new(),
             bedrock_headers: std::collections::BTreeMap::new(),
+            xai_headers: std::collections::BTreeMap::new(),
+            meta_headers: std::collections::BTreeMap::new(),
             claude_code_enabled: false,
             claude_code_binary: None,
             claude_code_effort: None,
@@ -332,6 +392,8 @@ impl Default for ProviderConfig {
             codex_reasoning_effort: None,
             codex_verbosity: None,
             codex_replay_reasoning: default_true(),
+            grok_enabled: false,
+            file_uploads: default_true(),
             anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
             provider_order: Vec::new(),

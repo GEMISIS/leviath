@@ -1,6 +1,6 @@
 //! The headers this route insists on, and what to say when it refuses.
 
-use super::token::Credentials;
+use crate::oauth::Credentials;
 
 /// Build the header set for one inference request.
 ///

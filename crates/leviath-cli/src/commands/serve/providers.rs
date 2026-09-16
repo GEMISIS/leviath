@@ -49,8 +49,7 @@ use crate::commands::setup::signin::{LiveAuthorizer, ProviderAuthorizer};
 /// anything reachable from a handler's parameters is request data as far as a
 /// scanner is concerned, and a file location that is request data is a
 /// path-injection finding. The grant store comes from
-/// [`admin_paths`](super::mcp::admin_paths) inside each handler instead. It
-/// did live here, and CodeQL was right to say so.
+/// [`admin_paths`](super::mcp::admin_paths) inside each handler instead.
 ///
 /// [`AdminPaths`]: super::mcp::AdminPaths
 #[derive(Clone)]
@@ -59,10 +58,11 @@ pub(crate) struct ProviderAdmin {
     pub(crate) opener: leviath_mcp::BrowserOpener,
     /// The OAuth issuer, and the loopback ports its client id is registered
     /// against. Overridden only by tests, which point them at a local mock and
-    /// port zero so a whole sign-in runs without a browser or a fixed port.
-    pub(crate) issuer: String,
+    /// port zero so a whole sign-in runs without a browser or a fixed port;
+    /// `None` is each provider's own.
+    pub(crate) issuer: Option<String>,
     /// See [`Self::issuer`].
-    pub(crate) ports: Vec<u16>,
+    pub(crate) ports: Option<Vec<u16>>,
     /// What each provider's sign-in is doing, for the poll to read.
     pub(crate) in_flight: Arc<Mutex<HashMap<String, Progress>>>,
     /// Current Unix time; a fn so a long-lived server stays current.
@@ -80,8 +80,8 @@ impl Default for ProviderAdmin {
     fn default() -> Self {
         Self {
             opener: Arc::new(leviath_sys::open_url),
-            issuer: leviath_providers::codex::ISSUER.to_string(),
-            ports: leviath_providers::codex::CALLBACK_PORTS.to_vec(),
+            issuer: None,
+            ports: None,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             now: super::mcp::system_now,
             usage_url: None,
@@ -93,9 +93,8 @@ impl ProviderAdmin {
     /// The authorizer for this request.
     ///
     /// Built per call rather than held, so the grant store and the credential
-    /// backend are both read from where they are *now*: a `[security]
-    /// credential_store` change used to need a restart of `lev serve` to take
-    /// effect, because the backend was resolved once at start-up.
+    /// backend are both read from where they are *now*, and a `[security]
+    /// credential_store` change takes effect without restarting `lev serve`.
     fn authorizer(&self) -> LiveAuthorizer {
         let paths = super::mcp::admin_paths();
         let mut authorizer = LiveAuthorizer::real(self.opener.clone(), &paths.config);
@@ -161,10 +160,10 @@ pub(crate) struct ProviderInfo {
     pub(crate) signin: Option<serde_json::Value>,
 }
 
-/// The providers that sign in with a browser.
+/// The providers that sign in with a browser, as the setup catalog lists them.
 ///
-/// One entry today. A list rather than a `codex` key so a second one is a
-/// table entry rather than a new route and a console change.
+/// A list rather than one key per provider, so each is a table entry rather
+/// than a new route and a console change.
 fn signin_providers() -> Vec<(&'static str, &'static str)> {
     crate::commands::setup::catalog::providers()
         .into_iter()
@@ -178,7 +177,7 @@ fn describe(
     id: &str,
     display: &str,
     config: &crate::config::Config,
-    store: Option<&leviath_providers::codex::ProviderAuthStore>,
+    store: Option<&leviath_providers::oauth::ProviderAuthStore>,
     in_flight: &HashMap<String, Progress>,
 ) -> ProviderInfo {
     let grant = store.and_then(|store| store.get(id).cloned());
@@ -186,7 +185,7 @@ fn describe(
     ProviderInfo {
         id: id.to_string(),
         display: display.to_string(),
-        enabled: config.providers.codex_enabled,
+        enabled: crate::commands::setup::catalog::signin_enabled(config, id),
         signed_in: grant.is_some(),
         account: grant
             .as_ref()
@@ -198,7 +197,7 @@ fn describe(
             .or_else(|| claims.as_ref().and_then(|c| c.plan_type.clone())),
         expires_at: grant
             .as_ref()
-            .and_then(|g| leviath_providers::codex::claims::expiry(&g.access_token)),
+            .and_then(|g| leviath_providers::oauth::claims::expiry(&g.access_token)),
         signin: in_flight
             .get(id)
             .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null)),
@@ -212,7 +211,7 @@ pub(super) async fn list_providers(State(state): State<AppState>) -> impl IntoRe
     // for every provider in it. The location comes from `admin_paths` rather
     // than from `state`; see `ProviderAdmin`.
     let store =
-        leviath_providers::codex::ProviderAuthStore::load(&super::mcp::admin_paths().grants).ok();
+        leviath_providers::oauth::ProviderAuthStore::load(&super::mcp::admin_paths().grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     let providers: Vec<ProviderInfo> = signin_providers()
         .into_iter()
@@ -286,7 +285,7 @@ pub(super) async fn login(
     // most once.
     let slot = Arc::new(Mutex::new(Some(started_tx)));
     let announce_slot = Arc::clone(&slot);
-    let announce: crate::commands::auth::codex::Announce = Arc::new(move |url: &str| {
+    let announce: crate::commands::auth::oauth::Announce = Arc::new(move |url: &str| {
         // `Option::map` rather than `if let`: an `if let` with no else leaves
         // a region only a second announce could reach, and there is not one.
         let _ = leviath_core::sync::lock(&announce_slot)
@@ -397,7 +396,7 @@ pub(super) async fn check(
         Err(response) => return *response,
     };
     let config = state.current_config();
-    let mut options = crate::commands::run::session::codex_options(&config);
+    let mut options = crate::commands::run::session::signin_options(&config, name);
     // The authorizer's path, not the default one it usually resolves to: the
     // sign-in wrote there, and a check that read somewhere else would report
     // a provider with no grant a moment after storing one.

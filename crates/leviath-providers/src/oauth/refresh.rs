@@ -8,21 +8,22 @@
 use async_trait::async_trait;
 
 use super::token::{RefreshError, RefreshTransport, RefreshedTokens};
+use super::{OAuthProfile, TokenBody};
 
 /// The real refresh, against the issuer.
 pub struct HttpRefresh {
     client: reqwest::Client,
     token_url: String,
-    client_id: String,
+    profile: &'static OAuthProfile,
 }
 
 impl HttpRefresh {
-    /// A refresher against the public ChatGPT issuer.
-    pub fn new(client: reqwest::Client) -> Self {
+    /// A refresher against `profile`'s issuer.
+    pub fn new(client: reqwest::Client, profile: &'static OAuthProfile) -> Self {
         Self {
             client,
-            token_url: format!("{}/oauth/token", super::ISSUER),
-            client_id: super::CLIENT_ID.to_string(),
+            token_url: profile.token_url(profile.issuer),
+            profile,
         }
     }
 
@@ -53,35 +54,53 @@ fn is_terminal(status: u16, body: &str) -> bool {
 }
 
 /// The sentence to show for a terminal refusal.
-fn terminal_message(body: &str) -> String {
+fn terminal_message(profile: &OAuthProfile, body: &str) -> String {
     let lower = body.to_ascii_lowercase();
+    let account = profile.account_name;
+    let hint = profile.relogin_hint();
     if lower.contains("refresh_token_reused") {
-        return "the ChatGPT refresh token was rejected as already used. This happens when \
-                two processes refresh the same session at once. The session cannot be \
-                recovered: run `lev auth login codex` to sign in again"
-            .to_string();
+        return format!(
+            "the {account} refresh token was rejected as already used. This happens when \
+             two processes refresh the same session at once. The session cannot be \
+             recovered: {hint}"
+        );
     }
     if lower.contains("refresh_token_invalidated") {
-        return "the ChatGPT session was revoked. Run `lev auth login codex` to sign in again"
-            .to_string();
+        return format!("the {account} session was revoked. {}", capitalised(&hint));
     }
-    "the ChatGPT session has expired. Run `lev auth login codex` to sign in again".to_string()
+    format!("the {account} session has expired. {}", capitalised(&hint))
+}
+
+/// `hint` with its first letter upper-cased, to start a sentence.
+fn capitalised(hint: &str) -> String {
+    let mut chars = hint.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 #[async_trait]
 impl RefreshTransport for HttpRefresh {
     async fn refresh(&self, refresh_token: &str) -> Result<RefreshedTokens, RefreshError> {
-        // JSON, not the form encoding the authorization-code exchange uses.
-        let body = serde_json::json!({
-            "client_id": self.client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        });
-
-        let response = self
-            .client
-            .post(&self.token_url)
-            .json(&body)
+        let pairs = [
+            ("client_id", self.profile.client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ];
+        // Each issuer's own choice, and neither accepts the other: OpenAI's
+        // wants JSON, and xAI's answers a JSON body with 415.
+        let request = self.client.post(&self.token_url);
+        let request = match self.profile.refresh_body {
+            TokenBody::Json => request.json(
+                &pairs
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            ),
+            TokenBody::Form => request.form(&pairs),
+        };
+        let response = request
             .send()
             .await
             .map_err(|e| RefreshError::Transient(format!("could not reach the issuer: {e}")))?;
@@ -91,7 +110,7 @@ impl RefreshTransport for HttpRefresh {
 
         if !(200..300).contains(&status) {
             return Err(match is_terminal(status, &text) {
-                true => RefreshError::Terminal(terminal_message(&text)),
+                true => RefreshError::Terminal(terminal_message(self.profile, &text)),
                 false => RefreshError::Transient(format!(
                     "the issuer refused the refresh (HTTP {status}): {text}"
                 )),
@@ -125,7 +144,8 @@ mod tests {
     use leviath_testkit::spawn_mock_server;
 
     fn refresher(url: &str) -> HttpRefresh {
-        HttpRefresh::new(reqwest::Client::new()).with_token_url(url.to_string())
+        HttpRefresh::new(reqwest::Client::new(), &crate::codex::PROFILE)
+            .with_token_url(url.to_string())
     }
 
     #[tokio::test]
@@ -237,9 +257,50 @@ mod tests {
 
     #[test]
     fn the_default_refresher_points_at_the_public_issuer() {
-        let refresher = HttpRefresh::new(reqwest::Client::new());
+        let refresher = HttpRefresh::new(reqwest::Client::new(), &crate::codex::PROFILE);
         assert_eq!(refresher.token_url, "https://auth.openai.com/oauth/token");
-        assert_eq!(refresher.client_id, super::super::CLIENT_ID);
+        let grok = HttpRefresh::new(reqwest::Client::new(), &crate::grok::PROFILE);
+        assert_eq!(grok.token_url, "https://auth.x.ai/oauth2/token");
+    }
+
+    #[tokio::test]
+    async fn each_issuer_gets_the_body_encoding_it_accepts() {
+        let reply = br#"{"access_token":"at-new"}"#.to_vec();
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", reply.clone()).await;
+        HttpRefresh::new(reqwest::Client::new(), &crate::grok::PROFILE)
+            .with_token_url(url)
+            .refresh("rt-old")
+            .await
+            .expect("refresh");
+        let form = seen.lock().unwrap().join("\n");
+        assert!(form.contains("application/x-www-form-urlencoded"), "{form}");
+        assert!(form.contains("grant_type=refresh_token"), "{form}");
+        assert!(form.contains("refresh_token=rt-old"), "{form}");
+
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", reply).await;
+        refresher(&url).refresh("rt-old").await.expect("refresh");
+        let json = seen.lock().unwrap().join("\n");
+        assert!(json.contains("application/json"), "{json}");
+        assert!(json.contains("\"grant_type\":\"refresh_token\""), "{json}");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_refusal_names_the_account_and_the_provider() {
+        let url =
+            spawn_mock_server(400, "Bad Request", br#"{"error":"invalid_grant"}"#.to_vec()).await;
+        let err = HttpRefresh::new(reqwest::Client::new(), &crate::grok::PROFILE)
+            .with_token_url(url)
+            .refresh("rt-old")
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Grok session has expired"), "{text}");
+        assert!(text.contains("Run `lev auth login grok`"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_hint_capitalises_to_nothing() {
+        assert_eq!(capitalised(""), "");
     }
 
     #[test]

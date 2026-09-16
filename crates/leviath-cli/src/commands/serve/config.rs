@@ -64,12 +64,16 @@ fn redact(
         has_google_key: c.providers.google_api_key.is_some(),
         has_openrouter_key: c.openrouter_api_key.is_some(),
         has_bedrock_key: c.providers.bedrock_api_key.is_some(),
+        has_xai_key: c.providers.xai_api_key.is_some(),
+        has_meta_key: c.providers.meta_api_key.is_some(),
         bedrock_region: c.providers.bedrock_region.clone(),
         ollama_base_url: c.ollama_base_url.clone(),
         // The switch or the address: either is a choice, and a console
         // drawing "Ollama is on" should not have to know which one was used.
         ollama_enabled: c.providers.ollama_enabled || c.ollama_base_url.is_some(),
         codex_enabled: c.providers.codex_enabled,
+        grok_enabled: c.providers.grok_enabled,
+        file_uploads: c.providers.file_uploads,
         codex_reasoning_effort: c.providers.codex_reasoning_effort.clone(),
         codex_verbosity: c.providers.codex_verbosity.clone(),
         codex_replay_reasoning: c.providers.codex_replay_reasoning,
@@ -213,6 +217,8 @@ pub(super) async fn put_config(
             req.bedrock_key,
             &mut config.providers.bedrock_api_key,
         ),
+        ("xai_key", req.xai_key, &mut config.providers.xai_api_key),
+        ("meta_key", req.meta_key, &mut config.providers.meta_api_key),
     ] {
         match sent {
             None => {}
@@ -251,6 +257,8 @@ pub(super) async fn put_config(
         .ollama_enabled
         .unwrap_or(config.providers.ollama_enabled);
     config.providers.codex_enabled = req.codex_enabled.unwrap_or(config.providers.codex_enabled);
+    config.providers.grok_enabled = req.grok_enabled.unwrap_or(config.providers.grok_enabled);
+    config.providers.file_uploads = req.file_uploads.unwrap_or(config.providers.file_uploads);
     config.providers.codex_replay_reasoning = req
         .codex_replay_reasoning
         .unwrap_or(config.providers.codex_replay_reasoning);
@@ -405,9 +413,16 @@ fn validate_key_format(provider: &str, key: &str) -> (bool, Option<String>) {
                 (false, Some("OpenAI keys start with `sk-`.".to_string()))
             }
         }
+        "xai" => {
+            if key.starts_with("xai-") {
+                (true, None)
+            } else {
+                (false, Some("xAI keys start with `xai-`.".to_string()))
+            }
+        }
         // A Bedrock key has no house prefix worth checking: long-term keys
-        // start `ABSK`, short-term ones do not.
-        "google" | "openrouter" | "bedrock" => {
+        // start `ABSK`, short-term ones do not. Meta publishes none.
+        "google" | "openrouter" | "bedrock" | "meta" => {
             if key.trim().is_empty() {
                 (false, Some("Key must not be empty.".to_string()))
             } else {
@@ -1141,10 +1156,14 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             has_bedrock_key: false,
+            has_xai_key: false,
+            has_meta_key: false,
             bedrock_region: None,
             ollama_base_url: None,
             ollama_enabled: false,
             codex_enabled: false,
+            grok_enabled: false,
+            file_uploads: true,
             codex_reasoning_effort: None,
             codex_verbosity: None,
             codex_replay_reasoning: true,
@@ -1177,10 +1196,14 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             has_bedrock_key: true,
+            has_xai_key: false,
+            has_meta_key: false,
             bedrock_region: Some("eu-west-1".to_string()),
             ollama_base_url: Some("http://localhost:11434".to_string()),
             ollama_enabled: false,
             codex_enabled: false,
+            grok_enabled: false,
+            file_uploads: true,
             codex_reasoning_effort: None,
             codex_verbosity: None,
             codex_replay_reasoning: true,

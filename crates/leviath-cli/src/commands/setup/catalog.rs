@@ -153,7 +153,7 @@ pub(crate) fn providers() -> Vec<Provider> {
         },
         Provider {
             id: "google",
-            display: "Google (Gemini)",
+            display: "Google",
             blurb: "Gemini models.",
             credential: Credential::ApiKey,
             hint: "AIza...",
@@ -163,6 +163,37 @@ pub(crate) fn providers() -> Vec<Provider> {
             setting: Setting::Text {
                 read: |c| c.providers.google_api_key.clone(),
                 write: |c, v| c.providers.google_api_key = v,
+            },
+        },
+        Provider {
+            id: "xai",
+            display: "xAI",
+            blurb: "Grok chat, image, video and speech models, billed to an xAI API \
+                    balance.",
+            credential: Credential::ApiKey,
+            hint: "xai-...",
+            env_var: Some("XAI_API_KEY"),
+            signup_url: Some("https://console.x.ai"),
+            preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.xai_api_key.clone(),
+                write: |c, v| c.providers.xai_api_key = v,
+            },
+        },
+        Provider {
+            id: "meta",
+            display: "Meta",
+            blurb: "Muse Spark chat, Muse Image and Muse Voice Transcribe, billed to a \
+                    Meta developer account.",
+            credential: Credential::ApiKey,
+            // Meta publishes no key prefix; Verify is the check.
+            hint: "your Meta Model API key",
+            env_var: Some("META_AI_API_KEY"),
+            signup_url: Some("https://dev.meta.ai/"),
+            preset_url: None,
+            setting: Setting::Text {
+                read: |c| c.providers.meta_api_key.clone(),
+                write: |c, v| c.providers.meta_api_key = v,
             },
         },
         Provider {
@@ -181,7 +212,7 @@ pub(crate) fn providers() -> Vec<Provider> {
         },
         Provider {
             id: "meshy",
-            display: "Meshy (3D models)",
+            display: "Meshy",
             blurb: "Generative 3D: reference images or a mesh in, a textured \
                     model out.",
             credential: Credential::ApiKey,
@@ -211,7 +242,7 @@ pub(crate) fn providers() -> Vec<Provider> {
         },
         Provider {
             id: "codex",
-            display: "OpenAI Codex (ChatGPT subscription)",
+            display: "OpenAI Codex",
             blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \
                     Signs in with a browser.",
             credential: Credential::Signin,
@@ -225,8 +256,23 @@ pub(crate) fn providers() -> Vec<Provider> {
             },
         },
         Provider {
+            id: "grok",
+            display: "Grok",
+            blurb: "Grok billed to a SuperGrok or X Premium+ plan instead of an API \
+                    balance. Signs in with a browser.",
+            credential: Credential::Signin,
+            hint: "",
+            env_var: None,
+            signup_url: Some("https://grok.com"),
+            preset_url: None,
+            setting: Setting::Switch {
+                read: |c| c.providers.grok_enabled,
+                write: |c, v| c.providers.grok_enabled = v,
+            },
+        },
+        Provider {
             id: "ollama",
-            display: "Ollama (local)",
+            display: "Ollama",
             blurb: "Models running on this machine. No key needed.",
             credential: Credential::BaseUrl,
             hint: DEFAULT_OLLAMA_URL,
@@ -368,6 +414,15 @@ pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
             .iter()
             .any(|(name, entry)| entry.is_endpoint() && preset_for(name, entry) == id),
         _ => stored_credential(config, id).is_some(),
+    }
+}
+
+/// Whether a browser sign-in provider is switched on in this config. `false`
+/// for any id that is not one.
+pub(crate) fn signin_enabled(config: &Config, id: &str) -> bool {
+    match row(id).map(|p| (p.credential, p.setting)) {
+        Some((Credential::Signin, Setting::Switch { read, .. })) => read(config),
+        _ => false,
     }
 }
 

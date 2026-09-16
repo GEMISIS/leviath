@@ -1,4 +1,4 @@
-//! Turning a Leviath request into a Codex Responses body.
+//! Turning a Leviath request into a Responses body.
 //!
 //! The Responses API takes an `input` array of typed items rather than a
 //! `messages` array, and a top-level `instructions` string rather than a system
@@ -36,6 +36,7 @@ use std::hash::{Hash as _, Hasher as _};
 
 use serde_json::{Value, json};
 
+use super::Dialect;
 use crate::provider::{ContentBlock, InferenceRequest, Message, MessageContent, Tool};
 
 /// What Leviath tells the model about itself, when the request carries no
@@ -48,18 +49,22 @@ const DEFAULT_INSTRUCTIONS: &str = "You are running inside Leviath, a multi-stag
      messages that follow carry the structured context regions for this stage. \
      Treat them as authoritative.";
 
-/// Build the request body.
-///
-/// `reasoning_effort` and `verbosity` are the operator's, already validated.
-/// `replay_reasoning` decides whether an assistant turn's opaque reasoning item
-/// is handed back, which is the only thing that keeps a chain of thought alive
-/// across turns on a backend that stores nothing.
-pub fn build(
-    request: &InferenceRequest,
-    reasoning_effort: &str,
-    verbosity: &str,
-    replay_reasoning: bool,
-) -> Value {
+/// What the operator chose for one provider's requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settings<'a> {
+    /// The reasoning effort to ask for, already validated. `None` sends no
+    /// `reasoning` block at all, for a route or model that refuses one.
+    pub effort: Option<&'a str>,
+    /// The text verbosity, sent only when the dialect takes one.
+    pub verbosity: &'a str,
+    /// Whether an assistant turn's sealed reasoning items are handed back,
+    /// which is the only thing that keeps a chain of thought alive across
+    /// turns on a route that stores nothing.
+    pub replay_reasoning: bool,
+}
+
+/// Build the request body for `dialect`.
+pub fn build(request: &InferenceRequest, dialect: &Dialect, settings: &Settings<'_>) -> Value {
     let (instructions, region_blocks) = split_system(request);
 
     let mut input: Vec<Value> = Vec::new();
@@ -67,26 +72,31 @@ pub fn build(
         input.push(developer_item(&text));
     }
     for message in &request.messages {
-        push_message(&mut input, message, replay_reasoning);
+        push_message(&mut input, message, dialect, settings.replay_reasoning);
     }
 
     // A map rather than a `Value`, so the removals below need no "is this an
     // object" arm that nothing could ever take.
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), json!(request.model));
-    // Mandatory. The backend rejects a stored thread on this route, which is
-    // what makes reasoning replay the caller's problem.
+    // Every dialect: a stored response is kept on the vendor's servers, and
+    // nothing here reads it back.
     body.insert("store".to_string(), json!(false));
     body.insert("stream".to_string(), json!(true));
     body.insert("instructions".to_string(), json!(instructions));
     body.insert("input".to_string(), json!(input));
-    body.insert("prompt_cache_key".to_string(), json!(cache_key(request)));
-
-    // Deliberately absent, both measured as `400 Unsupported parameter` on
-    // every model this route serves:
-    //   - `temperature`, so `InferenceRequest::temperature` cannot be honoured.
-    //   - `max_output_tokens`, so a stage's output cap cannot be enforced.
-    // Sending either fails the whole request rather than being ignored.
+    if dialect.cache_key {
+        body.insert("prompt_cache_key".to_string(), json!(cache_key(request)));
+    }
+    if dialect.output_cap {
+        body.insert("max_output_tokens".to_string(), json!(request.max_tokens));
+    }
+    if dialect.temperature {
+        body.insert(
+            "temperature".to_string(),
+            crate::provider::json_number(request.temperature),
+        );
+    }
 
     if !request.tools.is_empty() {
         body.insert(
@@ -97,12 +107,14 @@ pub fn build(
         body.insert("parallel_tool_calls".to_string(), json!(true));
     }
 
-    if reasoning_effort != "none" {
-        body.insert(
-            "reasoning".to_string(),
-            json!({ "effort": reasoning_effort, "summary": "auto" }),
-        );
-        if replay_reasoning {
+    if let Some(effort) = settings.effort {
+        let mut reasoning = serde_json::Map::new();
+        reasoning.insert("effort".to_string(), json!(effort));
+        if dialect.reasoning_summary {
+            reasoning.insert("summary".to_string(), json!("auto"));
+        }
+        body.insert("reasoning".to_string(), Value::Object(reasoning));
+        if settings.replay_reasoning {
             // Only worth asking for when it will be handed back; the blob is
             // response bytes that buy nothing if the next turn drops it.
             body.insert(
@@ -111,7 +123,12 @@ pub fn build(
             );
         }
     }
-    body.insert("text".to_string(), json!({ "verbosity": verbosity }));
+    if dialect.verbosity {
+        body.insert(
+            "text".to_string(),
+            json!({ "verbosity": settings.verbosity }),
+        );
+    }
 
     // Per-stage `[model.parameters]`, plus the runtime's own overrides (the
     // titling lane turns reasoning down through here). Merged last so a caller
@@ -123,28 +140,16 @@ pub fn build(
     }
 
     // Removed after the merge, not before. Each is `400 Unsupported parameter`
-    // on this route, and a stage that sets one in its parameters would
+    // on its route, and a stage that sets one in its parameters would
     // otherwise fail every request rather than have it ignored. The runtime
     // writes `temperature` into every request unconditionally, so this is not
     // a hypothetical.
-    for rejected in REJECTED_PARAMETERS {
+    for rejected in dialect.rejected_parameters {
         body.remove(*rejected);
     }
 
     Value::Object(body)
 }
-
-/// Parameters this route answers `400 Unsupported parameter` to.
-///
-/// Stripped unconditionally rather than trusted not to appear: they arrive
-/// from `[stages.<n>.model.parameters]`, and `temperature` arrives from the
-/// runtime on every single request.
-const REJECTED_PARAMETERS: &[&str] = &[
-    "temperature",
-    "max_output_tokens",
-    "max_tokens",
-    "prompt_cache_retention",
-];
 
 /// Split the system side into the preamble and the region blocks.
 ///
@@ -201,22 +206,27 @@ fn developer_item(text: &str) -> Value {
 }
 
 /// Append a conversation message as one or more input items.
-fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: bool) {
+fn push_message(
+    input: &mut Vec<Value>,
+    message: &Message,
+    dialect: &Dialect,
+    replay_reasoning: bool,
+) {
     // Already emitted as a developer item by `split_system`.
     if message.role == "system" {
         return;
     }
 
-    // The reasoning item comes first: it belongs to the turn it precedes.
-    // Only a sealed token of this route's own: the Bedrock provider stores its
-    // reasoning in the same field as a JSON object, and history is replayed to
-    // whichever provider runs the next stage.
+    // The reasoning items come first: they belong to the turn they precede.
+    // Only items this provider sealed: history is replayed to whichever
+    // provider runs the next stage, and another vendor's item is a 400.
     if replay_reasoning
         && message.role == "assistant"
         && let Some(blob) = &message.reasoning
-        && !blob.starts_with('{')
     {
-        input.push(json!({ "type": "reasoning", "encrypted_content": blob, "summary": [] }));
+        for item in super::reasoning::items_for(dialect.provider, blob) {
+            input.push(json!({ "type": "reasoning", "encrypted_content": item, "summary": [] }));
+        }
     }
 
     match &message.content {
@@ -257,7 +267,7 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         text.push_str(t);
                     }
                     ContentBlock::Mime { .. } => {
-                        mime.extend(crate::mime::codex_part(block));
+                        mime.extend(crate::mime::responses_part(block));
                     }
                     ContentBlock::ToolUse {
                         id,

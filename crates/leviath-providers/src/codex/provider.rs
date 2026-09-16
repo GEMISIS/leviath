@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::token::{Credentials, RefreshError, TokenSource};
-use super::{catalog, headers, request as request_body, stream, usage};
+use super::{catalog, headers, usage};
 use crate::capabilities::{ModelCapabilities, ModelCapabilityOverride};
+use crate::oauth::{Credentials, RefreshError, TokenSource};
 use crate::provider::{
     InferenceRequest, InferenceResponse, ModelInfo, Provider, ProviderError, RateLimitConfig,
     Result, UnavailableReason,
 };
 use crate::rate_limit::RateLimiter;
+use crate::responses::{request as request_body, stream};
 
 /// Inference billed to a ChatGPT subscription.
 pub struct CodexProvider {
@@ -353,12 +354,20 @@ impl Provider for CodexProvider {
     > {
         let body = request_body::build(
             request,
-            &self.reasoning_effort,
-            &self.verbosity,
-            self.replay_reasoning,
+            &super::DIALECT,
+            &request_body::Settings {
+                // `none` is a real effort on this route, and the one answer to
+                // it is to send no reasoning block at all.
+                effort: (self.reasoning_effort != "none").then_some(self.reasoning_effort.as_str()),
+                verbosity: &self.verbosity,
+                replay_reasoning: self.replay_reasoning,
+            },
         );
         let response = self.send(&body, &request.model).await?;
-        Ok(Box::pin(stream::codex_sse_stream(response.bytes_stream())))
+        Ok(Box::pin(stream::sse_stream(
+            response.bytes_stream(),
+            super::DIALECT,
+        )))
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
@@ -391,7 +400,7 @@ impl Provider for CodexProvider {
             Some(over) => over.apply_mime(base),
             None => base,
         };
-        crate::mime::WireShape::Codex.carried(mime)
+        crate::mime::WireShape::Responses.carried(mime)
     }
 
     async fn prime_capabilities(&self) -> Result<()> {

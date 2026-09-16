@@ -28,7 +28,7 @@ impl ProviderAuthorizer for Canned {
     async fn sign_in(
         &self,
         _provider_id: &str,
-        announce: codex_login::Announce,
+        announce: oauth_login::Announce,
     ) -> anyhow::Result<String> {
         if let Some(url) = &self.url {
             announce(url);
@@ -212,10 +212,10 @@ async fn a_provider_that_does_not_sign_in_is_refused() {
         store_path: None,
         credential_store: Ok(None),
         client: reqwest::Client::new(),
-        issuer: "http://127.0.0.1:1".to_string(),
-        ports: vec![0],
+        issuer: Some("http://127.0.0.1:1".to_string()),
+        ports: Some(vec![0]),
     };
-    let announce: codex_login::Announce = Arc::new(|_: &str| {});
+    let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
         .sign_in("anthropic", announce)
         .await
@@ -237,10 +237,10 @@ async fn no_home_is_reported_before_a_browser_opens() {
         store_path: None,
         credential_store: Ok(None),
         client: reqwest::Client::new(),
-        issuer: "http://127.0.0.1:1".to_string(),
-        ports: vec![0],
+        issuer: Some("http://127.0.0.1:1".to_string()),
+        ports: Some(vec![0]),
     };
-    let announce: codex_login::Announce = Arc::new(|_: &str| {});
+    let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
         .sign_in("codex", announce)
         .await
@@ -262,10 +262,10 @@ async fn an_unreachable_keychain_stops_the_sign_in() {
         store_path: Some(PathBuf::from("/nowhere/provider-auth.json")),
         credential_store: Err("no keychain on this machine".to_string()),
         client: reqwest::Client::new(),
-        issuer: "http://127.0.0.1:1".to_string(),
-        ports: vec![0],
+        issuer: Some("http://127.0.0.1:1".to_string()),
+        ports: Some(vec![0]),
     };
-    let announce: codex_login::Announce = Arc::new(|_: &str| {});
+    let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
         .sign_in("codex", announce)
         .await
@@ -287,7 +287,7 @@ async fn an_unreachable_keychain_stops_the_sign_in() {
 /// developer has signed in.
 #[tokio::test]
 async fn a_whole_sign_in_through_the_live_authorizer_reports_the_account() {
-    use crate::commands::auth::codex::tests::{browser_that_redirects, id_token};
+    use crate::commands::auth::oauth::tests::{browser_that_redirects, id_token};
 
     let body = serde_json::json!({
         "access_token": "at-1",
@@ -304,13 +304,13 @@ async fn a_whole_sign_in_through_the_live_authorizer_reports_the_account() {
         store_path: Some(store_path.clone()),
         credential_store: Ok(None),
         client: reqwest::Client::new(),
-        issuer,
-        ports: vec![0],
+        issuer: Some(issuer),
+        ports: Some(vec![0]),
     };
 
     let announced = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = Arc::clone(&announced);
-    let announce: codex_login::Announce = Arc::new(move |url: &str| {
+    let announce: oauth_login::Announce = Arc::new(move |url: &str| {
         sink.lock().expect("sink").push(url.to_string());
     });
 
@@ -327,12 +327,12 @@ async fn a_whole_sign_in_through_the_live_authorizer_reports_the_account() {
     );
     // And the grant really landed, so the sign-out below has something to
     // remove rather than reporting success over an empty store.
-    let stored = leviath_providers::codex::ProviderAuthStore::load(&store_path)
+    let stored = leviath_providers::oauth::ProviderAuthStore::load(&store_path)
         .expect("the store reads back");
     assert!(stored.get("codex").is_some());
 
     authorizer.sign_out("codex").await.expect("signs out");
-    let stored = leviath_providers::codex::ProviderAuthStore::load(&store_path)
+    let stored = leviath_providers::oauth::ProviderAuthStore::load(&store_path)
         .expect("the store still reads back");
     assert!(
         stored.get("codex").is_none(),
@@ -344,7 +344,7 @@ async fn a_whole_sign_in_through_the_live_authorizer_reports_the_account() {
 /// rather than the wizard sitting on "waiting for your browser" for ever.
 #[tokio::test]
 async fn an_issuer_that_refuses_the_exchange_fails_the_sign_in() {
-    use crate::commands::auth::codex::tests::browser_that_redirects;
+    use crate::commands::auth::oauth::tests::browser_that_redirects;
 
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -354,10 +354,10 @@ async fn an_issuer_that_refuses_the_exchange_fails_the_sign_in() {
         credential_store: Ok(None),
         client: reqwest::Client::new(),
         // Nothing listens on port 1, so the code exchange cannot succeed.
-        issuer: "http://127.0.0.1:1".to_string(),
-        ports: vec![0],
+        issuer: Some("http://127.0.0.1:1".to_string()),
+        ports: Some(vec![0]),
     };
-    let announce: codex_login::Announce = Arc::new(|_: &str| {});
+    let announce: oauth_login::Announce = Arc::new(|_: &str| {});
 
     let error = authorizer
         .sign_in("codex", announce)
@@ -378,8 +378,8 @@ async fn a_corrupt_grant_file_fails_the_sign_out() {
         store_path: Some(path),
         credential_store: Ok(None),
         client: reqwest::Client::new(),
-        issuer: "http://127.0.0.1:1".to_string(),
-        ports: vec![0],
+        issuer: Some("http://127.0.0.1:1".to_string()),
+        ports: Some(vec![0]),
     };
     assert!(authorizer.sign_out("codex").await.is_err());
 }
@@ -397,5 +397,5 @@ fn the_real_authorizer_points_at_this_machine() {
     // A config that does not exist is the default one, whose backend is the
     // file store: resolving it must not fail.
     assert!(authorizer.credential_store.is_ok());
-    assert_eq!(authorizer.ports, leviath_providers::codex::CALLBACK_PORTS);
+    assert_eq!(authorizer.ports, None);
 }

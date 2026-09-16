@@ -31,7 +31,7 @@ fn store_with(grant: ProviderGrant) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("provider-auth.json");
     let mut store = ProviderAuthStore::default();
-    store.set(super::super::PROVIDER_NAME, grant);
+    store.set(crate::codex::PROVIDER_NAME, grant);
     store.save(&path).expect("save");
     (dir, path)
 }
@@ -90,8 +90,8 @@ impl RefreshTransport for Failing {
     }
 }
 
-fn source(path: &Path, transport: Arc<dyn RefreshTransport>) -> CodexTokenSource {
-    CodexTokenSource::new(path.to_path_buf(), transport)
+fn source(path: &Path, transport: Arc<dyn RefreshTransport>) -> OAuthTokenSource {
+    OAuthTokenSource::new("codex", path.to_path_buf(), transport)
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn a_rotated_refresh_token_is_persisted_before_it_is_used() {
     // Read the file back rather than the cache: a crash after the network call
     // must not leave the dead refresh token as the only one on disk.
     let reloaded = ProviderAuthStore::load(&path).expect("load");
-    let stored = reloaded.get(super::super::PROVIDER_NAME).expect("grant");
+    let stored = reloaded.get(crate::codex::PROVIDER_NAME).expect("grant");
     assert_eq!(stored.refresh_token, "refresh-1");
     assert_eq!(stored.access_token, "access-1");
 }
@@ -208,7 +208,7 @@ async fn a_refresh_that_omits_a_new_refresh_token_keeps_the_old_one() {
     src.refresh_stale("stale").await.expect("refresh");
 
     let reloaded = ProviderAuthStore::load(&path).expect("load");
-    let stored = reloaded.get(super::super::PROVIDER_NAME).expect("grant");
+    let stored = reloaded.get(crate::codex::PROVIDER_NAME).expect("grant");
     assert_eq!(stored.refresh_token, "rt-keep");
 }
 
@@ -244,7 +244,7 @@ async fn a_re_issued_id_token_updates_the_account_facts() {
     assert_eq!(creds.account_id.as_deref(), Some("acct-2"));
     let stored = ProviderAuthStore::load(&path)
         .expect("load")
-        .get(super::super::PROVIDER_NAME)
+        .get(crate::codex::PROVIDER_NAME)
         .cloned()
         .expect("grant");
     assert_eq!(stored.plan_type.as_deref(), Some("pro"));
@@ -315,7 +315,7 @@ async fn a_grant_rotated_by_another_process_is_adopted_without_refreshing() {
     // Prime the cache, then let "another process" rotate the file underneath.
     assert_eq!(src.grant().expect("grant").access_token, "stale");
     let mut store = ProviderAuthStore::load(&path).expect("load");
-    store.set(super::super::PROVIDER_NAME, grant("fresh", "rt-1"));
+    store.set(crate::codex::PROVIDER_NAME, grant("fresh", "rt-1"));
     store.save(&path).expect("save");
 
     let creds = src.refresh_stale("stale").await.expect("refresh");
@@ -334,7 +334,7 @@ async fn an_unwritable_store_surfaces_after_the_refresh() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("provider-auth.json");
     let mut store = ProviderAuthStore::default();
-    store.set(super::super::PROVIDER_NAME, grant("stale", "rt-0"));
+    store.set(crate::codex::PROVIDER_NAME, grant("stale", "rt-0"));
     store.save(&path).expect("save");
 
     struct Refusing;
@@ -364,7 +364,7 @@ async fn the_grant_is_read_through_the_credential_store_when_one_is_set() {
         Arc::new(leviath_core::MemoryStore::default());
     let mut store = ProviderAuthStore::default();
     store.set(
-        super::super::PROVIDER_NAME,
+        crate::codex::PROVIDER_NAME,
         grant("kept-in-keychain", "rt-0"),
     );
     store
@@ -429,7 +429,7 @@ async fn a_source_can_be_named_for_another_provider() {
     store.set("other", grant("other-token", "rt-0"));
     store.save(&path).expect("save");
 
-    let src = source(&path, Counting::new()).with_provider("other");
+    let src = OAuthTokenSource::new("other", path.clone(), Counting::new());
     assert_eq!(src.grant().expect("grant").access_token, "other-token");
     // And the default-named source sees nothing, so the key really is used.
     let default = source(&path, Counting::new());
@@ -527,7 +527,7 @@ async fn another_provider_s_grant_is_left_alone_by_a_refresh() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("provider-auth.json");
     let mut store = ProviderAuthStore::default();
-    store.set(super::super::PROVIDER_NAME, grant("stale", "rt-0"));
+    store.set(crate::codex::PROVIDER_NAME, grant("stale", "rt-0"));
     store.set("other", grant("other-token", "other-rt"));
     store.save(&path).expect("save");
 
@@ -541,7 +541,7 @@ async fn another_provider_s_grant_is_left_alone_by_a_refresh() {
     );
     assert_eq!(
         reloaded
-            .get(super::super::PROVIDER_NAME)
+            .get(crate::codex::PROVIDER_NAME)
             .expect("rotated")
             .access_token,
         "access-1"

@@ -84,7 +84,7 @@ impl ProviderGrant {
     }
 
     /// The account facts carried in the id token.
-    pub fn claims(&self) -> super::claims::CodexClaims {
+    pub fn claims(&self) -> super::claims::GrantClaims {
         super::claims::parse(&self.id_token)
     }
 }

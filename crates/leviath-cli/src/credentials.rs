@@ -13,7 +13,15 @@ use leviath_core::{CredentialStore, CredentialStoreKind};
 /// Fixed, because the OS stores offer no portable "list everything under this
 /// service" operation - the accounts to look for have to come from somewhere,
 /// and for providers that is this list.
-pub const PROVIDER_KEYS: &[&str] = &["anthropic", "openai", "google", "openrouter", "bedrock"];
+pub const PROVIDER_KEYS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "openrouter",
+    "bedrock",
+    "xai",
+    "meta",
+];
 
 /// A [`CredentialStore`] backed by the OS credential store.
 ///

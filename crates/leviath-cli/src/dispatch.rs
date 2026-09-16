@@ -565,6 +565,10 @@ mod tests {
             claude_code: None,
             claude_code_effort: None,
             codex: None,
+            grok: None,
+            xai_key: None,
+            meta_key: None,
+            file_uploads: None,
         };
         let result = dispatch(Commands::Setup(args), &MockRisky).await;
         assert!(result.is_ok());
