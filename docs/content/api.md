@@ -127,21 +127,22 @@ The best outcome: a certificate that is *fully* trusted, with no interstitial an
 stores and will issue for a bare IP.
 
 ```bash
-TRUST_STORES=system,nss mkcert -install   # once, on the machine running the BROWSER
-mkcert 192.168.1.50                       # on the machine running Leviath
+TRUST_STORES=system,nss mkcert -install        # once, on the machine running the BROWSER
+TRUST_STORES=system,nss mkcert 192.168.1.50    # on the machine running Leviath
 lev serve --host 0.0.0.0 --port 3000 \
   --tls-cert ./192.168.1.50.pem --tls-key ./192.168.1.50-key.pem \
   --cors https://leviath.dev --token "$LEVIATH_API_TOKEN"
 ```
 
-The `TRUST_STORES=system,nss` prefix limits the install to the OS and browser stores, which are
-the only ones The Lair needs. Without it, mkcert 1.4.4 also tries the Java trust store whenever
-`JAVA_HOME` is set, and it stops with `failed to execute "keytool -list"` and
+The `TRUST_STORES=system,nss` prefix limits mkcert to the OS and browser stores, which are the
+only ones The Lair needs. Without it, mkcert 1.4.4 also looks at the Java trust store whenever
+`JAVA_HOME` is set, on both commands, and stops with `failed to execute "keytool -list"` and
 `Keystore file does not exist` when that directory has a `keytool` but no `lib/security/cacerts`.
 That is the layout `brew --prefix openjdk` has
-([mkcert issue #472](https://github.com/FiloSottile/mkcert/issues/472)). If you hit that error, the
-CA was already installed for your browsers before the Java step ran, so the next command still
-works. Pointing `JAVA_HOME` at `$(/usr/libexec/java_home)` also fixes it.
+([mkcert issue #472](https://github.com/FiloSottile/mkcert/issues/472)). If the install command
+hit that error, the CA was already in your OS and browser stores before the Java step ran, so
+rerun only the certificate command, with the prefix. Pointing `JAVA_HOME` at the real JDK home,
+`$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home`, fixes it for good.
 
 Installing a CA into your trust store is a real trust decision: anything holding that CA's key can
 issue a certificate your browser will believe. `mkcert` keeps the key on the machine that made it.

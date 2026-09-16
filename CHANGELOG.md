@@ -80,12 +80,12 @@ same list.
 
 ### Fixed
 
-- The mkcert recipe on the API page prefixes `mkcert -install` with
+- The mkcert recipe on the API page prefixes both mkcert commands with
   `TRUST_STORES=system,nss`, and the page and the troubleshooting guide
   explain the `keytool -list` / `Keystore file does not exist` stop that
-  mkcert 1.4.4 hits when `JAVA_HOME` names a directory with a `keytool` but
-  no `lib/security/cacerts`, as the Homebrew openjdk keg does. The OS and
-  browser stores are already done by then, which is all The Lair needs.
+  mkcert 1.4.4 hits, on install and on issue alike, when `JAVA_HOME` names
+  a directory with a `keytool` but no `lib/security/cacerts`, as the
+  Homebrew openjdk keg does. The Lair never needs the Java trust store.
 
 - The `lev setup` provider window no longer moves the Providers screen
   under it. The screen kept drawing its highlight and viewport from the
