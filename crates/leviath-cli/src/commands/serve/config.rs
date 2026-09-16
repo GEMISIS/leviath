@@ -1,7 +1,7 @@
 //! Config and models endpoints.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 
 use super::types::*;
@@ -322,6 +322,12 @@ pub(super) async fn put_config(
     // normally healthy; it is not assumed, because the file could equally have
     // been broken by hand a moment ago and rewritten by something else.
     let health = state.config.health();
+    // The models a settings page asks for next are the new config's, so the
+    // catalogue starts on them now rather than when that request arrives.
+    state
+        .caches
+        .model_catalog
+        .request_refresh(state.current_config(), true);
     Ok(Json(redact(&config, &state.limits.request_limits, &health)))
 }
 
@@ -453,134 +459,77 @@ pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json
     Json(ValidateKeyResp { valid, message })
 }
 
-/// How long the models route waits for a provider to describe its own models.
+/// `GET /api/models`: every model every configured provider reports, from the
+/// catalogue this server keeps rather than from the providers on each request.
 ///
-/// Shorter than the daemon's start-up prime: this is a page load, and a limit
-/// that arrives after the page has rendered is worth less than a fast answer
-/// that admits which numbers are guesses.
-const MODELS_PRIME_TIMEOUT_SECS: u64 = 5;
-
+/// `X-Leviath-Catalog-Age` says how many seconds ago the list was built and
+/// `X-Leviath-Catalog-Complete` whether every provider answered when it was.
+/// `?refresh=1` asks the providers again and waits for them.
 pub(super) async fn get_models(
     State(state): State<AppState>,
     Query(query): Query<ModelsQuery>,
-) -> Json<Vec<ModelEntry>> {
-    models_with(
-        &state,
-        &leviath_providers::provider::build_http_client,
-        &query,
-    )
-    .await
+) -> (HeaderMap, Json<Vec<ModelEntry>>) {
+    models_with(&state, &query).await
 }
 
-/// [`get_models`], with client construction injected so the "no usable HTTPS
-/// client" answer is reachable from a test.
+/// [`get_models`], callable from a test without a request.
 pub(super) async fn models_with(
     state: &AppState,
-    build_client: leviath_providers::provider::HttpClientFactory<'_>,
     query: &ModelsQuery,
-) -> Json<Vec<ModelEntry>> {
-    let mut models = list_models_from_config(&state.current_config(), build_client).await;
+) -> (HeaderMap, Json<Vec<ModelEntry>>) {
+    let (listing, _) = state
+        .caches
+        .model_catalog
+        .models(state.current_config(), query.refresh.unwrap_or(false))
+        .await;
     // Filtered here rather than left to the caller because the interesting
     // case is two providers serving the *same* model ids: `openai` and
     // `codex` both answer to `gpt-5.5`, and they bill to different places.
     // A client that wants one of them should be able to ask for it rather
     // than fetch both and match on a string it had to know.
+    let mut models = listing.models.clone();
     if let Some(provider) = query.provider.as_deref() {
         models.retain(|m| m.provider == provider);
     }
-    Json(models)
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        super::model_catalog::CATALOG_AGE,
+        HeaderValue::from(listing.age_secs()),
+    );
+    headers.insert(
+        super::model_catalog::CATALOG_COMPLETE,
+        HeaderValue::from_static(if listing.complete { "true" } else { "false" }),
+    );
+    (headers, Json(models))
 }
 
 /// Every model every configured provider reports, as `provider/id`: what the
 /// dashboard's agent editor offers once the providers have answered.
+///
+/// Asks the providers directly rather than through a catalogue: the
+/// dashboard asks once per session, off its UI loop.
 pub(crate) async fn list_model_ids(
     config: &crate::config::Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Vec<String> {
-    list_models_from_config(config, build_client)
-        .await
-        .into_iter()
-        .map(|m| format!("{}/{}", m.provider, m.id))
-        .collect()
-}
-
-/// Every model every configured provider reports, for `GET /api/models` and
-/// the dashboard's agent editor alike.
-///
-/// Iterates `resolvable_names` rather than `provider_names`, so a Rhai script
-/// provider is asked too. `provider_names` returns natively registered
-/// providers only, and a script provider is reachable through `get` alone, so
-/// iterating that instead lists a script provider under the gateways while
-/// offering none of its models - on the new-run page, in the agent editor and
-/// in settings alike.
-pub(super) async fn list_models_from_config(
-    config: &crate::config::Config,
-    build_client: leviath_providers::provider::HttpClientFactory<'_>,
-) -> Vec<ModelEntry> {
-    // Nothing to list if no client could be built; the endpoint answers with an
-    // empty set rather than failing the request, matching how it treats a
-    // provider whose `list_models` errors.
+    // Nothing to list if no client could be built, matching how a provider
+    // whose listing errors is treated: left out rather than fatal.
     let Ok(registry) = crate::commands::run::session::build_provider_registry_from_config_with(
         config,
         build_client,
     ) else {
         return Vec::new();
     };
-    // Ask each provider what its models are before asking what they can hold.
-    //
-    // Without this the route published the compiled-in guess for every provider
-    // whose real answer is a network call away - which is most of them, and
-    // includes the two that had learned to fetch it. Measured against a running
-    // server: Ollama reported a name-matched 131,072 for a model whose server
-    // says 262,144, and OpenRouter reported builtin limits for all 418 of its
-    // models. Only Google looked right, and only because its listing reads the
-    // limits inline rather than through the primed table.
-    //
-    // The route already makes one network call per provider to list at all, so
-    // this is a second bounded one, not a new class of cost. A provider that
-    // does not answer in time keeps its compiled table and says so through
-    // `limits_source`.
-    registry
-        .prime_capabilities(
-            std::time::Duration::from_secs(MODELS_PRIME_TIMEOUT_SECS),
-            &[],
-        )
-        .await;
-    let mut models = Vec::new();
-
-    for provider_name in registry.resolvable_names() {
-        // A script name is a candidate until it compiles, so unlike the old
-        // `provider_names` loop this cannot assume the lookup succeeds. A
-        // script that will not load is skipped with its own log line already
-        // written by the layer, exactly as a provider whose `list_models`
-        // errors is skipped below.
-        let Some(provider) = registry.get(&provider_name) else {
-            continue;
-        };
-        if let Ok(list) = provider.list_models().await {
-            for m in list {
-                let mime = provider.mime(&m.id);
-                models.push(ModelEntry {
-                    input_types: mime.input,
-                    output_types: mime.output,
-                    id: m.id,
-                    provider: m.provider,
-                    display_name: m.display_name,
-                    max_context_tokens: m.capabilities.max_context_tokens,
-                    max_output_tokens: m.capabilities.max_output_tokens,
-                    limits_source: limits_source_label(m.capabilities.limits_source),
-                    supports_tools: m.capabilities.supports_tools,
-                    supports_temperature: m.capabilities.supports_temperature,
-                    learned: m.learned,
-                    released: m.released,
-                    retires: m.retires,
-                    pricing: m.pricing,
-                });
-            }
-        }
-    }
-
+    let (models, _) = super::model_catalog::collect_models(
+        &std::sync::Arc::new(registry),
+        super::model_catalog::PROVIDER_TIMEOUT,
+        true,
+    )
+    .await;
     models
+        .into_iter()
+        .map(|m| format!("{}/{}", m.provider, m.id))
+        .collect()
 }
 
 /// The wire spelling of a [`LimitsSource`].
@@ -588,7 +537,7 @@ pub(super) async fn list_models_from_config(
 /// Written out here rather than serialized from the enum so the API's
 /// vocabulary is visible at the boundary that publishes it: a rename in the
 /// providers crate should not silently change what a console reads.
-fn limits_source_label(source: leviath_providers::LimitsSource) -> String {
+pub(super) fn limits_source_label(source: leviath_providers::LimitsSource) -> String {
     match source {
         leviath_providers::LimitsSource::Api => "api",
         leviath_providers::LimitsSource::Builtin => "builtin",
@@ -707,10 +656,8 @@ mod tests {
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
-        let build = leviath_providers::provider::build_http_client;
-
         // Unfiltered: the same id under both providers.
-        let Json(all) = super::models_with(&state, &build, &Default::default()).await;
+        let (_, Json(all)) = super::models_with(&state, &Default::default()).await;
         // Sorted: the registry's iteration order is not the contract here,
         // the pair of entries under one id is.
         let mut shared: Vec<&str> = all
@@ -726,11 +673,11 @@ mod tests {
         assert_eq!(shared, ["alpha", "zeta"], "{listed:?}");
 
         // Filtered: one of them, and the id is still there.
-        let Json(narrowed) = super::models_with(
+        let (_, Json(narrowed)) = super::models_with(
             &state,
-            &build,
             &super::ModelsQuery {
                 provider: Some("zeta".to_string()),
+                refresh: None,
             },
         )
         .await;
@@ -744,11 +691,11 @@ mod tests {
 
         // A provider this machine does not have lists nothing, rather than
         // erroring: "no models" is the honest answer.
-        let Json(none) = super::models_with(
+        let (_, Json(none)) = super::models_with(
             &state,
-            &build,
             &super::ModelsQuery {
                 provider: Some("not-a-provider".to_string()),
+                refresh: None,
             },
         )
         .await;
@@ -1130,13 +1077,12 @@ mod tests {
         // than take the endpoint down with it.
         std::fs::write(providers.join("broken.rhai"), "fn initialize(config) { #{").unwrap();
 
-        let models = temp_env::async_with_vars(
-            [("LEVIATH_HOME", Some(home.path()))],
-            list_models_from_config(
-                &Config::default(),
-                &leviath_providers::provider::build_http_client,
-            ),
-        )
+        let models = temp_env::async_with_vars([("LEVIATH_HOME", Some(home.path()))], async {
+            let (listing, _) = crate::commands::serve::model_catalog::ModelCatalog::default()
+                .models(Arc::new(Config::default()), false)
+                .await;
+            listing.models.clone()
+        })
         .await;
 
         let scripted: Vec<_> = models.iter().filter(|m| m.provider == "scripted").collect();
@@ -2393,7 +2339,17 @@ mod tests {
         // passes while exercising none of what it is named for.
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
-            caches: Default::default(),
+            caches: crate::commands::serve::caches::ServeCaches {
+                model_catalog: crate::commands::serve::model_catalog::ModelCatalog::with_builder(
+                    Arc::new(|config| {
+                        crate::commands::run::session::build_provider_registry_from_config_with(
+                            config,
+                            &|_t| Err(leviath_providers::provider::malformed_url_error()),
+                        )
+                    }),
+                ),
+                ..Default::default()
+            },
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -2409,12 +2365,7 @@ mod tests {
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
         };
-        let Json(models) = super::models_with(
-            &state,
-            &|_t| Err(leviath_providers::provider::malformed_url_error()),
-            &Default::default(),
-        )
-        .await;
+        let (_, Json(models)) = super::models_with(&state, &Default::default()).await;
         assert!(models.is_empty());
     }
 }

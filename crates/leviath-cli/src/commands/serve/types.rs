@@ -1134,7 +1134,7 @@ pub(super) struct SendMessageReq {
 // re-exported here, so every `use super::types::*` still reaches them.
 pub(super) use super::config_types::*;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(super) struct ModelEntry {
     pub(super) id: String,
     pub(super) provider: String,

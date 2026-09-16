@@ -198,6 +198,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // console can offer "models that can see this image" without inferring
     // it from names, and can tell a text-only answer from a missing field.
     "models.mime_types",
+    // `GET /api/models` answers from a catalogue this server keeps, so it is
+    // safe to call when a page opens: the providers are asked once per config
+    // and then behind the answer, never on the request's clock. Announced so
+    // a console knows the call is cheap, and that `X-Leviath-Catalog-Age`,
+    // `X-Leviath-Catalog-Complete` and `?refresh=1` are there.
+    "models.cached",
     // `parts` and `multipart/form-data` on `POST /api/agents` and
     // `POST /api/agents/{id}/message`, and `@path` tokens in a task or
     // message resolved inside the run's working directory: a caller can send
@@ -473,6 +479,9 @@ pub(super) struct ModelsQuery {
     /// providers is whatever this machine has configured, so "no models" is
     /// the honest answer to asking about one it has not.
     pub(super) provider: Option<String>,
+    /// Ask the providers again and wait for them, rather than answering from
+    /// the catalogue. For a settings page that just changed something.
+    pub(super) refresh: Option<bool>,
 }
 
 /// Body of `PUT /api/config` (admin-only). Every field is optional; a present
