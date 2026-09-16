@@ -32,9 +32,73 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Word-wrap `text` into rows of at most `width` display columns.
+///
+/// Breaks at spaces. A single word wider than a row is cut at the row edge,
+/// as many times as it takes, rather than running past it. Always at least
+/// one row, so a caller counting rows never sees zero for an empty note.
+pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        for piece in pieces(word, width) {
+            if !row.is_empty() && row.width() + 1 + piece.width() > width {
+                rows.push(std::mem::take(&mut row));
+            }
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(&piece);
+        }
+    }
+    rows.push(row);
+    rows
+}
+
+/// `word` cut into runs no wider than `width` columns: one run when it fits.
+fn pieces(word: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    for ch in word.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used > 0 && used + w > width {
+            out.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push(ch);
+        used += w;
+    }
+    out.push(current);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_wrap_at_the_width_and_a_long_word_is_cut() {
+        assert_eq!(
+            wrap_words("a name, a base URL, and a key", 12),
+            ["a name, a", "base URL,", "and a key"]
+        );
+        assert_eq!(wrap_words("short", 12), ["short"]);
+        assert_eq!(
+            wrap_words("x abcdefghijklmnop y", 6),
+            ["x", "abcdef", "ghijkl", "mnop y"]
+        );
+        // Wide characters take their two cells each.
+        assert_eq!(wrap_words("日本語のモデル", 6), ["日本語", "のモデ", "ル"]);
+    }
+
+    #[test]
+    fn an_empty_note_is_one_empty_row_and_a_zero_width_is_one_column() {
+        assert_eq!(wrap_words("", 10), [""]);
+        assert_eq!(wrap_words("   ", 10), [""]);
+        assert_eq!(wrap_words("ab", 0), ["a", "b"]);
+    }
 
     #[test]
     fn wide_characters_count_for_the_cells_they_occupy() {

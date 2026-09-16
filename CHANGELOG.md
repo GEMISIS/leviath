@@ -137,6 +137,14 @@ same list.
   a directory with a `keytool` but no `lib/security/cacerts`, as the
   Homebrew openjdk keg does. The Lair never needs the Java trust store.
 
+- `lev setup` no longer runs a long label into its value: the label column
+  on the Defaults and Limits screens, the name column on the Agents and MCP
+  screens, and the value column of the priority reorder are each as wide as
+  their widest entry plus a gap. The chooser wraps a long note under its
+  column instead of cutting it at the edge, and a click on the wrapped part
+  still lands on that row. A window too narrow for the step trail shows
+  "Step n of 7: Title" in the header instead of a trail cut at the border.
+
 - The `lev setup` provider window no longer moves the Providers screen
   under it. The screen kept drawing its highlight and viewport from the
   cursor the window was steering, so every arrow press in the window also

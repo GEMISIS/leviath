@@ -186,6 +186,26 @@ fn draw_header(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         };
         spans.push(Span::styled(step.title(), style));
     }
+    // A window too narrow for the whole trail gets the one fact it carries,
+    // where you are, rather than a trail cut off at the border.
+    let room = area.width.saturating_sub(2) as usize;
+    if spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum::<usize>()
+        > room
+    {
+        spans.truncate(1);
+        spans.push(Span::styled(
+            format!(
+                "Step {} of {}: {}",
+                current + 1,
+                Step::ALL.len(),
+                wizard.step.title()
+            ),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(
@@ -819,6 +839,9 @@ fn status_line(wizard: &Wizard, index: usize) -> Line<'static> {
 
 fn build_fields(wizard: &Wizard) -> Screen {
     let mut screen = Screen::default();
+    // The label column is the widest label on this screen plus a gap, so a
+    // long label never runs into its value.
+    let label_w = column_width(wizard.fields().iter().map(|field| field.label));
     for (index, field) in wizard.fields().iter().enumerate() {
         let selected = index == wizard.cursor;
         let hint = match &field.value {
@@ -832,7 +855,7 @@ fn build_fields(wizard: &Wizard) -> Screen {
                 if selected { "› " } else { "  " },
                 Style::default().fg(C_ACCENT),
             ),
-            Span::styled(format!("{:<28}", field.label), name_style(selected)),
+            Span::styled(format!("{:<label_w$}", field.label), name_style(selected)),
         ];
         match &wizard.edit {
             Some(edit) if edit.target == super::state::EditTarget::Field(index) => {
@@ -859,6 +882,7 @@ fn build_fields(wizard: &Wizard) -> Screen {
 
 fn build_agents(wizard: &Wizard) -> Screen {
     let mut screen = Screen::default();
+    let name_w = column_width(wizard.agents.iter().map(|row| row.agent.name));
     for (index, row) in wizard.agents.iter().enumerate() {
         let mark = if row.selected {
             GLYPH_COMPLETE
@@ -880,7 +904,7 @@ fn build_agents(wizard: &Wizard) -> Screen {
                 Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
             ),
             Span::styled(
-                format!("{:<22}", row.agent.name),
+                format!("{:<name_w$}", row.agent.name),
                 name_style(index == wizard.cursor),
             ),
             Span::styled(action, action_style),
@@ -891,6 +915,12 @@ fn build_agents(wizard: &Wizard) -> Screen {
 
 fn build_mcp(wizard: &Wizard) -> Screen {
     let mut screen = Screen::default();
+    let name_w = column_width(
+        wizard
+            .mcp
+            .iter()
+            .map(|row| row.candidate.config.name.as_str()),
+    );
     for (index, row) in wizard.mcp.iter().enumerate() {
         let mark = if row.selected {
             GLYPH_COMPLETE
@@ -936,7 +966,7 @@ fn build_mcp(wizard: &Wizard) -> Screen {
                 Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
             ),
             Span::styled(
-                format!("{:<22}", row.candidate.config.name),
+                format!("{:<name_w$}", row.candidate.config.name),
                 name_style(index == wizard.cursor),
             ),
             Span::styled(endpoint, Style::default().fg(C_MUTED)),
@@ -1110,6 +1140,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let hints = footer_hints(wizard);
     let message = wizard.message.as_deref().map(|m| (m, C_WARN));
     draw_hint_bar(frame, area, message, &hints, true);
+}
+
+/// The width of a column holding every one of `names`: the widest plus a
+/// two-cell gap, so the longest entry still stands clear of what follows it.
+fn column_width<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names.map(|name| name.chars().count()).max().unwrap_or(0) + 2
 }
 
 /// Highlight style for the row under the cursor.
@@ -2116,6 +2152,49 @@ mod tests {
         assert!(screen.contains(&format!("install {}", not_installed.version)));
     }
 
+    /// A label wider than a fixed column ran straight into its value. The
+    /// column is the widest label on the screen plus a gap, so even the
+    /// longest label has two spaces before its value.
+    #[test]
+    fn the_label_column_fits_the_widest_label() {
+        let (_dir, mut w) = wizard();
+        w.show_advanced = true;
+        w.enter(Step::Limits);
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("Max bytes one tool call may write  "),
+            "{screen}"
+        );
+        assert!(!screen.contains("may write2"), "{screen}");
+    }
+
+    /// The MCP list's name column grows to the longest imported name.
+    #[test]
+    fn a_long_mcp_server_name_keeps_its_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "a-very-long-mcp-server-name-indeed";
+        let candidate = crate::commands::setup::import::Candidate {
+            config: leviath_mcp::MCPServerConfig::http(long, "https://x.test/mcp"),
+            scope: String::new(),
+            inline_secrets: vec![],
+        };
+        let mut w = Wizard::new(
+            Config::default(),
+            &|_| None,
+            vec![("Cursor".to_string(), candidate)],
+            vec![],
+            dir.path(),
+            std::sync::Arc::new(|_| true),
+            Default::default(),
+        );
+        w.enter(Step::Mcp);
+        let screen = rendered(&w);
+        assert!(
+            screen.contains(&format!("{long}  https://x.test/mcp")),
+            "{screen}"
+        );
+    }
+
     #[test]
     fn the_mcp_list_flags_collisions_scopes_and_inline_secrets() {
         let dir = tempfile::tempdir().unwrap();
@@ -2294,6 +2373,11 @@ mod tests {
                 "{step:?} missing from header"
             );
         }
+        // Too narrow for the trail: the header says where you are instead
+        // of cutting the trail off at the border.
+        let narrow = rendered_at(&w, 60, 30);
+        assert!(narrow.contains("Step 5 of 7: Agents"), "{narrow}");
+        assert!(!narrow.contains("MCP servers"), "{narrow}");
     }
 
     #[test]
