@@ -165,9 +165,12 @@ mod tests {
     fn a_path_that_cannot_be_opened_is_an_error() {
         let dir = tempfile::tempdir().expect("a temp dir");
         // A directory where the file should be: `open` fails on every OS.
+        // Cap 0, because a directory has a size of its own (4096 bytes on
+        // ext4), and a cap below it would roll the directory aside first and
+        // then open a fresh file where it stood.
         let path = dir.path().join("daemon.log");
         std::fs::create_dir(&path).expect("a directory in the way");
-        let log = DaemonLog::new(path, 1024);
+        let log = DaemonLog::new(path, 0);
         assert!(log.append(b"x").is_err());
     }
 
