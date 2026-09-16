@@ -698,6 +698,7 @@ mod tests {
     async fn dispatch_serve_variant_is_routed_through_the_executor() {
         let args = commands::serve::ServeArgs {
             port: 0,
+            name: None,
             host: "127.0.0.1".to_string(),
             cors: None,
             token: Some("test-token".to_string()),

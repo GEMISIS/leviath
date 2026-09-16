@@ -793,6 +793,7 @@ Start the [REST and WebSocket API](/docs/api).
 |---|---|---|
 | `-p`, `--port <PORT>` | `3000` | |
 | `-H`, `--host <HOST>` | `127.0.0.1` | |
+| `--name <NAME>` | the port | Names this server's log file, `~/.leviath/serve-<NAME>.log`, so two servers side by side keep separate logs |
 | `--token <TOKEN>` | unset | Bearer token clients must present. Overrides `LEVIATH_API_TOKEN`. The server refuses to start if neither is set |
 | `--cors <ORIGIN>` | none | Allow browser requests from an origin. `*` is accepted and means any origin |
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |

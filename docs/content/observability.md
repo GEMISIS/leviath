@@ -34,7 +34,8 @@ the same events as readable lines on stderr.
 
 This block reloads: the daemon re-reads it and the next run emits into whatever it now names, with
 no restart. Turning export off puts the daemon's own log lines back in its own log file alone
-(`~/.leviath/daemon.log`, sized by `daemon_log_max_bytes` in the same block). The one part that is
+(`~/.leviath/daemon.log`, sized by `log_file_max_bytes` in the same block, as is each
+`lev serve`'s `serve-<name>.log`). The one part that is
 fixed for the process's life is the log level, which comes from `--verbose` on the daemon's own
 command line rather than from here.
 

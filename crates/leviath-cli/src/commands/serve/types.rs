@@ -26,6 +26,12 @@ pub struct ServeArgs {
     #[arg(short = 'H', long, default_value = "127.0.0.1")]
     pub host: String,
 
+    /// A name for this server, used for its log file
+    /// (`~/.leviath/serve-<NAME>.log`). Defaults to the port, so two servers
+    /// side by side keep separate logs. Letters, digits, `.`, `_` and `-`.
+    #[arg(long, value_parser = crate::commands::serve::parse_log_name)]
+    pub name: Option<String>,
+
     /// Allow browser requests from this origin (e.g. `http://localhost:5173`).
     ///
     /// Defaults to **none**: the API is for programmatic clients, which are not

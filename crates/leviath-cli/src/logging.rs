@@ -10,7 +10,7 @@
 //! exporter. Nothing goes to **stdout** - `lev agent-client` uses it as its
 //! JSON-RPC channel, and a stray log line there would corrupt the stream a
 //! host is parsing. Lines go to stderr, and in the daemon also to its own
-//! capped file (see [`attach_daemon_log`] and the `daemon_log` module); a
+//! capped file (see [`attach_log_file`] and the `daemon_log` module); a
 //! daemon whose stderr is not a terminal writes the file alone.
 //!
 //! stderr is not safe either while a full-screen TUI is up, which is what
@@ -38,7 +38,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry, reload};
 
 mod daemon_log;
 
-pub use daemon_log::daemon_log_path;
+pub use daemon_log::{daemon_log_path, serve_log_path};
 
 /// What the reload slot holds: nothing, or the installed OTLP layer.
 type OtelSlot = Option<leviath_telemetry::LogLayer>;
@@ -49,11 +49,12 @@ static OTEL_HANDLE: OnceLock<reload::Handle<OtelSlot, Registry>> = OnceLock::new
 /// Whether a TUI currently owns the terminal.
 static TUI_HOLDS_TERMINAL: AtomicBool = AtomicBool::new(false);
 
-/// The daemon's log file, once [`attach_daemon_log`] has run. Every other
-/// `lev` process leaves it empty, and the file writer then discards.
-static DAEMON_LOG: OnceLock<daemon_log::DaemonLog> = OnceLock::new();
+/// This process's log file, once [`attach_log_file`] has run: the daemon's
+/// `daemon.log`, a server's `serve-<name>.log`. Every other `lev` process
+/// leaves it empty, and the file writer then discards.
+static LOG_FILE: OnceLock<daemon_log::DaemonLog> = OnceLock::new();
 
-/// Whether the stderr writer still writes. Cleared by [`attach_daemon_log`]
+/// Whether the stderr writer still writes. Cleared by [`attach_log_file`]
 /// when stderr is not a terminal: a daemon started detached or by a
 /// supervisor has nobody reading it, and a supervisor that captures stderr
 /// would otherwise keep an uncapped copy of the file.
@@ -128,13 +129,13 @@ impl Write for TerminalAwareWriter {
     }
 }
 
-/// The file layer's writer: appends to the attached daemon log, or discards
+/// The file layer's writer: appends to the attached log file, or discards
 /// when this process has none.
 struct DaemonLogWriter;
 
 impl Write for DaemonLogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Some(log) = DAEMON_LOG.get() {
+        if let Some(log) = LOG_FILE.get() {
             log.append(buf)?;
         }
         Ok(buf.len())
@@ -151,7 +152,7 @@ fn daemon_writer() -> DaemonLogWriter {
     DaemonLogWriter
 }
 
-/// The layer that writes the daemon's log file: the same lines as stderr,
+/// The layer that writes the process's log file: the same lines as stderr,
 /// with no colour codes. A function rather than a value inside [`init`] so a
 /// test can put the same layer on a thread-scoped subscriber.
 fn daemon_file_layer<S>(level: &str) -> impl Layer<S>
@@ -164,28 +165,28 @@ where
         .with_filter(EnvFilter::new(level))
 }
 
-/// Start writing this process's log lines to the file at `path`, which is
-/// [`daemon_log_path`] in the daemon. Only `lev daemon` calls it; every
-/// other command keeps stderr alone.
+/// Start writing this process's log lines to the file at `path`:
+/// [`daemon_log_path`] in the daemon, [`serve_log_path`] in a server. The
+/// long-lived processes call it; every other command keeps stderr alone.
 ///
 /// Returns `false` on a second call: the file is attached once for the life
 /// of the process. `mirror_stderr` is whether stderr is a terminal, decided
 /// by the caller; when it is not, the stderr copy stops here, so a detached
-/// daemon writes the file alone.
-pub fn attach_daemon_log(path: PathBuf, mirror_stderr: bool) -> bool {
+/// process writes the file alone.
+pub fn attach_log_file(path: PathBuf, mirror_stderr: bool) -> bool {
     let _ = path.parent().map(leviath_sys::create_private_dir_all);
-    let log = daemon_log::DaemonLog::new(path, leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES);
-    if DAEMON_LOG.set(log).is_err() {
+    let log = daemon_log::DaemonLog::new(path, leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES);
+    if LOG_FILE.set(log).is_err() {
         return false;
     }
     STDERR_MIRROR.store(mirror_stderr, Ordering::Relaxed);
     true
 }
 
-/// Apply `[observability] daemon_log_max_bytes`. `false` when no daemon log
-/// is attached, which is every process but the daemon.
-pub(crate) fn set_daemon_log_cap(bytes: u64) -> bool {
-    match DAEMON_LOG.get() {
+/// Apply `[observability] log_file_max_bytes`. `false` when no log file is
+/// attached, which is every process but the daemon and a server.
+pub fn set_log_file_cap(bytes: u64) -> bool {
+    match LOG_FILE.get() {
         Some(log) => {
             log.set_cap(bytes);
             true
@@ -412,10 +413,10 @@ mod tests {
     /// One test owns the daemon-log static, for the same reason the OTEL
     /// handle has one: it is process-wide, and two tests attaching would race.
     #[test]
-    fn attaching_the_daemon_log_routes_the_file_layer_into_it() {
+    fn attaching_the_log_file_routes_the_file_layer_into_it() {
         // Before anything is attached: the cap has nowhere to go, and the file
         // writer accepts a line and drops it.
-        assert!(!set_daemon_log_cap(1));
+        assert!(!set_log_file_cap(1));
         assert_eq!(daemon_writer().write(b"x").expect("discarded"), 1);
         daemon_writer().flush().expect("nothing to flush");
 
@@ -424,15 +425,12 @@ mod tests {
         // muted arms itself.
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("logs").join("daemon.log");
+        assert!(attach_log_file(path.clone(), true), "the first attach wins");
         assert!(
-            attach_daemon_log(path.clone(), true),
-            "the first attach wins"
-        );
-        assert!(
-            !attach_daemon_log(path.clone(), true),
+            !attach_log_file(path.clone(), true),
             "and the second is refused"
         );
-        assert!(set_daemon_log_cap(1024 * 1024));
+        assert!(set_log_file_cap(1024 * 1024));
 
         // The layer `init` installs, on a subscriber this thread controls.
         let subscriber = tracing_subscriber::registry().with(daemon_file_layer("info"));
@@ -452,7 +450,7 @@ mod tests {
         drop(_guard);
         std::fs::remove_dir_all(dir.path()).expect("gone");
         std::fs::write(dir.path(), b"").expect("a file where the dir was");
-        assert!(set_daemon_log_cap(1));
+        assert!(set_log_file_cap(1));
         assert!(daemon_writer().write(b"x").is_err());
         let _ = std::fs::remove_file(dir.path());
     }

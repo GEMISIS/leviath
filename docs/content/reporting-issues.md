@@ -38,7 +38,7 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 | `config/` | `config.toml` and its siblings with every key removed, plus `policy.toml` and rules |
 | `agents/` | Every installed blueprint |
 | `tools/`, `providers/` | Your drop-in Rhai scripts |
-| `logs/` | `daemon.log`, `daemon.stdio.log` and `dashboard.log`, with their rolled copies |
+| `logs/` | `daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies |
 | `runs/<id>/` | The run you picked and its sub-agent runs: metadata, stages, context, journal, media, blueprint |
 | `blueprint/` | The blueprint you were building, with a check that says whether it parses |
 | `setup/imports.json` | Which other tools' config files exist on this machine, by path only |
@@ -95,8 +95,9 @@ lev rage --about setup --non-interactive
 
 ## Where the logs come from
 
-The daemon writes its log to `~/.leviath/daemon.log`, however it was started. The file is capped
-by `[observability] daemon_log_max_bytes` (5 MiB by default) and rolls once to `daemon.log.1`.
+The daemon writes its log to `~/.leviath/daemon.log`, however it was started, and each
+`lev serve` writes `~/.leviath/serve-<name>.log`. Both are capped by
+`[observability] log_file_max_bytes` (5 MiB by default) and roll once to `<name>.1`.
 See [the daemon page](/docs/daemon#where-it-logs). A run's own logs live under
 `~/.leviath/runs/<id>/`, which is what the `runs/` section of the zip copies.
 

@@ -77,9 +77,14 @@ same list.
   says so before you share it. The new Reporting issues guide has the rest.
 - The daemon writes its own log to `~/.leviath/daemon.log`, however it was
   started; before, a daemon `lev run` started for you logged nowhere. The
-  file is capped at `[observability] daemon_log_max_bytes` (5 MiB by
+  file is capped at `[observability] log_file_max_bytes` (5 MiB by
   default, `0` never rolls) with one rolled `daemon.log.1`, and a changed
   cap applies on the next run without a restart.
+- `lev serve` writes its own log too, `~/.leviath/serve-<name>.log`, one
+  per server: `--name` names it, and the port does when no name is given,
+  so two servers side by side keep separate logs and a restart on the same
+  port keeps rolling the same one. The same cap applies, read when the
+  server starts. `lev rage` packs every serve log into a bug report.
 - A **What is Leviath?** page opens the docs, before Getting Started: the
   problem a long agent run has, what a blueprint, regions, the daemon and
   the journal do about it, what Leviath is not, and who it is for. Written

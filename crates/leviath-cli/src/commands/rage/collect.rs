@@ -414,6 +414,17 @@ fn logs(env: &RageEnv, scrubber: &Scrubber, bundle: &mut Bundle) {
     for (path, dest) in sources {
         tail_text(&path, dest, LOG_TAIL, scrubber, bundle);
     }
+    // One log per `lev serve`, named for the server: `serve-<name>.log` and
+    // its rolled copy. Found by name, never by copying whatever sits in the
+    // directory beside them.
+    for path in sorted_entries(&env.data_dir) {
+        let name = file_name(&path);
+        let is_serve_log =
+            name.starts_with("serve-") && (name.ends_with(".log") || name.ends_with(".log.1"));
+        if is_serve_log && path.is_file() {
+            tail_text(&path, &format!("logs/{name}"), LOG_TAIL, scrubber, bundle);
+        }
+    }
 }
 
 /// `runs/<id>/` for the run and everything it spawned.

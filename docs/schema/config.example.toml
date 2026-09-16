@@ -125,7 +125,7 @@ enabled = false
 exporter = "otlp"
 endpoint = "http://localhost:4318"
 service_name = "leviath"
-daemon_log_max_bytes = 5242880
+log_file_max_bytes = 5242880
 
 [nudge]
 enabled = true

@@ -1747,7 +1747,7 @@ system_prompt = "x"
                 exporter: leviath_core::config::TelemetryExporterKind::Stdout,
                 endpoint: None,
                 service_name: None,
-                daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
+                log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
             },
             ..Config::default()
         };
@@ -1789,7 +1789,7 @@ system_prompt = "x"
                 exporter: leviath_core::config::TelemetryExporterKind::Otlp,
                 endpoint: Some("http://127.0.0.1:9".to_string()),
                 service_name: Some("leviath-test".to_string()),
-                daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
+                log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
             },
             ..Config::default()
         };

@@ -12,7 +12,7 @@
 //! `enabled = true`, start a run to watch it, and nothing arrives - which looks
 //! exactly like a collector that is not listening.
 //!
-//! The cap on the daemon's own log file (`daemon_log_max_bytes`) rides along:
+//! The cap on the daemon's own log file (`log_file_max_bytes`) rides along:
 //! every refresh hands it to the file writer, so raising it is a config edit
 //! rather than a restart.
 //!
@@ -61,7 +61,7 @@ impl TelemetryReload {
     pub fn for_daemon() -> Arc<Self> {
         Arc::new(Self::with_installers(
             Box::new(crate::logging::set_otel_layer),
-            Box::new(crate::logging::set_daemon_log_cap),
+            Box::new(crate::logging::set_log_file_cap),
         ))
     }
 
@@ -93,7 +93,7 @@ impl TelemetryReload {
     ) -> bool {
         // Cheap, and applied before the equality check so the cap the file
         // writer holds is the file's on every refresh, including the first.
-        (self.set_cap)(cfg.daemon_log_max_bytes);
+        (self.set_cap)(cfg.log_file_max_bytes);
         let mut applied = self.lock();
         if applied.as_ref() == Some(cfg) {
             return false;
@@ -186,11 +186,11 @@ mod tests {
         let (reload, _installs, caps) = reload_with_cap();
         let (_rt, mut world) = world();
         let mut first = cfg(false, TelemetryExporterKind::Stdout);
-        first.daemon_log_max_bytes = 123;
+        first.log_file_max_bytes = 123;
         assert!(reload.refresh_into(&mut world, &first));
         assert_eq!(caps.load(Ordering::SeqCst), 123);
 
-        first.daemon_log_max_bytes = 456;
+        first.log_file_max_bytes = 456;
         assert!(
             reload.refresh_into(&mut world, &first),
             "a cap change is a config change"
@@ -204,7 +204,7 @@ mod tests {
             exporter,
             endpoint: None,
             service_name: None,
-            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
+            log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
         }
     }
 
@@ -311,7 +311,7 @@ mod tests {
             exporter: TelemetryExporterKind::Otlp,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             service_name: Some("leviath-test".to_string()),
-            daemon_log_max_bytes: leviath_core::config::DEFAULT_DAEMON_LOG_MAX_BYTES,
+            log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
         };
         assert!(reload.refresh_into(&mut world, &otlp));
         assert_eq!(

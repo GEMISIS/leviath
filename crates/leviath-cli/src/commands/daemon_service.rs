@@ -59,7 +59,7 @@ pub(crate) fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, Supe
 /// home directory. Only the platforms with a supervisor render a unit file.
 ///
 /// Not the daemon's log: that is `daemon.log`, which the daemon writes and
-/// caps itself (`logging::attach_daemon_log`). What the supervisor captures
+/// caps itself (`logging::attach_log_file`). What the supervisor captures
 /// here is the little the process writes outside `tracing`: the one
 /// "listening" line, a fatal start-up error, and a panic backtrace. Pointing
 /// the capture at the capped file would double every line and, after a roll,

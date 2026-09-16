@@ -1,11 +1,13 @@
-//! The daemon's own log file: `<data_dir>/daemon.log`, size-capped, rolled
-//! once to `daemon.log.1`.
+//! A long-lived process's own log file: the daemon's `<data_dir>/daemon.log`,
+//! a server's `<data_dir>/serve-<name>.log`, size-capped, rolled once to
+//! `<name>.1`.
 //!
 //! A daemon the CLI starts for you has no terminal, and its stderr goes to the
-//! null device, so without this file its log lines went nowhere. The file is
-//! what `lev rage` packs into a bug report, and what you read when a run
-//! never spawned. The sibling `runstate/dashboard_log.rs` applies the same
-//! naming rule to the dashboard's activity log.
+//! null device, so without this file its log lines went nowhere; a server
+//! under `nohup` or a supervisor is in the same position. The files are what
+//! `lev rage` packs into a bug report, and what you read when a run never
+//! spawned. The sibling `runstate/dashboard_log.rs` applies the same naming
+//! rule to the dashboard's activity log.
 //!
 //! One handle is held open and the length tracked in-process, so a log line
 //! costs one `write(2)` rather than a stat, an open and a close each. The cap
@@ -21,6 +23,14 @@ use std::sync::{Mutex, PoisonError};
 /// `None` when no home directory resolves.
 pub fn daemon_log_path() -> Option<PathBuf> {
     leviath_core::paths::data_dir().map(|dir| dir.join("daemon.log"))
+}
+
+/// Where a `lev serve` writes its log: `serve-<name>.log` under the data
+/// directory, one per server. `name` is `--name`, or the port when none was
+/// given, so two servers side by side never share a file and a restart on
+/// the same port keeps rolling the same one.
+pub fn serve_log_path(name: &str) -> Option<PathBuf> {
+    leviath_core::paths::data_dir().map(|dir| dir.join(format!("serve-{name}.log")))
 }
 
 /// The rolled (previous-generation) file: `<path>.1`.
@@ -192,6 +202,16 @@ mod tests {
         assert_eq!(
             rolled_path(Path::new("/x/daemon.log")),
             PathBuf::from("/x/daemon.log.1")
+        );
+    }
+
+    #[test]
+    fn a_server_log_is_named_for_its_server() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || serve_log_path("3000"));
+        assert_eq!(
+            path,
+            Some(dir.path().join(".leviath").join("serve-3000.log"))
         );
     }
 
