@@ -222,7 +222,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/agents/{id}/message` | Steer a running agent. Takes files too; see [attaching files](#attaching-files) |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
-| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
+| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
 | `GET /api/models?provider=` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
@@ -1407,7 +1407,10 @@ On `PUT /api/config` each key has three states, which the other fields in that b
 | `"override_model": null`      | the setting is written away                        |
 | `"override_model": "gpt-5"`   | the setting is pinned to `gpt-5`                   |
 
-`fallback_model` reads the same way. Clearing `override_model` matters as much as setting it. A
+`fallback_model` reads the same way, and so do the five provider keys (`anthropic_key`,
+`openai_key`, `google_key`, `openrouter_key`, `bedrock_key`): `null` clears a key, which takes
+the provider out of this install the way the setup wizard's remove does, and an empty string is a
+400. Clearing `override_model` matters as much as setting it. A
 pinned model runs every stage of every blueprint on that one model, and the cheap stages then pay a
 top-tier price, so unset is the state most machines want: see
 [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on). Sending `null` is

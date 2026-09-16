@@ -12,10 +12,8 @@ use super::*;
 pub enum Step {
     /// What the wizard is about to do, before it touches anything.
     Welcome,
-    /// Pick which providers to configure.
+    /// The providers this install has, each set up in its own modal.
     Providers,
-    /// Enter or confirm a credential for each picked provider.
-    ProviderDetail,
     /// The default provider and model new runs use.
     Defaults,
     /// Concurrency, timeouts, and the other numeric ceilings.
@@ -30,10 +28,9 @@ pub enum Step {
 
 impl Step {
     /// Every step, in order.
-    pub const ALL: [Step; 8] = [
+    pub const ALL: [Step; 7] = [
         Step::Welcome,
         Step::Providers,
-        Step::ProviderDetail,
         Step::Defaults,
         Step::Limits,
         Step::Agents,
@@ -46,7 +43,6 @@ impl Step {
         match self {
             Step::Welcome => "Welcome",
             Step::Providers => "Providers",
-            Step::ProviderDetail => "Credentials",
             Step::Defaults => "Defaults",
             Step::Limits => "Limits",
             Step::Agents => "Agents",
@@ -149,11 +145,12 @@ pub struct McpRow {
 /// widgets now, because the dashboard's agent editor chooses the same way.
 pub(crate) use crate::tui::widgets::picker::{Picker, PickerOption};
 
-/// A thing the credential screen can do, offered as its own row.
+/// A thing a provider's setup modal can do, offered as its own row above
+/// the modal's buttons.
 ///
 /// These were shortcut keys and nothing else, which meant they existed only
 /// for people who had read the footer. As rows they can be seen, moved onto
-/// with the arrows, and clicked; `o` and `v` still work.
+/// with the arrows, and clicked; `o` still works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetailAction {
     /// Open the provider's signup or key page in a browser.
@@ -162,8 +159,57 @@ pub(crate) enum DetailAction {
     SignIn,
     /// Forget the stored sign-in.
     SignOut,
-    /// Check the credential against the provider.
-    Verify,
+}
+
+/// The three ways out of a provider's setup modal, in the order they are
+/// offered at its foot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalButton {
+    /// Check the credential against the provider, and keep the provider once
+    /// the check passes.
+    VerifyUse,
+    /// Keep the provider as configured, without asking the provider.
+    SkipUse,
+    /// Put the provider back the way it was when the modal opened.
+    Cancel,
+}
+
+impl ModalButton {
+    /// Every button, in the order drawn.
+    pub(crate) const ALL: [ModalButton; 3] = [
+        ModalButton::VerifyUse,
+        ModalButton::SkipUse,
+        ModalButton::Cancel,
+    ];
+
+    /// The button's text.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::VerifyUse => "Verify and use",
+            Self::SkipUse => "Skip verification and use",
+            Self::Cancel => "Cancel",
+        }
+    }
+}
+
+/// What the chooser is choosing, so its answer can be routed: a Defaults
+/// field's value, or one level of the add-a-provider flow (a category, then
+/// a kind within it, then a provider of that kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PickerPurpose {
+    /// The Defaults or Limits field at this index.
+    Field(usize),
+    /// How the provider is reached: an API key, a browser sign-in, a server.
+    Category,
+    /// What providers of `category` make: text and images, 3D models.
+    Kind { category: &'static str },
+    /// The providers of a category and kind; each option is one of these
+    /// rows of `providers`.
+    Provider {
+        category: &'static str,
+        kind: &'static str,
+        rows: Vec<usize>,
+    },
 }
 
 impl DetailAction {
@@ -191,7 +237,6 @@ impl DetailAction {
             }
             Self::SignIn => "Sign in with your browser".to_string(),
             Self::SignOut => "Sign out".to_string(),
-            Self::Verify => "Check this credential".to_string(),
         }
     }
 }
@@ -397,8 +442,6 @@ pub struct Edit {
 pub enum ConfirmPurpose {
     /// `q`/Ctrl-C with unsaved choices: quit and discard?
     QuitDiscard,
-    /// Leaving the Providers screen with nothing selected: continue anyway?
-    NoProviders,
 }
 
 /// A pending confirmation: the dialog plus what its Yes means.

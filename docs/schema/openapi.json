@@ -2911,20 +2911,24 @@
                     "description": "The model a stage falls back to when none of the models it names is configured on this machine. Same three states and the same empty-string refusal as `override_model`."
                   },
                   "anthropic_key": {
-                    "type": "string"
+                    "type": ["string", "null"],
+                    "description": "Three states like `override_model`: absent leaves the key alone, null clears it and takes the provider out of this install, a string sets it. An empty string is a 400."
                   },
                   "openai_key": {
-                    "type": "string"
+                    "type": ["string", "null"],
+                    "description": "Same three states as `anthropic_key`."
                   },
                   "google_key": {
-                    "type": "string"
+                    "type": ["string", "null"],
+                    "description": "Same three states as `anthropic_key`."
                   },
                   "openrouter_key": {
-                    "type": "string"
+                    "type": ["string", "null"],
+                    "description": "Same three states as `anthropic_key`."
                   },
                   "bedrock_key": {
-                    "type": "string",
-                    "description": "An AWS Bedrock API key, sent as a bearer token. Not an AWS access key."
+                    "type": ["string", "null"],
+                    "description": "An AWS Bedrock API key, sent as a bearer token. Not an AWS access key. Same three states as `anthropic_key`."
                   },
                   "bedrock_region": {
                     "type": "string",

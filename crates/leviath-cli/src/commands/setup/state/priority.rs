@@ -17,23 +17,37 @@ impl Wizard {
         let Some(order) = self.defaults.get(field).and_then(|f| f.value.order()) else {
             return;
         };
-        let items: Vec<ReorderItem> = order
+        // The order first, then every other configured provider, left out
+        // but shown so Space can bring it in: being in the priority is the
+        // user's choice, made here, not a side effect of configuring.
+        let mut items: Vec<ReorderItem> = order
             .iter()
             .map(|value| ReorderItem {
                 detail: self.provider_detail(value),
                 value: value.clone(),
+                included: true,
             })
             .collect();
+        for value in self.configured_provider_names() {
+            if !order.contains(&value) {
+                items.push(ReorderItem {
+                    detail: self.provider_detail(&value),
+                    value,
+                    included: false,
+                });
+            }
+        }
         self.reorder_field = field;
-        self.reorder = Some(Reorder::new(
-            "Provider priority",
-            self.picker_explanation(Self::PROVIDER_FIELD)
-                .into_iter()
-                .take(2)
-                .map(str::to_string)
-                .collect(),
-            items,
-        ));
+        let mut explain: Vec<String> = self
+            .picker_explanation(Self::PROVIDER_FIELD)
+            .into_iter()
+            .take(2)
+            .map(str::to_string)
+            .collect();
+        explain.push(
+            "A provider left out still runs any stage that names it as provider/model.".to_string(),
+        );
+        self.reorder = Some(Reorder::new("Provider priority", explain, items));
     }
 
     /// Take the reorder modal's answer, writing the new order back into the
@@ -48,6 +62,23 @@ impl Wizard {
         if self.reorder_field == Self::PROVIDER_FIELD {
             self.apply_provider_concurrency_default();
         }
+    }
+
+    /// Every configured provider the priority may name: the built-ins by id,
+    /// and an endpoint preset by each entry under it, since the entry's name
+    /// is what `default_provider` has to hold.
+    pub(super) fn configured_provider_names(&self) -> Vec<String> {
+        self.selected_providers()
+            .iter()
+            .flat_map(|&i| match self.is_endpoint_preset(i) {
+                true => self
+                    .endpoints_under(self.providers[i].provider.id)
+                    .into_iter()
+                    .map(|e| self.endpoints[e].name.clone())
+                    .collect(),
+                false => vec![self.providers[i].provider.id.to_string()],
+            })
+            .collect()
     }
 
     /// The default provider as it currently stands in the form, or the base

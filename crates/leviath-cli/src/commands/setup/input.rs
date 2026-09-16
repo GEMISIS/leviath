@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use super::catalog::Credential;
 use super::state::{
     ConfirmPurpose, DetailAction, Edit, EditTarget, EndpointCursor, EndpointField, FieldValue,
-    Picker, SigninAction, Step, Wizard,
+    ModalButton, Picker, SigninAction, Step, Wizard,
 };
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
@@ -84,7 +84,76 @@ impl Wizard {
             }
             return Action::Continue;
         }
+        if self.modal.is_some() {
+            self.handle_modal_key(key);
+            return Action::Continue;
+        }
         self.handle_nav_key(key)
+    }
+
+    /// Keys while a provider's setup modal is open: the arrows move over its
+    /// card and buttons, Enter acts on what the cursor is on, Esc cancels,
+    /// and `v` is the "Verify and use" button.
+    fn handle_modal_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.cancel_modal(),
+            KeyCode::Char('v') => self.activate_modal_button(ModalButton::VerifyUse),
+            KeyCode::Char('o') => self.open_signup_page(),
+            KeyCode::Char('s') if ctrl => {
+                self.message = Some("Finish the provider first: use it, or cancel.".to_string());
+            }
+            KeyCode::F(1) => self.show_help = true,
+            // The same jumps a screen has, over the card and its buttons.
+            KeyCode::Home => self.scroll_home(),
+            KeyCode::End => self.scroll_end(),
+            KeyCode::PageUp => self.scroll_by(-Wizard::PAGE),
+            KeyCode::PageDown => self.scroll_by(Wizard::PAGE),
+            _ => match keymap::resolve(&key) {
+                Some(keymap::Action::Up) => self.move_cursor(-1),
+                Some(keymap::Action::Down) | Some(keymap::Action::Next) => self.move_cursor(1),
+                Some(keymap::Action::Prev) => self.move_cursor(-1),
+                Some(keymap::Action::Left) => self.adjust(-1),
+                Some(keymap::Action::Right) => self.adjust(1),
+                Some(keymap::Action::Activate) | Some(keymap::Action::Toggle) => {
+                    self.activate_modal_row();
+                }
+                Some(keymap::Action::Help) => self.show_help = true,
+                Some(keymap::Action::Quit) => self.request_quit(),
+                // Esc is matched above as the cancel, and Ctrl-C is
+                // intercepted in `handle_key`, so neither `Back` nor
+                // `ForceQuit` reaches here.
+                Some(keymap::Action::Back) | Some(keymap::Action::ForceQuit) | None => {}
+            },
+        }
+    }
+
+    /// Enter in the modal: a button does what it says, and the card's rows
+    /// edit the credential, take a sign-in, or open a page. Only called
+    /// while a modal is open.
+    fn activate_modal_row(&mut self) {
+        let index = self
+            .modal_index()
+            .expect("the modal's keys are handled only while it is open");
+        if let Some(button) = self.modal_button_at(self.cursor) {
+            self.activate_modal_button(button);
+        } else if self.is_endpoint_preset(index) {
+            self.activate_endpoint_row(index);
+        } else {
+            self.activate_detail_row(index);
+        }
+    }
+
+    /// Finish, unless there is no provider to run anything with: a config
+    /// with none cannot run an agent, so the wizard sends the user back to
+    /// add one rather than write it.
+    fn try_save(&mut self) -> Action {
+        if self.selected_providers().is_empty() {
+            self.message = Some("Add at least one provider before finishing.".to_string());
+            self.enter(Step::Providers);
+            return Action::Continue;
+        }
+        Action::Save
     }
 
     /// Handle one mouse event against the window it was clicked in.
@@ -96,7 +165,9 @@ impl Wizard {
     /// help overlay is up, because a click cannot mean anything there and
     /// dismissing them by accident would lose typed input.
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Action {
-        if self.confirm.is_some() || self.edit.is_some() || self.show_help {
+        // The setup modal is keyboard-driven: a click through it would land
+        // on the Providers screen underneath.
+        if self.confirm.is_some() || self.edit.is_some() || self.show_help || self.modal.is_some() {
             return Action::Continue;
         }
         if let Some(picker) = self.picker.take() {
@@ -138,10 +209,6 @@ impl Wizard {
                     self.should_quit = true;
                     Action::Continue
                 }
-                ConfirmPurpose::NoProviders => {
-                    self.next_step();
-                    Action::Continue
-                }
             },
         }
     }
@@ -160,13 +227,15 @@ impl Wizard {
     }
 
     /// What the chooser decided: keep it open, or close it with or without a
-    /// value. The wizard's chooser is single-select, so a many-choice never
+    /// value. A choice is routed by what the chooser was for (a field, or a
+    /// level of the add-a-provider flow); a dismissal steps that flow back a
+    /// level. The wizard's chooser is single-select, so a many-choice never
     /// arrives; treated as a cancel should the widget ever send one.
     fn settle_picker(&mut self, picker: Picker, outcome: PickerOutcome) {
         match outcome {
             PickerOutcome::Pending => self.picker = Some(picker),
-            PickerOutcome::Chosen(index) => self.commit_picker(index),
-            PickerOutcome::Cancelled | PickerOutcome::ChosenMany(_) => {}
+            PickerOutcome::Chosen(index) => self.settle_picker_choice(index),
+            PickerOutcome::Cancelled | PickerOutcome::ChosenMany(_) => self.picker_back(),
         }
     }
 
@@ -218,9 +287,18 @@ impl Wizard {
     fn handle_nav_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('s') if ctrl => return Action::Save,
+            KeyCode::Char('s') if ctrl => return self.try_save(),
             KeyCode::Char('o') => self.open_signup_page(),
             KeyCode::Char('v') => self.verify_current(),
+            // Take a provider out of this install. Only where one is under
+            // the cursor: elsewhere `d` is nothing, not a delete.
+            KeyCode::Char('d') | KeyCode::Delete if self.step == Step::Providers => {
+                if let Some(index) = self.cursor_provider() {
+                    self.remove_provider(index);
+                }
+            }
+            // Straight to the add flow, from anywhere on the Providers screen.
+            KeyCode::Char('a') if self.step == Step::Providers => self.open_add_provider(),
             KeyCode::PageUp => self.scroll_by(-Wizard::PAGE),
             KeyCode::PageDown => self.scroll_by(Wizard::PAGE),
             KeyCode::Home => self.scroll_home(),
@@ -262,7 +340,7 @@ impl Wizard {
     fn activate(&mut self) -> Action {
         if self.on_continue() {
             return match self.step {
-                Step::Review => Action::Save,
+                Step::Review => self.try_save(),
                 Step::Providers => {
                     self.forward_guarded();
                     Action::Continue
@@ -273,35 +351,26 @@ impl Wizard {
                 }
             };
         }
-        if self.step == Step::ProviderDetail
-            && let Some(index) = self.detail_row()
-        {
-            // An endpoint preset's screen is its entries' own form; every
-            // other one is a credential row (where there is something to type)
-            // followed by its buttons.
-            if self.is_endpoint_preset(index) {
-                self.activate_endpoint_row(index);
-            } else {
-                self.activate_detail_row(index);
-            }
-            return Action::Continue;
-        }
         match self.step {
-            Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
+            // A provider row opens its setup modal; the row after the last
+            // provider is the add flow.
+            Step::Providers => match self.cursor_provider() {
+                Some(index) => self.open_provider_modal(index),
+                None => self.open_add_provider(),
+            },
+            Step::Agents | Step::Mcp => self.toggle(),
             Step::Defaults | Step::Limits => self.activate_field(),
             // Rowless steps put the cursor on their button, so these arms are
             // reachable only with a hand-forced cursor; acting on nothing is
-            // correct then. `ProviderDetail` joins them for a different
-            // reason: reaching it at all needs a selected provider, so the
-            // screen with no row to act on is one the wizard never opens.
-            Step::Welcome | Step::Review | Step::ProviderDetail => {}
+            // correct then.
+            Step::Welcome | Step::Review => {}
         }
         Action::Continue
     }
 
-    /// Enter on the credential screen of the provider at `index`.
+    /// Enter on the setup modal's card for the provider at `index`.
     ///
-    /// Row 0 is the credential on every screen that has one, and it opens its
+    /// Row 0 is the credential on every card that has one, and it opens its
     /// editor; `detail_action_at` answers `None` there. A browser sign-in has
     /// nothing to type, so its buttons start at row 0 instead and the `None`
     /// arm is only the cursor past the last of them.
@@ -311,7 +380,6 @@ impl Wizard {
             Some(DetailAction::OpenSignup) => self.open_signup_page(),
             Some(DetailAction::SignIn) => self.request_signin(index, SigninAction::In),
             Some(DetailAction::SignOut) => self.request_signin(index, SigninAction::Out),
-            Some(DetailAction::Verify) => self.verify_current(),
         }
     }
 
@@ -406,30 +474,17 @@ impl Wizard {
         true
     }
 
-    /// `Space` (or Enter on a row): toggle whatever the cursor is on.
+    /// `Space` (or Enter on a row): toggle whatever the cursor is on. On the
+    /// Providers screen there is nothing to toggle: a provider is set up in
+    /// its modal or taken out with `d`, so Space opens the modal the way
+    /// Enter does.
     fn toggle(&mut self) {
         match self.step {
-            Step::Providers => {
-                // An endpoint preset is selected by having entries: picking
-                // it adds the first, unpicking it drops them all.
-                if self.is_endpoint_preset(self.cursor) {
-                    let index = self.cursor;
-                    if self.providers[index].selected {
-                        self.remove_endpoints_under(self.providers[index].provider.id);
-                        self.providers[index].selected = false;
-                        self.dirty = true;
-                    } else {
-                        self.add_endpoint(index);
-                    }
-                } else if let Some(row) = self.providers.get_mut(self.cursor) {
-                    row.selected = !row.selected;
-                    self.dirty = true;
-                }
-                // The credential screen walks selected providers, so its
-                // position is only meaningful relative to the current
-                // selection.
-                self.detail = 0;
-            }
+            Step::Providers => match self.cursor_provider() {
+                Some(index) => self.open_provider_modal(index),
+                None if self.on_add_provider() => self.open_add_provider(),
+                None => {}
+            },
             Step::Agents => {
                 if let Some(row) = self.agents.get_mut(self.cursor) {
                     row.selected = !row.selected;
@@ -463,25 +518,25 @@ impl Wizard {
                     }
                 }
             }
-            Step::Welcome | Step::ProviderDetail | Step::Review => {}
+            Step::Welcome | Step::Review => {}
         }
     }
 
-    /// `←`/`→`: cycle a choice, or step through the credential screen's
-    /// providers.
+    /// `←`/`→`: cycle a choice, or an endpoint entry's default model in the
+    /// setup modal.
     fn adjust(&mut self, delta: isize) {
-        match self.step {
-            Step::ProviderDetail => {
-                // On an endpoint preset's screen the default model cycles;
-                // everything else there is typed.
-                if let Some(index) = self.detail_row()
-                    && self.is_endpoint_preset(index)
-                    && let Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) =
-                        self.endpoint_cursor(index)
-                {
-                    self.cycle_endpoint_model(entry, delta);
-                }
+        // On an endpoint preset's card the default model cycles; everything
+        // else there is typed.
+        if let Some(index) = self.modal_index() {
+            if self.is_endpoint_preset(index)
+                && let Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) =
+                    self.endpoint_cursor(index)
+            {
+                self.cycle_endpoint_model(entry, delta);
             }
+            return;
+        }
+        match self.step {
             Step::Defaults | Step::Limits => {
                 let cursor = self.cursor;
                 let mut changed_provider = false;
@@ -508,51 +563,37 @@ impl Wizard {
         }
     }
 
-    /// Advance, but guard the one advance that is almost always a slip:
-    /// leaving the Providers screen with nothing selected.
+    /// Advance, but not past the Providers screen with nothing configured:
+    /// Leviath cannot run an agent without a provider, so the wizard will not
+    /// write a config that has none.
     fn forward_guarded(&mut self) {
         if self.step == Step::Providers && self.selected_providers().is_empty() {
-            self.open_no_providers_confirm();
+            self.message = Some("Add at least one provider to continue.".to_string());
             return;
         }
         self.forward();
     }
 
-    /// `Tab`: next provider on the credential screen, otherwise next step.
+    /// `Tab`: next step.
     fn forward(&mut self) {
-        if self.step == Step::ProviderDetail {
-            // Verify what was just entered before moving on, so the answer is
-            // waiting rather than starting when the user asks for it.
-            if let Some(index) = self.detail_row() {
-                self.request_verification(index);
-            }
-            if self.next_detail() {
-                return;
-            }
-        }
         self.next_step();
     }
 
-    /// `Esc` / `Shift-Tab`: previous provider, otherwise previous step.
+    /// `Esc` / `Shift-Tab`: previous step.
     fn back(&mut self) {
-        if self.step == Step::ProviderDetail && self.prev_detail() {
-            return;
-        }
         self.prev_step();
     }
 
-    /// `v`: re-check the provider on screen, or every selected one.
+    /// `v`: re-check every configured provider.
     fn verify_current(&mut self) {
         match self.step {
-            Step::ProviderDetail => {
-                if let Some(index) = self.detail_row() {
-                    self.request_verification(index);
-                    self.message = Some("Checking…".to_string());
-                }
-            }
             Step::Providers | Step::Review => {
+                if self.selected_providers().is_empty() {
+                    self.message = Some("Nothing to check: no provider is configured.".to_string());
+                    return;
+                }
                 self.verify_all();
-                self.message = Some("Checking every selected provider…".to_string());
+                self.message = Some("Checking every configured provider…".to_string());
             }
             _ => {}
         }
@@ -564,17 +605,16 @@ impl Wizard {
     /// real browser - `lev dash` learned that the hard way when a unit test
     /// opened one.
     fn open_signup_page(&mut self) {
-        let url = match self.step {
-            Step::ProviderDetail => self
-                .detail_row()
-                .and_then(|i| self.providers.get(i))
-                .and_then(|r| r.provider.signup_url),
-            Step::Providers => self
-                .providers
-                .get(self.cursor)
-                .and_then(|r| r.provider.signup_url),
-            _ => None,
+        // The modal's provider when one is open, else the provider under the
+        // Providers screen's cursor.
+        let row = match self.modal_index() {
+            Some(index) => Some(index),
+            None if self.step == Step::Providers => self.cursor_provider(),
+            None => None,
         };
+        let url = row
+            .and_then(|i| self.providers.get(i))
+            .and_then(|r| r.provider.signup_url);
         match url {
             Some(url) => {
                 let opened = (self.opener)(url);

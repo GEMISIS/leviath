@@ -39,13 +39,18 @@ pub(crate) enum ReorderOutcome {
     Cancelled,
 }
 
-/// One row: the value that will be written, and a few words on what it is.
+/// One row: the value that will be written, a few words on what it is, and
+/// whether it is in the list at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReorderItem {
     /// The value written back (a provider name).
     pub(crate) value: String,
     /// A short note shown beside it (e.g. "configured", "not configured").
     pub(crate) detail: String,
+    /// Whether the row is part of the order that is kept. A row left out is
+    /// still shown, dimmed, so it can be brought in with Space; at least one
+    /// row always stays in, since an empty order means nothing.
+    pub(crate) included: bool,
 }
 
 /// A drag in progress: the row it was lifted from, and where the pointer is now.
@@ -97,9 +102,26 @@ impl Reorder {
         }
     }
 
-    /// The values in their current order, for a caller keeping the result.
+    /// The included values in their current order, for a caller keeping the
+    /// result.
     fn values(&self) -> Vec<String> {
-        self.ordered().into_iter().map(|i| i.value).collect()
+        self.ordered()
+            .into_iter()
+            .filter(|i| i.included)
+            .map(|i| i.value)
+            .collect()
+    }
+
+    /// Bring the row under the cursor into the order, or leave it out. The
+    /// last included row stays in: an order with nothing in it is not one.
+    fn toggle_included(&mut self) {
+        let included = self.items.iter().filter(|i| i.included).count();
+        if let Some(item) = self.items.get_mut(self.cursor) {
+            if item.included && included <= 1 {
+                return;
+            }
+            item.included = !item.included;
+        }
     }
 
     /// The rows as `(value, detail)`, for a caller (a test) checking what the
@@ -154,6 +176,7 @@ impl Reorder {
             KeyCode::Char('j') if shifted => self.move_row(1),
             KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Char('j') => self.move_cursor(1),
+            KeyCode::Char(' ') => self.toggle_included(),
             KeyCode::Enter => return ReorderOutcome::Confirmed(self.values()),
             KeyCode::Esc => return ReorderOutcome::Cancelled,
             _ => {}
@@ -258,13 +281,17 @@ impl Reorder {
             .map(|text| Line::from(Span::styled(text.clone(), Style::default().fg(C_MUTED))))
             .collect();
         lines.push(Line::from(Span::styled(
-            "Drag ⠿, or Shift+↑/↓ or K/J to move a row. Enter keeps the order, Esc cancels.",
+            "Drag ⠿, or Shift+↑/↓ or K/J to move a row. Space takes a row in or out of the \
+             order. Enter keeps the order, Esc cancels.",
             Style::default().fg(C_DIM),
         )));
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[0]);
 
         // The row the pointer is holding, so it can be marked while dragged.
+        // Positions count included rows only: a row left out has no place in
+        // the order and is shown without one.
         let held = self.drag.map(|d| d.to);
+        let mut place = 0;
         let rows: Vec<Line<'static>> = self
             .ordered()
             .iter()
@@ -272,18 +299,28 @@ impl Reorder {
             .map(|(position, item)| {
                 let on = position == self.cursor;
                 let dragged = Some(position) == held;
+                let number = match item.included {
+                    true => {
+                        place += 1;
+                        format!("{place}. ")
+                    }
+                    false => "-  ".to_string(),
+                };
+                let value_style = match (item.included, on || dragged) {
+                    (true, true) => Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD),
+                    (true, false) => Style::default().fg(C_WHITE),
+                    (false, true) => Style::default().fg(C_MUTED).add_modifier(Modifier::BOLD),
+                    (false, false) => Style::default().fg(C_DIM),
+                };
+                let detail = match item.included {
+                    true => item.detail.clone(),
+                    false => format!("{} (not in the order)", item.detail),
+                };
                 Line::from(vec![
                     Span::styled(GRIP, Style::default().fg(if on { C_ACCENT } else { C_DIM })),
-                    Span::styled(format!("{}. ", position + 1), Style::default().fg(C_DIM)),
-                    Span::styled(
-                        format!("{:<16}", item.value),
-                        if on || dragged {
-                            Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(C_WHITE)
-                        },
-                    ),
-                    Span::styled(item.detail.clone(), Style::default().fg(C_DIM)),
+                    Span::styled(number, Style::default().fg(C_DIM)),
+                    Span::styled(format!("{:<16}", item.value), value_style),
+                    Span::styled(detail, Style::default().fg(C_DIM)),
                 ])
             })
             .collect();
@@ -304,8 +341,59 @@ mod tests {
             .map(|v| ReorderItem {
                 value: v.to_string(),
                 detail: "configured".to_string(),
+                included: true,
             })
             .collect()
+    }
+
+    /// Space takes a row out of the order and back in; the last included row
+    /// stays, and the kept order is only the included rows.
+    #[test]
+    fn space_takes_a_row_out_of_the_order_but_never_the_last_one() {
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Down));
+        assert_eq!(
+            r.handle_key(&key(KeyCode::Char(' '))),
+            ReorderOutcome::Pending
+        );
+        assert_eq!(
+            r.handle_key(&key(KeyCode::Enter)),
+            ReorderOutcome::Confirmed(vec!["a".to_string(), "c".to_string()])
+        );
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Char(' ')));
+        r.handle_key(&key(KeyCode::Down));
+        r.handle_key(&key(KeyCode::Char(' ')));
+        r.handle_key(&key(KeyCode::Down));
+        r.handle_key(&key(KeyCode::Char(' ')));
+        assert_eq!(
+            r.handle_key(&key(KeyCode::Enter)),
+            ReorderOutcome::Confirmed(vec!["c".to_string()]),
+            "the last included row cannot be taken out"
+        );
+        // Back in, at its place in the list.
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Char(' ')));
+        r.handle_key(&key(KeyCode::Char(' ')));
+        assert_eq!(
+            r.handle_key(&key(KeyCode::Enter)),
+            ReorderOutcome::Confirmed(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+        // And an excluded row draws without a place number.
+        let mut r = reorder();
+        r.handle_key(&key(KeyCode::Char(' ')));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| r.draw(f, f.area())).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("not in the order"), "{text}");
+        // Nothing to take in or out of an empty list.
+        let mut empty = Reorder::new("Provider priority", vec![], vec![]);
+        empty.handle_key(&key(KeyCode::Char(' ')));
+        assert_eq!(
+            empty.handle_key(&key(KeyCode::Enter)),
+            ReorderOutcome::Confirmed(vec![])
+        );
     }
 
     fn reorder() -> Reorder {

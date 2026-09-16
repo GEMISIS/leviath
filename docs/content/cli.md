@@ -871,13 +871,31 @@ has a flag, so headless setup is scriptable. The wizard's Limits screen edits th
 only appears once you turn on **Show advanced tuning** on the Defaults screen. Skipping it changes
 nothing about what gets written.
 
+The Providers screen lists the providers this install has, not the whole catalog. **Add a
+provider** (or `a`) asks three short questions in a chooser, one level at a time: how the provider
+is reached (an API key, a subscription sign-in, a server you run), what it makes (text and images,
+3D models), and which one. Esc steps back a level. The provider then opens in a modal: its
+credential, its sign-in or its endpoint entries, and three ways out at the foot. **Verify and use**
+checks the credential against the provider and keeps it once the check passes, staying open with
+the answer if it fails; **Skip verification and use** keeps it unchecked; **Cancel** puts the
+provider back the way it was. Enter on a listed provider reopens that modal, and `d` removes the
+provider, clearing its key when you finish. A provider supplied by an environment variable cannot
+be removed here; unset the variable. The wizard will not continue past this screen, or finish,
+with no provider configured, because a config without one cannot run an agent.
+
 The Defaults screen leads with **Provider priority** - the order a bare model name prefers, whose
 head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
 move the one under the cursor with `Shift+↑`/`Shift+↓`, or with `K`/`J` on a terminal that keeps
-Shift+arrows for itself (Apple Terminal does). It writes the same
-[`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order` and
-`PUT /api/config` set, so putting a subscription like Codex first there is how you route bare model
-names onto your plan.
+Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
+or brings it back in; a provider left out is still configured, and still runs any stage that names
+it as `provider/model`, but bare model names prefer the listed ones. Configuring a new provider
+does not add it to the order on its own, and at least one provider always stays in. It writes the
+same [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order`
+and `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare
+model names onto your plan.
+
+Quitting with unsaved choices asks first, and the dialog lists the choices that would be
+discarded.
 
 The same screen carries **Zero data retention (ZDR)**: a switch that asks every provider to keep
 nothing of your prompts and replies once a reply is returned, with a row under it for each chosen
@@ -912,9 +930,8 @@ entry rather than a key. **llama.cpp** and **LM Studio** are presets: each start
 default address (`http://localhost:8080/v1` and `http://localhost:1234/v1`) with no key, and is
 written as `llama-cpp` or `lm-studio`. **Custom OpenAI-compatible endpoint** asks for a name, a
 base URL, an optional key and optional headers (`Name: value`, several separated by semicolons).
-All three repeat: the credential screen for a preset is a small form per endpoint with **Add
-another** at the end and **Remove this endpoint** on each, so two llama.cpp servers on two ports
-are two entries. **Check this endpoint** asks the server for its models; on success they are
+All three repeat: a preset's modal is a small form per endpoint with **Add another** at the end
+and **Remove this endpoint** on each, so two llama.cpp servers on two ports are two entries. **Check this endpoint** asks the server for its models; on success they are
 listed and the **Default model** row cycles through them, and on failure the entry is kept and the
 **Models** row takes the ids by hand, which is what the entry's `models` list is. Every endpoint
 appears in the default-provider choice by its own name. These entries have no flags; script them

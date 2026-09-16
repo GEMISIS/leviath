@@ -13,6 +13,25 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- `lev setup` sets a provider up in a modal rather than on a screen per
+  provider. The Providers screen lists the providers this install has;
+  **Add a provider** asks how it is reached, what it makes, and which one,
+  then opens the provider's card with three ways out: **Verify and use**,
+  **Skip verification and use**, **Cancel**. Enter on a listed provider
+  reopens its card and `d` removes it, clearing its key when you finish.
+  The wizard will not continue past that screen, or finish, with no
+  provider configured. Configuring a provider no longer puts it in the
+  provider priority on its own: the reorder modal takes a configured
+  provider in or out with Space, keeping at least one, and one left out
+  still runs any stage that names it as `provider/model`. The quit dialog
+  lists the choices that would be discarded.
+- `PUT /api/config` takes `null` for `anthropic_key`, `openai_key`,
+  `google_key`, `openrouter_key` and `bedrock_key` to clear a key, taking
+  the provider out of the install the way the wizard's remove does; an
+  empty string is a 400.
+
 ### Added
 
 - `[providers] <provider>_headers` (`anthropic_headers`, `openai_headers`,

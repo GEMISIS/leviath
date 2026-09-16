@@ -6,7 +6,7 @@
 //! itself lives in `priority`.
 
 use super::limits::LIMITS_FIXED;
-use super::{Field, FieldValue, Picker, PickerOption, Step, Wizard};
+use super::{Field, FieldValue, Picker, PickerOption, PickerPurpose, Step, Wizard};
 
 impl Wizard {
     /// What choosing one of these values actually decides.
@@ -174,7 +174,7 @@ impl Wizard {
                 PickerOption { value, detail }
             })
             .collect();
-        self.picker_field = field;
+        self.picker_purpose = PickerPurpose::Field(field);
         // Opening on the current value rather than at the top: the list is
         // long, and "where am I now" is the first thing you look for.
         self.picker = Some(Picker::new(
@@ -234,7 +234,9 @@ impl Wizard {
         // in order, so the option index *is* the field's index. Indexing rather
         // than looking up: the field is where it was when the chooser opened,
         // and nothing rebuilds the form while one is on screen.
-        let field = self.picker_field;
+        let PickerPurpose::Field(field) = self.picker_purpose else {
+            return;
+        };
         if let Some(fields) = self.fields_mut()
             && let Some(f) = fields.get_mut(field)
         {

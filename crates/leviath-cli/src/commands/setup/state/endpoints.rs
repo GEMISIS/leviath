@@ -5,7 +5,7 @@
 //! each, and a `[model_providers.<name>]` endpoint is neither: a machine can
 //! run two llama.cpp servers on two ports, and each needs a name, an address,
 //! maybe a key, maybe headers. So the pick-list rows for these are presets,
-//! and picking one adds an *entry* the credential screen then edits as a small
+//! and picking one adds an *entry* the setup modal then edits as a small
 //! form. Several entries can sit under one preset, and the screen offers add
 //! and remove beside the fields.
 //!
@@ -40,7 +40,7 @@ pub struct EndpointRow {
     pub checking: bool,
 }
 
-/// The rows one entry occupies on the credential screen, in order.
+/// The rows one entry occupies on the setup modal, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointField {
     /// The table key.
@@ -114,7 +114,7 @@ impl EndpointField {
     }
 }
 
-/// Where the cursor sits on an endpoint preset's credential screen.
+/// Where the cursor sits on an endpoint preset's setup modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointCursor {
     /// On a field of the entry at this index into `Wizard::endpoints`.
@@ -301,7 +301,7 @@ impl Wizard {
         self.endpoints.retain(|e| e.preset != preset);
     }
 
-    /// How many cursor rows the credential screen has for the preset at
+    /// How many cursor rows the setup modal has for the preset at
     /// provider row `index`: every entry's fields, then the add row.
     pub(crate) fn endpoint_row_count(&self, index: usize) -> usize {
         let preset = self.providers[index].provider.id;
@@ -635,7 +635,7 @@ mod tests {
         w.cursor = 16;
         assert_eq!(w.endpoint_cursor(llama), Some(EndpointCursor::Add));
         w.cursor = 17;
-        assert_eq!(w.endpoint_cursor(llama), None, "the continue button");
+        assert_eq!(w.endpoint_cursor(llama), None, "the modal's first button");
         assert_eq!(w.endpoint_cursor(99), None);
         assert!(w.is_endpoint_preset(llama));
         assert!(!w.is_endpoint_preset(0));
@@ -835,18 +835,20 @@ mod tests {
         w.request_endpoint_verification(4);
     }
 
-    /// The preset's credential screen has no action rows of its own (each
-    /// entry carries its buttons), and the chooser names an entry by its
-    /// preset and address.
+    /// The preset's setup modal has no action rows of its own (each entry
+    /// carries its buttons), so its card is exactly the entries' rows, and
+    /// the chooser names an entry by its preset and address.
     #[test]
     fn a_preset_has_no_detail_actions_and_the_chooser_names_its_entries() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = test_wizard(dir.path());
         let llama = preset_index(&w, "llama-cpp");
         w.add_endpoint(llama);
-        w.enter(Step::ProviderDetail);
+        w.enter(Step::Providers);
+        w.open_provider_modal(llama);
         assert_eq!(w.detail_row(), Some(llama));
         assert!(w.detail_actions().is_empty());
+        assert_eq!(w.modal_card_rows(), w.endpoint_row_count(llama));
 
         assert_eq!(
             w.provider_detail("llama-cpp"),
