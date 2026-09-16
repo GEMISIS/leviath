@@ -499,12 +499,22 @@ pub(super) struct WriteConfigReq {
     /// refusal as `override_model`.
     #[serde(default, deserialize_with = "double_option")]
     pub(super) fallback_model: Option<Option<String>>,
-    pub(super) anthropic_key: Option<String>,
-    pub(super) openai_key: Option<String>,
-    pub(super) google_key: Option<String>,
-    pub(super) openrouter_key: Option<String>,
+    /// The provider keys, each three-state like `override_model`: absent
+    /// leaves the key alone, `null` clears it (taking the provider out of
+    /// this install, the way the setup wizard's remove does), a string sets
+    /// it. An empty string is refused with a 400 rather than read as a
+    /// clear, since a form that posts its empty box should be told.
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) anthropic_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) openai_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) google_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) openrouter_key: Option<Option<String>>,
     /// A Bedrock API key, sent as a bearer token.
-    pub(super) bedrock_key: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub(super) bedrock_key: Option<Option<String>>,
     /// The AWS region Bedrock is called in. An empty string is refused with
     /// a 400: `""` is not a region, and losing the setting to a stray form
     /// field is worse than an error.

@@ -174,6 +174,15 @@ pub struct SetupEnv {
 pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<()> {
     let mut config = Config::load_from_path_public(&env.config_path).unwrap_or_default();
     apply_flags(&mut config, args);
+    // The wizard refuses to finish without a provider; this path is scripted
+    // and writes what it was given, so it says so instead. A config with no
+    // provider is a valid file that cannot run an agent.
+    if configured_providers(&config).is_empty() {
+        eprintln!(
+            "warning: no provider is configured; runs will fail until one is (give a key \
+             flag, or run `lev setup` interactively)"
+        );
+    }
 
     let agents = if args.install_agents {
         crate::bundled::plan_agent_actions(&env.agents_dir)
@@ -611,6 +620,15 @@ mod tests {
             config.providers.zero_retention_agreements,
             vec!["anthropic".to_string(), "openai".to_string()]
         );
+    }
+
+    /// A wizard with one provider configured: the loop will not finish
+    /// without one, so every test that saves starts from here.
+    fn configured_wizard(env: &SetupEnv) -> Wizard {
+        let mut wizard = build_wizard(env);
+        wizard.providers[0].selected = true;
+        wizard.providers[0].value = "sk-test".to_string();
+        wizard
     }
 
     // ─── default_provider retargeting ───────────────────────────────────────
@@ -1193,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn saving_returns_the_plan_the_wizard_describes() {
         let dir = tempfile::tempdir().unwrap();
-        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut wizard = configured_wizard(&env_in(dir.path()));
         let mut terminal = test_terminal();
         // A tick with no input, then save - covering the poll-timeout path.
         let mut events = TestEventSource::new_with_nones(vec![
@@ -1248,7 +1266,7 @@ mod tests {
     #[tokio::test]
     async fn a_click_is_routed_with_the_window_it_was_made_in() {
         let dir = tempfile::tempdir().unwrap();
-        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut wizard = configured_wizard(&env_in(dir.path()));
         wizard.enter(state::Step::Providers);
         let mut terminal = test_terminal();
         let size = terminal.size().expect("the test backend has a size");
@@ -1256,9 +1274,11 @@ mod tests {
         // The row the click has to land on is asked for, not assumed, so the
         // test does not encode a layout.
         let row = (0..area.height)
-            .find(|y| render::row_at(area, &wizard, 4, *y) == Some(1))
-            .expect("the second provider is on screen");
+            .find(|y| render::row_at(area, &wizard, 4, *y) == Some(0))
+            .expect("the configured provider is on screen");
 
+        // The click opens the provider's setup modal; Esc cancels it; Ctrl-S
+        // then finishes with the provider still configured.
         let mut events = TestEventSource::new(vec![
             crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1266,6 +1286,7 @@ mod tests {
                 row,
                 modifiers: KeyModifiers::empty(),
             }),
+            key(KeyCode::Esc),
             key_with(KeyCode::Char('s'), KeyModifiers::CONTROL),
         ]);
 
@@ -1279,10 +1300,13 @@ mod tests {
         .unwrap()
         .expect("ctrl-s finished it");
 
-        assert!(
-            wizard.providers[1].selected,
-            "the click selected what it landed on"
+        assert!(wizard.modal.is_none(), "Esc closed what the click opened");
+        assert_eq!(
+            wizard.message.as_deref(),
+            Some("Cancelled; nothing changed."),
+            "the click opened the modal, which Esc then cancelled"
         );
+        assert!(wizard.providers[0].selected);
         assert!(!plan.agents.is_empty());
     }
 
@@ -1290,7 +1314,7 @@ mod tests {
     #[tokio::test]
     async fn clicking_apply_and_finish_ends_the_wizard() {
         let dir = tempfile::tempdir().unwrap();
-        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut wizard = configured_wizard(&env_in(dir.path()));
         wizard.enter(state::Step::Review);
         let mut terminal = test_terminal();
         let size = terminal.size().expect("the test backend has a size");
@@ -1364,7 +1388,7 @@ mod tests {
     async fn saving_writes_the_config_and_installs_the_agents() {
         let dir = tempfile::tempdir().unwrap();
         let env = env_in(dir.path());
-        let mut wizard = build_wizard(&env);
+        let mut wizard = configured_wizard(&env);
         let mut setup = TestSetup::new();
         let mut events =
             TestEventSource::new(vec![key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)]);
@@ -1450,7 +1474,7 @@ mod tests {
         let mut env = env_in(dir.path());
         let blocked = dir.path().join("not-a-dir");
         std::fs::write(&blocked, "").unwrap();
-        let mut wizard = build_wizard(&env);
+        let mut wizard = configured_wizard(&env);
         env.config_path = blocked.join("config.toml");
         let mut setup = TestSetup::new();
         let mut events =
@@ -1515,6 +1539,13 @@ mod tests {
         let mut setup = TestSetup::new();
         let mut events =
             TestEventSource::new(vec![key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)]);
+        // The wizard is built from the file, and will not finish without a
+        // provider, so the file starts with one.
+        std::fs::write(
+            &env.config_path,
+            "[providers]\nanthropic_api_key = \"sk-test\"\n",
+        )
+        .unwrap();
 
         execute_with(&args(), &env, &mut setup, &mut events, true)
             .await

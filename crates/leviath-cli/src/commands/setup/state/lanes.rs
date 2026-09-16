@@ -124,6 +124,10 @@ impl Wizard {
         if landed && self.step == Step::Limits {
             self.rebuild_advanced_models();
         }
+        // "Verify and use" is waiting on exactly this answer.
+        if landed {
+            self.settle_modal_verification();
+        }
     }
 
     // ── Signing in ──────────────────────────────────────────────────────────

@@ -183,20 +183,48 @@ pub(super) async fn put_config(
             Some(Some(v)) => *slot = Some(v),
         }
     }
-    if let Some(v) = req.anthropic_key {
-        config.providers.anthropic_api_key = Some(v);
-    }
-    if let Some(v) = req.openai_key {
-        config.providers.openai_api_key = Some(v);
-    }
-    if let Some(v) = req.google_key {
-        config.providers.google_api_key = Some(v);
-    }
-    if let Some(v) = req.openrouter_key {
-        config.openrouter_api_key = Some(v);
-    }
-    if let Some(v) = req.bedrock_key {
-        config.providers.bedrock_api_key = Some(v);
+    // The keys have the same three states: `null` clears one, which takes
+    // the provider out of this install the way the setup wizard's remove
+    // does, and an empty string is refused rather than stored as a key
+    // that authenticates as nobody.
+    for (key, sent, slot) in [
+        (
+            "anthropic_key",
+            req.anthropic_key,
+            &mut config.providers.anthropic_api_key,
+        ),
+        (
+            "openai_key",
+            req.openai_key,
+            &mut config.providers.openai_api_key,
+        ),
+        (
+            "google_key",
+            req.google_key,
+            &mut config.providers.google_api_key,
+        ),
+        (
+            "openrouter_key",
+            req.openrouter_key,
+            &mut config.openrouter_api_key,
+        ),
+        (
+            "bedrock_key",
+            req.bedrock_key,
+            &mut config.providers.bedrock_api_key,
+        ),
+    ] {
+        match sent {
+            None => {}
+            Some(None) => *slot = None,
+            Some(Some(v)) if v.trim().is_empty() => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("{key} must not be empty; send null to clear it"),
+                ));
+            }
+            Some(Some(v)) => *slot = Some(v),
+        }
     }
     if let Some(v) = req.bedrock_region {
         if v.trim().is_empty() {
@@ -1711,6 +1739,54 @@ mod tests {
         );
         let reread = Config::load_from_path_public(&path).unwrap();
         assert_eq!(reread.override_model, None, "and it stays gone on re-read");
+    }
+
+    /// A provider key has the same three states: a string sets it, `null`
+    /// clears it from the file (taking the provider out of the install), and
+    /// an empty string is refused with a message that names the key.
+    #[tokio::test]
+    async fn put_config_sets_clears_and_refuses_a_provider_key_like_the_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let body = serde_json::json!({ "anthropic_key": "sk-ant-set" }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .providers
+                .anthropic_api_key
+                .as_deref(),
+            Some("sk-ant-set")
+        );
+
+        let body = serde_json::json!({ "anthropic_key": null }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["has_anthropic_key"], false, "{answer}");
+        assert_eq!(
+            Config::load_from_path_public(&path)
+                .unwrap()
+                .providers
+                .anthropic_api_key,
+            None,
+            "the key is gone on re-read"
+        );
+
+        let body = serde_json::json!({ "openrouter_key": "  " }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("openrouter_key"), "{text}");
+        assert!(text.contains("null to clear"), "{text}");
     }
 
     /// `fallback_model` has the same three states as `override_model`: a

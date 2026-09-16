@@ -1,4 +1,4 @@
-//! The credential screen for an endpoint preset: one small form per entry,
+//! The setup modal's card for an endpoint preset: one small form per entry,
 //! then a row to add another.
 //!
 //! Split from the parent because a preset with two entries is sixteen cursor
@@ -8,24 +8,13 @@
 use super::*;
 use crate::commands::setup::state::{EditTarget, EndpointCursor, EndpointField, EndpointRow};
 
-/// The credential screen for the endpoint preset at provider row `index`.
+/// The setup modal's card for the endpoint preset at provider row `index`:
+/// its entries' forms and the add row, without the modal's own buttons.
 pub(super) fn build_endpoint_detail(wizard: &Wizard, index: usize) -> Screen {
     let row = &wizard.providers[index];
-    let position = wizard.detail + 1;
-    let total = wizard.selected_providers().len();
     let entries = wizard.endpoints_under(row.provider.id);
 
     let mut screen = Screen::default();
-    screen.push(Line::from(vec![
-        Span::styled(
-            row.provider.display,
-            Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("   {position} of {total}"),
-            Style::default().fg(C_DIM),
-        ),
-    ]));
     screen.push(Line::from(Span::styled(
         row.provider.blurb,
         Style::default().fg(C_MUTED),
@@ -42,7 +31,7 @@ pub(super) fn build_endpoint_detail(wizard: &Wizard, index: usize) -> Screen {
         &format!("Add another {}", row.provider.display),
         on_add,
     ));
-    screen.finish(wizard)
+    screen
 }
 
 /// One entry's form: a heading, its fields, its two buttons.
@@ -186,24 +175,34 @@ mod tests {
     use super::*;
     use crate::commands::setup::verify::Outcome;
 
-    fn open_llama(w: &mut Wizard) -> usize {
-        let llama = w
-            .providers
+    fn llama_row(w: &Wizard) -> usize {
+        w.providers
             .iter()
             .position(|r| r.provider.id == "llama-cpp")
-            .expect("in the table");
-        w.add_endpoint(llama);
-        w.enter(Step::ProviderDetail);
+            .expect("in the table")
+    }
+
+    /// The llama.cpp preset's setup modal, open over the Providers screen.
+    /// Opening it on a preset with no entry gives it one to edit.
+    fn open_llama(w: &mut Wizard) -> usize {
+        let llama = llama_row(w);
+        w.enter(Step::Providers);
+        w.open_provider_modal(llama);
         llama
     }
 
     #[test]
-    fn the_endpoint_screen_draws_every_field_and_the_add_row() {
+    fn the_endpoint_card_draws_every_field_the_add_row_and_the_modal_buttons() {
         let (_dir, mut w) = wizard();
         open_llama(&mut w);
+        assert_eq!(w.endpoints.len(), 1, "the modal opened with a fresh entry");
         let screen = rendered(&w);
-        assert!(screen.contains("llama.cpp"), "{screen}");
+        assert!(screen.contains(" Set up llama.cpp "), "{screen}");
         assert!(screen.contains("Endpoint 1: llama-cpp"), "{screen}");
+        assert!(
+            !screen.contains("1 of 1"),
+            "no walk-through header inside the modal:\n{screen}"
+        );
         for field in EndpointField::ALL {
             assert!(
                 screen.contains(field.label()),
@@ -220,6 +219,13 @@ mod tests {
         // The focused field explains itself; the first row is the name.
         assert!(screen.contains("› Name"), "{screen}");
         assert!(screen.contains(EndpointField::Name.help()), "{screen}");
+        // The modal's own three ways out sit under the card, unfocused.
+        for button in crate::commands::setup::state::ModalButton::ALL {
+            assert!(
+                screen.contains(&format!("  [ {} ]", button.label())),
+                "{button:?} missing:\n{screen}"
+            );
+        }
     }
 
     #[test]
@@ -269,28 +275,32 @@ mod tests {
         assert!(rendered(&w).contains("checking"));
     }
 
-    /// The pick-list says how many entries a preset holds, and a short
-    /// listing is shown whole.
+    /// The Providers screen says how many entries a preset holds, the modal
+    /// opened on one that has entries adds none, and a short listing is
+    /// shown whole.
     #[test]
-    fn the_pick_list_counts_entries_and_a_short_listing_is_shown_whole() {
+    fn the_providers_screen_counts_entries_and_a_short_listing_is_shown_whole() {
         let (_dir, mut w) = wizard();
-        let llama = open_llama(&mut w);
+        let llama = llama_row(&w);
         w.enter(Step::Providers);
+        w.add_endpoint(llama);
         assert!(rendered(&w).contains("llama.cpp  (1 endpoint)"));
         w.add_endpoint(llama);
         assert!(rendered(&w).contains("llama.cpp  (2 endpoints)"));
 
-        w.enter(Step::ProviderDetail);
+        w.open_provider_modal(llama);
+        assert_eq!(w.endpoints.len(), 2, "entries already there, none added");
         w.endpoints[0].outcome = Outcome::Reachable {
             models: vec!["a".to_string(), "b".to_string()],
         };
         let screen = rendered(&w);
+        assert!(screen.contains("Endpoint 2: llama-cpp-2"), "{screen}");
         assert!(screen.contains("2 models: a, b"), "{screen}");
         assert!(!screen.contains("more"), "{screen}");
     }
 
     #[test]
-    fn the_focus_marker_reaches_the_buttons_and_the_add_row() {
+    fn the_focus_marker_reaches_the_buttons_the_add_row_and_the_modal_buttons() {
         let (_dir, mut w) = wizard();
         open_llama(&mut w);
         w.endpoints[0].headers = "X-Org: r".to_string();
@@ -300,5 +310,11 @@ mod tests {
         assert!(screen.contains("Headers: X-Org: r"), "{screen}");
         w.cursor = 8;
         assert!(rendered(&w).contains("› [ Add another llama.cpp ]"));
+        // Past the card: the modal's first button.
+        w.cursor = w.modal_card_rows();
+        assert_eq!(w.cursor, 9);
+        let screen = rendered(&w);
+        assert!(screen.contains("› [ Verify and use ]"), "{screen}");
+        assert!(!screen.contains("› [ Add another"), "{screen}");
     }
 }
