@@ -140,9 +140,15 @@ that silently becomes "no limit" is the kind of typo that only shows up as a bil
 Prefer a relative cap for a stage that writes something whose size follows the material (a report,
 a rewrite of a file). A fixed number is easy to set smaller than the thing being written, and a
 reply cut off by its cap is not an answer: the runtime sends it back with the reason and retries
-once at the model's maximum, but the first attempt is still paid for. A tool call cut off halfway
-through its arguments is not run. The model is shown what arrived and told why. After three cut-off
-replies of either kind the stage ends rather than paying for a fourth.
+once at the model's maximum, but the first attempt is still paid for.
+
+A tool call cut off halfway through its arguments is not run. The model is shown what arrived and
+told how to split the call. For `write_file` that means writing the first part, then adding each
+later part with `"append": true`. From the second cut-off in a row the model is also told not to
+resend the call and how many tries it has left. If a fourth reply in a row is cut off in a tool call,
+the stage ends with an error. It takes the stage's `error` edge when there is one, and the run fails
+when there is not. Replies that are not cut off, however many tool calls they make, start the count
+again.
 
 Model selection is per stage, and only per stage. Two mistakes here are quiet ones. A top-level
 `[model]` block parses and is read by nothing, and a stage naming no model takes the host default

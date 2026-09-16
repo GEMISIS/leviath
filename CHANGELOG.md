@@ -60,6 +60,11 @@ same list.
 
 ### Added
 
+- `write_file` takes an optional `append`. Set to `true`, the content goes
+  on the end of the file, which is created if missing. A file too large for
+  one reply can now be written in parts, and file tracking keeps the parts
+  together under the one path.
+
 - `GET /api/models` carries `X-Leviath-Catalog-Age` and
   `X-Leviath-Catalog-Complete`, takes `?refresh=1` to ask the providers
   again, and announces the `models.cached` capability.
@@ -131,10 +136,19 @@ same list.
   ended in an error, and a paused run resumed or recovered after a daemon
   restart hit the same wall. Requests now carry those arguments as
   `{"_raw": "..."}` beside the refusal the model already got, which is what
-  Bedrock requests already did. A stage whose replies are cut off three times
-  now ends whether they were text or tool calls. Before, a model that kept
-  sending a call too big for its own maximum was paid in full for every
-  attempt until `max_iterations` stopped it.
+  Bedrock requests already did.
+
+- A model whose tool call keeps getting cut off is told how to fix the
+  call instead of just what went wrong. The refusal says the limit is
+  raised for the next reply, how to split this tool's call (`write_file`
+  with `"append": true`, smaller `edit_file` changes), and, from the second
+  cut-off in a row, not to resend it and how many tries are left. A fourth
+  cut-off tool call in a row is a stage error: it takes the stage's `error`
+  edge, or fails the run when there is none. Before, such a model was paid
+  in full for every attempt until `max_iterations` stopped it, and the run
+  could then report complete with the work undone. Only cut-offs in a row
+  count, so replies that are not cut off never add to it, however many tool
+  calls they make.
 
 - `lev setup` no longer shows every configured provider as "not checked
   yet". What a provider said the last time anything asked it is recorded in

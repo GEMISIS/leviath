@@ -73,6 +73,11 @@ hint = "Implementation complete, ready for review"
 condition = "stuck"          # a runtime signal, not the agent's choice
 ```
 
+`error` fires when a stage cannot go on. A provider refused the request, or the model's replies were
+cut off in the middle of a tool call four times in a row (see
+[stages and models](/docs/agents#stages-and-models)). The recovery stage finds the
+reason in the context. With no `error` edge the run fails.
+
 An edge with a `hint` and no `condition` is routed by the model, exactly as though you had written
 `condition = "llm_choice"`. The full set of values is `always`, `llm_choice`, `error`,
 `max_iterations`, `stuck`, and `dead_end`. Anything else is a parse error rather than an edge that
