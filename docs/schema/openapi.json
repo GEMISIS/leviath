@@ -3075,15 +3075,48 @@
               "type": "string"
             },
             "description": "Only models this provider serves. `openai` and `codex` serve the same model ids and bill to different places, so `provider` and `id` together are the key, not `id` alone. A provider this machine has not configured lists nothing rather than 404ing."
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Ask the providers again and wait for them, rather than answering from the catalogue the server keeps. For a settings page that has just changed something."
           }
         ],
         "tags": [
           "config"
         ],
-        "summary": "Models this install can reach",
+        "summary": "Models this install can reach, from the server's catalogue",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "description": "Success. The listing comes from a catalogue the server keeps; the providers are asked once per config and then behind the answer.",
+            "headers": {
+              "X-Leviath-Catalog-Age": {
+                "description": "Seconds since the listing was built.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Leviath-Catalog-Complete": {
+                "description": "Whether every provider answered when the listing was built. `false` means one timed out, errored or could not be built, and its models are absent.",
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

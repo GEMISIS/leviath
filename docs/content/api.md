@@ -233,7 +233,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
-| `GET /api/models?provider=` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id) |
+| `GET /api/models?provider=&refresh=` | Enumerate models, with each one's token limits and where they came from, from a catalogue the server keeps. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id); `refresh=1` asks the providers again - see [the model catalogue](#the-model-catalogue) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
@@ -1160,6 +1160,22 @@ without an `agent`, since the answer is the same either way.
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
 
+## The model catalogue
+
+`GET /api/models` answers from a listing the server keeps, not from the providers on each
+request. The providers are asked once per config, side by side, each given five seconds; a
+complete listing is served for fifteen minutes and one missing a provider's answer for one
+minute, after which the next request gets the list in hand and starts a refresh behind it.
+Only the very first request for a config waits for the providers, and that wait is bounded.
+A `PUT /api/config` starts the refresh for the new config as it returns.
+
+Two headers say what you got. `X-Leviath-Catalog-Age` is how many seconds ago the listing
+was built; `X-Leviath-Catalog-Complete` is `true` when every provider answered when it was,
+`false` when one timed out, errored, or could not be built, in which case its models are
+absent. `?refresh=1` asks the providers again and waits for them, for a settings page that
+has just changed a key and wants to show the result rather than the memory of the old one.
+Announced as the `models.cached` capability.
+
 ## Two providers, one model id
 
 `GET /api/models` returns a flat list, and each entry carries the `provider`
@@ -1522,6 +1538,7 @@ than that feature, not broken.
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
 | `runs.files.mime_type` | `mime_type` on every file-listing entry, typed by the run's registry from the file's name |
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
+| `models.cached` | `GET /api/models` answers from a catalogue the server keeps, with `X-Leviath-Catalog-Age` and `X-Leviath-Catalog-Complete` on the response and `?refresh=1` to ask the providers again. Safe to call when a page opens. See [the model catalogue](#the-model-catalogue) |
 | `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`, and `@path` tokens in `task` and region text resolved inside the working directory. See [attaching files](#attaching-files) |
 | `messages.parts` | The same on `POST /api/agents/{id}/message` |
 | `runs.blobs` | `GET /api/agents/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |

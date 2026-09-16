@@ -10,4 +10,6 @@
 pub(super) struct ServeCaches {
     /// The parse cache over the runs directory that every listing route reads.
     pub(super) run_index: super::run_index::RunIndex,
+    /// The model listing `GET /api/models` answers from.
+    pub(super) model_catalog: super::model_catalog::ModelCatalog,
 }

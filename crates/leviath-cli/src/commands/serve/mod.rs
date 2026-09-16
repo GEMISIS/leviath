@@ -21,6 +21,7 @@ mod fs;
 mod interactions;
 mod mcp;
 mod mime;
+mod model_catalog;
 mod polling;
 mod providers;
 mod request_limits;
@@ -416,6 +417,12 @@ async fn execute_with_shutdown(
     let _warm_guard = AbortOnDrop(tokio::spawn(async move {
         warm_state.caches.run_index.snapshot().await;
     }));
+    // And the model catalogue, which otherwise costs the first opener of the
+    // model picker every provider's answer.
+    state
+        .caches
+        .model_catalog
+        .request_refresh(state.current_config(), false);
 
     // Background world-event consumer: subscribes to the daemon's pushed
     // `WorldEvent` stream and forwards each event to WebSocket subscribers.
