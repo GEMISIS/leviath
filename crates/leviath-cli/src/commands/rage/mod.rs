@@ -254,44 +254,65 @@ pub async fn execute_with<S: TerminalSetup, E: EventSource>(
         return run_non_interactive(args, env).await;
     }
     let mut ui = state::Rage::new(args, env)?;
-    setup.enable()?;
-    let mut terminal = setup.create_terminal()?;
-    let result = run_loop(
-        &mut ui,
-        env,
-        &mut terminal,
-        events,
-        Duration::from_millis(120),
-    )
-    .await;
-    setup.disable();
-    match result? {
+    match drive_screen(&mut ui, env, setup, events).await? {
         Some(outcome) => print_outcome(&outcome),
         None => println!("Cancelled. Nothing was written."),
     }
     Ok(())
 }
 
-/// Draw, read a key, repeat, until the screen is done or the user leaves.
+/// Why the loop handed the terminal back.
+pub(crate) enum LoopExit {
+    /// The user left without a bundle.
+    Quit,
+    /// The summary step was reached and the bundle has to be built.
+    Build,
+    /// The summary was read; here is what was written.
+    Finished(Outcome),
+}
+
+/// Take the terminal, run the screen, and hand the terminal back for the
+/// build, then take it again for the summary.
 ///
-/// The bundle is built the moment the summary step is entered, inside the
-/// loop, so the screen that follows shows what was actually written.
-pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
+/// The build runs between two takes because gathering the bundle runs
+/// `lev doctor`'s config check, and a config with an odd-looking key makes
+/// that print a warning straight to stderr, which is the same terminal the
+/// screen is drawn on. Outside the alternate screen the line lands where a
+/// warning belongs, and the summary is drawn clean afterwards.
+async fn drive_screen<S: TerminalSetup, E: EventSource>(
     ui: &mut state::Rage,
     env: &RageEnv,
+    setup: &mut S,
+    events: &mut E,
+) -> anyhow::Result<Option<Outcome>> {
+    loop {
+        setup.enable()?;
+        let mut terminal = setup.create_terminal()?;
+        let exit = run_loop(ui, &mut terminal, events, Duration::from_millis(120)).await;
+        setup.disable();
+        match exit? {
+            LoopExit::Quit => return Ok(None),
+            LoopExit::Finished(outcome) => return Ok(Some(outcome)),
+            LoopExit::Build => match build(env, &ui.selection(), ui.output.as_deref()).await {
+                Ok(outcome) => ui.outcome = Some(outcome),
+                Err(e) => ui.error = Some(e.to_string()),
+            },
+        }
+    }
+}
+
+/// Draw, read a key, repeat, until the screen is done, the user leaves, or
+/// the summary step is reached with nothing built yet (see
+/// [`drive_screen`] for why the build happens outside).
+pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
+    ui: &mut state::Rage,
     terminal: &mut Terminal<B>,
     events: &mut impl EventSource,
     tick_rate: Duration,
-) -> anyhow::Result<Option<Outcome>> {
+) -> anyhow::Result<LoopExit> {
     loop {
         if ui.needs_build() {
-            terminal
-                .draw(|frame| render::draw(frame, ui))
-                .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
-            match build(env, &ui.selection(), ui.output.as_deref()).await {
-                Ok(outcome) => ui.outcome = Some(outcome),
-                Err(e) => ui.error = Some(e.to_string()),
-            }
+            return Ok(LoopExit::Build);
         }
         terminal
             .draw(|frame| render::draw(frame, ui))
@@ -304,13 +325,17 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
         }
 
         if ui.should_quit {
-            return Ok(None);
+            return Ok(LoopExit::Quit);
         }
         if ui.finished {
             if let Some(error) = ui.error.take() {
                 return Err(anyhow::anyhow!(error));
             }
-            return Ok(ui.outcome.take());
+            return Ok(LoopExit::Finished(
+                ui.outcome
+                    .take()
+                    .expect("the summary is entered with an outcome or an error"),
+            ));
         }
     }
 }
