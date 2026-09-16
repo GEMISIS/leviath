@@ -101,13 +101,25 @@ fn canonicalize(found: Vec<BlueprintInfo>) -> Vec<BlueprintInfo> {
 /// Every consumer goes through here (`list_blueprints`, `get_blueprint`,
 /// `spawn_agent`), so they all share one answer to "which blueprint is `x`".
 pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<BlueprintInfo> {
+    discover_in(blueprint_roots(config))
+}
+
+/// The directories [`discover_blueprints`] scans: the installed agents dir,
+/// then every configured `agent_paths` entry.
+///
+/// Resolved apart from the scan so a handler can resolve them on its own task
+/// (where a test's agents-dir override is visible) and read them on the
+/// blocking pool, where a walk over every manifest belongs.
+pub(super) fn blueprint_roots(config: &crate::config::Config) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = vec![agents_dir()];
+    roots.extend(config.agent_paths.iter().cloned());
+    roots
+}
+
+/// [`discover_blueprints`] over the given roots.
+pub(super) fn discover_in(roots: Vec<PathBuf>) -> Vec<BlueprintInfo> {
     let mut results = Vec::new();
-    let agents = agents_dir();
-
-    let mut dirs_to_scan: Vec<PathBuf> = vec![agents];
-    dirs_to_scan.extend(config.agent_paths.iter().cloned());
-
-    for dir in dirs_to_scan {
+    for dir in roots {
         if !dir.exists() {
             continue;
         }
@@ -217,7 +229,8 @@ pub(super) async fn list_blueprints(
         ),
     };
 
-    let mut found = discover_blueprints(&state.current_config());
+    let roots = blueprint_roots(&state.current_config());
+    let mut found = super::blocking::blocking(move || discover_in(roots)).await;
 
     // `q` shares the search primitive but not the framework: three in-memory
     // string fields do not need sources, phases or highlights.
@@ -298,7 +311,8 @@ pub(super) async fn get_blueprint(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<BlueprintDetail>, StatusCode> {
-    let blueprints = discover_blueprints(&state.current_config());
+    let roots = blueprint_roots(&state.current_config());
+    let blueprints = super::blocking::blocking(move || discover_in(roots)).await;
     let mut info = blueprints
         .into_iter()
         .find(|b| b.name == name)

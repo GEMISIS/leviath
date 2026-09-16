@@ -9,7 +9,6 @@ use leviath_core::mime::MimeRegistry;
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
-use super::blueprints::discover_blueprints;
 use super::runs::run_json;
 use super::types::*;
 use crate::runstate::{self, ContextSnapshot, RunMeta};
@@ -69,7 +68,8 @@ pub(super) async fn spawn_agent(
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SpawnAgentReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
-    let blueprints = discover_blueprints(&state.current_config());
+    let roots = super::blueprints::blueprint_roots(&state.current_config());
+    let blueprints = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
     let bp_info = blueprints
         .iter()
         .find(|b| b.name == body.blueprint)
