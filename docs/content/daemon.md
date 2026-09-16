@@ -65,7 +65,8 @@ is renamed to `daemon.log.1` and a fresh file starts, so the two together never 
 rolls.
 
 A daemon under `lev daemon install` also has `daemon.stdio.log`, where the supervisor keeps what
-the process writes outside its log: a fatal start-up error, or a panic.
+the process writes outside its log: a fatal start-up error, or a panic. `lev rage` packs all three
+files into a bug report. See [Reporting issues](/docs/reporting-issues).
 
 ## What happens when it restarts
 

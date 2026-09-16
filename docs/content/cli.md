@@ -862,6 +862,35 @@ compiles the provider and reads its catalog but never sends an inference.
 `lev doctor` exits non-zero when a check fails, so it works as a CI gate. It bills two inferences
 per run, each capped at 64 output tokens; `--no-daemon` bills one, and `--offline` none.
 
+### `lev rage`
+
+Pack the logs and settings a bug report needs into one zip, with every key removed. A small
+screen asks what the problem was about and, for a run, which one. Nothing is uploaded: attaching
+the zip to an issue is your decision. [Reporting issues](/docs/reporting-issues) says what the zip
+holds, what it never holds, and how to attach it.
+
+```bash
+$ lev rage --run abc123 --note "the review stage never finished" -o report.zip
+Wrote report.zip (1.4 MiB, 6 secrets removed)
+  README.md                 1 file(s)        3 KiB
+  config/                   3 file(s)        2 KiB
+  runs/                    14 file(s)      1.3 MiB
+  ...
+```
+
+| Flag | Purpose |
+|---|---|
+| `--about <setup\|run\|agent\|other>` | What the problem was about. Answers the first question on the screen |
+| `--run <RUN_ID>` | The run it happened in: an exact id, or a prefix only one run starts with. Implies `--about run` |
+| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.leviath`. Implies `--about agent` |
+| `--note <TEXT>` | What happened, in your words. Lands at the top of the zip's README |
+| `-o`, `--output <PATH>` | Where to write the zip. Default: `./leviath-rage-<timestamp>.zip` |
+| `--no-blobs` | Leave a run's stored media parts out |
+| `--non-interactive` | No screen: build the zip from the flags and print its path. A stdout that is not a terminal does the same |
+
+The zip keeps your task text, the model's replies, tool output and file contents, which is what a
+helper needs. Read it before you share it.
+
 ### `lev setup`
 
 The interactive [provider](/docs/providers) wizard. Every credential and agent choice it asks for

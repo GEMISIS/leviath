@@ -764,7 +764,7 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
     Ok(())
 }
 
-mod detect;
+pub(crate) mod detect;
 pub(crate) mod latest;
 mod migrate;
 

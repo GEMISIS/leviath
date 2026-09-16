@@ -330,3 +330,44 @@ fn pack_subcommand_dispatches_and_exits_zero() {
     );
     assert!(output_bundle.exists());
 }
+
+// ─── rage ────────────────────────────────────────────────────────────────
+//
+// `lev rage --non-interactive` writes a bug-report zip from the flags alone:
+// no terminal, no daemon (it never starts one), no network. The isolated
+// home means it packs an empty install, which is a valid bundle.
+
+#[test]
+fn rage_subcommand_writes_a_zip_without_a_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let zip = tmp.path().join("out.zip");
+
+    let output = lev_command(tmp.path())
+        .args([
+            "rage",
+            "--non-interactive",
+            "--about",
+            "other",
+            "--note",
+            "an integration test",
+            "--output",
+            zip.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Wrote"), "{stdout}");
+    assert!(stdout.contains("Before you share it"), "{stdout}");
+    assert!(zip.exists());
+    let bytes = std::fs::read(&zip).unwrap();
+    assert_eq!(
+        &bytes[..2],
+        b"PK",
+        "a zip starts with the local file header"
+    );
+}

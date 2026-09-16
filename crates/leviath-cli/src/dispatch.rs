@@ -152,6 +152,9 @@ pub enum Commands {
 
     /// Run the shared-world daemon in the foreground
     Daemon(commands::daemon::DaemonArgs),
+
+    /// Pack the logs and settings a bug report needs, with every key removed
+    Rage(commands::rage::RageArgs),
 }
 
 /// The top-level `lev --help` layout. Renders the categorized [`COMMANDS_HELP`]
@@ -178,6 +181,7 @@ Setup and configuration:
   setup         Configure API keys and defaults
   providers     Show configured providers and set their priority order
   doctor        Check that provider wiring works, end to end
+  rage          Pack the logs and settings a bug report needs, with every key removed
   models        List and inspect available models
   mime         Show the mime registry, and what a file resolves to under it
   auth          Inspect and move the secrets Leviath holds
@@ -335,6 +339,13 @@ pub trait RiskyExecutors {
         &self,
         args: commands::update::UpdateArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+
+    /// `lev rage` - takes over the real terminal, reads the real data root
+    /// and asks the daemon (never starting one) over the control socket.
+    fn rage(
+        &self,
+        args: commands::rage::RageArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
 /// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
@@ -390,6 +401,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Providers(args) => ex.providers(args).await,
         Commands::Auth(args) => ex.auth(args).await,
         Commands::Update(args) => ex.update(args).await,
+        Commands::Rage(args) => ex.rage(args).await,
     }
 }
 
@@ -471,6 +483,9 @@ mod tests {
             &self,
             _args: commands::agent_client::AgentClientArgs,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn rage(&self, _args: commands::rage::RageArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
@@ -595,6 +610,14 @@ mod tests {
         // auto-starts a daemon, so a unit test must never reach the real one.
         let args = commands::doctor::DoctorArgs::default();
         assert!(dispatch(Commands::Doctor(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_rage_variant_is_routed_through_the_executor() {
+        // Routed, not called directly: `lev rage` takes over the terminal and
+        // reads the real data root.
+        let args = commands::rage::RageArgs::default();
+        assert!(dispatch(Commands::Rage(args), &MockRisky).await.is_ok());
     }
 
     #[tokio::test]

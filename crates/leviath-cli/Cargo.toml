@@ -54,6 +54,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
+# `lev rage`: the token-shaped patterns its scrubber replaces.
+regex = { workspace = true }
+# `lev rage`: the bundle it writes.
+zip = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
