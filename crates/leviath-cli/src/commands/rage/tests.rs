@@ -198,6 +198,8 @@ PLANTED_TOKEN = "{MCP_ENV_VALUE}"
 kind = "openai-compatible"
 base_url = "http://localhost:9"
 api_key = "{GATEWAY_KEY}"
+
+[model_providers.scripted]
 api_token = "{EXTRA_VALUE}"
 "#
         ),
@@ -261,7 +263,13 @@ api_token = "{EXTRA_VALUE}"
     // list, a ghost in that list, and an unrelated run.
     let runs = root.join("runs");
     let mut root_meta = meta(ROOT_RUN, &blueprint);
-    root_meta.children = vec![LISTED_CHILD.to_string(), "run-ghost-99999".to_string()];
+    // One child listed here and by its own parent id, one listed here only,
+    // and one that no longer exists.
+    root_meta.children = vec![
+        CHILD_RUN.to_string(),
+        LISTED_CHILD.to_string(),
+        "run-ghost-99999".to_string(),
+    ];
     write_meta(&runs, &root_meta);
     let mut child = meta(CHILD_RUN, &blueprint);
     child.parent_run_id = Some(ROOT_RUN.to_string());
@@ -352,8 +360,15 @@ api_token = "{EXTRA_VALUE}"
     );
     write(&run_dir.join("blobs").join("aa11"), [0u8, 159, 146, 150]);
     write(&run_dir.join("blobs").join("bb22"), b"small text blob");
-    // The child's journal is corrupt, and it has nothing else.
+    // The child's journal is corrupt, and it has nothing else; the listed
+    // child's is clean and small.
     write(&runs.join(CHILD_RUN).join("run.lvr"), b"not an archive");
+    write(
+        &runs.join(LISTED_CHILD).join("run.lvr"),
+        archive(&[records[0].clone()], None),
+    );
+    // A blueprint file too large to be one, left out by size.
+    write(&demo.join("NOTES.md"), vec![b'x'; 300 * 1024]);
     blueprint
 }
 
@@ -531,6 +546,17 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
         assert!(
             reasons.iter().any(|r| r.contains("providers/")),
             "{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("NOTES.md") && r.contains("over the")),
+            "{reasons:?}"
+        );
+        assert!(
+            member_names
+                .iter()
+                .any(|n| n.ends_with(&format!("runs/{LISTED_CHILD}/run.lvr")))
         );
         let notes = manifest["notes"].as_array().unwrap();
         assert!(
@@ -791,7 +817,11 @@ fn family_is_the_root_and_what_it_spawned() {
     let runs = dir.path();
     let blueprint = Path::new("/nowhere");
     let mut root = meta("root", blueprint);
-    root.children = vec!["listed".to_string(), "ghost".to_string()];
+    root.children = vec![
+        "child".to_string(),
+        "listed".to_string(),
+        "ghost".to_string(),
+    ];
     let mut child = meta("child", blueprint);
     child.parent_run_id = Some("root".to_string());
     let mut grandchild = meta("grandchild", blueprint);
@@ -1099,7 +1129,7 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         plant(&root);
         let env = env_for(&root);
         let args = RageArgs {
-            about: Some(About::Other),
+            run: Some(ROOT_RUN.to_string()),
             note: Some("preset".to_string()),
             output: Some(root.join("s.zip")),
             ..Default::default()
@@ -1107,7 +1137,9 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         let mut ui = Rage::new(&args, &env).unwrap();
         assert_eq!(ui.step, Step::Summary, "everything was answered by flags");
         let mut terminal = test_terminal();
-        let mut source = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
+        // A key the summary does not answer to, then one it does.
+        let mut source =
+            TestEventSource::new(vec![key(KeyCode::Char('x')), key(KeyCode::Char('q'))]);
         let outcome = run_loop(
             &mut ui,
             &env,
@@ -1123,8 +1155,98 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         assert!(text.contains("Your bundle"), "{text}");
         assert!(text.contains("config/"), "{text}");
         assert!(text.contains("Left out"), "{text}");
+        assert!(text.contains("note:"), "{text}");
+        assert!(text.contains("more, listed in manifest.json"), "{text}");
     })
     .await
+}
+
+#[tokio::test]
+async fn the_flags_path_reports_a_bad_run_or_an_unwritable_zip() {
+    with_env(|root| async move {
+        plant(&root);
+        let env = env_for(&root);
+        let bad_run = RageArgs {
+            run: Some("zzz".to_string()),
+            ..Default::default()
+        };
+        assert!(run_non_interactive(&bad_run, &env).await.is_err());
+        // The screen refuses the same run before taking the terminal.
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![]);
+        assert!(
+            execute_with(&bad_run, &env, &mut setup, &mut events, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(setup.enable_calls, 0);
+        let bad_zip = RageArgs {
+            output: Some(root.join("nowhere").join("x.zip")),
+            ..Default::default()
+        };
+        assert!(run_non_interactive(&bad_zip, &env).await.is_err());
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_short_skipped_list_is_shown_whole() {
+    with_env(|root| async move {
+        let env = env_for(&root);
+        let args = RageArgs {
+            about: Some(About::Other),
+            note: Some("n".to_string()),
+            ..Default::default()
+        };
+        let mut ui = Rage::new(&args, &env).unwrap();
+        ui.outcome = Some(Outcome {
+            zip_path: root.join("x.zip"),
+            zip_bytes: 10,
+            sections: vec![],
+            skipped: vec![
+                SkippedEntry {
+                    path: "logs/daemon.log".to_string(),
+                    reason: "not present".to_string(),
+                },
+                SkippedEntry {
+                    path: "logs/dashboard.log".to_string(),
+                    reason: "not present".to_string(),
+                },
+            ],
+            redactions: 0,
+            notes: vec![],
+        });
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| super::render::draw(frame, &ui))
+            .unwrap();
+        let text = terminal.backend().text();
+        assert!(text.contains("logs/dashboard.log"), "{text}");
+        assert!(!text.contains("more, listed"), "{text}");
+        // And nothing left out at all: no list.
+        ui.outcome.as_mut().unwrap().skipped.clear();
+        terminal
+            .draw(|frame| super::render::draw(frame, &ui))
+            .unwrap();
+        let text = terminal.backend().text();
+        assert!(!text.contains("Left out"), "{text}");
+    })
+    .await
+}
+
+#[test]
+fn a_readme_for_a_bundle_with_nothing_left_out_has_no_such_list() {
+    let text = report::readme(
+        About::Other,
+        "",
+        None,
+        "0.0.0",
+        "b",
+        "now",
+        &Bundle::default(),
+    );
+    assert!(!text.contains("Left out, and why"));
+    assert!(text.contains("No description was given"));
 }
 
 #[tokio::test]

@@ -488,14 +488,22 @@ async fn checking_an_unknown_provider_is_a_404() {
 /// field somebody could set.
 #[test]
 fn the_default_admin_points_at_this_machine() {
-    let admin = ProviderAdmin::default();
+    // Both paths below come from `LEVIATH_HOME` at the moment they are read.
+    // Held under `temp_env`, which serializes every env-changing test in the
+    // process, so a neighbour moving the home between the two reads cannot
+    // make them disagree.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let admin = temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let admin = ProviderAdmin::default();
+        let authorizer = admin.authorizer();
+        assert_eq!(
+            authorizer.store_path,
+            Some(crate::commands::serve::mcp::admin_paths().grants)
+        );
+        admin
+    });
     assert_eq!(admin.issuer, leviath_providers::codex::ISSUER);
     assert_eq!(admin.ports, leviath_providers::codex::CALLBACK_PORTS);
-    let authorizer = admin.authorizer();
-    assert_eq!(
-        authorizer.store_path,
-        Some(crate::commands::serve::mcp::admin_paths().grants)
-    );
     assert!(
         leviath_core::sync::lock(&admin.in_flight).is_empty(),
         "nothing is in flight before anything is asked"

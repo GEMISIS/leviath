@@ -717,7 +717,10 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // daemon was started. The cap follows `[observability]` once the host is
     // up (`telemetry_reload`).
     if let Some(path) = leviath_cli::logging::daemon_log_path()
-        && leviath_cli::logging::attach_daemon_log(path.clone())
+        && leviath_cli::logging::attach_daemon_log(
+            path.clone(),
+            std::io::IsTerminal::is_terminal(&io::stderr()),
+        )
     {
         info!(path = %path.display(), "leviath daemon writing its log here");
     }
