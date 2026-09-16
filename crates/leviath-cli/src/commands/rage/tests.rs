@@ -432,12 +432,13 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
         let members = unzip(&out);
         let member_names = names(&members);
 
+        // The message names the secret by its index, not its value, so a
+        // failure never prints one and a code scanner never sees one logged.
         for (name, bytes) in &members {
-            for secret in ALL_SECRETS {
+            for (index, secret) in ALL_SECRETS.iter().enumerate() {
                 assert!(
                     !contains(bytes, secret),
-                    "{secret} survived in {name}: {}",
-                    String::from_utf8_lossy(bytes)
+                    "planted secret #{index} survived in {name}"
                 );
             }
         }
