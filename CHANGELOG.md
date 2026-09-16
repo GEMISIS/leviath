@@ -42,6 +42,12 @@ same list.
 
 ### Added
 
+- A **What is Leviath?** page opens the docs, before Getting Started: the
+  problem a long agent run has, what a blueprint, regions, the daemon and
+  the journal do about it, what Leviath is not, and who it is for. Written
+  in plain words for someone who runs a coding agent and has never opened a
+  framework's docs.
+
 - `[providers] <provider>_headers` (`anthropic_headers`, `openai_headers`,
   `google_headers`, `openrouter_headers`, `meshy_headers`, `bedrock_headers`):
   extra headers sent after the provider's own on every request to its host,
