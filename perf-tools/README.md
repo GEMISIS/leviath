@@ -47,6 +47,13 @@ does not apply and no benchmark target pollutes a crate's profile.
   directory N times with fresh ids. Copies, not stubs: a 200-byte
   `context.json` would hide exactly the per-frame parsing cost the dashboard
   numbers exist to catch.
+- `serve_latency.py --port 8299 --n 200 [--burst] [--accept-encoding gzip]` -
+  p50/p99 per read route over a fixed corpus, one connection per request.
+  `--burst` fires the console's connect-time set (config, first runs page,
+  blueprints, models, folder listing, update plan) at once and reports the
+  wall clock to the last byte, which is what a user waits for when The Lair
+  opens. `--accept-encoding` records the compressed body size and the
+  `content-encoding` the server chose.
 - `dash_pty.py --bin lev --seconds 30 --keys 'jjj'` - drives `lev dash`
   over a real pty, accumulating the whole escape stream (a full pty buffer
   blocks the child and corrupts the measurement), and reports the child's
