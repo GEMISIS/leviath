@@ -29,6 +29,10 @@ same list.
 - `lev serve` compresses a body over a kilobyte for a client that accepts
   gzip or brotli, and its CORS answer lets a browser keep a preflight for
   an hour rather than asking again about every request.
+- `lev daemon install` points the supervisor's stdout and stderr capture at
+  `daemon.stdio.log` rather than `daemon.log`, which the daemon now writes
+  and caps itself. Run `lev daemon install` again to pick that up. A daemon
+  whose stderr is not a terminal no longer copies its log there.
 - `lev setup` sets a provider up in a modal rather than on a screen per
   provider. The Providers screen lists the providers this install has;
   **Add a provider** asks how it is reached, what it makes, and which one,
@@ -61,6 +65,21 @@ same list.
   again, and announces the `models.cached` capability.
 - `perf-tools/serve_latency.py --burst` times the console's connect-time
   requests fired at once, and `--accept-encoding` records compressed sizes.
+- `lev rage` packs the logs and settings a bug report needs into one zip,
+  with every key removed: `lev doctor --offline`, the daemon's state and
+  log, the config file with its keys taken out, every installed blueprint,
+  and, for a run, its metadata, stages, context, journal, media and
+  blueprint. A small screen asks what the problem was about (`--about`)
+  and which run (`--run`) or blueprint (`--agent`); `--note` adds your
+  words, `--output` names the zip, `--no-blobs` leaves media out, and
+  `--non-interactive` skips the screen. Nothing is uploaded. The zip keeps
+  the task text, the model's replies, tool output and file contents, and
+  says so before you share it. The new Reporting issues guide has the rest.
+- The daemon writes its own log to `~/.leviath/daemon.log`, however it was
+  started; before, a daemon `lev run` started for you logged nowhere. The
+  file is capped at `[observability] daemon_log_max_bytes` (5 MiB by
+  default, `0` never rolls) with one rolled `daemon.log.1`, and a changed
+  cap applies on the next run without a restart.
 - A **What is Leviath?** page opens the docs, before Getting Started: the
   problem a long agent run has, what a blueprint, regions, the daemon and
   the journal do about it, what Leviath is not, and who it is for. Written

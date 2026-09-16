@@ -17,6 +17,9 @@ resolution, one real inference, and the daemon handoff, in that order, and repor
 check that fails tells you which section below you need. In particular it separates "my keys are
 wrong" from "the daemon is stuck", which look identical from the outside.
 
+If you get stuck, `lev rage` packs the logs, the config with its keys removed, and the run into
+one zip you can attach to an issue. See [Reporting issues](/docs/reporting-issues).
+
 ## I edited config.toml and nothing changed
 
 The daemon picks up `~/.leviath/config.toml` on its own, so an edit that does nothing almost always
