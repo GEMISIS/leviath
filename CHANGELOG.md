@@ -15,6 +15,20 @@ same list.
 
 ### Changed
 
+- `lev serve` answers The Lair's connect-time requests from memory. Every
+  run listing reads through one parse cache over the runs directory, filled
+  at start-up and read off the async runtime, so a page of fifty costs a
+  stat per live run rather than a parse of every run on the machine; the
+  tree routes walk a parent map built once instead of re-scanning the list
+  at every level. `GET /api/models` answers from a catalogue built once per
+  config and refreshed behind a stale answer, with the providers asked side
+  by side and each given five seconds; only the first request for a config
+  waits, and that wait is bounded. On a machine with about a thousand runs
+  the console's connect burst went from about 0.9 s to about 4 ms, and
+  `/api/models` from about 1 s to under a millisecond once warm.
+- `lev serve` compresses a body over a kilobyte for a client that accepts
+  gzip or brotli, and its CORS answer lets a browser keep a preflight for
+  an hour rather than asking again about every request.
 - `lev setup` sets a provider up in a modal rather than on a screen per
   provider. The Providers screen lists the providers this install has;
   **Add a provider** asks how it is reached, what it makes, and which one,
@@ -42,6 +56,11 @@ same list.
 
 ### Added
 
+- `GET /api/models` carries `X-Leviath-Catalog-Age` and
+  `X-Leviath-Catalog-Complete`, takes `?refresh=1` to ask the providers
+  again, and announces the `models.cached` capability.
+- `perf-tools/serve_latency.py --burst` times the console's connect-time
+  requests fired at once, and `--accept-encoding` records compressed sizes.
 - A **What is Leviath?** page opens the docs, before Getting Started: the
   problem a long agent run has, what a blueprint, regions, the daemon and
   the journal do about it, what Leviath is not, and who it is for. Written

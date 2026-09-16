@@ -1,0 +1,49 @@
+{
+  "taken_at": "2026-09-16T06:40:00+00:00",
+  "commit": "c913c635",
+  "branch_head": "c913c635",
+  "machine": "Darwin 25.6.0 arm64",
+  "notes": [
+    "serve: the real ~/.leviath of a development machine, 974 runs / 1.4 GB, 18 agents, 5 providers configured; release binary, one connection per request",
+    "before = the build on main (0.6.1, 94360314) on port 3000; after = this branch on port 3011, against the same home, both with the daemon running",
+    "per-route: 20 sequential requests; burst: the console's connect-time set fired at once, 10 times; the first burst of each run is slow for every route (~200-300 ms) on both builds, which is the client's threads warming rather than the server",
+    "/api/models before is one to two seconds per request (a registry built and every provider asked, per request); after it answers from the catalogue, X-Leviath-Catalog-Age 44 on this run",
+    "gzip: the same routes with Accept-Encoding: gzip; body_bytes is what crossed the wire. /api/agents is JSON with long final outputs, so it compresses less than the listings do, and costs about 11 ms more to compress"
+  ],
+  "serve_974_runs_before": {
+    "/api/runs?limit=50": { "p50_ms": 17.46, "p99_ms": 20.52, "body_bytes": 76945 },
+    "/api/agents/tree": { "p50_ms": 18.36, "p99_ms": 19.03, "body_bytes": 233480 },
+    "/api/agents": { "p50_ms": 25.26, "p99_ms": 26.79, "body_bytes": 3215704 },
+    "/api/config": { "p50_ms": 0.36, "p99_ms": 0.63, "body_bytes": 1946 },
+    "/api/blueprints": { "p50_ms": 3.3, "p99_ms": 3.87, "body_bytes": 5249 },
+    "/api/models": { "p50_ms": 1014.23, "p99_ms": 1430.93, "body_bytes": 260580 },
+    "/api/agents/{id}/children": { "p50_ms": 16.81, "p99_ms": 17.62, "body_bytes": 2 }
+  },
+  "serve_974_runs": {
+    "/api/runs?limit=50": { "p50_ms": 1.68, "p99_ms": 1.85, "body_bytes": 76945 },
+    "/api/agents/tree": { "p50_ms": 1.9, "p99_ms": 2.04, "body_bytes": 233480 },
+    "/api/agents": { "p50_ms": 9.21, "p99_ms": 9.78, "body_bytes": 3215705 },
+    "/api/config": { "p50_ms": 0.21, "p99_ms": 0.24, "body_bytes": 2008 },
+    "/api/blueprints": { "p50_ms": 3.57, "p99_ms": 3.95, "body_bytes": 5249 },
+    "/api/models": { "p50_ms": 0.75, "p99_ms": 0.86, "body_bytes": 259813 },
+    "/api/agents/{id}/children": { "p50_ms": 1.28, "p99_ms": 1.33, "body_bytes": 2 }
+  },
+  "serve_974_runs_gzip": {
+    "/api/runs?limit=50": { "p50_ms": 1.85, "body_bytes": 13399 },
+    "/api/agents/tree": { "p50_ms": 2.29, "body_bytes": 38668 },
+    "/api/agents": { "p50_ms": 20.69, "body_bytes": 1066071 },
+    "/api/config": { "p50_ms": 0.24, "body_bytes": 941 },
+    "/api/blueprints": { "p50_ms": 2.69, "body_bytes": 2080 },
+    "/api/models": { "p50_ms": 1.12, "body_bytes": 27051 }
+  },
+  "serve_connect_burst_before": {
+    "wall_to_last_byte": { "p50_ms": 908.29, "p99_ms": 1211.24, "max_ms": 1726.05 },
+    "/api/models": { "p50_ms": 907.69, "max_ms": 1724.58 },
+    "/api/runs (console first page)": { "p50_ms": 39.42, "body_bytes": 16193 }
+  },
+  "serve_connect_burst": {
+    "wall_to_last_byte": { "p50_ms": 4.3, "p99_ms": 5.96, "max_ms": 218.9 },
+    "/api/models": { "p50_ms": 1.64, "max_ms": 206.75 },
+    "/api/runs (console first page)": { "p50_ms": 2.33, "body_bytes": 16193 }
+  }
+}
