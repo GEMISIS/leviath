@@ -245,7 +245,11 @@ axum = { version = "0.8", features = ["ws", "multipart"] }
 # implementation or a second crypto provider, which is what the policy above
 # is about.
 axum-server = { version = "0.8", features = ["tls-rustls"] }
-tower-http = { version = "0.7", features = ["cors"] }
+# `compression-*` for `lev serve`'s responses: a run listing is JSON with a
+# great deal of repetition, and a console on the other end of a tunnel reads
+# it at a tenth of the bytes. Both codecs were already in the lockfile through
+# reqwest, so this adds no crate.
+tower-http = { version = "0.7", features = ["cors", "compression-gzip", "compression-br"] }
 
 # ── Release profile ──────────────────────────────────────────────────────────
 #

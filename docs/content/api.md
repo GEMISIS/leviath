@@ -188,6 +188,13 @@ ssh -N -L 3000:127.0.0.1:3000 you@that-machine
 Then point The Lair at `http://127.0.0.1:3000`. Leave Leviath on its default `127.0.0.1` bind for
 this. `--host 0.0.0.0` is not wanted and only widens the exposure.
 
+### Compressed responses
+
+A client that says it takes `gzip` or `br` in `Accept-Encoding` gets any body over a kilobyte
+compressed, with `Vary: Accept-Encoding` on the response. A run listing is JSON with a great deal of
+repetition, so over a tunnel that is roughly a tenth of the bytes. Byte ranges, images and event
+streams are left alone, as is anything already carrying a `Content-Encoding`.
+
 ## Auth flow
 
 ```mermaid
