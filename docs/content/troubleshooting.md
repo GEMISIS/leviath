@@ -359,6 +359,23 @@ lev serve --token 6618… --cors https://leviath.dev --allow-admin
 > A page served over **https** can't call an **http** endpoint (mixed content). `http://127.0.0.1`
 > is exempt, so localhost works; for a remote box use TLS, an SSH tunnel, or the Docker image.
 
+## `mkcert -install` stops with `keytool -list`
+
+```
+ERROR: failed to execute "keytool -list": exit status 1
+keytool error: java.lang.Exception: Keystore file does not exist: /Users/you/.keystore
+```
+
+The CA is already in your OS and browser trust stores by the time this prints. The Java trust
+store is the step that failed, and The Lair does not use it. Carry on with `mkcert <ip>` and
+`lev serve --tls-cert ...` as on
+[the API page](/docs/api#mkcert-if-the-browser-and-leviath-are-on-machines-you-control).
+
+The cause is a bug in mkcert 1.4.4: when `JAVA_HOME` points at a directory with a `keytool` but no
+`lib/security/cacerts`, which is what `brew --prefix openjdk` gives you, mkcert runs keytool with an
+empty keystore path. Run `TRUST_STORES=system,nss mkcert -install` to skip the Java store, or set
+`JAVA_HOME` to `$(/usr/libexec/java_home)`.
+
 ## I get `401 Unauthorized`
 
 The token is missing or wrong. REST clients send `Authorization: Bearer <token>`; WebSocket clients
