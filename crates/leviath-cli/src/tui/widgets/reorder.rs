@@ -291,6 +291,15 @@ impl Reorder {
         // Positions count included rows only: a row left out has no place in
         // the order and is shown without one.
         let held = self.drag.map(|d| d.to);
+        // The value column is the widest value plus a gap, so a long provider
+        // name never runs into the note beside it.
+        let value_w = self
+            .items
+            .iter()
+            .map(|item| item.value.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
         let mut place = 0;
         let rows: Vec<Line<'static>> = self
             .ordered()
@@ -319,7 +328,7 @@ impl Reorder {
                 Line::from(vec![
                     Span::styled(GRIP, Style::default().fg(if on { C_ACCENT } else { C_DIM })),
                     Span::styled(number, Style::default().fg(C_DIM)),
-                    Span::styled(format!("{:<16}", item.value), value_style),
+                    Span::styled(format!("{:<value_w$}", item.value), value_style),
                     Span::styled(detail, Style::default().fg(C_DIM)),
                 ])
             })
@@ -394,6 +403,23 @@ mod tests {
             empty.handle_key(&key(KeyCode::Enter)),
             ReorderOutcome::Confirmed(vec![])
         );
+    }
+
+    /// A value wider than a fixed column ran into its note; the column is
+    /// as wide as the widest value plus a gap.
+    #[test]
+    fn a_long_value_keeps_its_gap_before_the_note() {
+        let r = Reorder::new(
+            "Provider priority",
+            vec![],
+            items(&["openai-compatible", "b"]),
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| r.draw(f, f.area())).unwrap();
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("openai-compatible  configured"), "{text}");
+        assert!(text.contains("b                  configured"), "{text}");
     }
 
     fn reorder() -> Reorder {
