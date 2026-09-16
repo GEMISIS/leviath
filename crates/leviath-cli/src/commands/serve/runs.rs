@@ -9,18 +9,20 @@
 //! What this adds over that: keyset pagination, sorting, server-side search with
 //! highlights, batch fetch by id, and field projection.
 //!
-//! **What it does not fix.** Every listing here still walks the runs directory
-//! and parses every `meta.json`, because that is the only index there is.
-//! Pagination bounds what crosses the wire and what the browser holds; it does
-//! not bound the server's work. The guard that does bound the damage is
-//! [`MAX_SEARCH_SCAN`], on the filesystem-reading half of search.
+//! Every listing here starts from the shared run index (`run_index`), which
+//! parses a `meta.json` only when its stat changes, so a page of fifty costs a
+//! stat per live run rather than a parse of every run on the machine.
+//! Pagination bounds what crosses the wire and what the browser holds. The
+//! guard that bounds the filesystem-reading half of search is
+//! [`MAX_SEARCH_SCAN`].
 //!
 //! Pruning is [`delete_run`] and [`delete_runs`], which is the other half of
 //! that story: the listing can now be made smaller, not only paged over.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use axum::extract::{Path as AxumPath, Query};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
@@ -464,6 +466,7 @@ fn serialized_keys(probe: &RunMeta) -> HashSet<String> {
 
 /// `GET /api/runs`
 pub(super) async fn list_runs(
+    State(state): State<AppState>,
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<Page<RunItem>>, ApiError> {
     let resolved = resolve(&query)?;
@@ -486,7 +489,7 @@ pub(super) async fn list_runs(
         return Ok(Json(page));
     }
 
-    let mut runs = runstate::list_runs();
+    let mut runs = state.caches.run_index.snapshot().await.into_runs();
     // Before the sort and before `total`, like every other filter here, so the
     // count describes what was asked for rather than what is on the machine.
     runs.retain(|meta| resolved.parent.keeps(meta));
@@ -538,7 +541,7 @@ pub(super) async fn list_runs(
 /// The tie-break is not decoration: two runs can start in the same second, and
 /// a keyset walk over a non-total order drops whichever colliding run it
 /// resumed past. Run ids are unique, so this makes the order total.
-fn sort_runs(runs: &mut [RunMeta], resolved: &Resolved) {
+fn sort_runs(runs: &mut [Arc<RunMeta>], resolved: &Resolved) {
     runs.sort_by(|a, b| {
         let ka = (resolved.sort.value(a), a.run_id.as_str());
         let kb = (resolved.sort.value(b), b.run_id.as_str());
@@ -555,8 +558,8 @@ fn sort_runs(runs: &mut [RunMeta], resolved: &Resolved) {
 /// Takes `limit + 1` and keeps `limit`, so a cursor is only ever emitted when a
 /// further item is known to exist. Emitting one speculatively would make a
 /// client's "loop until null" run one empty request longer, every time.
-fn paginate(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, Option<String>) {
-    let mut after_cursor: Vec<RunMeta> = match resolved.cursor {
+fn paginate(runs: Vec<Arc<RunMeta>>, resolved: &Resolved) -> (Vec<Arc<RunMeta>>, Option<String>) {
+    let mut after_cursor: Vec<Arc<RunMeta>> = match resolved.cursor {
         None => runs,
         Some(ref cursor) => runs
             .into_iter()
@@ -801,6 +804,7 @@ pub(super) async fn delete_run(
 /// predicate is much more likely to be a client that failed to build its query
 /// than an operator asking to erase the machine's entire history.
 pub(super) async fn delete_runs(
+    State(state): State<AppState>,
     Query(query): Query<DeleteRunsQuery>,
 ) -> Result<Json<DeleteRunsResp>, ApiError> {
     let targets: Vec<String> = match (&query.ids, query.before) {
@@ -819,10 +823,15 @@ pub(super) async fn delete_runs(
         }
         // Scoped to terminal runs at selection time as well as in `deletable`,
         // so a sweep does not report every live run on the machine as skipped.
-        (None, Some(before)) => runstate::list_runs()
+        (None, Some(before)) => state
+            .caches
+            .run_index
+            .snapshot()
+            .await
+            .into_runs()
             .into_iter()
             .filter(|m| runstate::is_terminal_status(&m.status) && m.updated_at < before)
-            .map(|m| m.run_id)
+            .map(|m| m.run_id.clone())
             .collect(),
         (None, None) => {
             return Err(err(

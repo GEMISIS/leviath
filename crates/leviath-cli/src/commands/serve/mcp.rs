@@ -424,6 +424,7 @@ mod tests {
     fn state_at(opener: impl Fn(&str) -> bool + Send + Sync + 'static) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -879,6 +880,7 @@ for line in sys.stdin:
         std::fs::create_dir(&store).unwrap();
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -954,6 +956,7 @@ for line in sys.stdin:
         std::fs::write(&file, b"x").unwrap();
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

@@ -218,6 +218,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -666,6 +667,7 @@ mod tests {
         daemon.client.list().await.expect("served, and introduced");
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -829,6 +831,7 @@ mod tests {
         // `handle_ws` without needing to fabricate the error directly.
         let (tx, _) = broadcast::channel::<ServerEvent>(2);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -959,6 +962,7 @@ mod tests {
     async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

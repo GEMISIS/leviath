@@ -54,6 +54,7 @@ fn quiet_admin() -> ProviderAdmin {
 fn state_with(admin: ProviderAdmin, config: Config) -> AppState {
     let (tx, _) = broadcast::channel(16);
     AppState {
+        caches: Default::default(),
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: crate::commands::serve::testutil::fixed_config(config),

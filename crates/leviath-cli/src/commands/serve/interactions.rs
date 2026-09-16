@@ -182,6 +182,7 @@ mod tests {
     fn app_with(control: ControlClient) -> Router {
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

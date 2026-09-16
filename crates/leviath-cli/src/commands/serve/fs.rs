@@ -282,6 +282,7 @@ mod tests {
     fn app_with_root(workdir_root: Option<PathBuf>) -> Router {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

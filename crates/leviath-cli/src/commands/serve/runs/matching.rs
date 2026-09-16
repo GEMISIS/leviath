@@ -5,7 +5,10 @@ use super::*;
 
 /// Phase one of search: keep the runs that could match, bounding how many of
 /// them are allowed to cost a file read.
-pub(super) fn apply_search(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, bool) {
+pub(super) fn apply_search(
+    runs: Vec<Arc<RunMeta>>,
+    resolved: &Resolved,
+) -> (Vec<Arc<RunMeta>>, bool) {
     let Some(ref q) = resolved.q else {
         return (runs, false);
     };
