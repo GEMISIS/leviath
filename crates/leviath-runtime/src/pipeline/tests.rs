@@ -18676,6 +18676,158 @@ fn cut_off_arguments_refusal_quotes_the_tail() {
     );
 }
 
+/// A refused cut-off call stays in the conversation beside its refusal, and
+/// the next request must still be one a provider accepts. Anthropic answers
+/// `tool_use.input: Input should be an object` to the partial text
+/// as a bare string, and every retry and resume sent that same request again,
+/// so the run could never recover.
+#[tokio::test]
+async fn a_refused_cut_off_call_assembles_as_an_object_the_provider_accepts() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let raw = "{\"path\": \"report.md\", \"content\": \"# Local LLM hardw";
+    let result = crate::components::InferenceResult {
+        parts: Vec::new(),
+        response: String::new(),
+        tool_calls: vec![fcall("c1", "write_file", serde_json::json!(raw))],
+        tokens_used: 0,
+        cut_off_at: Some(24_000),
+        reasoning: None,
+    };
+    // A sliding window, the kind assembled as typed messages: a `Clearable`
+    // conversation renders as system text and would never show a `tool_use`.
+    let mut conversation = ContextWindow::new(10_000);
+    conversation.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 20,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        5000,
+    ));
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&["write_file"]),
+            result,
+            conversation,
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let assembled = world.get::<ContextWindow>(e).unwrap().assemble();
+    let blocks: Vec<&leviath_providers::ContentBlock> = assembled
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+            leviath_providers::MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .collect();
+    let input = blocks
+        .iter()
+        .find_map(|b| match b {
+            leviath_providers::ContentBlock::ToolUse { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .expect("the call is still in the request");
+    assert_eq!(input, serde_json::json!({ "_raw": raw }));
+    let refusal = blocks
+        .iter()
+        .find_map(|b| match b {
+            leviath_providers::ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "c1" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the refusal is paired with the call");
+    assert!(refusal.contains("was not run"), "{refusal}");
+}
+
+/// A cut-off reply with tool calls, as `process_response` sees it.
+fn cut_off_batch(
+    arguments: serde_json::Value,
+    cut_off_at: Option<usize>,
+) -> crate::components::InferenceResult {
+    crate::components::InferenceResult {
+        parts: Vec::new(),
+        response: String::new(),
+        tool_calls: vec![fcall("c1", "write_file", arguments)],
+        tokens_used: 0,
+        cut_off_at,
+        reasoning: None,
+    }
+}
+
+/// A model that keeps sending a call too large for the model's own maximum
+/// is sent back with the refusal three times, as a cut-off text reply is, and
+/// then the stage ends instead of paying for the same call again.
+#[test]
+fn process_response_ends_the_stage_after_the_cut_off_budget() {
+    let mut world = World::new();
+    let first = world
+        .spawn((
+            cut_off_batch(serde_json::json!("{\"path\": \"a"), Some(8_192)),
+            StageProgress::default(),
+            ProcessResponse,
+        ))
+        .id();
+    run_process(&mut world);
+    assert!(world.get::<ReadyForTools>(first).is_some());
+    assert_eq!(world.get::<StageProgress>(first).unwrap().cut_off_nudges, 1);
+
+    let spent = world
+        .spawn((
+            cut_off_batch(serde_json::json!("{\"path\": \"a"), Some(8_192)),
+            StageProgress {
+                cut_off_nudges: MAX_CUT_OFF_NUDGES,
+                ..Default::default()
+            },
+            ProcessResponse,
+        ))
+        .id();
+    run_process(&mut world);
+    assert!(world.get::<ResolveTransition>(spent).is_some());
+    assert!(world.get::<ReadyForTools>(spent).is_none());
+    assert!(world.get::<ProcessResponse>(spent).is_none());
+}
+
+/// Only a call whose arguments were cut off spends the budget: a cap that
+/// fell after a complete call, or text arguments with no cut-off (a torn
+/// journal record replayed on restore), dispatch as they always did.
+#[test]
+fn process_response_counts_only_calls_the_cap_cut_off() {
+    let mut world = World::new();
+    let complete = world
+        .spawn((
+            cut_off_batch(serde_json::json!({ "path": "a" }), Some(8_192)),
+            StageProgress::default(),
+            ProcessResponse,
+        ))
+        .id();
+    let torn = world
+        .spawn((
+            cut_off_batch(serde_json::json!("{\"path\": \"a"), None),
+            StageProgress::default(),
+            ProcessResponse,
+        ))
+        .id();
+    run_process(&mut world);
+    for e in [complete, torn] {
+        assert!(world.get::<ReadyForTools>(e).is_some());
+        assert_eq!(world.get::<StageProgress>(e).unwrap().cut_off_nudges, 0);
+    }
+}
+
 /// An accepted text-only reply stays in the conversation. Drop it and a gate
 /// that bounces the stage back is talking to a model with no memory of its own
 /// draft.

@@ -1142,6 +1142,7 @@ pub trait Provider: Send + Sync {
 mod helpers;
 
 use helpers::stream_once;
+pub use helpers::tool_input_object;
 pub(crate) use helpers::*;
 
 #[cfg(test)]
@@ -1943,6 +1944,22 @@ mod tests {
         assert_eq!(
             parse_tool_arguments("{\"path\": \"re"),
             serde_json::json!("{\"path\": \"re")
+        );
+    }
+
+    /// An object is sent as it is; the text of a cut-off call, or any other
+    /// shape, is wrapped so the request carries an object.
+    #[test]
+    fn tool_input_is_always_an_object_on_the_wire() {
+        let whole = serde_json::json!({ "path": "a.md" });
+        assert_eq!(tool_input_object(&whole), whole);
+        assert_eq!(
+            tool_input_object(&serde_json::json!("{\"path\": \"re")),
+            serde_json::json!({ "_raw": "{\"path\": \"re" })
+        );
+        assert_eq!(
+            tool_input_object(&serde_json::Value::Null),
+            serde_json::json!({ "_raw": null })
         );
     }
 

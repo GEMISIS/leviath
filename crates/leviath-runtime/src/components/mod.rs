@@ -1208,6 +1208,101 @@ mod tests {
     }
 
     #[test]
+    fn assemble_wraps_tool_arguments_that_are_not_an_object() {
+        // A call the output cap cut off is stored as the partial text that
+        // arrived. Every provider that takes tool input as an object refuses
+        // a string there, so it goes out as `{"_raw": ...}`; an object is
+        // sent as it was stored.
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            50_000,
+        ));
+        let call = |id: &str, arguments: serde_json::Value| leviath_core::SerializedToolCall {
+            id: id.to_string(),
+            name: "write_file".to_string(),
+            arguments,
+            thought_signature: None,
+        };
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Write the report.".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        call("cut", serde_json::json!("{\"path\": \"re")),
+                        call("list", serde_json::json!([1, 2])),
+                        call("whole", serde_json::json!({ "path": "a.md" })),
+                    ],
+                },
+                "Writing.".to_string(),
+                50,
+            )
+            .unwrap();
+        for id in ["cut", "list", "whole"] {
+            window
+                .add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::ToolResult {
+                        tool_call_id: id.to_string(),
+                        tool_name: "write_file".to_string(),
+                        is_error: true,
+                    },
+                    "[error] was not run".to_string(),
+                    10,
+                )
+                .unwrap();
+        }
+
+        let assembled = window.assemble();
+        let blocks: Vec<&leviath_providers::ContentBlock> = assembled
+            .messages
+            .iter()
+            .filter_map(|msg| match &msg.content {
+                leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+                leviath_providers::MessageContent::Text(_) => None,
+            })
+            .flatten()
+            .collect();
+        let inputs: Vec<(String, serde_json::Value)> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                leviath_providers::ContentBlock::ToolUse { id, input, .. } => {
+                    Some((id.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let results = blocks
+            .iter()
+            .filter(|block| matches!(block, leviath_providers::ContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            inputs,
+            vec![
+                (
+                    "cut".to_string(),
+                    serde_json::json!({ "_raw": "{\"path\": \"re" })
+                ),
+                ("list".to_string(), serde_json::json!({ "_raw": [1, 2] })),
+                ("whole".to_string(), serde_json::json!({ "path": "a.md" })),
+            ]
+        );
+        assert_eq!(results, 3, "every result stays paired");
+    }
+
+    #[test]
     fn test_assemble_strips_orphaned_tool_use() {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(

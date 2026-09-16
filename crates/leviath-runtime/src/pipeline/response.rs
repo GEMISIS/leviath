@@ -674,9 +674,10 @@ pub(crate) struct StageProgress {
     /// Consecutive text-only responses that were nudged toward tool use.
     pub text_only_nudges: usize,
     /// Replies the output cap cut off that were sent back with an explanation
-    /// instead of being taken as the answer. Bounded by
-    /// `MAX_CUT_OFF_NUDGES` so a model that cannot fit its reply in the
-    /// model's own maximum still ends the stage.
+    /// instead of being taken as the answer: a text reply with a nudge, a tool
+    /// call with its refusal. One count for both, bounded by
+    /// `MAX_CUT_OFF_NUDGES`, so a model that cannot fit its reply in the
+    /// model's own maximum still ends the stage whichever shape the reply takes.
     pub cut_off_nudges: usize,
     /// Set once a reply in this stage was cut off: the next requests go out
     /// with the output cap raised to the model's maximum, since the stage's
@@ -801,6 +802,26 @@ pub(crate) fn process_response(
         }
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
+        // A call the cap cut off mid-argument arrives as text. Its refusal is
+        // this path's nudge, so it spends the same budget a cut-off text
+        // reply does. Without the bound a model whose call does not fit even
+        // the model's maximum sends it again, paid in full each time, until
+        // an opt-in `max_iterations` stops it. Both conditions are needed:
+        // text arguments alone can also be a torn journal record.
+        let cut_off_call = result.cut_off_at.is_some()
+            && result.tool_calls.iter().any(|c| c.arguments.is_string());
+        if cut_off_call {
+            if progress.cut_off_nudges >= MAX_CUT_OFF_NUDGES {
+                tracing::warn!(
+                    cut_offs = progress.cut_off_nudges + 1,
+                    tools = ?result.tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+                    "a tool call was cut off by the output limit again; ending the stage"
+                );
+                e.insert(ResolveTransition);
+                continue;
+            }
+            progress.cut_off_nudges += 1;
+        }
         if result.tool_calls.is_empty() {
             e.insert(ReadyForTransition);
         } else {
@@ -1025,7 +1046,8 @@ pub(crate) fn handle_empty_response(
 /// it has. The first retry goes out with the cap raised to the model's
 /// maximum, so a second cut-off means the reply does not fit the model at all
 /// and the nudge asks for it in pieces; a third means the model is not
-/// listening, and the stage ends rather than paying for a fourth.
+/// listening, and the stage ends rather than paying for a fourth. A cut-off
+/// text reply and a cut-off tool call draw on the same count.
 pub(crate) const MAX_CUT_OFF_NUDGES: usize = 3;
 
 /// The `[System]` line sent back with a cut-off reply.

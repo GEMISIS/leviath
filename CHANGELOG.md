@@ -123,6 +123,19 @@ same list.
 
 ### Fixed
 
+- A tool call cut off by the output cap no longer kills the run on the
+  next request. The call was refused, but its half-written arguments stayed
+  in the conversation as plain text, and every later request sent them that
+  way. Anthropic answers `400 tool_use.input: Input should be an object`, and
+  Ollama refuses it too. A 400 is never retried or failed over, so the run
+  ended in an error, and a paused run resumed or recovered after a daemon
+  restart hit the same wall. Requests now carry those arguments as
+  `{"_raw": "..."}` beside the refusal the model already got, which is what
+  Bedrock requests already did. A stage whose replies are cut off three times
+  now ends whether they were text or tool calls. Before, a model that kept
+  sending a call too big for its own maximum was paid in full for every
+  attempt until `max_iterations` stopped it.
+
 - `lev doctor` no longer fails its `resolve` check with "resolved to
   'anthropic', which is not configured" on an install whose only provider
   is something else and whose config sets no `override_model` or
