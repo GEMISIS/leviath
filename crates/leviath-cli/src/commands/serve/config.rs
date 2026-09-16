@@ -1096,6 +1096,23 @@ mod tests {
         );
     }
 
+    /// No usable HTTPS client means nothing to list, not a failure.
+    #[tokio::test]
+    async fn list_model_ids_is_empty_when_no_client_can_be_built() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("test-key".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let ids = super::list_model_ids(&config, &|_t| {
+            Err(leviath_providers::provider::malformed_url_error())
+        })
+        .await;
+        assert!(ids.is_empty());
+    }
+
     /// The dashboard's flat `provider/id` list is the same enumeration.
     #[tokio::test]
     async fn list_model_ids_flattens_to_provider_slash_id() {

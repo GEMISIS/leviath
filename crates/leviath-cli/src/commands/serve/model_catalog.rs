@@ -318,9 +318,14 @@ impl Inner {
                 return None;
             }
         };
-        if let Some(path) = leviath_core::paths::capability_cache_path() {
-            registry.load_capability_cache(&path);
-        }
+        // `is_some_and` rather than `if let`: a home that does not resolve is
+        // `false` flowing through, not an else arm no test can reach.
+        let seeded = leviath_core::paths::capability_cache_path()
+            .is_some_and(|path| registry.load_capability_cache(&path));
+        tracing::debug!(
+            seeded,
+            "built the provider registry for the model catalogue"
+        );
         let registry = Arc::new(registry);
         leviath_core::sync::lock(&self.state).registry =
             Some((Arc::clone(config), Arc::clone(&registry)));
@@ -393,9 +398,13 @@ pub(super) async fn collect_models(
             }
             Err(_) => {
                 complete = false;
+                // Bound first rather than computed inside the field: a method
+                // call in a structured field runs only when the callsite is
+                // enabled, which a coverage run cannot count on.
+                let timeout_secs = timeout.as_secs();
                 tracing::warn!(
                     provider = %name,
-                    timeout_secs = timeout.as_secs(),
+                    timeout_secs,
                     "timed out listing this provider's models"
                 );
             }
