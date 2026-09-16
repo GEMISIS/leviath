@@ -913,6 +913,16 @@ provider, clearing its key when you finish. A provider supplied by an environmen
 be removed here; unset the variable. The wizard will not continue past this screen, or finish,
 with no provider configured, because a config without one cannot run an agent.
 
+Each listed provider shows what it said the last time anything asked it, and when: "12 models ·
+checked 2 hours ago", or the error it gave. That answer is shared. The daemon records one each time
+it starts and reads every provider's model list, `lev models` records one for each provider it
+lists live, and the wizard records its own checks, all in `~/.leviath/model_capabilities.json`
+beside the model lists themselves. A check counts only for the key it was made with: change a key
+and that provider reads "not checked yet" until it is checked again. The file holds a fingerprint
+of each key, never the key, made with a random key of this install's own
+(`~/.leviath/provider-check.key`). `lev rage` includes the cache in a bug report and never that
+key, so a shared report gives nothing to guess a key back from.
+
 The Defaults screen leads with **Provider priority** - the order a bare model name prefers, whose
 head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
 move the one under the cursor with `Shift+↑`/`Shift+↓`, or with `K`/`J` on a terminal that keeps

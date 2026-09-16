@@ -272,18 +272,41 @@ impl ProviderRegistry {
     /// provider that keeps no learned store (a script provider) contributes
     /// nothing; a cache that could not be written is a warning, never fatal.
     ///
+    /// A primed listing is also a successful check, so each provider that
+    /// primed gets a [`ProviderCheck`](leviath_providers::ProviderCheck)
+    /// stamped `now`, carrying its entry in `fingerprints` (provider name to
+    /// credential fingerprint, made by the caller), which is what lets
+    /// `lev setup` open on a provider the daemon has already proved works. The file is added to, not replaced:
+    /// checks other surfaces recorded, and providers this registry does not
+    /// hold, stay as they were.
+    ///
     /// `path` is an `Option` so a caller whose home did not resolve (the cache
     /// path is unknown) passes `None` and this no-ops, keeping the caller
     /// branch-free rather than each guarding an untestable `None`.
-    pub fn save_capability_cache(&self, path: Option<&std::path::Path>, now: i64) {
+    pub fn save_capability_cache(
+        &self,
+        path: Option<&std::path::Path>,
+        now: i64,
+        fingerprints: &HashMap<String, String>,
+    ) {
         let Some(path) = path else {
             return;
         };
-        let mut cache = leviath_providers::CapabilityCache::new(now);
+        let mut cache = leviath_providers::CapabilityCache::load_or_new(path, now);
         for (name, provider) in &self.providers {
             if let Some(learned) = provider.learned_models() {
                 let snapshot = learned.snapshot();
                 if !snapshot.is_empty() {
+                    cache.record_check(
+                        name,
+                        leviath_providers::ProviderCheck {
+                            checked_at: now,
+                            credential: fingerprints.get(name).cloned(),
+                            outcome: leviath_providers::CheckOutcome::Reachable {
+                                models: snapshot.len(),
+                            },
+                        },
+                    );
                     cache.set(name, snapshot);
                 }
             }
@@ -1274,7 +1297,42 @@ mod tests {
         );
         // and one with no store at all (a script provider; skipped).
         primed.register("storeless".to_string(), Arc::new(StubProvider::storeless()));
-        primed.save_capability_cache(Some(&path), 1_000);
+        // A check another surface recorded earlier survives the daemon's save.
+        let mut earlier = leviath_providers::CapabilityCache::new(500);
+        earlier.record_check(
+            "elsewhere",
+            leviath_providers::ProviderCheck {
+                checked_at: 500,
+                credential: None,
+                outcome: leviath_providers::CheckOutcome::Failed {
+                    message: "rejected".to_string(),
+                },
+            },
+        );
+        earlier.save(&path).expect("the earlier cache writes");
+        let fingerprints = HashMap::from([("learned".to_string(), "abcd1234abcd1234".to_string())]);
+        primed.save_capability_cache(Some(&path), 1_000, &fingerprints);
+
+        // The prime is recorded as a check, with the credential it used.
+        let written = leviath_providers::CapabilityCache::load(&path).expect("written");
+        let check = written
+            .check("learned")
+            .expect("a primed provider is checked");
+        assert_eq!(check.checked_at, 1_000);
+        assert_eq!(check.credential.as_deref(), Some("abcd1234abcd1234"));
+        assert_eq!(
+            check.outcome,
+            leviath_providers::CheckOutcome::Reachable { models: 1 }
+        );
+        assert!(
+            written.check("empty").is_none(),
+            "a provider that primed nothing is not a passed check"
+        );
+        assert_eq!(
+            written.check("elsewhere").expect("kept").checked_at,
+            500,
+            "another surface's check survives"
+        );
 
         // A fresh registry reads it back.
         let mut fresh = ProviderRegistry::new();
@@ -1338,8 +1396,8 @@ mod tests {
             Arc::new(StubProvider::with_learned(&[("m", 1)])),
         );
         // The failure is logged, not propagated: a cache is a convenience.
-        reg.save_capability_cache(Some(&unwritable), 1);
+        reg.save_capability_cache(Some(&unwritable), 1, &HashMap::new());
         // No path (home did not resolve) is a silent no-op, not a panic.
-        reg.save_capability_cache(None, 1);
+        reg.save_capability_cache(None, 1, &HashMap::new());
     }
 }

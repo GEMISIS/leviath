@@ -481,6 +481,7 @@ impl Wizard {
         row.selected = false;
         row.value.clear();
         row.outcome = Outcome::Skipped;
+        row.checked_at = None;
         self.dirty = true;
         // One row fewer above the cursor: it stays where it was, or lands on
         // the add row when that is now the last row it could be on.

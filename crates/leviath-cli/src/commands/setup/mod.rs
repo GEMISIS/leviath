@@ -163,6 +163,23 @@ pub struct SetupEnv {
     pub ui_state_path: Option<PathBuf>,
 }
 
+impl SetupEnv {
+    /// The shared capability cache, where every surface records what a
+    /// provider said when it was last asked. The wizard opens on those
+    /// records and adds its own.
+    ///
+    /// Beside the UI state file, because both live in the data directory:
+    /// the binary's UI state path is `~/.leviath/ui-state.json` and the
+    /// cache is `~/.leviath/model_capabilities.json`. Derived rather than a
+    /// field of its own so a test that keeps the UI state out of the real
+    /// home (`None`, or a tempdir) keeps the cache out of it too.
+    pub fn capability_cache_path(&self) -> Option<PathBuf> {
+        self.ui_state_path
+            .as_deref()
+            .map(|p| p.with_file_name("model_capabilities.json"))
+    }
+}
+
 // The real `SetupEnv` - the user's actual home, a real `std::env` lookup, and
 // a real browser - is built in the binary, where those leaves belong. Nothing
 // in the library reaches the real environment, so no test can either.
@@ -379,7 +396,7 @@ pub fn build_wizard(env: &SetupEnv) -> Wizard {
         .as_deref()
         .map(|p| crate::ui_state::load(p).setup)
         .unwrap_or_default();
-    Wizard::new(
+    let mut wizard = Wizard::new(
         base,
         &env.env_lookup,
         candidates,
@@ -388,6 +405,16 @@ pub fn build_wizard(env: &SetupEnv) -> Wizard {
         env.opener.clone(),
         remembered,
     )
+    .with_check_store(env.capability_cache_path());
+    // What the daemon, `lev models`, or an earlier wizard already found out.
+    if let Some(cache) = env
+        .capability_cache_path()
+        .as_deref()
+        .and_then(leviath_providers::CapabilityCache::load)
+    {
+        wizard.seed_checks(&cache);
+    }
+    wizard
 }
 
 /// Answer verification requests until the wizard drops its sender.
@@ -1118,6 +1145,72 @@ mod tests {
         );
         assert_eq!(wizard.mcp.len(), 1);
         assert_eq!(wizard.mcp[0].candidate.config.name, "fs");
+    }
+
+    /// The wizard opens on what another surface already learned: a check the
+    /// daemon or `lev models` recorded for the key this config holds shows,
+    /// with its models and when, and the wizard writes its own checks back to
+    /// the same file.
+    #[test]
+    fn the_wizard_opens_on_checks_recorded_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        run_non_interactive(
+            &SetupArgs {
+                anthropic_key: Some("sk-ant-stored".to_string()),
+                ..args()
+            },
+            &env,
+        )
+        .unwrap();
+        let cache_path = env.capability_cache_path().expect("a store");
+        let mut cache = leviath_providers::CapabilityCache::new(1_000);
+        cache.set_model_ids("anthropic", &["claude-opus-5".to_string()]);
+        cache.record_check(
+            "anthropic",
+            leviath_providers::ProviderCheck {
+                checked_at: 1_000,
+                credential: Some(
+                    crate::provider_checks::CheckKey::load_or_create(&cache_path)
+                        .expect("a key beside the cache")
+                        .fingerprint("sk-ant-stored"),
+                ),
+                outcome: leviath_providers::CheckOutcome::Reachable { models: 1 },
+            },
+        );
+        cache.save(&cache_path).unwrap();
+
+        let wizard = build_wizard(&env);
+        let row = wizard
+            .providers
+            .iter()
+            .find(|r| r.provider.id == "anthropic")
+            .expect("configured");
+        assert_eq!(
+            row.outcome,
+            verify::Outcome::Reachable {
+                models: vec!["claude-opus-5".to_string()]
+            }
+        );
+        assert_eq!(row.checked_at, Some(1_000));
+        assert_eq!(wizard.check_store.as_deref(), Some(cache_path.as_path()));
+    }
+
+    /// The binary's UI state path puts the cache exactly where the daemon
+    /// and `lev models` write it, and no UI state path means no cache.
+    #[test]
+    fn the_cache_sits_where_every_other_surface_writes_it() {
+        temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-cache-path"), || {
+            let dir = tempfile::tempdir().unwrap();
+            let mut env = env_in(dir.path());
+            env.ui_state_path = crate::ui_state::default_path();
+            assert_eq!(
+                env.capability_cache_path(),
+                leviath_core::paths::capability_cache_path()
+            );
+            env.ui_state_path = None;
+            assert_eq!(env.capability_cache_path(), None);
+        });
     }
 
     #[test]

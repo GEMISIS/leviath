@@ -262,6 +262,8 @@ async fn list_with_registry_within(
     // serves. A provider that cannot be asked keeps its catalogue
     // rows, and the trailing line says which is which.
     let mut live_providers: Vec<String> = Vec::new();
+    // What each provider said, for the shared record of provider checks.
+    let mut answers: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
     if !args.offline {
         registry.prime_capabilities(prime_within, &[]).await;
         // `resolvable_names`, not `provider_names`: a script provider is
@@ -288,6 +290,10 @@ async fn list_with_registry_within(
             };
             match tokio::time::timeout(prime_within, provider.list_models()).await {
                 Ok(Ok(live)) => {
+                    answers.push((
+                        provider_name.clone(),
+                        Ok(live.iter().map(|m| m.id.clone()).collect()),
+                    ));
                     // The listing is the whole answer for this provider: a
                     // catalogue row it does not carry is a model it does not
                     // serve, and keeping it would list a model nothing can run.
@@ -303,6 +309,10 @@ async fn list_with_registry_within(
                         "Warning: could not fetch models from '{}': {}; showing this build's table",
                         provider_name, e
                     );
+                    answers.push((
+                        provider_name.clone(),
+                        Err(crate::commands::setup::verify::describe(&e.to_string())),
+                    ));
                 }
                 Err(_) => {
                     eprintln!(
@@ -314,6 +324,15 @@ async fn list_with_registry_within(
             }
         }
     }
+
+    // A timeout is not recorded: it says nothing about the credential, and
+    // it must not overwrite a check that did get an answer.
+    record_checks(
+        leviath_core::paths::capability_cache_path().as_deref(),
+        &config,
+        &answers,
+        chrono::Utc::now().timestamp(),
+    );
 
     // A `--provider` naming something neither registered natively nor present
     // in the catalogue is a script provider (or a typo). Ask the script
@@ -426,6 +445,45 @@ async fn list_with_registry_within(
 
 /// The listing as a table, with a trailing line saying which rows are the
 /// provider's own answer and which are this build's.
+/// Record what each provider's listing said in the shared capability cache,
+/// so `lev setup` and every other surface open on it. Nothing is written when
+/// nothing answered, or when the home did not resolve; a file that cannot be
+/// written is a warning, since the listing itself already printed.
+fn record_checks(
+    path: Option<&std::path::Path>,
+    config: &Config,
+    answers: &[(String, Result<Vec<String>, String>)],
+    now: i64,
+) {
+    let Some(path) = path.filter(|_| !answers.is_empty()) else {
+        return;
+    };
+    let fingerprints = crate::provider_checks::fingerprints(Some(path), config);
+    let mut cache = leviath_providers::CapabilityCache::load_or_new(path, now);
+    for (name, answer) in answers {
+        let outcome = match answer {
+            Ok(ids) => {
+                cache.set_model_ids(name, ids);
+                leviath_providers::CheckOutcome::Reachable { models: ids.len() }
+            }
+            Err(message) => leviath_providers::CheckOutcome::Failed {
+                message: message.clone(),
+            },
+        };
+        cache.record_check(
+            name,
+            leviath_providers::ProviderCheck {
+                checked_at: now,
+                credential: fingerprints.get(name).cloned(),
+                outcome,
+            },
+        );
+    }
+    if let Err(e) = cache.save(path) {
+        eprintln!("Warning: could not record the provider checks: {e}");
+    }
+}
+
 fn print_listing(
     entries: &[ModelInfo],
     overridden: &std::collections::HashSet<String>,
@@ -1778,6 +1836,74 @@ mod tests {
             );
             Ok(registry)
         }
+    }
+
+    fn live_args() -> ListArgs {
+        ListArgs {
+            provider: None,
+            remote: false,
+            offline: false,
+            all: false,
+            json: false,
+            accepts: None,
+        }
+    }
+
+    /// A live listing is a check: what each provider said lands in the shared
+    /// capability cache under the home, so `lev setup` opens on it. A listing
+    /// that failed is recorded as a failure with the wizard's wording.
+    #[tokio::test]
+    async fn a_live_listing_records_each_providers_answer() {
+        crate::config::with_isolated_config_path_async(
+            "models-records-checks",
+            |home| async move {
+                let listed = ModelInfo::new(
+                    "mock-recorded".to_string(),
+                    "mock".to_string(),
+                    ModelCapabilities::default(),
+                );
+                list_with_registry(live_args(), &mock_registry("mock", vec![listed], false))
+                    .await
+                    .expect("the listing prints");
+                let path = home.join(".leviath").join("model_capabilities.json");
+                let cache = leviath_providers::CapabilityCache::load(&path).expect("recorded");
+                let check = cache.check("mock").expect("the provider answered");
+                assert_eq!(
+                    check.outcome,
+                    leviath_providers::CheckOutcome::Reachable { models: 1 }
+                );
+                assert_eq!(cache.model_ids("mock"), ["mock-recorded"]);
+
+                list_with_registry(live_args(), &mock_registry("mock", vec![], true))
+                    .await
+                    .expect("a failed listing still prints the table");
+                let cache = leviath_providers::CapabilityCache::load(&path).expect("recorded");
+                assert_eq!(
+                    cache.check("mock").expect("recorded").outcome,
+                    leviath_providers::CheckOutcome::Failed {
+                        message: "mock provider failure".to_string()
+                    }
+                );
+            },
+        )
+        .await;
+    }
+
+    /// Nothing answered, or nowhere to write: no file. A file that cannot be
+    /// written is a warning, not an error.
+    #[test]
+    fn recording_writes_nothing_without_answers_or_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caps.json");
+        let config = Config::default();
+        record_checks(Some(&path), &config, &[], 1);
+        assert!(!path.exists());
+        let answers = [("mock".to_string(), Ok(vec![]))];
+        record_checks(None, &config, &answers, 1);
+        assert!(!path.exists());
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        record_checks(Some(&blocker.join("caps.json")), &config, &answers, 1);
     }
 
     #[tokio::test]

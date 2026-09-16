@@ -214,6 +214,9 @@ api_token = "{EXTRA_VALUE}"
         "name = \"r\"\n",
     );
     write(&data.join("ui-state.json"), "not json at all");
+    // The key provider checks are fingerprinted with. A report carries the
+    // capability cache, so it must never carry this beside it.
+    write(&data.join("provider-check.key"), "00".repeat(32));
     write(&data.join("control.token"), CONTROL_TOKEN);
     write(
         &data.join("mcp-auth.json"),
@@ -448,7 +451,12 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 );
             }
         }
-        for forbidden in ["control.token", "mcp-auth.json", "provider-auth.json"] {
+        for forbidden in [
+            "control.token",
+            "mcp-auth.json",
+            "provider-auth.json",
+            "provider-check.key",
+        ] {
             assert!(
                 !member_names.iter().any(|n| n.ends_with(forbidden)),
                 "{forbidden} must never be copied: {member_names:?}"

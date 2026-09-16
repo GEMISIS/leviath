@@ -27,6 +27,7 @@ mod priority;
 mod retention;
 pub(crate) use endpoints::*;
 pub(crate) use modal::ProviderModal;
+pub(in crate::commands::setup) mod checks;
 mod lanes;
 mod limits;
 use limits::*;
@@ -129,6 +130,12 @@ pub struct Wizard {
     pub(crate) reorder: Option<crate::tui::widgets::reorder::Reorder>,
     /// Which Defaults field the open reorder modal is arranging.
     pub(crate) reorder_field: usize,
+    /// Where provider checks are recorded for other surfaces to read (the
+    /// capability cache). `None` reads and writes nothing, which is what
+    /// every test gets. See [`checks`].
+    pub(crate) check_store: Option<std::path::PathBuf>,
+    /// The key checks are fingerprinted with, beside `check_store`.
+    pub(crate) check_key: Option<crate::provider_checks::CheckKey>,
 }
 
 /// The environment variables the wizard reports as already-supplying a
@@ -206,6 +213,7 @@ impl Wizard {
                     from_env,
                     outcome: Outcome::Skipped,
                     checking: false,
+                    checked_at: None,
                     signed_in,
                     signing_in: false,
                     authorize_url: None,
@@ -302,6 +310,8 @@ impl Wizard {
             picker_purpose: PickerPurpose::Field(0),
             reorder: None,
             reorder_field: 0,
+            check_store: None,
+            check_key: None,
         };
         wizard.rebuild_defaults();
         wizard

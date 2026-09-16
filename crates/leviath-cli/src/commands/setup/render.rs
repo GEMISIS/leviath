@@ -829,12 +829,28 @@ fn status_line(wizard: &Wizard, index: usize) -> Line<'static> {
         super::verify::Outcome::Reachable { .. } => Line::from(vec![
             Span::styled(format!("{GLYPH_COMPLETE} "), Style::default().fg(C_SUCCESS)),
             Span::styled(row.outcome.summary(), Style::default().fg(C_SUCCESS)),
+            Span::styled(checked_when(row.checked_at), Style::default().fg(C_DIM)),
         ]),
         super::verify::Outcome::Failed { .. } => Line::from(vec![
             Span::styled(format!("{GLYPH_ERROR} "), Style::default().fg(C_ERROR)),
             Span::styled(row.outcome.summary(), Style::default().fg(C_ERROR)),
+            Span::styled(checked_when(row.checked_at), Style::default().fg(C_DIM)),
         ]),
     }
+}
+
+/// " · checked 2 hours ago", or nothing for an outcome with no time: an
+/// outcome learned from the capability cache says when, so a person can tell
+/// a check from this morning from one made last month.
+fn checked_when(checked_at: Option<i64>) -> String {
+    checked_at
+        .map(|then| {
+            format!(
+                " · checked {}",
+                super::state::checks::checked_ago(chrono::Utc::now().timestamp(), then)
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn build_fields(wizard: &Wizard) -> Screen {
@@ -1953,6 +1969,19 @@ mod tests {
             message: "rejected - check the key".into(),
         };
         assert!(rendered(&w).contains("rejected"));
+
+        // An outcome that knows when it was learned says so, which is what
+        // tells a check from this session apart from last week's.
+        w.providers[0].checked_at = Some(chrono::Utc::now().timestamp() - 2 * 3_600);
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("rejected - check the key · checked 2 hours ago"),
+            "{screen}"
+        );
+        w.providers[0].outcome = crate::commands::setup::verify::Outcome::Reachable {
+            models: vec!["a".into()],
+        };
+        assert!(rendered(&w).contains("1 model · checked 2 hours ago"));
     }
 
     #[test]

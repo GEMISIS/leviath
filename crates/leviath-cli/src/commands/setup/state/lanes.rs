@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use super::{Credential, Outcome, SigninAction, SigninEvent, SigninRequest, Step, VerifyRequest};
+use super::{
+    Credential, Outcome, SigninAction, SigninEvent, SigninRequest, Step, VerifyReply, VerifyRequest,
+};
 use super::{Wizard, catalog};
 
 impl Wizard {
@@ -29,6 +31,7 @@ impl Wizard {
         };
         if !row.has_credential() {
             row.outcome = Outcome::Skipped;
+            row.checked_at = None;
             return;
         }
         let id = row.provider.id.to_string();
@@ -84,6 +87,31 @@ impl Wizard {
         });
     }
 
+    /// Route a verifier's reply to the provider row it answers for, stamped
+    /// `now`. `true` when one took it.
+    fn settle_provider_reply(&mut self, reply: &VerifyReply, now: i64) -> bool {
+        let Some(row) = self
+            .providers
+            .iter_mut()
+            .find(|r| r.provider.id == reply.provider_id)
+        else {
+            return false;
+        };
+        row.checking = false;
+        row.outcome = reply.outcome.clone();
+        row.checked_at = Some(now);
+        true
+    }
+
+    /// Hand the wizard a reply as the verifier would, so a test can watch
+    /// it land without a verifier.
+    #[cfg(test)]
+    pub(crate) fn push_reply_for_test(&self, reply: VerifyReply) {
+        self.reply_tx
+            .send(reply)
+            .expect("the wizard holds the receiver");
+    }
+
     /// Ask about every selected provider at once.
     pub(crate) fn verify_all(&mut self) {
         for index in self.selected_providers() {
@@ -95,19 +123,14 @@ impl Wizard {
     pub(crate) fn drain_verifications(&mut self) {
         let mut landed = false;
         while let Ok(reply) = self.reply_rx.try_recv() {
+            let now = chrono::Utc::now().timestamp();
             // Entries first: an entry is named after its preset by default
             // (`llama-cpp`), and the preset's own row never asks for a check
             // under its id, so a reply carrying that name is the entry's.
-            if self.settle_endpoint_reply(&reply) {
+            if self.settle_endpoint_reply(&reply, now) || self.settle_provider_reply(&reply, now) {
                 landed = true;
-            } else if let Some(row) = self
-                .providers
-                .iter_mut()
-                .find(|r| r.provider.id == reply.provider_id)
-            {
-                row.checking = false;
-                row.outcome = reply.outcome;
-                landed = true;
+                // So the next surface, this wizard included, opens on it.
+                self.remember_check(&reply.provider_id, &reply.outcome, now);
             }
         }
         // A reply carries the model list, and the picker was built from
@@ -152,6 +175,7 @@ impl Wizard {
         // The old check described the old account. Leaving it up through a
         // sign-out would show a green tick beside "Not signed in".
         row.outcome = Outcome::Skipped;
+        row.checked_at = None;
         self.message = Some(
             match action {
                 SigninAction::In => "Opening your browser…",
