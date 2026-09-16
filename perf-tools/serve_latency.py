@@ -40,10 +40,10 @@ ROUTES = [
 
 # The requests the console makes the moment it connects. The runs row matches
 # the console's `RUN_ROW_FIELDS`; the blueprint page size is the server's cap.
+ROW_FIELDS = "run_id,agent_name,task,title,status,started_at,parent_run_id,waiting_on,children"
 CONNECT_BURST = [
     "/api/config",
-    "/api/runs?sort=started_at&limit=50&parent=none"
-    "&fields=run_id,agent_name,task,title,status,started_at,parent_run_id,waiting_on,children",
+    "/api/runs?sort=started_at&limit=50&parent=none&fields=" + ROW_FIELDS,
     "/api/blueprints?limit=200",
     "/api/models",
     "/api/fs/dirs",
