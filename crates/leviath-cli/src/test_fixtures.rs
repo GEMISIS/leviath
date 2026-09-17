@@ -252,3 +252,82 @@ mod tests {
         assert_eq!(fixtures::fanout_config().max_workers, 1);
     }
 }
+
+/// What a [`Subscription`] answers when asked for its quota.
+#[derive(Clone, Debug)]
+pub(crate) enum QuotaAnswer {
+    /// A report.
+    Report(leviath_providers::quota::QuotaReport),
+    /// A failed read.
+    Fails(String),
+    /// No quota to report.
+    Nothing,
+    /// Never answers.
+    Hangs,
+}
+
+/// A provider billed to a subscription, answering its quota as told.
+pub(crate) struct Subscription {
+    pub(crate) name: &'static str,
+    pub(crate) answer: QuotaAnswer,
+}
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for Subscription {
+    async fn infer(
+        &self,
+        _: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Err(leviath_providers::ProviderError::Other("unused".into()))
+    }
+    async fn count_tokens(&self, _: &str, _: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _: &str) -> usize {
+        1
+    }
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn capabilities(&self, _: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    async fn quota(
+        &self,
+    ) -> Option<leviath_providers::Result<leviath_providers::quota::QuotaReport>> {
+        match &self.answer {
+            QuotaAnswer::Report(report) => Some(Ok(report.clone())),
+            QuotaAnswer::Fails(why) => {
+                Some(Err(leviath_providers::ProviderError::Other(why.clone())))
+            }
+            QuotaAnswer::Nothing => None,
+            QuotaAnswer::Hangs => std::future::pending().await,
+        }
+    }
+}
+
+/// A registry holding `providers`.
+pub(crate) fn subscriptions(providers: Vec<Subscription>) -> leviath_runtime::ProviderRegistry {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    for provider in providers {
+        registry.register(provider.name.to_string(), std::sync::Arc::new(provider));
+    }
+    registry
+}
+
+/// A report over its limit, or not.
+pub(crate) fn quota_report(over: bool) -> leviath_providers::quota::QuotaReport {
+    leviath_providers::quota::QuotaReport {
+        plan: Some("plus".into()),
+        windows: vec![leviath_providers::quota::UsageWindow {
+            label: "week".into(),
+            used_percent: Some(100.0),
+            used: None,
+            limit: None,
+            unit: None,
+            resets_at: None,
+        }],
+        balance: None,
+        limit_reached: over,
+    }
+}

@@ -1450,4 +1450,54 @@ mod tests {
         }];
         assert!(!build(&creds).has("codex"));
     }
+
+    // ─── xai, meta and grok ────────────────────────────────────────────────
+
+    fn keyed(name: &str, key: Option<&str>) -> ProviderCreds {
+        ProviderCreds {
+            name: name.to_string(),
+            api_key: key.map(str::to_string),
+            base_url: Some("https://gw.example/v1".to_string()),
+            model_capabilities: Default::default(),
+            request_timeout_secs: Some(30),
+            rate_limit: None,
+            options: [("effort".to_string(), "high".to_string())].into(),
+        }
+    }
+
+    #[test]
+    fn xai_and_meta_register_with_a_key_and_not_without_one() {
+        let registry = build(&[keyed("xai", Some("xai-k")), keyed("meta", Some("m-k"))]);
+        assert!(registry.has("xai"));
+        assert!(registry.has("meta"));
+        let registry = build(&[keyed("xai", None), keyed("meta", None)]);
+        assert!(!registry.has("xai"));
+        assert!(!registry.has("meta"));
+    }
+
+    #[test]
+    fn grok_registers_with_a_grant_location_and_is_skipped_without_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut creds = codex_creds(dir.path(), &[("effort", "low")]);
+        creds[0].name = "grok".to_string();
+        assert!(build(&creds).has("grok"));
+        creds[0].options.remove("auth_store_path");
+        assert!(!build(&creds).has("grok"));
+    }
+
+    #[test]
+    fn grok_needs_a_client_and_refuses_a_header_without_a_position() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut creds = codex_creds(dir.path(), &[]);
+        creds[0].name = "grok".to_string();
+        assert!(build_provider_registry_probing(&creds, &failing_client, &|_| true).is_err());
+        creds[0]
+            .options
+            .insert("header:X-No-Position".to_string(), "v".to_string());
+        let err = build_provider_registry(&creds)
+            .map(drop)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("header:X-No-Position"), "{err}");
+    }
 }

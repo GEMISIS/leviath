@@ -537,3 +537,40 @@ async fn a_check_reports_the_models_the_plan_can_reach() {
         "a pro-only model reached a plus account: {body}"
     );
 }
+
+/// A signed-in subscription's usage rides on the listing when asked for;
+/// one that cannot be read carries the reason instead.
+#[tokio::test]
+async fn the_listing_carries_quota_only_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_at(dir.path(), state_with(quiet_admin(), Config::default()));
+    let (status, body) = send(&app, "GET", "/api/providers?quota=true").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["providers"][0]["quota"].is_null(),
+        "nothing enabled, nothing read"
+    );
+
+    let paths = crate::commands::serve::mcp::AdminPaths {
+        config: dir.path().join("config.toml"),
+        store: dir.path().join("mcp-auth.json"),
+        grants: dir.path().join("provider-auth.json"),
+    };
+    let mut config = Config::default();
+    config.providers.grok_enabled = true;
+    let providers = vec![ProviderInfo {
+        id: "grok".into(),
+        display: "Grok".into(),
+        enabled: true,
+        signed_in: true,
+        account: None,
+        plan: None,
+        expires_at: None,
+        signin: None,
+        quota: None,
+    }];
+    let read = crate::commands::serve::mcp::TEST_PATHS
+        .scope(paths, quotas(&config, &providers))
+        .await;
+    assert!(read["grok"]["error"].is_string(), "{read:?}");
+}

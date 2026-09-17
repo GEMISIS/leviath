@@ -1082,4 +1082,19 @@ mod tests {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn a_config_that_does_not_parse_fails_the_json_listing() {
+        crate::config::with_isolated_config_path_async("mime-unparseable", |dir| async move {
+            std::fs::write(dir.join("config.toml"), "not = [toml").unwrap();
+            assert!(
+                execute(MimeArgs {
+                    command: MimeCommand::List(ListArgs { json: true }),
+                })
+                .await
+                .is_err()
+            );
+        })
+        .await;
+    }
 }

@@ -653,6 +653,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_xai_meta_grok_and_upload_flags_write_their_keys() {
+        let mut config = Config::default();
+        let flags = SetupArgs {
+            xai_key: Some("xai-k".into()),
+            meta_key: Some("m-k".into()),
+            file_uploads: Some(false),
+            grok: Some(true),
+            ..args()
+        };
+        apply_flags(&mut config, &flags);
+        assert_eq!(config.providers.xai_api_key.as_deref(), Some("xai-k"));
+        assert_eq!(config.providers.meta_api_key.as_deref(), Some("m-k"));
+        assert!(!config.providers.file_uploads);
+        assert!(config.providers.grok_enabled);
+    }
+
     /// The two retention flags write the switch and replace the agreement
     /// list, trimmed of blanks; unset, both leave the config alone.
     #[test]

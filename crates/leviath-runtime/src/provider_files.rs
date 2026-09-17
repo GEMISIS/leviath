@@ -91,6 +91,34 @@ pub(crate) struct FileRoute {
     pub ttl_secs: u64,
 }
 
+/// Where a job's uploads go, if anywhere, and why parts go inline when they
+/// could have been uploaded. Uploads need the switch on, no zero retention,
+/// a provider that stores files, and a run directory to record them in, so
+/// the run can delete them when it ends.
+pub(crate) fn route_for(
+    provider: &Arc<dyn Provider>,
+    provider_name: &str,
+    limits: &leviath_providers::files::MediaLimits,
+    settings: &leviath_providers::retention::RetentionSettings,
+    store: &dyn leviath_core::mime::BlobStore,
+    run_id: &str,
+    ttl_secs: u64,
+) -> (Option<FileRoute>, &'static str) {
+    if limits.file_bytes.is_none() {
+        return (None, "");
+    }
+    let route = match settings.uploads_allowed() {
+        true => store.run_dir(run_id).map(|dir| FileRoute {
+            provider: provider.clone(),
+            provider_name: provider_name.to_string(),
+            ledger: dir.join(LEDGER_FILE),
+            ttl_secs,
+        }),
+        false => None,
+    };
+    (route, settings.why_inline())
+}
+
 /// A file name every vendor takes: the part's own name without the
 /// characters some refuse, else one made from its hash.
 fn file_name(name: Option<&str>, sha256: &str) -> String {
@@ -138,16 +166,15 @@ pub(crate) async fn attach(
             continue;
         };
         for block in blocks.iter_mut() {
-            if !leviath_providers::mime::sends_natively(block, mime) {
-                continue;
-            }
+            let native = leviath_providers::mime::sends_natively(block, mime);
             let ContentBlock::Mime {
                 part, name, remote, ..
             } = block
             else {
                 continue;
             };
-            if !limits.by_file(&part.mime_type, part.size)
+            if !native
+                || !limits.by_file(&part.mime_type, part.size)
                 || (remote.is_some() && !again)
                 || (remote.is_none() && again)
             {
@@ -232,9 +259,9 @@ pub fn take_ledger(run_dir: &Path) -> Vec<Entry> {
         return Vec::new();
     }
     let ledger = load(&path);
-    if let Err(e) = std::fs::remove_file(&path) {
-        tracing::warn!(path = %path.display(), error = %e, "the provider file ledger could not be removed");
-    }
+    // A ledger left behind names files already deleted, and a second delete
+    // of one is answered as done, so a failed removal costs nothing.
+    let _ = std::fs::remove_file(&path);
     ledger.files
 }
 

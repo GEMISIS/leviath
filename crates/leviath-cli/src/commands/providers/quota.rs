@@ -79,11 +79,20 @@ pub(crate) fn render(usage: &[Usage], now: u64) -> String {
 /// The usage as JSON: `{"quota": [{"provider", "report" | "error"}]}`.
 pub(crate) fn json(usage: &[Usage]) -> serde_json::Value {
     serde_json::json!({
-        "quota": usage.iter().map(|u| match &u.report {
-            Ok(report) => serde_json::json!({ "provider": u.provider, "report": report }),
-            Err(error) => serde_json::json!({ "provider": u.provider, "error": error }),
+        "quota": usage.iter().map(|u| {
+            let mut value = entry(u);
+            value["provider"] = serde_json::json!(u.provider);
+            value
         }).collect::<Vec<_>>()
     })
+}
+
+/// One subscription's usage as JSON: `{"report": ...}` or `{"error": ...}`.
+pub(crate) fn entry(usage: &Usage) -> serde_json::Value {
+    match &usage.report {
+        Ok(report) => serde_json::json!({ "report": report }),
+        Err(error) => serde_json::json!({ "error": error }),
+    }
 }
 
 /// Unix seconds now.
@@ -93,22 +102,40 @@ pub(crate) fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// What `lev providers quota` prints for `usage`.
+pub(crate) fn report_text(usage: &[Usage], json_out: bool, now: u64) -> String {
+    match (json_out, usage.is_empty()) {
+        (true, _) => format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json(usage)).expect("a JSON value serialises")
+        ),
+        (false, true) => "No subscription is signed in. `lev auth login codex` or `lev auth \
+                          login grok` signs one in; `lev setup` turns it on.\n"
+            .to_string(),
+        (false, false) => render(usage, now),
+    }
+}
+
+/// The usage block `lev auth status` adds, or nothing when no subscription
+/// is signed in.
+pub(crate) fn section(usage: &[Usage], now: u64) -> String {
+    match usage.is_empty() {
+        true => String::new(),
+        false => format!("\nSubscription usage:\n{}", render(usage, now)),
+    }
+}
+
+/// The registry a quota read asks: every provider the config builds, or
+/// none when a client cannot be built, which reads as nothing signed in.
+pub(crate) fn registry_for(config: &Config) -> leviath_runtime::ProviderRegistry {
+    crate::commands::run::session::build_provider_registry_from_config(config).unwrap_or_default()
+}
+
 /// Run `lev providers quota`.
 pub(super) async fn show(json_out: bool, config_path: &std::path::Path) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(config_path)?;
-    let registry = crate::commands::run::session::build_provider_registry_from_config(&config)?;
-    let usage = usage(&config, &registry).await;
-    if json_out {
-        println!("{}", serde_json::to_string_pretty(&json(&usage))?);
-        return Ok(());
-    }
-    match usage.is_empty() {
-        true => println!(
-            "No subscription is signed in. `lev auth login codex` or `lev auth login grok` \
-             signs one in; `lev setup` turns it on."
-        ),
-        false => print!("{}", render(&usage, now())),
-    }
+    let usage = usage(&config, &registry_for(&config)).await;
+    print!("{}", report_text(&usage, json_out, now()));
     Ok(())
 }
 
@@ -189,5 +216,91 @@ mod tests {
             .await
             .expect("nothing signed in is not an error");
         show(true, &path).await.expect("and as JSON");
+    }
+
+    #[tokio::test]
+    async fn each_enabled_subscription_answers_or_says_why_not() {
+        use crate::test_fixtures::{QuotaAnswer, Subscription, quota_report, subscriptions};
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.providers.grok_enabled = true;
+        let registry = subscriptions(vec![
+            Subscription {
+                name: "codex",
+                answer: QuotaAnswer::Report(quota_report(false)),
+            },
+            Subscription {
+                name: "grok",
+                answer: QuotaAnswer::Fails("HTTP 401".into()),
+            },
+        ]);
+        let read = usage(&config, &registry).await;
+        assert_eq!(read.len(), 2);
+        assert!(read[0].report.is_ok());
+        assert_eq!(read[1].report.as_ref().unwrap_err(), "HTTP 401");
+        assert!(report_text(&read, false, 0).contains("codex (plus plan)"));
+        assert!(report_text(&read, true, 0).contains("\"quota\""));
+        assert!(report_text(&[], false, 0).contains("No subscription is signed in"));
+        assert!(section(&read, 0).starts_with("\nSubscription usage:\ncodex"));
+        assert_eq!(section(&[], 0), "");
+        let _ = registry_for(&Config::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_with_nothing_to_say_is_left_out_and_a_silent_one_times_out() {
+        use crate::test_fixtures::{QuotaAnswer, Subscription, subscriptions};
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.providers.grok_enabled = true;
+        let registry = subscriptions(vec![
+            Subscription {
+                name: "codex",
+                answer: QuotaAnswer::Nothing,
+            },
+            Subscription {
+                name: "grok",
+                answer: QuotaAnswer::Hangs,
+            },
+        ]);
+        let read = usage(&config, &registry).await;
+        assert_eq!(read.len(), 1);
+        assert!(
+            read[0]
+                .report
+                .as_ref()
+                .unwrap_err()
+                .contains("did not answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_config_that_does_not_parse_is_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not = [toml").unwrap();
+        assert!(show(false, &path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_fake_subscription_keeps_its_trait_obligations() {
+        use leviath_providers::Provider;
+        let fake = crate::test_fixtures::Subscription {
+            name: "codex",
+            answer: crate::test_fixtures::QuotaAnswer::Nothing,
+        };
+        let request = leviath_providers::InferenceRequest {
+            system: vec![],
+            messages: vec![],
+            model: "m".into(),
+            max_tokens: 1,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        assert!(fake.infer(&request).await.is_err());
+        assert_eq!(fake.count_tokens("", "").await, 1);
+        assert_eq!(fake.max_context_tokens(""), 1);
+        let _ = fake.capabilities("");
     }
 }

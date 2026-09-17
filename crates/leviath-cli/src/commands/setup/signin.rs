@@ -140,12 +140,8 @@ impl LiveAuthorizer {
             self.client.clone(),
             announce,
         );
-        if let Some(issuer) = &self.issuer {
-            env.issuer = issuer.clone();
-        }
-        if let Some(ports) = &self.ports {
-            env.ports = ports.clone();
-        }
+        env.issuer = self.issuer.clone().unwrap_or(env.issuer);
+        env.ports = self.ports.clone().unwrap_or(env.ports);
         Ok(env)
     }
 }

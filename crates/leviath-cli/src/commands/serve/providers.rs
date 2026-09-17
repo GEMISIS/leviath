@@ -247,18 +247,18 @@ async fn quotas(
             }
         })
         .collect();
-    let Ok(registry) = leviath_runtime::provider_creds::build_provider_registry(&creds) else {
-        return HashMap::new();
-    };
+    // A registry that cannot be built has nothing to ask, which reads as no
+    // usage rather than a failed listing.
+    let registry =
+        leviath_runtime::provider_creds::build_provider_registry(&creds).unwrap_or_default();
     crate::commands::providers::quota::usage(config, &registry)
         .await
         .into_iter()
         .map(|usage| {
-            let value = match usage.report {
-                Ok(report) => serde_json::json!({ "report": report }),
-                Err(error) => serde_json::json!({ "error": error }),
-            };
-            (usage.provider.to_string(), value)
+            (
+                usage.provider.to_string(),
+                crate::commands::providers::quota::entry(&usage),
+            )
         })
         .collect()
 }

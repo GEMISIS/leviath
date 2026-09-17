@@ -124,19 +124,15 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
             print!("{}", render_status(&status(&config, &path)));
             // Read live, and only for a subscription that is switched on: a
             // signed-in account is the one place the usage lives.
-            let registry =
-                crate::commands::run::session::build_provider_registry_from_config(&config)?;
+            let registry = crate::commands::providers::quota::registry_for(&config);
             let usage = crate::commands::providers::quota::usage(&config, &registry).await;
-            if !usage.is_empty() {
-                println!("\nSubscription usage:");
-                print!(
-                    "{}",
-                    crate::commands::providers::quota::render(
-                        &usage,
-                        crate::commands::providers::quota::now()
-                    )
-                );
-            }
+            print!(
+                "{}",
+                crate::commands::providers::quota::section(
+                    &usage,
+                    crate::commands::providers::quota::now()
+                )
+            );
             Ok(())
         }
         AuthCommand::Login { provider } => {
@@ -217,12 +213,8 @@ async fn login_with(
             println!("\nOpen this page to sign in:\n\n  {url}\n");
         }),
     );
-    if let Some(issuer) = env.issuer {
-        login_env.issuer = issuer;
-    }
-    if let Some(ports) = env.ports {
-        login_env.ports = ports;
-    }
+    login_env.issuer = env.issuer.unwrap_or(login_env.issuer);
+    login_env.ports = env.ports.unwrap_or(login_env.ports);
 
     let grant = oauth::login(&login_env).await?;
     let who = grant.email.as_deref().unwrap_or("this account");
@@ -2252,5 +2244,45 @@ mod tests {
         for needle in ["anthropic", "codex", "lev setup"] {
             assert!(refusal.contains(needle), "refusal never mentions {needle}");
         }
+    }
+
+    /// Signing out of Grok asks xAI to revoke the session first; an issuer
+    /// that cannot be reached is a warning, and the grant is forgotten anyway.
+    #[test]
+    fn a_grok_sign_out_revokes_and_forgets_even_when_the_issuer_is_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let grants = path.with_file_name("provider-auth.json");
+        let mut store = leviath_providers::oauth::ProviderAuthStore::default();
+        store.set(
+            "grok",
+            leviath_providers::ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                ..Default::default()
+            },
+        );
+        store.save(&grants).unwrap();
+        let env = AuthEnv {
+            opener: std::sync::Arc::new(|_| false),
+            grant_path: Some(grants.clone()),
+            client: reqwest::Client::new(),
+            issuer: Some("http://127.0.0.1:9".to_string()),
+            ports: Some(vec![0]),
+        };
+        run_auth_with(&path, AuthArgs::logout_for_test("grok"), env).expect("logout succeeds");
+        let store = leviath_providers::oauth::ProviderAuthStore::load(&grants).unwrap();
+        assert!(store.get("grok").is_none());
+
+        let nowhere = AuthEnv {
+            opener: std::sync::Arc::new(|_| false),
+            grant_path: None,
+            client: reqwest::Client::new(),
+            issuer: None,
+            ports: None,
+        };
+        assert!(run_auth_with(&path, AuthArgs::logout_for_test("grok"), nowhere).is_err());
+        assert!(logout_with("anthropic", None, Ok(None)).is_err());
     }
 }

@@ -1000,4 +1000,17 @@ retention = "zero""#,
         .await
         .expect("json on an empty config");
     }
+
+    #[tokio::test]
+    async fn the_quota_subcommand_reads_the_config() {
+        let (_dir, env) = env_with(Config::default());
+        execute_with(
+            ProvidersArgs {
+                command: Some(ProvidersCommand::Quota(ListArgs { json: true })),
+            },
+            &env,
+        )
+        .await
+        .expect("nothing signed in is not an error");
+    }
 }

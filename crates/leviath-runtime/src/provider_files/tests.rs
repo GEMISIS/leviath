@@ -448,3 +448,81 @@ fn off_a_runtime_nothing_is_started() {
         "a directory is no ledger"
     );
 }
+
+#[test]
+fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
+    let run = run();
+    let storage: Arc<dyn Provider> = Arc::new(Storage::default());
+    let files = leviath_providers::files::provider_limits("anthropic");
+    let allowed = leviath_providers::retention::RetentionSettings {
+        file_uploads: true,
+        ..Default::default()
+    };
+    let (route, why) = route_for(
+        &storage,
+        "anthropic",
+        &files,
+        &allowed,
+        &run.store,
+        "run-1",
+        60,
+    );
+    let route = route.expect("a route");
+    assert_eq!(route.ledger, run.run_dir.join(LEDGER_FILE));
+    assert_eq!(route.ttl_secs, 60);
+    assert_eq!(route.provider_name, "anthropic");
+    assert_eq!(why, "");
+
+    let zero = leviath_providers::retention::RetentionSettings {
+        zero_requested: true,
+        ..allowed.clone()
+    };
+    let (route, why) = route_for(
+        &storage,
+        "anthropic",
+        &files,
+        &zero,
+        &run.store,
+        "run-1",
+        60,
+    );
+    assert!(route.is_none());
+    assert!(why.contains("zero data retention"));
+
+    let memory = leviath_core::mime::MemoryBlobStore::new();
+    assert!(
+        route_for(
+            &storage,
+            "anthropic",
+            &files,
+            &allowed,
+            &memory,
+            "run-1",
+            60
+        )
+        .0
+        .is_none()
+    );
+
+    let none = MediaLimits::NONE;
+    assert_eq!(
+        route_for(&storage, "x", &none, &zero, &run.store, "run-1", 60).1,
+        ""
+    );
+}
+
+#[tokio::test]
+async fn a_ledger_that_cannot_be_written_leaves_the_upload_in_place() {
+    let run = run();
+    let pdf = stored(&run, "application/pdf", b"%PDF-1.7 w", None);
+    let route = FileRoute {
+        ledger: run.run_dir.join("no-such-dir").join(LEDGER_FILE),
+        ..route(&run, Arc::new(Storage::default()))
+    };
+    let mut req = request(vec![pdf]);
+    assert_eq!(
+        attach(&mut req, &route, &vision(), &run.store, "run-1", false).await,
+        1
+    );
+    assert_eq!(remote_ids(&req), [Some("file-0".into())]);
+}
