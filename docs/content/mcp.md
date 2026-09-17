@@ -73,7 +73,7 @@ headers = { Authorization = "Bearer ${MY_TOKEN}" }   # ${VAR} is expanded
 ```
 
 Either way, the next run picks it up. The daemon watches `config.toml`, so a server you add, edit
-or remove takes effect without `lev daemon restart` - see
+or remove takes effect without `lev daemon restart`. See
 [the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run).
 
 ## Discovery and invocation
@@ -137,8 +137,8 @@ still resolves, **as long as exactly one server offers a tool by that name**. Tw
 genuinely ambiguous: it resolves to nothing and the manifest has to say which. Worth updating the
 manifest either way, since the ambiguity can arrive later when somebody adds a second server.
 
-A built-in is never captured this way - `read_file` matches the built-in, whatever any server calls
-its own tools.
+A built-in is never captured this way. `read_file` matches the built-in, whatever any server
+calls its own tools.
 
 ```mermaid
 sequenceDiagram
@@ -177,8 +177,9 @@ The connector is resolved at spawn against what the server actually advertises t
 with `available_tools`, so the two mix freely. A tool the server gains next month is offered
 without touching the manifest.
 
-A connector that resolves to nothing - the server is not installed, or did not connect this run -
-grants nothing, exactly as an `available_tools` name matching nothing does. Whether a server is
+A connector that resolves to nothing grants nothing, exactly as an `available_tools` name
+matching nothing does. That covers a server which is not installed, and one that did not connect
+this run. Whether a server is
 present is not a property of your blueprint, so `lev validate` says nothing about connector names
 either, the same way it never reports an MCP tool as unknown.
 

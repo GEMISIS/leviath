@@ -198,7 +198,7 @@ spawn. Fix the file and everything above clears on its own, with nothing restart
 
 `[model_providers.<name>]` reloads too, as of this release. A script provider's own `.rhai` file
 has always been re-read on each use, so a table beside it that needed a restart made two halves of
-one feature disagree in silence - setting a `base_url` and watching it do nothing looked exactly
+one feature disagree in silence. Setting a `base_url` and watching it do nothing looked exactly
 like having typed the key wrong. Both halves are now live: edit the script or the table, and the
 next provider load uses it.
 
@@ -208,8 +208,8 @@ and the next MCP connection. A server already connected keeps the header it was 
 `[[mcp_servers]]` entry that interpolates a variable is reconnected when you change the list, which
 is what puts the new value in front of the next run.
 
-`[[mcp_servers]]` is live as well. Add, edit or remove a global server - with `lev mcp add`, `POST
-/api/mcp/servers`, or by hand - and the next run gets the tools the file names now. A run already
+`[[mcp_servers]]` is live as well. Add, edit or remove a global server, with `lev mcp add`, `POST
+/api/mcp/servers`, or by hand, and the next run gets the tools the file names now. A run already
 under way keeps the servers it started with: a removed one stays connected for
 `[limits] mcp_idle_disconnect_secs` so nothing loses a tool mid-call, and is torn down after that.
 

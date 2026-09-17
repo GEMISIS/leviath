@@ -60,8 +60,8 @@ by point:
 
 ### What every script can call
 
-Available at every extension point, including the ones that get no host access at all, because none
-of these reach outside the process - they only transform values the script already holds:
+Available at every extension point, including the ones that get no host access at all. None of
+these reach outside the process; they only transform values the script already holds:
 
 | Group | Functions |
 |---|---|
@@ -70,7 +70,7 @@ of these reach outside the process - they only transform values the script alrea
 | JSON | `parse_json`, `to_json` |
 
 On top of that, tool and provider scripts get `encode_uri`, `encode_base64`, `decode_base64` and
-`html_to_text`, and the host functions that do reach outside - which is what
+`html_to_text`, plus the host functions that do reach outside. Those are what
 [`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) governs. The full list
 per point is on that point's own page: [tools](/docs/rhai-tools),
 [providers](/docs/rhai-providers), [regions](/docs/rhai-regions), [hooks](/docs/rhai-hooks),

@@ -58,9 +58,9 @@ panel and answer. `lev respond` does the same from the shell.
   on a different build than this dashboard, the run list wears a chip beside the sort chip. The
   second case is the one that asks something of you: restart `lev dash` so both run the same code.
 - **The config banner**: when `~/.leviath/config.toml` stops loading, a warning takes the top row of
-  every screen and stays there. It names the file, where in it the problem is - a line and column
-  for a syntax error, the key for a value that was refused - and says that runs are on the last
-  config that loaded, which is the part a broken file otherwise hides. It is a banner rather than a
+  every screen and stays there. It names the file and where in it the problem is: a line and
+  column for a syntax error, the key for a value that was refused. It also says that runs are on
+  the last config that loaded, which is the part a broken file otherwise hides. It is a banner rather than a
   toast because the condition lasts until somebody edits the file, and a message that faded three
   seconds after the save cannot explain the run you start two minutes later. Fix the file and it
   clears itself, with nothing restarted. On a narrow terminal the path gives way first, then the
@@ -118,7 +118,7 @@ deleted is forgotten the next time the dashboard can see the run list.
 
 Three other choices live in that same file: the sort order `s` cycles, the agent the new-run
 screen opens on (whichever one you last launched), and how each run's [Context view](#context-view)
-was left folded. Nothing transient joins them - a filter, a search and the marks are all gone when
+was left folded. Nothing transient joins them. A filter, a search and the marks are all gone when
 you come back, and unattended (`Ctrl-Y`) is deliberately off every time the new-run screen opens,
 because a setting that runs tools without asking is not one to inherit out of sight.
 
@@ -272,8 +272,8 @@ than a promise.
 
 The rows under the detail view's header draw the run's path: one box per stage **visit**, in the
 order the run walked them, snaking across rows so it stays compact and grows a row at a time while
-the run is still going. A stage entered three times is three boxes - `implement`, `implement (2)`,
-`implement (3)` - because the order is the story, and each says when it was entered and how many
+the run is still going. A stage entered three times is three boxes, `implement`, `implement (2)` and
+`implement (3)`, because the order is the story. Each says when it was entered and how many
 iterations it took. The rows alternate direction, so the last box of a row sits directly above the
 first box of the next and the hand-off between them is a short vertical hop rather than a jump back
 across the canvas. The band grows a row taller when the path wraps; past that it pans, keeping the
@@ -298,9 +298,9 @@ of everything it could do:
   their last visit, the last transition it took is animated while the run is still going, and
   revisit loops run along a lane
   beside the boxes. The whole blueprint is on show, so you can see what the run has not done as
-  well as what it has. `t` narrows it to the path and the options - the stages the run has been
+  well as what it has. `t` narrows it to the path and the options: the stages the run has been
   through and the one it is in, the transitions between them, and the transitions it can take from
-  where it is with the stages they lead to - and everything else waits off screen, so a stage never
+  where it is with the stages they lead to. Everything else waits off screen, so a stage never
   sits there without a line to it.
   The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
   them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the

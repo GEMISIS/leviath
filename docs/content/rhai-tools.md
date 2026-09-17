@@ -97,8 +97,8 @@ in its context does, by file name.
 
 `decode_base64` fails rather than returning something wrong, in two ways worth telling apart. Input
 that is not valid base64 says so. Input that is valid base64 but decodes to bytes that are not UTF-8
-says *that* - base64 carries any bytes, a Rhai string holds text, so a script decoding an image has
-asked for something the function cannot return. Both reach the model as an `[error]` line naming
+says *that*. Base64 carries any bytes and a Rhai string holds text, so a script decoding an image
+has asked for something the function cannot return. Both reach the model as an `[error]` line naming
 your tool, so a script that hits one stops rather than carrying on with an empty string.
 
 ## A complete tool

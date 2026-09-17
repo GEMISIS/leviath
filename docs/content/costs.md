@@ -124,7 +124,7 @@ inference after it grows. [Structured context](/docs/context) is where this is g
   stage does not read is the cheapest change available: a report-rewriting stage does not need
   the transcript of the research that produced it.
 - `max_tokens` on a region is a ceiling, not a reservation. Alongside a percentage budget it
-  caps what that percentage resolves to - so on every model where it binds, it and not the
+  caps what that percentage resolves to. On every model where it binds, it and not the
   percentage is what sizes the region. Reach for it only when the region's useful size does not
   grow with the window.
 
@@ -234,7 +234,7 @@ want, since the pool a 9b can afford is not the one a 70b can.
 
 ## Don't pay for the same tokens twice
 
-A region that accumulates - the one tool results land in - is re-sent on every inference for the
+A region that accumulates, the one tool results land in, is re-sent on every inference for the
 rest of the stage. Whether you pay full price for it each time comes down to one field:
 
 ```toml
@@ -257,8 +257,8 @@ matter binds on every model above the window it was chosen for, and from there u
 decides nothing. A region that resolves to the same number on a 200K model and a 1M one is not
 percentage-sized at all. If your region is too big, the percentage is the number to change.
 
-The exception is a region whose useful size genuinely does not grow with the window - a fixed
-list, a seeded constant. Those are the ones `max_tokens` is for.
+The exception is a region whose useful size genuinely does not grow with the window, such as a
+fixed list or a seeded constant. Those are the ones `max_tokens` is for.
 
 See [structured context](/docs/context) for the full set of region fields.
 

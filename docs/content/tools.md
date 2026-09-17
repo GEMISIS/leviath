@@ -90,12 +90,12 @@ reusable.
 
 A line the parser cannot read as commands at all is different again. A backtick, an unterminated
 quote or an unbalanced `$(` could put a redirect anywhere, so a line carrying one is refused
-outright the moment it also carries a `>` - guessing where it writes is exactly what the fence
+outright the moment it also carries a `>`. Guessing where it writes is exactly what the fence
 exists not to do. Rewrite the line without the construct, or use the `write_file` tool.
 
 A **heredoc is read**, not refused: its body is standard input, so `python3 - <<'EOF' ... EOF`
 runs with the whole script on stdin, and a `>` or a `->` inside that body is text rather than a
-redirect. A real redirect beside the operator still counts - `cat <<EOF > report.md` writes
+redirect. A real redirect beside the operator still counts: `cat <<EOF > report.md` writes
 `report.md` and is confined to the workspace like any other. The two heredoc shapes that could
 still hide a command keep the old refusal: a body that never reaches its delimiter, and an
 **unquoted** heredoc (`<<EOF`, not `<<'EOF'`) whose body contains a `$(...)` or backtick the shell
@@ -312,7 +312,7 @@ directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 >
 > `lev doctor` asks the daemon rather than itself, so it catches exactly this and tells you to
 > `lev daemon restart` from a shell that exports the key. (A daemon started from a desktop session
-> or a service manager inherits that environment, not your shell's - export the key where the
+> or a service manager inherits that environment, not your shell's, so export the key where the
 > daemon actually starts.)
 
 A search that cannot reach an engine is the quietest failure a research agent has. The model is
@@ -320,7 +320,7 @@ handed an empty result set, cannot tell it apart from "nobody has written about 
 the gap from its training data, citing what it remembers. The report comes out confident and
 fully referenced. Three things make that visible now: `web_search` returns prose naming the
 problem instead of `[]`, `lev doctor` runs a `search` check, and every run records `searches_run`
-and `searches_empty` in its `meta.json` - equal counts, with a non-zero total, mean the run saw
+and `searches_empty` in its `meta.json`. Equal counts, with a non-zero total, mean the run saw
 nothing and wrote a report anyway.
 
 > [!WARNING]
