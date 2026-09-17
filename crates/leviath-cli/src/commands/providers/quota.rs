@@ -26,29 +26,53 @@ pub(crate) async fn usage(
     config: &Config,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> Vec<Usage> {
-    let mut out = Vec::new();
-    for row in catalog::providers() {
-        if !catalog::signin_enabled(config, row.id) {
-            continue;
-        }
-        let Some(provider) = registry.get(row.id) else {
-            continue;
-        };
-        let report = match tokio::time::timeout(QUOTA_TIMEOUT, provider.quota()).await {
-            Ok(Some(Ok(report))) => Ok(report),
-            Ok(Some(Err(e))) => Err(e.to_string()),
-            Ok(None) => continue,
-            Err(_) => Err(format!(
-                "the account did not answer within {}s",
-                QUOTA_TIMEOUT.as_secs()
-            )),
-        };
-        out.push(Usage {
-            provider: row.id,
-            report,
+    usage_within(config, registry, QUOTA_TIMEOUT).await
+}
+
+/// [`usage`] with the bound named, for a caller with a page open rather than a
+/// person at a terminal.
+///
+/// The accounts are asked side by side, so a signed-in subscription that will
+/// not answer costs one `timeout` for the whole read rather than one each. That
+/// is `join_all` and not a `JoinSet` on purpose: it answers in the order it was
+/// given, which is catalog order, so nothing has to be tagged and re-sorted;
+/// it needs no `'static`, so the borrowed registry stays borrowed and every
+/// caller's signature is unchanged; and it adds no "this account's read
+/// panicked" arm, which for an HTTP call would be a branch no test could reach.
+pub(crate) async fn usage_within(
+    config: &Config,
+    registry: &leviath_runtime::ProviderRegistry,
+    timeout: Duration,
+) -> Vec<Usage> {
+    let asking = catalog::providers()
+        .into_iter()
+        .filter(|row| catalog::signin_enabled(config, row.id))
+        .filter_map(|row| registry.get(row.id).map(|provider| (row.id, provider)))
+        .map(|(provider_id, provider)| async move {
+            (
+                provider_id,
+                tokio::time::timeout(timeout, provider.quota()).await,
+            )
         });
-    }
-    out
+    futures_util::future::join_all(asking)
+        .await
+        .into_iter()
+        .filter_map(|(provider, read)| {
+            let report = match read {
+                Ok(Some(Ok(report))) => Ok(report),
+                Ok(Some(Err(e))) => Err(e.to_string()),
+                // Nothing to say: a key-billed provider, or a subscription
+                // whose plan reports no windows. Left out rather than reported
+                // as an empty one.
+                Ok(None) => return None,
+                Err(_) => Err(format!(
+                    "the account did not answer within {}s",
+                    timeout.as_secs()
+                )),
+            };
+            Some(Usage { provider, report })
+        })
+        .collect()
 }
 
 /// The usage as text, one block per provider.
@@ -270,6 +294,60 @@ mod tests {
                 .as_ref()
                 .unwrap_err()
                 .contains("did not answer")
+        );
+    }
+
+    /// The whole read is bounded by one timeout, not by one per subscription.
+    ///
+    /// This is the regression test for the shape the loop used to have: an
+    /// `await` per provider inside a `for`, which cost ten seconds for the
+    /// first silent account and ten more for the second, on a console's
+    /// providers page.
+    #[tokio::test(start_paused = true)]
+    async fn two_silent_accounts_are_given_up_on_together_rather_than_one_after_the_other() {
+        use crate::test_fixtures::{QuotaAnswer, Subscription, subscriptions};
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.providers.grok_enabled = true;
+        let registry = subscriptions(vec![
+            Subscription {
+                name: "codex",
+                answer: QuotaAnswer::Hangs,
+            },
+            Subscription {
+                name: "grok",
+                answer: QuotaAnswer::Hangs,
+            },
+        ]);
+        let started = tokio::time::Instant::now();
+        let read = usage(&config, &registry).await;
+        assert_eq!(read.len(), 2);
+        assert!(
+            started.elapsed() < QUOTA_TIMEOUT * 2,
+            "asked one after the other"
+        );
+        for entry in &read {
+            assert_eq!(
+                entry.report.as_ref().unwrap_err(),
+                "the account did not answer within 10s"
+            );
+        }
+    }
+
+    /// A caller that names its own bound gets it, in the wait and in the words.
+    #[tokio::test(start_paused = true)]
+    async fn a_named_bound_is_the_one_waited_and_the_one_reported() {
+        use crate::test_fixtures::{QuotaAnswer, Subscription, subscriptions};
+        let mut config = Config::default();
+        config.providers.grok_enabled = true;
+        let registry = subscriptions(vec![Subscription {
+            name: "grok",
+            answer: QuotaAnswer::Hangs,
+        }]);
+        let read = usage_within(&config, &registry, Duration::from_secs(1)).await;
+        assert_eq!(
+            read[0].report.as_ref().unwrap_err(),
+            "the account did not answer within 1s"
         );
     }
 

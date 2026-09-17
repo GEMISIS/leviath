@@ -242,7 +242,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
 | `GET /api/models?provider=&refresh=` | Enumerate models, with each one's token limits and where they came from, from a catalogue the server keeps. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id); `refresh=1` asks the providers again - see [the model catalogue](#the-model-catalogue) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
-| `GET /api/providers` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
+| `GET /api/providers?quota=&refresh=` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. `quota=true` adds what each subscription has used - see [subscription usage](#subscription-usage) - and `refresh=1` reads the accounts again. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it: `PUT` adds or updates a row in `mime_types.toml` (`{"mime_type", "family"?, "text"?, "tokens"?, "extensions"?, "magic"?, "stand_in"?, "check"?}`, only the fields sent are changed, a bad type or rule is a 400), `DELETE ?mime_type=` takes one out (404 if there is no such row). The writes need admin. See [below](#writing-a-mime-row) |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks, validators and mime checks, and the global model providers and mime checks. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
@@ -1262,10 +1262,12 @@ providers sign in this way: `codex` (a ChatGPT plan) and `grok` (a SuperGrok or 
 }
 ```
 
+### Subscription usage
+
 `GET /api/providers?quota=true` adds a `quota` object to each signed-in provider that is enabled:
 `{"report": {...}}` with what the subscription has used, or `{"error": "..."}` when the account
-could not be read. It is off by default because it reads each account over the network, and a
-console polls this route while a sign-in is waiting.
+could not be read. It is off by default because it is a reading of the accounts rather than of
+this machine, and a console polls this route while a sign-in is waiting.
 
 ```json
 "quota": {
@@ -1283,6 +1285,24 @@ console polls this route while a sign-in is waiting.
 A window carries `used_percent` when the provider reports a share (Codex), or `used`, `limit`
 and `unit` when it reports amounts (Grok, in credits). `balance` is a prepaid balance as the
 provider words it, when there is one. `lev providers quota --json` prints the same reports.
+
+The accounts are asked side by side, each given five seconds, so the reading is bounded by five
+seconds however many subscriptions are signed in. One that does not answer inside that carries
+`{"error": "the account did not answer within 5s"}` and the rest of the reading still arrives;
+nothing holds the response.
+
+The answer comes from a reading the server keeps, not from the accounts on every request. A
+complete reading is served for one minute and one missing an account's answer for fifteen
+seconds, after which the next request gets the reading in hand and starts a new one behind it.
+Two headers say what you got: `X-Leviath-Quota-Age` is how many seconds ago the accounts were
+read, and `X-Leviath-Quota-Complete` is `true` when every one of them answered. `complete` names
+no provider, so the per-provider `error` is the one to read; the header is there to say whether
+asking again is likely to help. `?refresh=1` reads the accounts again and waits, for a "check
+again" button, and means nothing without `quota=true`. Signing in or out gets its own reading
+rather than the one taken before it, so a console does not have to invalidate anything itself.
+
+Announced as the `providers.quota` capability. Safe to ask for whenever the providers page
+opens.
 
 `enabled` and `signed_in` are separate on purpose. Either can be true alone, they are set by
 different routes, and the combination that breaks runs - enabled, not signed in - is the one a
@@ -1613,6 +1633,7 @@ than that feature, not broken.
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
 | `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
 | `providers.signin` | `GET /api/providers` and the three admin routes under it: the browser sign-in for a provider that has no API key. Without it a console can write `codex_enabled` and has no way to complete the sign-in, which leaves the user enabled and unable to run anything. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
+| `providers.quota` | `?quota=true` on `GET /api/providers`, the `quota` object it adds, `X-Leviath-Quota-Age` and `X-Leviath-Quota-Complete` on the answer, and `?refresh=1` to read the accounts again. Without it a missing `quota` says two things at once: a daemon that ignored the parameter, or a subscription with nothing to report. See [subscription usage](#subscription-usage) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. Without it a missing `config_error` means nothing, so a console cannot tell a file that loads from a daemon that would not say. See [when the config file will not load](#when-the-config-file-will-not-load) |
 
 ## Writing a mime row

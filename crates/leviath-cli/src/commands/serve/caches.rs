@@ -12,4 +12,6 @@ pub(super) struct ServeCaches {
     pub(super) run_index: super::run_index::RunIndex,
     /// The model listing `GET /api/models` answers from.
     pub(super) model_catalog: super::model_catalog::ModelCatalog,
+    /// The subscription usage `GET /api/providers?quota=true` answers from.
+    pub(super) provider_quota: super::quota_cache::QuotaCache,
 }

@@ -32,10 +32,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
+use super::quota_cache::{Accounts, Asked, QUOTA_AGE, QUOTA_COMPLETE};
 use super::types::{AppState, err};
 use crate::commands::setup::signin::{LiveAuthorizer, ProviderAuthorizer};
 
@@ -171,8 +172,13 @@ pub(super) struct ListQuery {
     /// Read each signed-in subscription's usage too. Off by default: it is a
     /// network read per provider, and a console polls this route while a
     /// sign-in is waiting.
-    #[serde(default)]
-    quota: bool,
+    #[serde(default, deserialize_with = "super::types::flag")]
+    pub(super) quota: bool,
+    /// Ask the accounts again and wait for them, rather than answering from
+    /// the reading the server keeps. Only meaningful beside `quota`; for a
+    /// console's "check again".
+    #[serde(default, deserialize_with = "super::types::flag")]
+    pub(super) refresh: bool,
 }
 
 /// The providers that sign in with a browser, as the setup catalog lists them.
@@ -220,72 +226,72 @@ fn describe(
     }
 }
 
-/// Each enabled, signed-in provider's usage, by id, read through a registry
-/// built the way a run builds one but over the grant file the sign-in routes
-/// wrote.
-async fn quotas(
-    config: &crate::config::Config,
-    providers: &[ProviderInfo],
-) -> HashMap<String, serde_json::Value> {
-    let creds: Vec<_> = providers
-        .iter()
-        .filter(|p| p.enabled && p.signed_in)
-        .map(|p| {
-            let mut options = crate::commands::run::session::signin_options(config, &p.id);
-            options.insert(
-                "auth_store_path".to_string(),
-                super::mcp::admin_paths().grants.display().to_string(),
-            );
-            leviath_runtime::provider_creds::ProviderCreds {
-                name: p.id.clone(),
-                api_key: None,
-                base_url: None,
-                model_capabilities: HashMap::new(),
-                request_timeout_secs: Some(20),
-                rate_limit: None,
-                options,
-            }
-        })
-        .collect();
-    // A registry that cannot be built has nothing to ask, which reads as no
-    // usage rather than a failed listing.
-    let registry =
-        leviath_runtime::provider_creds::build_provider_registry(&creds).unwrap_or_default();
-    crate::commands::providers::quota::usage(config, &registry)
-        .await
-        .into_iter()
-        .map(|usage| {
-            (
-                usage.provider.to_string(),
-                crate::commands::providers::quota::entry(&usage),
-            )
-        })
-        .collect()
-}
-
 /// `GET /api/providers` - every browser-sign-in provider and its state.
 pub(super) async fn list_providers(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> impl IntoResponse {
+    listing_with(&state, &query).await
+}
+
+/// [`list_providers`], callable from a test without a request.
+///
+/// With `?quota=true` the answer carries `X-Leviath-Quota-Age` and
+/// `X-Leviath-Quota-Complete`; without it neither, since an age describing a
+/// reading that is not in the response is worse than no header at all.
+pub(super) async fn listing_with(
+    state: &AppState,
+    query: &ListQuery,
+) -> (HeaderMap, Json<serde_json::Value>) {
     let config = state.current_config();
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it. The location comes from `admin_paths` rather
     // than from `state`; see `ProviderAdmin`.
-    let store =
-        leviath_providers::oauth::ProviderAuthStore::load(&super::mcp::admin_paths().grants).ok();
+    let paths = super::mcp::admin_paths();
+    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     let mut providers: Vec<ProviderInfo> = signin_providers()
         .into_iter()
         .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
         .collect();
+    let mut headers = HeaderMap::new();
     if query.quota {
-        let mut read = quotas(&config, &providers).await;
+        // Built from the rows above rather than from a second look at the
+        // grant store, so what the reading is keyed on and what the body says
+        // about who is signed in cannot come apart.
+        let asked = providers
+            .iter()
+            .filter(|p| p.enabled && p.signed_in)
+            .map(|p| Asked {
+                id: p.id.clone(),
+                account: p.account.clone(),
+            })
+            .collect();
+        let (reading, _) = state
+            .caches
+            .provider_quota
+            .report(Accounts::new(config, paths.grants, asked), query.refresh)
+            .await;
+        let mut read: HashMap<&str, serde_json::Value> = reading
+            .value
+            .iter()
+            .map(|usage| {
+                (
+                    usage.provider,
+                    crate::commands::providers::quota::entry(usage),
+                )
+            })
+            .collect();
         for provider in &mut providers {
-            provider.quota = read.remove(&provider.id);
+            provider.quota = read.remove(provider.id.as_str());
         }
+        headers.insert(QUOTA_AGE, HeaderValue::from(reading.age_secs()));
+        headers.insert(
+            QUOTA_COMPLETE,
+            HeaderValue::from_static(if reading.complete { "true" } else { "false" }),
+        );
     }
-    Json(serde_json::json!({ "providers": providers })).into_response()
+    (headers, Json(serde_json::json!({ "providers": providers })))
 }
 
 /// The catalog's own id for `name`, or the refusal for a name nothing signs
