@@ -364,8 +364,8 @@ hashed, and stored as a part of the run when it fits `[mime] max_part_bytes`, so
 sees it in the `final_output` region the way it sees any other part. The answer records
 `name`, `path`, `mime_type`, `size` and `sha256` per file.
 
-A file the run **produced** but never wrote to disk - a picture from an image model, say, which
-lives in the run's store - can be named the same way. The name (then a sha256 prefix) is checked
+A file the run **produced** but never wrote to disk can be named the same way, such as a picture
+from an image model that lives in the run's store. The name (then a sha256 prefix) is checked
 against the parts the run has produced first, and a match is written to that path before it is
 recorded. So a describe-the-image stage can attach the picture it was handed with
 `artifacts: [{ name: "image", path: "image-1.png" }]` (the file name is shown beside the part in its
@@ -415,9 +415,9 @@ Files are what a stage hands back; what it takes is its regions' `accepts`, and
 
 Some models produce a file rather than prose: a 3D generator returns a mesh, an image model returns
 a picture. When an output stage's model is one of those, there is nothing for a `submit_output` call
-to add - the produced part *is* the answer. So an output stage records it directly: route the
-produced part into a region with `output_routing`, declare it as an artifact, and the run hands it
-back with no tool call and no text turn.
+to add, because the produced part *is* the answer. So an output stage records it directly: route
+the produced part into a region with `output_routing`, declare it as an artifact, and the run hands
+it back with no tool call and no text turn.
 
 ```toml
 [stages.build]
@@ -442,8 +442,8 @@ required = true
 When the stage finishes, the parts it routed are matched against the artifacts it declared, by type
 and in order; if every `required` artifact is matched, they become the run's final output. Only the
 regions this stage's `output_routing` names are searched, so an input mesh sat in another region is
-never mistaken for the one this stage made. If a required artifact has no matching produced part -
-the model returned only text, say - the stage falls back to the ordinary `submit_output` nudge.
+never mistaken for the one this stage made. If a required artifact has no matching produced part,
+because the model returned only text, the stage falls back to the ordinary `submit_output` nudge.
 
 This is what lets a pure "bytes in, bytes out" pipeline run with no text provider at all: the
 bundled `image-to-model` and `model-to-animated-model` need only Meshy configured.

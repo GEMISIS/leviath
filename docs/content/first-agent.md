@@ -95,7 +95,7 @@ it is `grows`: it sits after the stable content and is split so its settled part
 only the newest note is re-sent.
 
 The value cannot be guessed from `kind`. All three of these are `pinned`, which sounds immutable
-and says nothing about whether the agent writes to them - only you know that `notes` is the one it
+and says nothing about whether the agent writes to them. Only you know that `notes` is the one it
 adds to. Leaving it out is safe: an undeclared region is assumed to change, which is the pessimistic
 placement, so declaring can only improve things. On a twenty-turn run of this shape, declaring took
 the cache hit rate from 0% to 84% and the cost per turn down by roughly two thirds.

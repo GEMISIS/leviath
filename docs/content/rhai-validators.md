@@ -101,8 +101,8 @@ In both modes the run flags the script:
 | `lev dash` | `⚠ 1 broken script` in the run's detail header |
 | `meta.json`, the API | `flags.broken_scripts`, naming each script |
 
-Named rather than counted, because the useful question is which one. Recorded once per script
-however many times the stage submits - a validator that throws throws every time.
+Named rather than counted, because the useful question is which one. It is recorded once per
+script however many times the stage submits, since a validator that throws throws every time.
 
 Under `accept` the flag is the only trace: the run completes, reports success, and an answer nobody
 checked looks exactly like an answer that passed. Check it before trusting those runs.

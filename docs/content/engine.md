@@ -338,7 +338,7 @@ A provider named in `[limits.max_concurrent_inferences_by_provider]` gets a seco
 front of that one, bounding every model it serves together. A request takes a slot in both and
 holds both for its duration. It is for the metered API where the point of a small pool is bounding
 spend: capping one provider at 1 leaves every other provider's pool untouched, which lowering the
-global number cannot do. A provider that is not named there has no pool of its own - the global
+global number cannot do. A provider that is not named there has no pool of its own. The global
 fallback is a per-model number and is not applied a second time per provider.
 
 Pool sizes reload with `config.toml`, so a new number applies to the next request that asks for a
@@ -347,7 +347,7 @@ already waiting on that pool. Lowering one takes back only the slots nobody is h
 narrows as requests finish and nothing in flight is interrupted.
 
 The smallest a pool can be is 1. A configured `0` is read as `1`, since a pool of nothing would
-park every request on it forever under the backpressure rule below - which is exactly the shape
+park every request on it forever under the backpressure rule below. That is exactly the shape
 nothing ever reports.
 
 Waiting for a slot is ordinary backpressure and is never treated as a failure, however long it
@@ -359,9 +359,9 @@ This knob gets confused with two others. Fan-out's `max_workers` bounds how many
 stage spawns. `[rate_limits.<provider>]` shapes how fast requests are sent. The pools bound how
 many run at once. All of them apply independently.
 
-The daemon's health reading carries each pool's occupancy, providers included - in `lev ps --json`
-under `health`, and in the lane heartbeat in the log - because a run parked on a full provider pool
-sees every model pool with room in it.
+The daemon's health reading carries each pool's occupancy, providers included. It is in
+`lev ps --json` under `health`, and in the lane heartbeat in the log. It has to be, because a run
+parked on a full provider pool sees every model pool with room in it.
 
 ## The tool lane
 

@@ -37,9 +37,9 @@ what a model sees and what a model hands back, and `lev models list --accepts im
 models on your keys that take a given type.
 
 Every provider here is opt-in, Ollama included. It needs no key and answers on a well-known local
-port, which used to be reason enough to register it on every machine - and that made a bare model
-name in a blueprint resolvable against whatever happened to be running locally, which is a
-surprising place for a run to end up. Choose it in `lev setup`, or set `[providers]
+port, which used to be reason enough to register it on every machine. That made a bare model name
+in a blueprint resolvable against whatever happened to be running locally, which is a surprising
+place for a run to end up. Choose it in `lev setup`, or set `[providers]
 ollama_enabled = true`; naming an `ollama_base_url` also counts, so an install that configured it
 before the switch existed keeps working untouched.
 
@@ -208,7 +208,7 @@ In order:
    here are asked which of them serves that model, and yours is asked first. That is how the
    bundled agents run on whichever key you have without ever naming it. A
    [script provider](/docs/rhai-providers) is asked too when it is the one you named as
-   `default_provider` - see [preferring a script provider](#preferring-a-script-provider) for what
+   `default_provider`. See [preferring a script provider](#preferring-a-script-provider) for what
    it has to report before it can answer.
 3. Your `override_model`, when it is set, first among the entries from step 2. It leads even when the
    blueprint lists that same provider with a different model: `default_provider = "ollama"` with
@@ -234,14 +234,14 @@ blueprint's own choice stands. `lev validate` prints the same thing before anyth
 > `override_model` pins **one** model across every stage, which is usually not what you want. A
 > blueprint picks per stage on purpose: `deep-researcher` gathers on a mid-tier model and analyses
 > on a top one. Setting `default_provider` alone keeps that shape and moves it onto your
-> provider - gathering on that provider's mid-tier entry, analysing on its top one. Setting
+> provider, gathering on that provider's mid-tier entry and analysing on its top one. Setting
 > `override_model` too flattens it, and the cheap stages start paying top-tier prices while the
 > deciding stage loses the model the author chose for it. `fallback_model` is the safe one: it
 > changes nothing for a stage that can run what it asked for.
 
 Going back is a first-class move, not a repair. Delete the `override_model` line from `config.toml`,
-or over the API send `PUT /api/config` with `{"override_model": null}` - `null` clears it, an absent
-key leaves it alone, and an empty string is refused rather than read as a clear. Either way the next
+or over the API send `PUT /api/config` with `{"override_model": null}`. `null` clears it, an
+absent key leaves it alone, and an empty string is refused rather than read as a clear. Either way the next
 run picks per stage again, with no restart. `GET /api/config` reports both settings, `null` when
 nothing is set.
 
@@ -326,7 +326,7 @@ through to the next model listed.
 
 ### Preferring a script provider
 
-A [script provider](/docs/rhai-providers) is preferred the same way any other is - name it as your
+A [script provider](/docs/rhai-providers) is preferred the same way any other is. Name it as your
 `default_provider` and stages start there, each on the model its author picked for it:
 
 ```toml
@@ -351,7 +351,7 @@ serves = ["deepseek-v4-flash"]
 ```
 
 A provider that reports neither claims nothing, and can then only be reached by a blueprint that
-pins it - `{ provider = "spark", model = "..." }` - which is worth knowing before concluding the
+pins it with `{ provider = "spark", model = "..." }`. That is worth knowing before concluding the
 preference is broken.
 
 > [!NOTE]
@@ -610,9 +610,9 @@ stage (a `rig`, say) can see it. A Meshy job runs for minutes, so give the stage
 
 A generated mesh is a large file: a full-resolution GLB can run to tens of megabytes, past the
 `[mime] max_part_bytes` ceiling (32 MiB when no configured provider names a larger limit), which drops it with a note in the reply. Two
-knobs keep it in bounds - `target_polycount` with `should_remesh = true` in the stage
-parameters, which is also what makes the mesh game-ready, and a higher `[mime] max_part_bytes` in
-your config for when you do want the full-resolution model.
+knobs keep it in bounds. `target_polycount` with `should_remesh = true` in the stage parameters is
+one, and it is also what makes the mesh game-ready. The other is a higher `[mime] max_part_bytes`
+in your config, for when you do want the full-resolution model.
 
 ## AWS Bedrock
 
@@ -1002,7 +1002,7 @@ context windows are this build's belief, and which models answer depends on
 your plan. `lev models list --provider codex` shows what your plan reaches.
 The compiled list is cross-checked against OpenAI's published catalogue every
 week by `cargo xtask prices`, which reports a model that looks renamed,
-withdrawn or newly served - it cannot fix the list, because what Codex serves
+withdrawn or newly served. It cannot fix the list, because what Codex serves
 is published nowhere, but it stops the table going quietly stale.
 
 **Reasoning effort is accepted per model.** `codex_reasoning_effort` takes

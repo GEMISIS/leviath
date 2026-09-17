@@ -24,9 +24,9 @@ one zip you can attach to an issue. See [Reporting issues](/docs/reporting-issue
 
 The daemon picks up `~/.leviath/config.toml` on its own, so an edit that does nothing almost always
 means the file no longer parses. When that happens Leviath keeps serving **the last version of the
-file that loaded**: runs still start and still work, on the settings from before your edit. That is
-deliberate - a half-typed save should not break a spawn - and it is why the symptom is "nothing
-changed" rather than an error.
+file that loaded**: runs still start and still work, on the settings from before your edit. That
+is deliberate, because a half-typed save should not break a spawn. It is also why the symptom is
+"nothing changed" rather than an error.
 
 Any of these will tell you:
 
@@ -38,9 +38,9 @@ lev dash          # a warning across the top of the screen, for as long as it la
 ```
 
 The message names the file and where in it the problem is. A syntax error, or a value of the wrong
-type, comes with a line and a column. A value that parsed and was then refused - an
-`openai-compatible` gateway with no `base_url`, an `[[mcp_servers]]` entry with neither a `command`
-nor a `url` - comes with the key instead, such as `model_providers.local`.
+type, comes with a line and a column. A value that parsed and was then refused comes with the key
+instead, such as `model_providers.local`. That covers an `openai-compatible` gateway with no
+`base_url`, and an `[[mcp_servers]]` entry with neither a `command` nor a `url`.
 
 Fix the file and save it. Everything above clears on its own and the next run uses the new config;
 nothing needs restarting. If you would rather see it over HTTP, `GET /api/config` carries the same
@@ -239,11 +239,13 @@ blueprint's `models` list pair with a provider that is named separately, so they
 `override_model` or `fallback_model` prefixed with its own `default_provider` is read bare and
 `lev doctor` says so; a blueprint entry is sent as written.
 
-Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
-rather than Leviath's built-in table. A provider *name* it cannot reach at all fails the command
-outright, so a typo there is answered rather than shown as an empty table. Note that a valid dated identifier such as
-`deepseek/deepseek-v4-flash-0731` may be absent from the offline table while still working, so
-absence there is not proof of a bad name. See
+Check the spelling against `lev models list --provider <name>`, which asks the provider rather
+than Leviath's built-in table. Asking is the default; `--offline` is what limits the answer to the
+table. A provider *name* it cannot reach at all fails the command outright, so a typo there is
+answered rather than shown as an empty table.
+
+A valid dated identifier such as `deepseek/deepseek-v4-flash-0731` may be absent from the offline
+table while still working, so absence there is not proof of a bad name. See
 [model identifiers](/docs/providers#model-identifiers).
 
 ## Bedrock answers with an access error

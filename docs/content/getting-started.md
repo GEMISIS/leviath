@@ -42,7 +42,7 @@ your own PATH.
 
 Paste it into PowerShell rather than Command Prompt. The old form that spawned PowerShell from
 cmd (`powershell -ExecutionPolicy Bypass -c "..."`) is the launch pattern endpoint protection
-refuses on managed machines - it answered "Access is denied." before anything ran.
+refuses on managed machines. It answered "Access is denied." before anything ran.
 
 If Windows Defender or another antivirus quarantines `lev.exe`, that is a false positive on a new,
 unsigned binary, not something it found. You can check the file is exactly what this repo's CI

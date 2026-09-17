@@ -196,7 +196,7 @@ The rules that keep this safe:
   resolves outside the workdir is refused at spawn unless a declared and granted `[read_paths]`
   entry covers it, on the same reasoning as `read_file`: the blueprint chose that path, not you.
   A `blueprint:`-prefixed seed reads only from the blueprint's own directory, and no grant can
-  let it out - a blueprint does not ship files outside itself.
+  let it out, since a blueprint does not ship files outside itself.
 - Rhai script tools have their own `read_file` and it stays workdir-confined; among the tools,
   `[read_paths]` applies to the built-in file tools only.
 

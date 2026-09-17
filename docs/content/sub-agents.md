@@ -38,7 +38,7 @@ are no extra processes to start and nothing has to be serialized between a paren
 
 Both are ordinary tools: a stage grants them in `available_tools` and the agent calls them when it
 decides it needs help. `fan_out` is also what a `mode = "fan_out"` stage runs, which is covered
-below - the stage is sugar over the same tool, not a separate mechanism.
+below. The stage is sugar over the same tool, not a separate mechanism.
 
 ## One sub-agent
 
@@ -103,16 +103,16 @@ reaches nobody.
 
 **Put all the work in one call.** The engine paces the concurrency itself (`max_workers`, default
 30), so a hundred items in one call is fine and a second call would only wait for the first. One
-`fan_out` call per turn is the rule - it has to be the only tool call in its turn, because it waits
+`fan_out` call per turn is the rule. It has to be the only tool call in its turn, because it waits
 for its workers.
 
 **An empty `items` array is a real answer.** It means there is nothing to hand out, and the run
 moves on. That matters most in a stage a run enters more than once, where the honest answer the
 second time is often that the work is already done.
 
-The result is routed like any other tool result, so `[stages.<name>.tool_routing]` decides where it
-lands - a region of its own, the conversation, or a cheap drop for a blueprint whose workers write
-files and whose parent does not need their prose:
+The result is routed like any other tool result, so `[stages.<name>.tool_routing]` decides where
+it lands: a region of its own, the conversation, or a cheap drop for a blueprint whose workers
+write files and whose parent does not need their prose:
 
 ```toml
 [stages.investigate.tool_routing.overrides]
@@ -171,7 +171,7 @@ and checks that a named `worker_stage` exists and has opted in with `allow_as_wo
 ### If the stage never fans out
 
 The one thing a fan-out stage owes is a `fan_out` call. A model that answers in prose instead is
-asked again - three times by default, or however many `max_attempts` says - and then let through. A
+asked again, three times by default or however many `max_attempts` says, and then let through. A
 run is never stranded over a thing the model would not do. What it is not allowed to do is pass for
 success: the stage's `splits_degraded` count goes up, a note goes into `error_report` so the merge
 stage knows it is working from nothing, and `lev ps` renders the run as `complete (fan-out empty)`.
@@ -182,10 +182,10 @@ max_attempts = 5   # a small local model may need more than a nudge
 # max_attempts = 0 # or none at all, when an empty fan-out is an acceptable outcome
 ```
 
-The budget is deliberately separate from `max_revisits`. Those answer different questions - "how
+The budget is deliberately separate from `max_revisits`. Those answer different questions: "how
 many times may the graph re-enter this stage" and "how many times do we ask a model that has not
-done what the stage is for" - and each retry re-sends the whole stage context, so borrowing the
-first for the second is how a routing setting quietly multiplies an inference bill.
+done what the stage is for". Each retry re-sends the whole stage context, so borrowing the first
+for the second is how a routing setting quietly multiplies an inference bill.
 
 `max_attempts` is also the *only* thing bounding those asks: **`max_iterations` does not apply to a
 fan-out stage**. It once did, and the two budgets fought - a run that spent three of its four

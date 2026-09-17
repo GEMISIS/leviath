@@ -173,8 +173,8 @@ it is how you say you meant it. See
 
 #### Naming a tool from an MCP server
 
-An MCP tool is always named `<server>__<tool>` - the server it came from, two underscores, the tool
-the server calls it:
+An MCP tool is always named `<server>__<tool>`: the server it came from, two underscores, then
+the tool the server calls it:
 
 ```toml
 available_tools = ["read_file", "tracker__create_issue"]
@@ -241,7 +241,7 @@ ordinary move. Only the blueprint knows which is which.
 
 Leaving it out is safe: an unclassified region is assumed to change and placed last, so declaring
 can only improve matters. A region that claims `stable` and then keeps changing is named in the
-log, because a wrong declaration is worse than none - it puts churn at the front of the prompt,
+log, because a wrong declaration is worse than none. It puts churn at the front of the prompt,
 where it costs the most. See [what caching costs](/docs/context#what-caching-costs).
 
 A stage can override the whole layout for itself alone with `[stages.<name>.context.regions]`. The
@@ -397,10 +397,10 @@ Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite
 It works in stages. First it renders a clean front T-pose from the sprite, then back and side views
 that match it, drawing more than one where it is unsure. A filter stage deletes the bad renders
 (off-model, pixel-art, or a multi-angle turnaround sheet) and keeps the good single views. A critique
-stage, on a second model chosen for a sharp eye, then compares each kept view against the source part
-by part and records anything missing or wrong - an absent arm cannon, a shoulder pad on the wrong
-side - into a dedicated region; it is the only stage that clears an item, and only after confirming
-on the images that the detail is now there. A coverage stage decides whether the angles are covered
+stage, on a second model chosen for a sharp eye, then compares each kept view against the source
+part by part. It records anything missing or wrong into a dedicated region, such as an absent arm
+cannon or a shoulder pad on the wrong side. It is the only stage that clears an item, and only
+after confirming on the images that the detail is now there. A coverage stage decides whether the angles are covered
 and that list is clear; if not, a generation pass redraws the views to fix exactly those items,
 conditioned on both the sprite sheet and the good views already in hand, and the whole filter to
 critique to generate loop is bounded. Meshy then builds one model from the chosen views, with
