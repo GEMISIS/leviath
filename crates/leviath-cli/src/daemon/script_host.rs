@@ -85,6 +85,9 @@ pub(crate) trait ScriptIo: Send + Sync {
     fn run_shell(&self, cmd: TokioCommand, timeout: Duration) -> Result<String, String>;
     /// Read the file at an already-confined absolute `path`.
     fn read_file(&self, path: &Path) -> Result<String, String>;
+    /// Read the raw bytes of the file at an already-confined absolute `path`,
+    /// refusing one larger than `max` bytes rather than reading it.
+    fn read_file_bytes(&self, path: &Path, max: u64) -> Result<Vec<u8>, String>;
     /// Write `content` to an already-confined absolute `path`, creating parent
     /// directories as needed. Returns a short confirmation.
     fn write_file(&self, path: &Path, content: &str) -> Result<String, String>;
@@ -304,6 +307,10 @@ impl ScriptHost for LimitedHost {
         self.inner.read_file(path)
     }
 
+    fn read_file_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.inner.read_file_bytes(path)
+    }
+
     fn write_file(&self, path: &str, content: &str) -> Result<String, String> {
         self.inner.write_file(path, content)
     }
@@ -439,6 +446,21 @@ impl ScriptHost for DaemonScriptHost {
         }
         let resolved = self.resolve_in_workdir(path)?;
         self.io.read_file(&resolved)
+    }
+
+    // The same permission and confinement as `read_file`: it is the same
+    // file, read as bytes instead of text. The ceiling is the largest part
+    // the run may store, since `write_part` is where the bytes are headed.
+    fn read_file_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
+        if !self.allow.read_file {
+            return Err(denied("read_file_bytes"));
+        }
+        let resolved = self.resolve_in_workdir(path)?;
+        let max = self
+            .mime
+            .as_ref()
+            .map_or(MAX_RESPONSE_BYTES, |m| m.max_part_bytes);
+        self.io.read_file_bytes(&resolved, max)
     }
 
     fn write_file(&self, path: &str, content: &str) -> Result<String, String> {
@@ -998,6 +1020,27 @@ impl ScriptIo for RealScriptIo {
             .map_err(|e| format!("read '{}': {e}", path.display()))
     }
 
+    fn read_file_bytes(&self, path: &Path, max: u64) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        // One message for both failures: a directory opens on Unix and fails
+        // at the read, and fails at the open on Windows.
+        let failed = |e: std::io::Error| format!("read '{}': {e}", path.display());
+        // Read at most one byte past the ceiling: a file that grows between a
+        // size check and the read is still caught, and a huge one is never
+        // pulled into memory to find out.
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|file| file.take(max.saturating_add(1)).read_to_end(&mut bytes))
+            .map_err(failed)?;
+        if bytes.len() as u64 > max {
+            return Err(format!(
+                "'{}' is over the {max}-byte limit on a part, so it was not read",
+                path.display()
+            ));
+        }
+        Ok(bytes)
+    }
+
     fn write_file(&self, path: &Path, content: &str) -> Result<String, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -1426,6 +1469,13 @@ mod tests {
                 .push(format!("read:{}", path.display()));
             Ok("r".into())
         }
+        fn read_file_bytes(&self, path: &Path, max: u64) -> Result<Vec<u8>, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("read_bytes:{}:{max}", path.display()));
+            Ok(vec![0x89, b'P'])
+        }
         fn write_file(&self, path: &Path, content: &str) -> Result<String, String> {
             self.calls
                 .lock()
@@ -1700,6 +1750,11 @@ mod tests {
         assert!(host.shell("ls").unwrap_err().contains("shell"));
         assert!(host.read_file("a.txt").unwrap_err().contains("read_file"));
         assert!(
+            host.read_file_bytes("a.png")
+                .unwrap_err()
+                .contains("read_file_bytes")
+        );
+        assert!(
             host.write_file("a.txt", "b")
                 .unwrap_err()
                 .contains("write_file")
@@ -1708,6 +1763,24 @@ mod tests {
         assert!(
             io.calls.lock().unwrap().is_empty(),
             "no I/O on denied calls"
+        );
+    }
+
+    /// `read_file_bytes` is confined like `read_file`, and a host with no
+    /// store reads up to the fetch ceiling.
+    #[test]
+    fn read_file_bytes_is_confined_and_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), dir.path().to_path_buf(), io.clone());
+        assert_eq!(host.read_file_bytes("a.png").unwrap(), vec![0x89, b'P']);
+        let err = host.read_file_bytes("../../etc/passwd").unwrap_err();
+        assert!(err.contains("escape"), "got: {err}");
+        let calls = io.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "the escaping read reached no I/O");
+        assert!(
+            calls[0].ends_with(&format!(":{MAX_RESPONSE_BYTES}")),
+            "got: {calls:?}"
         );
     }
 
@@ -2627,6 +2700,38 @@ mod parts_tests {
             write_file: true,
             env_var: true,
         }
+    }
+
+    /// A file the script (or its shell) wrote reaches `write_part` as bytes,
+    /// through a stage's limit too, and one over the run's part ceiling is
+    /// refused before it is read into memory.
+    #[test]
+    fn a_workdir_file_read_as_bytes_becomes_a_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\n\x00\xffdiagram".to_vec();
+        std::fs::write(dir.path().join("out.png"), &png).unwrap();
+        std::fs::write(dir.path().join("huge.bin"), vec![7u8; 65]).unwrap();
+        std::fs::write(dir.path().join("edge.bin"), vec![7u8; 64]).unwrap();
+        let (mime, store) = mime_and_store();
+        let parts = Arc::new(StdMutex::new(Vec::new()));
+        let host: Arc<dyn ScriptHost> = Arc::new(
+            DaemonScriptHost::new(all_allowed(), dir.path().to_path_buf())
+                .with_mime(mime, parts.clone()),
+        );
+        let limited = LimitedHost::new(host, parts, "render", vec!["image/*".to_string()]);
+        let bytes = limited.read_file_bytes("out.png").unwrap();
+        assert_eq!(bytes, png, "the bytes are exact, not text-decoded");
+        let summary = limited
+            .write_part(bytes, None, Some("diagram.png"))
+            .unwrap();
+        assert_eq!(summary["mime_type"], "image/png");
+        let sha = summary["sha256"].as_str().unwrap();
+        assert_eq!(store.read("run-1", sha).unwrap().to_vec(), png);
+        assert_eq!(limited.read_file_bytes("edge.bin").unwrap().len(), 64);
+        let err = limited.read_file_bytes("huge.bin").unwrap_err();
+        assert!(err.contains("over the 64-byte limit"), "got: {err}");
+        let err = limited.read_file_bytes("missing.png").unwrap_err();
+        assert!(err.contains("missing.png"), "got: {err}");
     }
 
     /// Through a stage's limit, a script sees only the parts the tool may
