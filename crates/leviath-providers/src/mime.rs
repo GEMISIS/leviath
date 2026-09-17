@@ -69,6 +69,8 @@ pub enum WireShape {
     /// The Responses shape on a route that also takes `input_audio` and
     /// `input_video` (Meta's Model API).
     ResponsesAv,
+    /// Gemini's Interactions API: `image`, `audio`, `video`, `document`.
+    Gemini,
     /// Bedrock Converse: `image`, `document`.
     Bedrock,
 }
@@ -80,7 +82,10 @@ impl WireShape {
             (self, family),
             (_, Family::Image | Family::Document)
                 | (WireShape::OpenAi, Family::Audio)
-                | (WireShape::ResponsesAv, Family::Audio | Family::Video)
+                | (
+                    WireShape::ResponsesAv | WireShape::Gemini,
+                    Family::Audio | Family::Video
+                )
         )
     }
 
@@ -530,6 +535,37 @@ pub fn responses_part(block: &ContentBlock) -> Option<serde_json::Value> {
         }),
         Family::Other => serde_json::json!({ "type": "input_text", "text": part.stand_in }),
     })
+}
+
+/// A mime block as a Gemini Interactions content item: the part by the
+/// vendor's uri when it was uploaded, else its bytes, else a text item
+/// carrying the stand-in.
+pub fn gemini_part(block: &ContentBlock) -> Option<serde_json::Value> {
+    let ContentBlock::Mime {
+        part, data, remote, ..
+    } = block
+    else {
+        return None;
+    };
+    let kind = match family_of(&part.mime_type) {
+        Family::Image => "image",
+        Family::Audio => "audio",
+        Family::Video => "video",
+        Family::Document => "document",
+        Family::Other => return Some(serde_json::json!({ "type": "text", "text": part.stand_in })),
+    };
+    match (
+        remote.as_ref().and_then(|f| f.uri.as_deref()),
+        data.is_empty(),
+    ) {
+        (Some(uri), _) => Some(serde_json::json!({
+            "type": kind, "uri": uri, "mime_type": part.mime_type,
+        })),
+        (None, false) => Some(serde_json::json!({
+            "type": kind, "data": data, "mime_type": part.mime_type,
+        })),
+        (None, true) => Some(serde_json::json!({ "type": "text", "text": part.stand_in })),
+    }
 }
 
 /// The `format` word OpenAI's `input_audio` part takes for a type.
