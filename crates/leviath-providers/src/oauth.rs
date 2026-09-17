@@ -38,7 +38,7 @@ pub struct OAuthProfile {
     pub provider: &'static str,
     /// The name a person knows the account by, for messages: "ChatGPT",
     /// "Grok".
-    pub account_name: &'static str,
+    pub brand: &'static str,
     /// The OAuth issuer.
     pub issuer: &'static str,
     /// The authorization endpoint's path under [`Self::issuer`].

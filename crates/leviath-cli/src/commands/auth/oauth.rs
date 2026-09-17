@@ -108,7 +108,7 @@ async fn bind(
     Err(anyhow::anyhow!(
         "could not listen on port {list} ({last}). The {} sign-in only redirects to \
          that port, so this is not a port Leviath can choose. {}",
-        profile.account_name,
+        profile.brand,
         profile.port_conflict
     ))
 }
@@ -164,10 +164,7 @@ async fn exchange(
         .send()
         .await
         .map_err(|e| {
-            anyhow::anyhow!(
-                "could not reach the {} sign-in service: {e}",
-                profile.account_name
-            )
+            anyhow::anyhow!("could not reach the {} sign-in service: {e}", profile.brand)
         })?;
 
     let status = response.status();

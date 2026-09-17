@@ -56,7 +56,7 @@ fn is_terminal(status: u16, body: &str) -> bool {
 /// The sentence to show for a terminal refusal.
 fn terminal_message(profile: &OAuthProfile, body: &str) -> String {
     let lower = body.to_ascii_lowercase();
-    let account = profile.account_name;
+    let account = profile.brand;
     let hint = profile.relogin_hint();
     if lower.contains("refresh_token_reused") {
         return format!(
