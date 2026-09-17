@@ -190,6 +190,12 @@ is never hidden by a limit, and a tool absent from the table keeps whatever it t
 on a tool the stage does not grant; the dashboard's agent editor sets them on the Models and
 tools tab.
 
+A [Rhai tool](/docs/rhai-tools) makes a part with `write_part`, from bytes it got one of three
+ways: `read_part` for a part the run already holds, `http_get_bytes` for a download, or
+`read_file_bytes` for a file in the working directory, such as an image its own shell command
+rendered or a design someone left there. A limit hides parts, not files: `read_file_bytes` is
+gated by the `read_file` permission instead.
+
 ## Stages declare typed outputs
 
 ```toml
