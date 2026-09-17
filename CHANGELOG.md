@@ -104,6 +104,12 @@ same list.
 
 ### Added
 
+- `read_file_bytes(path)` for Rhai tools: a workdir file's exact bytes as a
+  blob, ready for `write_part`. A picture a shell command rendered, or a
+  design someone dropped in the workdir, can now become a part without
+  going through base64 text, which the 900 KB shell output cap cut short.
+  Gated and confined like `read_file`, and refused past
+  `[mime] max_part_bytes` before the file is read.
 - `[model_providers.<name>] kind = "openai"`: OpenAI's own provider, on the
   Responses API, at a host of its own under the name you give it. Several
   sit side by side, each with its own `base_url` and `api_key`, so two Azure

@@ -712,7 +712,8 @@ env_var    = "inherit"
 Every field defaults to `inherit`. For `shell`, `read_file`, and `write_file`, that defers to the
 agent's own permission for the equivalent built-in and permits the call only when it resolves to
 `allow`. For `http_get`, `http_post`, and `env_var`, which have no built-in equivalent, `inherit`
-permits the call; the tool itself is still gated by the other three layers. See
+permits the call; the tool itself is still gated by the other three layers. `read_file` also
+covers `read_file_bytes`, and `http_get` covers `http_get_bytes`. See
 [Rhai tools](/docs/rhai-tools).
 
 ## `[sandbox]`

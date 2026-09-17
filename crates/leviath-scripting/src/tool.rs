@@ -329,6 +329,14 @@ pub trait ScriptHost: Send + Sync {
     fn shell(&self, command: &str) -> std::result::Result<String, String>;
     /// Read a file (confined to the agent workdir by the implementor).
     fn read_file(&self, path: &str) -> std::result::Result<String, String>;
+    /// Read a file's raw bytes (confined to the agent workdir by the
+    /// implementor): what a script stores with `write_part` when the file is
+    /// an image, a sound or a document rather than text. A host that cannot
+    /// read bytes says so.
+    fn read_file_bytes(&self, path: &str) -> std::result::Result<Vec<u8>, String> {
+        let _ = path;
+        Err("this host cannot read files as bytes".to_string())
+    }
     /// Write `content` to a file (confined to the agent workdir by the
     /// implementor), returning a short confirmation.
     fn write_file(&self, path: &str, content: &str) -> std::result::Result<String, String>;
@@ -621,7 +629,7 @@ fn dynamic_to_result_string(value: Dynamic) -> String {
     }
 }
 
-/// A Rhai engine with sandbox limits, the shared Leviath helpers, and the eight
+/// A Rhai engine with sandbox limits, the shared Leviath helpers, and the
 /// script-tool host functions registered.
 fn build_tool_engine(host: Arc<dyn ScriptHost>) -> Engine {
     let mut engine = Engine::new();
@@ -698,10 +706,11 @@ fn headers_from_map(map: &Map) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Register the eight host functions. Five delegate to [`ScriptHost`]; three
-/// (`parse_json`, `to_json`, `encode_uri`) are pure.
+/// Register the host functions: the side-effecting ones delegate to
+/// [`ScriptHost`], and the helpers (`parse_json`, `to_json`, `encode_uri` and
+/// the rest) are pure.
 ///
-/// **Every** registration goes through [`guard_str`] / [`guard_dyn`], so a panic
+/// Registrations go through [`guard_str`] / [`guard_dyn`], so a panic
 /// anywhere in a native function becomes an ordinary Rhai runtime error instead
 /// of unwinding into Rhai and aborting the process. The pure
 /// helpers are guarded too - they run on untrusted, model- and network-supplied
@@ -759,6 +768,16 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     let h = host.clone();
     engine.register_fn("read_file", move |path: &str| {
         guard_str("read_file", &mut || to_rhai(h.read_file(path)))
+    });
+
+    // read_file_bytes(path) -> Blob, ready for write_part
+    let h = host.clone();
+    engine.register_fn("read_file_bytes", move |path: &str| {
+        guard_dyn("read_file_bytes", &mut || {
+            h.read_file_bytes(path)
+                .map(Dynamic::from_blob)
+                .map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))
+        })
     });
 
     // write_file(path, content)
@@ -1228,6 +1247,15 @@ mod tests {
         }
         fn read_file(&self, _path: &str) -> std::result::Result<String, String> {
             self.read_response.lock().unwrap().clone()
+        }
+        fn read_file_bytes(&self, path: &str) -> std::result::Result<Vec<u8>, String> {
+            // `big.pdf` answers with a datasheet-sized body, as `http_get_bytes`
+            // does for `/big`; anything else a short PNG header.
+            match path {
+                "big.pdf" => Ok(vec![0x25; BIG_BODY_BYTES]),
+                "missing.png" => Err("read 'missing.png': not found".to_string()),
+                _ => Ok(b"\x89PNG".to_vec()),
+            }
         }
         fn write_file(&self, path: &str, content: &str) -> std::result::Result<String, String> {
             Ok(format!("WROTE:{path}={content}"))
@@ -1726,6 +1754,9 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         fn read_file(&self, _p: &str) -> std::result::Result<String, String> {
             self.do_panic();
         }
+        fn read_file_bytes(&self, _p: &str) -> std::result::Result<Vec<u8>, String> {
+            self.do_panic();
+        }
         fn write_file(&self, _p: &str, _c: &str) -> std::result::Result<String, String> {
             self.do_panic();
         }
@@ -1786,6 +1817,11 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
             ),
             ("shell", "sh", "// @tool sh\nshell(\"ls\")"),
             ("read_file", "rf", "// @tool rf\nread_file(\"x.txt\")"),
+            (
+                "read_file_bytes",
+                "rb",
+                "// @tool rb\nread_file_bytes(\"x.png\")",
+            ),
             (
                 "write_file",
                 "wf",
@@ -1919,6 +1955,26 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
             }),
         );
         assert!(out.contains("cannot fetch bytes"), "got: {out}");
+    }
+
+    /// `read_file_bytes` hands a file to the script as a blob, whole at any
+    /// size the host allows, and a host refusal is the script's error.
+    #[test]
+    fn read_file_bytes_hands_back_a_blob() {
+        let host = FakeHost::arc();
+        let tool = tool_from(
+            "// @tool t\nlet b = read_file_bytes(\"out.png\");\n\
+             `${type_of(b)}:${b.len()}:${b[0]}`",
+        );
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out, "blob:4:137");
+        let tool = tool_from("// @tool t\nread_file_bytes(\"big.pdf\").len()");
+        let out = execute(&tool, serde_json::json!({}), host.clone());
+        assert_eq!(out, BIG_BODY_BYTES.to_string());
+        let tool = tool_from("// @tool t\nread_file_bytes(\"missing.png\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.starts_with("[error] t:"), "got: {out}");
+        assert!(out.contains("not found"), "got: {out}");
     }
 
     /// A datasheet-sized body arrives whole. The engine's array ceiling is
@@ -2513,6 +2569,11 @@ mod parts_tests {
         touch_stubs(host.as_ref());
         touch_stubs(PartsHost::arc(false).as_ref());
         assert!(host.read_part("x").unwrap_err().contains("holds no part"));
+        assert!(
+            host.read_file_bytes("x.png")
+                .unwrap_err()
+                .contains("cannot read files as bytes")
+        );
         assert!(
             host.write_part(vec![1], None, None)
                 .unwrap_err()

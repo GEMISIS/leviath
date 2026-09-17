@@ -73,6 +73,7 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 | `http_post(url, body [, headers])` | An HTTP POST |
 | `shell(cmd)` | Runs a shell command |
 | `read_file(path)` | Reads a file, always confined to the workdir |
+| `read_file_bytes(path)` | The same file, as bytes: a Rhai blob, exact, ready for `write_part`. For a file that is not text, like an image your shell command rendered or a design someone handed you. Files up to `[mime] max_part_bytes`; larger ones are refused before they are read. Gated and confined like `read_file` |
 | `write_file(path, content)` | Writes a file |
 | `env_var(name)` | Reads an environment variable. Credential-shaped names need [`allow_env_vars`](/docs/configuration#security) |
 | `read_part(name)` | The bytes of a stored [part](/docs/mime) the run holds, as a Rhai blob, by file name or by the first six or more characters of its sha256. Reading needs no permission: the part is already the run's |
@@ -123,23 +124,24 @@ let body = http_get(params.url);
 html_to_text(body)
 ```
 
-A tool that makes a part. It takes a sprite by name, runs a shell command over its bytes, and
-hands the result back typed, so a model that draws sees the image and one that does not sees a
-line naming it:
+A tool that makes a part. It renders a diagram with a command-line tool, reads the picture the
+command wrote as bytes, and hands it back typed, so a model that sees images sees the diagram and
+one that does not sees a line naming it:
 
 ```rhai
-// @tool flip_sprite
-// @description Mirror a sprite left to right
-// @param image string required "the sprite's file name, as shown in context"
-// @accepts image/png
+// @tool render_diagram
+// @description Render a Mermaid diagram to a PNG
+// @param source string required "the Mermaid source"
 // @produces image/png
 // @requires shell
-let src = read_part(params.image);
-write_file("work/in.png", encode_base64(src));
-shell("base64 -d work/in.png | convert - -flop work/out.png");
-let out = read_part("out.png");   // a file the shell wrote is not a part yet: attach it first
-#{ content: "flipped " + params.image, parts: [write_part(out, "image/png", "flipped.png")] }
+write_file("work/diagram.mmd", params.source);
+shell("mmdc -i work/diagram.mmd -o work/diagram.png");
+let png = read_file_bytes("work/diagram.png");
+#{ content: "rendered the diagram", parts: [write_part(png, "image/png", "diagram.png")] }
 ```
+
+The source goes through a file rather than into the command line, so nothing the model writes is
+ever run by the shell.
 
 For parameter shapes that directives cannot express (enums, array `items`, numeric bounds), drop a
 sibling `.toml` named after the script (`export.toml` beside `export.rhai`). When present it
