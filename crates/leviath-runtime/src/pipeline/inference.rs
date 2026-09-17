@@ -651,18 +651,17 @@ pub(crate) fn dispatch_inference(
                 let (mime_resources, max_media_bytes) = mime.hydration_inputs(entity);
                 let limits = provider.media_limits(&si.model);
                 let settings = providers.0.retention_settings();
+                let ttl_secs = mime.provider_file_ttl_secs();
                 let hydration = mime_resources.map(|(store, registry)| {
-                    // Uploads need somewhere to record them, so the run can
-                    // delete them when it ends.
-                    let files = (settings.uploads_allowed() && limits.file_bytes.is_some())
-                        .then(|| store.run_dir(&state.agent_id))
-                        .flatten()
-                        .map(|dir| crate::provider_files::FileRoute {
-                            provider: provider.clone(),
-                            provider_name: si.provider_name.clone(),
-                            ledger: dir.join(crate::provider_files::LEDGER_FILE),
-                            ttl_secs: mime.provider_file_ttl_secs(),
-                        });
+                    let (files, why_inline) = crate::provider_files::route_for(
+                        &provider,
+                        &si.provider_name,
+                        &limits,
+                        settings,
+                        store.as_ref(),
+                        &state.agent_id,
+                        ttl_secs,
+                    );
                     crate::inference_bridge::JobHydration {
                         store,
                         run_id: state.agent_id.clone(),
@@ -672,10 +671,7 @@ pub(crate) fn dispatch_inference(
                         as_text: config.map(|c| c.as_text.clone()).unwrap_or_default(),
                         limits,
                         files,
-                        why_inline: match limits.file_bytes {
-                            Some(_) => settings.why_inline(),
-                            None => "",
-                        },
+                        why_inline,
                     }
                 });
                 let job = InferenceJob {

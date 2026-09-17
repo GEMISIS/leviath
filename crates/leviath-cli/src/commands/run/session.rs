@@ -1181,7 +1181,11 @@ mod tests {
         let mut config = Config::default();
         assert_eq!(
             retention_settings(&config),
-            leviath_providers::retention::RetentionSettings::default()
+            leviath_providers::retention::RetentionSettings {
+                file_uploads: true,
+                ..Default::default()
+            },
+            "uploads are on unless the config turns them off"
         );
         config.providers.zero_retention = true;
         config.providers.zero_retention_agreements = vec!["openai".to_string()];
@@ -1283,6 +1287,23 @@ mod tests {
     /// a blank key must not register one: doing so produced a provider that
     /// authenticates as nobody and fails at the first call, and it crowded out
     /// the provider the user actually configured.
+    #[test]
+    fn grok_creds_carry_the_xai_gateway_and_the_sign_in_options_follow_the_id() {
+        let mut config = Config::default();
+        config.providers.grok_enabled = true;
+        config.providers.xai_base_url = Some(" https://gw.example/v1 ".to_string());
+        config
+            .providers
+            .xai_headers
+            .insert("X-Tenant".to_string(), "t".to_string());
+        let creds = provider_creds_from_config(&config);
+        let grok = creds.iter().find(|c| c.name == "grok").expect("grok");
+        assert_eq!(grok.base_url.as_deref(), Some("https://gw.example/v1"));
+        assert!(grok.options.keys().any(|k| k.contains("X-Tenant")));
+        let _ = signin_options(&config, "grok");
+        assert!(signin_options(&config, "anthropic").is_empty());
+    }
+
     #[test]
     fn provider_creds_from_config_ignores_blank_keys() {
         let config = Config {

@@ -2576,6 +2576,39 @@ some_custom_thing = \"forwarded to the script\"
         );
     }
 
+    #[test]
+    fn xai_and_meta_settings_in_the_file_beat_the_environment() {
+        temp_env::with_vars(
+            [
+                ("XAI_API_KEY", Some("xai-env")),
+                ("META_AI_API_KEY", Some("meta-env")),
+                ("XAI_BASE_URL", Some("https://env/xai")),
+                ("META_AI_BASE_URL", Some("https://env/meta")),
+            ],
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.toml");
+                std::fs::write(
+                    &path,
+                    "[providers]\nxai_api_key = \"xai-file\"\nmeta_api_key = \"meta-file\"\n\
+                     xai_base_url = \"https://file/xai\"\nmeta_base_url = \"https://file/meta\"\n",
+                )
+                .unwrap();
+                let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+                assert_eq!(config.providers.xai_api_key.as_deref(), Some("xai-file"));
+                assert_eq!(config.providers.meta_api_key.as_deref(), Some("meta-file"));
+                assert_eq!(
+                    config.providers.xai_base_url.as_deref(),
+                    Some("https://file/xai")
+                );
+                assert_eq!(
+                    config.providers.meta_base_url.as_deref(),
+                    Some("https://file/meta")
+                );
+            },
+        );
+    }
+
     /// And the file wins over the environment, the same way the keys do - a
     /// checkout that names its gateway is not overruled by whatever the host
     /// happens to export.

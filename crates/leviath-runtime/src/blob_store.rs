@@ -649,4 +649,23 @@ mod tests {
         assert_eq!(limits, limits);
         assert!(format!("{limits:?}").contains("MimeLimits"));
     }
+
+    #[test]
+    fn the_upload_lifetime_follows_the_limits_when_there_are_some() {
+        let mut world = World::new();
+        {
+            let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+            let mime = state.get(&world).unwrap();
+            assert_eq!(
+                mime.provider_file_ttl_secs(),
+                MimeLimits::DEFAULT.provider_file_ttl_secs
+            );
+        }
+        world.insert_resource(MimeLimits {
+            provider_file_ttl_secs: 7,
+            ..MimeLimits::DEFAULT
+        });
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        assert_eq!(state.get(&world).unwrap().provider_file_ttl_secs(), 7);
+    }
 }

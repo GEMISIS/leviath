@@ -2141,3 +2141,33 @@ fn the_yolo_check_follows_the_file() {
         );
     });
 }
+
+#[tokio::test]
+async fn a_subscription_over_its_limit_is_a_warning_and_the_rest_say_nothing() {
+    use crate::test_fixtures::{QuotaAnswer, Subscription, quota_report, subscriptions};
+    let mut config = Config::default();
+    config.providers.codex_enabled = true;
+    config.providers.grok_enabled = true;
+    let registry = subscriptions(vec![
+        Subscription {
+            name: "codex",
+            answer: QuotaAnswer::Report(quota_report(true)),
+        },
+        Subscription {
+            name: "grok",
+            answer: QuotaAnswer::Fails("HTTP 401".into()),
+        },
+    ]);
+    let checks = quota_checks(&config, &registry).await;
+    assert_eq!(checks.len(), 1);
+    assert!(
+        checks[0].detail.contains("over a usage limit"),
+        "{:?}",
+        checks[0].detail
+    );
+    let within = subscriptions(vec![Subscription {
+        name: "codex",
+        answer: QuotaAnswer::Report(quota_report(false)),
+    }]);
+    assert!(quota_checks(&config, &within).await.is_empty());
+}

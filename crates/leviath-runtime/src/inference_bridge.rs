@@ -558,10 +558,11 @@ pub(crate) async fn run_inference_job(
                         && hydration.as_ref().is_some() =>
                 {
                     renewed_files = true;
-                    let renewed = match &hydration {
-                        Some(h) => h.renew_files(&mut request).await,
-                        None => false,
-                    };
+                    let renewed = hydration
+                        .as_ref()
+                        .expect("the guard checked a hydration is present")
+                        .renew_files(&mut request)
+                        .await;
                     tracing::info!(renewed, error = %e, "a named file was gone; uploaded again and retrying");
                 }
                 Err(e) => match backoff_after(&retry, &e, attempt, spent) {

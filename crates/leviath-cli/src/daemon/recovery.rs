@@ -78,20 +78,18 @@ pub(crate) fn reload_persisted_agents(
         .collect();
     // A run that finished while no daemon was there to see it (or whose
     // daemon died before its uploads were deleted) deletes them now.
-    if let Some(providers) = world
+    let providers = world
         .world()
-        .get_resource::<leviath_runtime::pipeline::Providers>()
-    {
-        for (meta, _) in &candidates {
-            if matches!(
-                meta.status,
-                RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
-            ) {
-                leviath_runtime::provider_files::forget_in_background(
-                    runs_dir.join(&meta.run_id),
-                    &providers.0,
-                );
-            }
+        .resource::<leviath_runtime::pipeline::Providers>();
+    for (meta, _) in &candidates {
+        if matches!(
+            meta.status,
+            RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+        ) {
+            leviath_runtime::provider_files::forget_in_background(
+                runs_dir.join(&meta.run_id),
+                &providers.0,
+            );
         }
     }
     // Order phase: drop terminal runs and rank the rest actionable-first (in-flight

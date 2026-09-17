@@ -399,3 +399,32 @@ fn the_real_authorizer_points_at_this_machine() {
     assert!(authorizer.credential_store.is_ok());
     assert_eq!(authorizer.ports, None);
 }
+
+/// Signing out of Grok asks xAI to revoke the session first, and an issuer
+/// that cannot be reached does not keep the grant.
+#[tokio::test]
+async fn a_grok_sign_out_forgets_the_grant_when_the_revoke_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_path = dir.path().join("provider-auth.json");
+    let mut store = leviath_providers::oauth::ProviderAuthStore::default();
+    store.set(
+        "grok",
+        leviath_providers::ProviderGrant {
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            ..Default::default()
+        },
+    );
+    store.save(&store_path).unwrap();
+    let authorizer = LiveAuthorizer {
+        opener: Arc::new(|_: &str| panic!("no browser may open")),
+        store_path: Some(store_path.clone()),
+        credential_store: Ok(None),
+        client: reqwest::Client::new(),
+        issuer: Some("http://127.0.0.1:9".to_string()),
+        ports: None,
+    };
+    authorizer.sign_out("grok").await.expect("signs out");
+    let stored = leviath_providers::oauth::ProviderAuthStore::load(&store_path).unwrap();
+    assert!(stored.get("grok").is_none());
+}

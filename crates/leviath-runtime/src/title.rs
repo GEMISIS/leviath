@@ -2453,4 +2453,15 @@ mod tests {
         assert_eq!(totals.prompt_tokens, 0);
         assert_eq!(totals.completion_tokens, 0);
     }
+
+    #[test]
+    fn the_responses_routes_title_with_a_low_effort() {
+        for provider in ["xai", "grok", "meta"] {
+            assert_eq!(
+                title_request("t", provider, "m").extra,
+                serde_json::json!({ "reasoning": { "effort": "low" } }),
+                "{provider}"
+            );
+        }
+    }
 }

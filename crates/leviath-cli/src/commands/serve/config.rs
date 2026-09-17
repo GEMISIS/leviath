@@ -2184,6 +2184,8 @@ mod tests {
         assert_eq!(validate_key_format("anthropic", "sk-ant-1"), (true, None));
         assert!(!validate_key_format("anthropic", "nope").0);
         assert_eq!(validate_key_format("openai", "sk-1"), (true, None));
+        assert_eq!(validate_key_format("xai", "xai-1"), (true, None));
+        assert!(!validate_key_format("xai", "sk-1").0);
         assert!(!validate_key_format("openai", "nope").0);
         assert_eq!(validate_key_format("google", "g"), (true, None));
         assert!(!validate_key_format("google", "  ").0);

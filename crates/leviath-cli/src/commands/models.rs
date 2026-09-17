@@ -3201,6 +3201,35 @@ mod live_listing_tests {
     }
 
     #[tokio::test]
+    async fn produces_keeps_the_models_that_make_the_type_and_refuses_a_bare_word() {
+        crate::config::with_isolated_config_path_async("models-produces", |_| async move {
+            let models = vec![learned_model("mock-live", Some(1), Some(1.0))];
+            let args = ListArgs {
+                all: true,
+                produces: Some("video/*".to_string()),
+                ..list_args(true, false)
+            };
+            assert!(
+                list_with_registry(args, &registry_with(models.clone(), false))
+                    .await
+                    .is_ok()
+            );
+            let bare = ListArgs {
+                produces: Some("video".to_string()),
+                ..list_args(true, false)
+            };
+            let err = list_with_registry(bare, &registry_with(models, false))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("--produces takes a mime type"),
+                "{err}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn offline_prints_only_this_builds_table() {
         crate::config::with_isolated_config_path_async("models-offline", |_| async move {
             // `--all` keeps the catalogue rows for providers this registry does
