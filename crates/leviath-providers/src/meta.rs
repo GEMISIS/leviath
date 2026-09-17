@@ -297,7 +297,12 @@ impl Provider for MetaProvider {
             .filter_map(|entry| {
                 let id = entry.get("id")?.as_str()?.to_string();
                 let learned = LearnedModel {
-                    released: entry.get("created").and_then(serde_json::Value::as_i64),
+                    // The listing sends `created: 0` for every model (2026-09-17),
+                    // which is no date rather than 1970.
+                    released: entry
+                        .get("created")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|t| *t > 0),
                     pricing: crate::pricing::published_rates(PROVIDER_NAME, &id),
                     ..LearnedModel::default()
                 };

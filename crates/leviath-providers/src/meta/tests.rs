@@ -113,7 +113,7 @@ async fn the_listing_names_what_the_key_reaches_and_the_tables_size_it() {
     let listing = serde_json::json!({ "data": [
         { "id": "muse-spark-1.3", "created": 1786147200 },
         { "id": "muse-spark-1.3-contributor", "created": 1786147200 },
-        { "id": "muse-image-1.0" },
+        { "id": "muse-image-1.0", "created": 0 },
         { "created": 1 }
     ]});
     let (url, _) = spawn_mock_sequence(vec![(200, "OK", listing.to_string().into_bytes())]).await;
@@ -140,6 +140,11 @@ async fn the_listing_names_what_the_key_reaches_and_the_tables_size_it() {
         .unwrap()
         .released;
     assert_eq!(released, Some(1_786_147_200));
+    let image = models.iter().find(|m| m.id == "muse-image-1.0").unwrap();
+    assert_eq!(
+        image.released, None,
+        "the live listing's created 0 is no date"
+    );
 }
 
 #[tokio::test]

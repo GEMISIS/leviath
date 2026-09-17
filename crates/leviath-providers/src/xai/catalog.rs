@@ -9,6 +9,8 @@
 //!   (`*_long_context` beside `long_context_threshold`).
 //! - `GET /v1/language-models` carries the chat models again with
 //!   `input_modalities` and `output_modalities`, and no `context_length`.
+//!   Its modalities never name documents, yet every chat model reads a PDF,
+//!   inline or by file id (grok-4.3, 2026-09-17), so a PDF is added to each.
 //! - `GET /v1/image-generation-models` and `/v1/video-generation-models` carry
 //!   the media models; an image model quotes `image_price`, a video model
 //!   quotes nothing.
@@ -243,7 +245,10 @@ pub(crate) fn read_modalities(body: &Value, listing: &mut Listing) {
                 released: entry.get("created").and_then(Value::as_i64),
                 ..LearnedModel::default()
             });
-        model.input_types = modalities(entry, "input_modalities");
+        model.input_types = modalities(entry, "input_modalities").map(|mut types| {
+            types.push("application/pdf".to_string());
+            types
+        });
         model.output_types = modalities(entry, "output_modalities");
         listing.insert(id.to_string(), entry, model);
     }
@@ -403,7 +408,14 @@ mod tests {
         let grok = &listing.models["grok-4.20-0309-reasoning"];
         assert_eq!(
             grok.input_types.as_deref(),
-            Some(&["text/*".to_string(), "image/*".to_string()][..])
+            Some(
+                &[
+                    "text/*".to_string(),
+                    "image/*".to_string(),
+                    "application/pdf".to_string()
+                ][..]
+            ),
+            "a chat model reads PDFs, which the listing never names"
         );
         assert_eq!(
             grok.max_context_tokens,
@@ -415,7 +427,7 @@ mod tests {
         close(new.pricing.unwrap().input_per_mtok, 2.0);
         assert_eq!(
             new.input_types.as_deref(),
-            Some(&["text/*".to_string()][..])
+            Some(&["text/*".to_string(), "application/pdf".to_string()][..])
         );
         assert_eq!(
             listing.aliases.get("grok-newest").map(String::as_str),
