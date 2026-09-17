@@ -119,13 +119,13 @@ const OPENAI: MediaLimits = MediaLimits {
     file_ttl_max_secs: 30 * DAY,
 };
 
-/// Google's Gemini API: every type it reads by file uri; 2 GB a file, kept
-/// 48 hours; 100 MB a request inline and 50 MB a PDF.
+/// Google's Gemini API: images, audio, video and PDFs by file uri; 2 GB a
+/// file, kept 48 hours; 100 MB a request inline and 50 MB a PDF.
 const GOOGLE: MediaLimits = MediaLimits {
     inline_request_bytes: Some(100 * MIB),
     inline_part_bytes: &[("application/pdf", 50 * MIB)],
     file_bytes: Some(2 * 1024 * MIB),
-    file_types: &["image/*", "audio/*", "video/*", "application/pdf", "text/*"],
+    file_types: &["image/*", "audio/*", "video/*", "application/pdf"],
     file_ttl_max_secs: 2 * DAY,
 };
 

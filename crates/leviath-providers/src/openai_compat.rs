@@ -114,6 +114,19 @@ pub fn message_to_openai_with(
     content: &MessageContent,
     tool_args: ToolArgsFormat,
 ) -> Vec<serde_json::Value> {
+    message_to_chat(role, content, tool_args, crate::mime::openai_part)
+}
+
+/// How a stored part becomes a content part of a chat message.
+pub(crate) type PartEncoder = fn(&ContentBlock) -> Option<serde_json::Value>;
+
+/// [`message_to_openai_with`], naming how a stored part is written too.
+fn message_to_chat(
+    role: &str,
+    content: &MessageContent,
+    tool_args: ToolArgsFormat,
+    encode_part: PartEncoder,
+) -> Vec<serde_json::Value> {
     match content {
         MessageContent::Text(text) => {
             vec![serde_json::json!({ "role": role, "content": text })]
@@ -166,7 +179,7 @@ pub fn message_to_openai_with(
             // takes a string only, so mime beside a tool result travels in a
             // `user` message after the results.
             let mime_parts: Vec<serde_json::Value> =
-                blocks.iter().filter_map(crate::mime::openai_part).collect();
+                blocks.iter().filter_map(encode_part).collect();
 
             // A block list can carry calls and results at once (a compacted
             // turn, or a stage that folded both into one entry). Emitting only
@@ -224,6 +237,17 @@ pub fn openai_messages_with(
     request: &InferenceRequest,
     tool_args: ToolArgsFormat,
 ) -> Vec<serde_json::Value> {
+    chat_messages(request, tool_args, crate::mime::openai_part)
+}
+
+/// [`openai_messages_with`], naming how a stored part is written: the
+/// conversation repairs (unpaired calls, unsigned calls, turn order, a user
+/// turn) for a wire format whose parts are not OpenAI's.
+pub(crate) fn chat_messages(
+    request: &InferenceRequest,
+    tool_args: ToolArgsFormat,
+    encode_part: PartEncoder,
+) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     // One system message, however many blocks the context assembled into.
     //
@@ -250,7 +274,12 @@ pub fn openai_messages_with(
         }));
     }
     for msg in &request.messages {
-        messages.extend(message_to_openai_with(&msg.role, &msg.content, tool_args));
+        messages.extend(message_to_chat(
+            &msg.role,
+            &msg.content,
+            tool_args,
+            encode_part,
+        ));
     }
     // After the unpaired sweep, not before: a call with no answer is dropped
     // outright, and folding it first would preserve it as text instead.
