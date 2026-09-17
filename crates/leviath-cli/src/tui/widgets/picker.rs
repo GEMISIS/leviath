@@ -63,6 +63,10 @@ pub(crate) struct Picker {
     pub(crate) cursor: usize,
     /// Multi-select: the chosen indices into `options`. `None` = one choice.
     pub(crate) multi: Option<BTreeSet<usize>>,
+    /// Where the options shown only to a search begin: those at or past this
+    /// index stay hidden until something is typed. `None` = every option is
+    /// always listed.
+    pub(crate) search_from: Option<usize>,
 }
 
 impl Picker {
@@ -81,7 +85,18 @@ impl Picker {
             options,
             cursor,
             multi: None,
+            search_from: None,
         }
+    }
+
+    /// Add options a search can find that the list does not show: a
+    /// category chooser that also finds any provider by its name or what it
+    /// does, once a word is typed. They are chosen by their index after the
+    /// listed options.
+    pub(crate) fn with_search_only(mut self, options: Vec<PickerOption>) -> Self {
+        self.search_from = Some(self.options.len());
+        self.options.extend(options);
+        self
     }
 
     /// The options matching the query, as indices into `options`.
@@ -92,8 +107,13 @@ impl Picker {
     pub(crate) fn matches(&self) -> Vec<usize> {
         let query = self.query.value().to_lowercase();
         let terms: Vec<&str> = query.split_whitespace().collect();
+        let listed = match terms.is_empty() {
+            true => self.search_from.unwrap_or(self.options.len()),
+            false => self.options.len(),
+        };
         self.options
             .iter()
+            .take(listed)
             .enumerate()
             .filter(|(_, option)| {
                 let haystack = format!("{} {}", option.value, option.detail).to_lowercase();
@@ -466,6 +486,24 @@ mod tests {
             !short.contains("alpha"),
             "no room above the tall row:\n{short}"
         );
+    }
+
+    /// Options for a search only stay out of the list until something is
+    /// typed, then are found by their value or their note like any other, and
+    /// chosen by their index after the listed ones.
+    #[test]
+    fn search_only_options_appear_once_something_is_typed() {
+        let extra = vec![PickerOption {
+            value: "Anthropic".into(),
+            detail: "Claude models".into(),
+        }];
+        let mut p = Picker::new("Pick", vec![], options(), 0).with_search_only(extra);
+        assert_eq!(p.matches(), [0, 1, 2, 3], "the list alone");
+        for c in "claude".chars() {
+            p.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(p.matches(), [4], "found by its note");
+        assert_eq!(p.handle_key(&key(KeyCode::Enter)), PickerOutcome::Chosen(4));
     }
 
     #[test]

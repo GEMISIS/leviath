@@ -108,17 +108,28 @@ impl Provider {
         }
     }
 
-    /// What this provider produces, the wizard's grouping within an auth kind.
-    /// Everything shipped is a text-and-images model except Meshy, which makes
-    /// 3D; the arm is here so an image, audio, or video provider slots in by
-    /// naming its own family.
-    pub(crate) fn modality(&self) -> &'static str {
+    /// What this provider makes, the wizard's grouping within an auth kind.
+    /// A provider files under every kind it makes, so OpenAI is found under
+    /// video as well as text: the kinds are the models it serves, not a
+    /// single label.
+    pub(crate) fn kinds(&self) -> &'static [&'static str] {
         match self.id {
-            "meshy" => "3D models and textures",
-            _ => "Text and images",
+            "meshy" => &[KIND_3D],
+            "openai" | "google" | "xai" | "grok" => &[KIND_TEXT, KIND_VIDEO, KIND_AUDIO],
+            "meta" => &[KIND_TEXT, KIND_AUDIO],
+            _ => &[KIND_TEXT],
         }
     }
 }
+
+/// Chat models, and the image models beside them.
+pub(crate) const KIND_TEXT: &str = "Text and images";
+/// Video generation.
+pub(crate) const KIND_VIDEO: &str = "Video";
+/// Text to speech, transcription and music.
+pub(crate) const KIND_AUDIO: &str = "Speech and audio";
+/// 3D models and their textures.
+pub(crate) const KIND_3D: &str = "3D models and textures";
 
 /// Every provider the wizard offers, in the order it offers them.
 pub(crate) fn providers() -> Vec<Provider> {
@@ -140,7 +151,8 @@ pub(crate) fn providers() -> Vec<Provider> {
         Provider {
             id: "openai",
             display: "OpenAI",
-            blurb: "GPT models.",
+            blurb: "GPT chat models, GPT Image, Sora video, speech and Whisper \
+                    transcription.",
             credential: Credential::ApiKey,
             hint: "sk-...",
             env_var: Some("OPENAI_API_KEY"),
@@ -154,7 +166,8 @@ pub(crate) fn providers() -> Vec<Provider> {
         Provider {
             id: "google",
             display: "Google",
-            blurb: "Gemini models.",
+            blurb: "Gemini chat and image models, Veo video, Gemini speech and Lyria \
+                    music.",
             credential: Credential::ApiKey,
             hint: "AIza...",
             env_var: Some("GOOGLE_API_KEY"),
@@ -525,15 +538,21 @@ mod tests {
                 ["Subscription logins", "API key", "Local and custom"].contains(&auth),
                 "provider {id} has an unknown auth kind {auth}"
             );
-            assert!(!p.modality().is_empty(), "provider {id} has no modality");
+            assert!(!p.kinds().is_empty(), "provider {id} makes nothing");
         }
-        // The catalog carries all four auth kinds and both modalities in use, so
+        // The catalog carries all four auth kinds and every kind in use, so
         // the classifier's arms are all exercised.
         assert!(all.iter().any(|p| p.credential == Credential::Signin));
         assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
         assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
-        assert!(all.iter().any(|p| p.modality() == "3D models and textures"));
-        assert!(all.iter().any(|p| p.modality() == "Text and images"));
+        for kind in [KIND_TEXT, KIND_VIDEO, KIND_AUDIO, KIND_3D] {
+            assert!(
+                all.iter().any(|p| p.kinds().contains(&kind)),
+                "nothing makes {kind}"
+            );
+        }
+        let meta = all.iter().find(|p| p.id == "meta").unwrap();
+        assert_eq!(meta.kinds(), [KIND_TEXT, KIND_AUDIO]);
     }
 
     #[test]

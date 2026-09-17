@@ -905,7 +905,10 @@ nothing about what gets written.
 The Providers screen lists the providers this install has, not the whole catalog. **Add a
 provider** (or `a`) asks three short questions in a chooser, one level at a time: how the provider
 is reached (an API key, a subscription sign-in, a server you run), what it makes (text and images,
-3D models), and which one. Esc steps back a level. The provider then opens in a modal: its
+video, speech and audio, 3D models), and which one. A provider that makes several of these is
+listed under each. Esc steps back a level. Or type at the first question: a provider's name or
+what it does (`anthropic`, `sora`, `video`) finds it, and Enter goes straight to it. The provider
+then opens in a modal: its
 credential, its sign-in or its endpoint entries, and three ways out at the foot. **Verify and use**
 checks the credential against the provider and keeps it once the check passes, staying open with
 the answer if it fails; **Skip verification and use** keeps it unchecked; **Cancel** puts the

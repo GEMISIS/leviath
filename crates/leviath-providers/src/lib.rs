@@ -67,7 +67,7 @@ pub use openrouter::OpenRouterProvider;
 pub use pricing::{CostTotals, ModelPricing};
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FailureKind, FinishReason, InferenceRequest,
-    InferenceResponse, Message, MessageContent, ModelInfo, Provider, ProviderError,
+    InferenceResponse, Message, MessageContent, ModelInfo, OPENING_TURN, Provider, ProviderError,
     RateLimitConfig, Result, RetryAdvice, SystemBlock, TokenUsage, Tool, ToolCall,
     UnavailableReason, build_http_client, collect_stream, tool_input_object,
 };

@@ -227,6 +227,8 @@ pub enum PriceUnit {
     AudioHour,
     /// One million characters of text spoken.
     MillionChars,
+    /// One generated clip of music, whatever its length.
+    Clip,
 }
 
 impl PriceUnit {
@@ -237,6 +239,7 @@ impl PriceUnit {
             PriceUnit::VideoSecond => "s",
             PriceUnit::AudioHour => "hr",
             PriceUnit::MillionChars => "M chr",
+            PriceUnit::Clip => "clip",
         }
     }
 }
@@ -295,11 +298,12 @@ struct RateTable {
 }
 
 /// One unit-priced row of the shipped price table: a media model billed per
-/// image, per second of video, per hour of audio, or per million characters.
+/// image, per second of video, per hour of audio, per million characters, or
+/// per music clip.
 ///
-/// Neither OpenRouter nor LiteLLM publishes these, so every row is `manual`
-/// and `cargo xtask prices` reports one that has gone unread too long rather
-/// than rewriting it.
+/// LiteLLM publishes most of these, and `cargo xtask prices` rewrites those
+/// rows; a row a person wrote (`manual`) is kept, and reported once it has
+/// gone unchecked too long.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PublishedUnitRate {
     /// The provider the row applies to.
@@ -310,7 +314,8 @@ pub struct PublishedUnitRate {
     pub unit: PriceUnit,
     /// USD per unit.
     pub usd: f64,
-    /// Where the figure came from; `manual` for every row today.
+    /// Where the figure came from: `litellm`, or `manual` for a row a person
+    /// wrote.
     pub source: String,
     /// The day a person last checked the figure against the vendor's page.
     pub checked_on: String,
@@ -536,6 +541,21 @@ impl CostTotals {
 mod tier_tests {
     use super::*;
 
+    #[test]
+    fn every_unit_has_its_short_label() {
+        let labels: Vec<&str> = [
+            PriceUnit::Image,
+            PriceUnit::VideoSecond,
+            PriceUnit::AudioHour,
+            PriceUnit::MillionChars,
+            PriceUnit::Clip,
+        ]
+        .iter()
+        .map(|u| u.label())
+        .collect();
+        assert_eq!(labels, ["img", "s", "hr", "M chr", "clip"]);
+    }
+
     fn tiered() -> ModelPricing {
         ModelPricing {
             long_context: Some(PriceTier {
@@ -629,7 +649,10 @@ mod tier_tests {
         for row in &RATE_TABLE.unit_rate {
             let priced = published_rates(&row.provider, &row.prefix).expect("a unit row prices");
             assert_eq!(priced.unit.map(|u| u.usd), Some(row.usd), "{row:?}");
-            assert_eq!(row.source, "manual", "{row:?}");
+            assert!(
+                ["manual", "litellm"].contains(&row.source.as_str()),
+                "{row:?}"
+            );
             assert!(row.usd > 0.0, "{row:?}");
         }
         assert!(published_unit_rate("nobody", "nothing").is_none());

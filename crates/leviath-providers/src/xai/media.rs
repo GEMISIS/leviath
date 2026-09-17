@@ -101,6 +101,8 @@ pub(crate) async fn run(
                     hints: &["aspect_ratio", "resolution", "quality"],
                     reported_cost: billing.reported,
                     unit: billing.unit.filter(|_| billing.reported),
+                    tokens: None,
+                    response_format: true,
                 },
                 request,
             )

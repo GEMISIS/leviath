@@ -653,7 +653,7 @@ fn build_providers(wizard: &Wizard) -> Screen {
             format!(
                 "  {} · {}",
                 row.provider.auth_kind(),
-                row.provider.modality()
+                row.provider.kinds().join(", ")
             ),
             Style::default().fg(C_DIM),
         ));

@@ -9,6 +9,11 @@
 //! A stage's `[model.parameters]` written for Chat Completions keep working:
 //! `reasoning_effort` becomes `reasoning.effort`, and `response_format` becomes
 //! `text.format`.
+//!
+//! The image, video, speech and transcription models are served too, each on
+//! its own route (see `media`).
+
+pub(crate) mod media;
 
 use crate::capabilities::{Match, Row};
 use crate::learned::{LearnedModel, LearnedModels};
@@ -61,6 +66,8 @@ pub struct OpenAIProvider {
     /// Models the API has refused a temperature for, so the next request to one
     /// omits it instead of spending a round trip learning the same thing again.
     temperature_unsupported: crate::provider::ModelMemo,
+    /// How often a video job is polled.
+    poll_interval: std::time::Duration,
     /// What `GET /v1/models` said, filled by [`Provider::prime_capabilities`].
     ///
     /// Ids and dates only: see that method for what the listing cannot say.
@@ -95,6 +102,12 @@ fn is_chat_model_id(model_key: &str) -> bool {
     ];
     (model_key.starts_with("gpt") || is_o_series(model_key))
         && !NOT_CHAT.iter().any(|s| model_key.contains(s))
+}
+
+/// Whether this provider runs `model_key`: a chat or reasoning model, or an
+/// image, video, speech or transcription model on its own route.
+fn serves_id(model_key: &str) -> bool {
+    is_chat_model_id(model_key) || media::kind(model_key).is_some()
 }
 
 /// `o` followed by a digit: the reasoning line.
@@ -138,6 +151,23 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 /// model's nominal window, so a region sized past it is a refused request.
 /// Azure publishes the same numbers for its deployments.
 pub(crate) const MODELS: &[Row] = &[
+    // The media models answer with parts, not tokens, and call no tools. Ahead
+    // of the families below, whose prefixes some of them share.
+    Row {
+        matches: &[
+            Match::Prefix("gpt-image"),
+            Match::Prefix("chatgpt-image"),
+            Match::Prefix("sora"),
+            Match::Prefix("tts-"),
+            Match::Contains("-tts"),
+            Match::Prefix("whisper"),
+            Match::Contains("transcribe"),
+        ],
+        temperature: false,
+        tools: false,
+        context: 32_000,
+        output: 4_096,
+    },
     Row {
         matches: &[Match::Prefix("gpt-5.5")],
         temperature: false,
@@ -208,7 +238,31 @@ impl OpenAIProvider {
             capability_overrides: HashMap::new(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
+            poll_interval: std::time::Duration::from_secs(10),
         }
+    }
+
+    /// How often a video job is polled. Tests shorten it.
+    #[must_use]
+    pub fn with_poll_interval(mut self, interval: std::time::Duration) -> Self {
+        self.poll_interval = interval;
+        self
+    }
+
+    /// Run a media model: images, video, speech or transcription.
+    async fn run_media(
+        &self,
+        kind: media::Kind,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse> {
+        let rates = self.pricing(&request.model);
+        let billing = media::Billing {
+            unit: rates.and_then(|p| p.unit),
+            // A table row priced by the token always has an output rate; a
+            // row priced by the unit alone has none.
+            tokens: rates.filter(|p| p.output_per_mtok > 0.0),
+        };
+        media::run(&self.endpoint, kind, request, &billing, self.poll_interval).await
     }
 
     /// Create a new OpenAI provider with per-model capability overrides.
@@ -357,6 +411,9 @@ fn text_format(format: serde_json::Value) -> serde_json::Value {
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if let Some(kind) = media::kind(&request.model) {
+            return self.run_media(kind, request).await;
+        }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
         crate::provider::collect_stream(self.infer_stream(request).await?).await
@@ -366,6 +423,11 @@ impl Provider for OpenAIProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        if let Some(kind) = media::kind(&request.model) {
+            return Ok(crate::media::one_chunk(
+                self.run_media(kind, request).await?,
+            ));
+        }
         tracing::debug!(model = %request.model, "Calling OpenAI API");
         let mut body = self.body(request);
         let response = match self.post(request, &body).await {
@@ -417,7 +479,7 @@ impl Provider for OpenAIProvider {
         // OpenAI's chat models are `gpt-*`, and its reasoning line is `o1`/`o3`
         // and successors. See the note on the Gemini provider for why the
         // capability table is the wrong thing to ask.
-        (is_chat_model_id(model_key)
+        (serves_id(model_key)
             || self.capability_overrides.contains_key(model_key)
             || self.serves.iter().any(|id| id == model_key))
         .then(|| model_key.to_string())
@@ -464,12 +526,22 @@ impl Provider for OpenAIProvider {
             Some(o) => o.apply_mime(base),
             None => base,
         };
-        crate::mime::WireShape::Responses.carried(mime)
+        // A media model's own route takes what it takes; only a chat model is
+        // narrowed to what a Responses body carries.
+        match media::kind(model) {
+            Some(_) => mime,
+            None => crate::mime::WireShape::Responses.carried(mime),
+        }
     }
 
-    /// Images and PDFs by file id.
-    fn media_limits(&self, _model: &str) -> crate::files::MediaLimits {
-        crate::files::provider_limits(PROVIDER_NAME)
+    /// Images and PDFs by file id for a chat model. A media model's route
+    /// takes its inputs in the request and names no file.
+    fn media_limits(&self, model: &str) -> crate::files::MediaLimits {
+        let limits = crate::files::provider_limits(PROVIDER_NAME);
+        match media::kind(model) {
+            Some(_) => limits.inline_only(),
+            None => limits,
+        }
     }
 
     async fn upload_file(
@@ -486,16 +558,16 @@ impl Provider for OpenAIProvider {
 
     /// The chat and reasoning models the listing named, once primed.
     ///
-    /// Filtered through `is_chat_model_id` because `GET /v1/models` also
-    /// carries embeddings, transcription, speech and image models (130 entries
-    /// against a few dozen chat models, measured), and a complete catalogue
-    /// that named `text-embedding-3-large` would let a blueprint route a stage
-    /// to it. The same rule routes a bare name, so nothing routing accepts is
-    /// refused here.
+    /// Filtered through `serves_id` because `GET /v1/models` also carries
+    /// embeddings and realtime models (130 entries against a few dozen this
+    /// provider can drive, measured), and a complete catalogue that named
+    /// `text-embedding-3-large` would let a blueprint route a stage to it.
+    /// The same rule routes a bare name, so nothing routing accepts is
+    /// refused here, and a named host's own deployments follow.
     fn served_catalog(&self) -> Option<Vec<String>> {
         self.learned.catalog().map(|ids| {
             ids.into_iter()
-                .filter(|id| is_chat_model_id(id))
+                .filter(|id| serves_id(id))
                 .chain(self.serves.iter().cloned())
                 .collect()
         })
@@ -552,7 +624,7 @@ impl Provider for OpenAIProvider {
             .learned
             .to_model_infos(&self.name, |id| self.capabilities(id))
             .into_iter()
-            .filter(|m| is_chat_model_id(&m.id))
+            .filter(|m| serves_id(&m.id))
             .collect())
     }
 }

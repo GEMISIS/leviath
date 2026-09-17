@@ -32,7 +32,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
 Which providers can take an image, audio or a document in a request, and which can hand an image
-back, is a per-model capability rather than a provider-wide one. [Typed mime](/docs/mime) covers
+back, is a per-model capability rather than a provider-wide one. [More than text](/docs/mime) covers
 what a model sees and what a model hands back, and `lev models list --accepts image/*` names the
 models on your keys that take a given type.
 
@@ -728,6 +728,87 @@ as OpenAI's `reasoning.effort` or Gemini's `thinking_level`, and OpenAI's `respo
 A URL ending in `/openai` is read as the root above it. A gateway that speaks only Gemini's OpenAI
 compatible API is set up as an [OpenAI-compatible endpoint](#custom-openai-compatible-providers)
 instead.
+
+## Image, video and audio models
+
+Image, video, speech, transcription and music models run as stages that take parts and hand parts
+back, the way [Meshy](#meshy) does. A stage on one is sent its text as the prompt (the task, or
+what an earlier stage wrote to the stage's regions) and the images or audio its regions hold; the
+stage's instructions, tools and history are not sent, since these models call no tools and some
+refuse anything but the prompt. Give the stage an `output_routing` for what the model makes and an
+artifact to hand it back:
+
+```toml
+[stages.picture]
+mode = "output"
+
+[[stages.picture.model.models]]
+provider = "openai"
+model = "gpt-image-2"
+
+[stages.picture.model.parameters]
+size = "1536x1024"
+quality = "medium"
+
+[stages.picture.output_routing]
+"image/*" = "pictures"
+
+[[stages.picture.output.artifacts]]
+name = "picture"
+type = "image/png"
+required = true
+```
+
+A video is made in the background at the vendor and waited for, so give a video stage a generous
+`request_timeout_secs` (Leviath waits up to 900 seconds by default).
+
+**OpenAI**
+
+| Model | Takes | Makes | Parameters |
+|---|---|---|---|
+| `gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini`, `chatgpt-image-latest` | text, and images to edit | PNG images | `size`, `quality`, `background`, `output_format`, `moderation`, `n` |
+| `sora-2`, `sora-2-pro` | text, and an image to start from | an MP4 video | `seconds` (4, 8 or 12), `size` (`1280x720`, `720x1280` and the larger sizes on pro) |
+| `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` | text | speech, MP3 unless `response_format` says otherwise | `voice` (`alloy` unless set), `response_format`, `instructions`, `speed` |
+| `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe-diarize` | audio | the transcript as text, with a `transcript.json` part (segments, and speakers from the diarize model) | `language`, `prompt`, `response_format` |
+
+**Google**
+
+| Model | Takes | Makes | Parameters |
+|---|---|---|---|
+| `gemini-3.1-flash-image`, `gemini-3-pro-image`, `nano-banana-pro-preview` | text, and images to edit | JPEG images, and a line of text | `aspect_ratio`, `image_size` |
+| `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` | text, and an image to start from | an MP4 video with sound | `duration` (4, 6 or 8 seconds; 8 unless set), `aspect_ratio`, `resolution`, `negative_prompt` |
+| `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` | text to read aloud | speech as a 24 kHz WAV | `voice` (`Kore`, `Puck` and the rest), `language` |
+| `lyria-3.5`, `lyria-3-pro-preview`, `lyria-3-clip-preview` | a description of the music | an MP3, and its lyrics with timings as text | none |
+
+A Gemini speech model reads out the text it is given and refuses a prompt it would answer in words
+instead ("Model tried to generate text"), so hand it the words to speak rather than a request to
+write them.
+
+**AWS Bedrock**
+
+| Model | Takes | Makes | Parameters |
+|---|---|---|---|
+| `stability.stable-image-core-v1:1`, `stability.stable-image-ultra-v1:1`, `stability.sd3-5-large-v1:0` | text, and an image to start from (SD3.5) | PNG images | `aspect_ratio`, `negative_prompt`, `seed`, `output_format`, `strength` |
+| `us.stability.stable-image-remove-background-v1:0`, `-search-recolor-`, `-search-replace-`, `-inpaint-`, `-erase-object-`, `-control-sketch-`, `-control-structure-`, `-style-guide-`, `stable-outpaint-`, `stable-style-transfer-` and the upscalers | an image, and a prompt for the tools that take one | PNG images | each tool's own fields (`select_prompt` for recolor, for example), sent as written |
+| `amazon.nova-canvas-v1:0` (us-east-1) | text, or an image to vary | PNG images | `width`, `height`, `numberOfImages`, `cfgScale`, `seed`, `quality` |
+
+The Stability models are enabled per region (us-west-2 carries them), and the editing tools are
+reached through their `us.` inference profile. Nova Reel, Bedrock's video model, is not offered: it
+writes its result to an S3 bucket, which a Bedrock API key cannot read.
+
+**xAI, Grok and Meta** have their own image, video and speech models; see [xAI](#xai) and
+[Meta](#meta).
+
+**Cost.** A media model is priced the way its vendor bills it: by the token when the reply counts
+tokens (OpenAI's image models, Gemini's image and speech models, the `gpt-4o` transcription
+models), and otherwise per image, per second of video, per hour of audio, per million characters or
+per music clip, from the shipped price table. Those unit prices are read from LiteLLM by
+`cargo xtask prices`. `gpt-4o-mini-tts` reports nothing to price its audio by, so its calls read as
+unpriced.
+
+**Not offered here.** The realtime and live models (`gpt-realtime-*`, `gemini-*-live*`,
+`lyria-realtime-exp`) speak a streaming socket rather than a request, and `gpt-audio-*` is a chat
+model that also hears and speaks.
 
 ## xAI
 

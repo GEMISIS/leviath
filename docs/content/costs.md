@@ -157,7 +157,7 @@ noticed before the bill arrives. Where a figure comes from decides how far to tr
 | OpenRouter | its own catalogue, plus the real cost each call reports | live | every model it serves; `cost_is_exact` is true for these |
 | OpenAI, Anthropic, Google, Meta | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
 | xAI | its own listings, plus the real cost each call reports | live, with the table as the fallback | every model it lists; `cost_is_exact` is true for a call that reported its cost |
-| image, video and speech models (xAI, Meta) | the vendor's price page, written into the table by hand | table, with each row's check date | priced per image, second of video, hour of audio or million characters |
+| image, video, speech and music models (OpenAI, Google, Bedrock, xAI, Meta) | LiteLLM's table, or the vendor's price page written in by hand where LiteLLM has none (a hand-written row wins) | table, refreshed with the rest; a hand-written row carries its check date | priced per image, second of video, hour of audio, million characters or music clip; a model billed by the token (OpenAI's image models, Gemini's image and speech models) is priced by its tokens |
 | Ollama | free by design | neither | every model; a self-hosted cost belongs in the override below |
 | Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unpriced unless one of those says otherwise |
 

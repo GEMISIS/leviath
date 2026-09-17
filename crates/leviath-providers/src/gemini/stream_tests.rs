@@ -124,11 +124,70 @@ fn media_the_model_makes_is_a_part() {
     let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
     assert_eq!(chunks[0].delta, "here");
     assert_eq!(chunks[0].parts[0].mime_type.as_str(), "image/png");
+    assert_eq!(chunks[0].parts[0].name.as_deref(), Some("image-1.png"));
     assert_eq!(chunks[1].parts[0].mime_type.as_str(), "image/jpeg");
+    assert_eq!(chunks[1].parts[0].name.as_deref(), Some("image-2.jpg"));
     assert_eq!(chunks.len(), 3, "an unreadable image yields nothing");
     let last = chunks.last().unwrap();
     assert_eq!(last.finish_reason, Some(FinishReason::Complete));
     assert_eq!(last.tokens.clone().unwrap().total_tokens, 0);
+}
+
+/// A speech model streams raw PCM in many deltas, as measured on
+/// gemini-3.1-flash-tts-preview; the turn hands it on as one WAV when it ends.
+#[test]
+fn streamed_speech_is_joined_into_one_wav() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "type": "model_output" } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "audio", "mime_type": "audio/l16",
+            "data": "AQI=", "channels": 1, "sample_rate": 24000 } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "audio",
+            "mime_type": "audio/L16;codec=pcm;rate=16000", "data": "AwQ=" } }),
+        json!({ "event_type": "interaction.completed", "interaction": { "status": "completed" } }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    assert_eq!(chunks.len(), 1, "no part until the turn ends");
+    let wav = &chunks[0].parts[0];
+    assert_eq!(wav.mime_type.as_str(), "audio/wav");
+    assert_eq!(wav.name.as_deref(), Some("speech.wav"));
+    assert_eq!(&wav.bytes[..4], b"RIFF");
+    assert_eq!(
+        &wav.bytes[44..],
+        [1, 2, 3, 4],
+        "both deltas' samples, in order"
+    );
+    // The first delta's rate and channels hold for the whole clip.
+    assert_eq!(
+        u32::from_le_bytes(wav.bytes[24..28].try_into().unwrap()),
+        24_000
+    );
+    assert_eq!(u16::from_le_bytes(wav.bytes[22..24].try_into().unwrap()), 1);
+
+    let from_type = run(&[
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "audio",
+            "mime_type": "audio/L16;codec=pcm;rate=16000", "data": "AQI=" } }),
+        json!({ "event_type": "interaction.completed", "interaction": { "status": "completed" } }),
+    ]);
+    let wav = &from_type[0].as_ref().unwrap().parts[0];
+    assert_eq!(
+        u32::from_le_bytes(wav.bytes[24..28].try_into().unwrap()),
+        16_000
+    );
+    let bare = run(&[
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "audio",
+            "mime_type": "audio/l16", "data": "AQI=" } }),
+        json!({ "event_type": "interaction.completed", "interaction": { "status": "completed" } }),
+    ]);
+    let untyped = run(&[
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "audio", "data": "AQI=" } }),
+    ]);
+    assert!(untyped.is_empty(), "media with no type is nothing");
+    let wav = &bare[0].as_ref().unwrap().parts[0];
+    assert_eq!(
+        u32::from_le_bytes(wav.bytes[24..28].try_into().unwrap()),
+        24_000,
+        "the default rate"
+    );
 }
 
 #[test]

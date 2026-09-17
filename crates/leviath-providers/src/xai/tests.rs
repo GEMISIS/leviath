@@ -367,7 +367,12 @@ async fn priming_reads_all_four_listings_and_answers_for_aliases() {
         "the listing is the answer once read"
     );
     assert_eq!(provider.max_context_tokens("grok-4.3-latest"), 1_000_000);
-    assert_eq!(provider.served_catalog().map(|c| c.len()), Some(3));
+    let catalog = provider.served_catalog().expect("primed");
+    assert_eq!(catalog.len(), 5, "{catalog:?}");
+    assert!(
+        catalog.iter().any(|id| id == "grok-tts") && catalog.iter().any(|id| id == "grok-stt"),
+        "the speech routes no listing names are in the catalogue: {catalog:?}"
+    );
     let price = provider.pricing("grok-4.3-latest").expect("priced live");
     assert!((price.input_per_mtok - 1.25).abs() < 1e-9);
     assert!(

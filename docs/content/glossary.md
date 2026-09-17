@@ -83,19 +83,19 @@ same blueprint works across models with different window sizes.
 **Journal**: the append-only record of what a run did, written as it happens. It is what lets the
 daemon reload an interrupted run without repeating tool calls that already took effect.
 
-## Typed mime
+## More than text
 
 **Part**: one typed piece of content. A [context region](/docs/context) entry, a tool result, a
 message you send, a model's reply, and a run's output are each a list of parts. A part is a
 mime type and a body: a text body travels inline, any other body is a
-stored part. See [Typed mime](/docs/mime).
+stored part. See [More than text](/docs/mime).
 
 **Mime type**: `type/subtype`, naming what a part is, such as `image/png`, `application/pdf` or
 `model/obj`. It is not a fixed list; the mime registry says what each one means.
 
 **Mime registry**: the table that says what a mime type *is*: its family, whether its bytes are
 text, its file extensions, and its token cost. Compiled defaults, layered under rows from your
-config, a blueprint, or a provider. See [Typed mime](/docs/mime#the-registry).
+config, a blueprint, or a provider. See [More than text](/docs/mime#the-registry).
 
 **Blob**: the bytes of a stored part, kept once by content hash under a run's
 `blobs/` directory and referenced from wherever the part appears. Deleted with the run.

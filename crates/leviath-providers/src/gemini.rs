@@ -8,10 +8,14 @@
 //! that answers it.
 //!
 //! The base URL is the native API root (`.../v1beta`). A configured
-//! `google_base_url` ending in `/openai`, the compatibility endpoint this
-//! provider used to call, is read as the root above it.
+//! `google_base_url` ending in `/openai` names the OpenAI-compatible endpoint,
+//! and is read as the root above it.
+//!
+//! Veo, and the image, speech and music models, are served too (see
+//! `media`).
 
 mod files;
+pub(crate) mod media;
 mod request;
 mod stream;
 
@@ -94,15 +98,18 @@ const NATIVE_PAGE_SIZE: usize = 200;
 /// in hand.
 pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
     let (max_context_tokens, max_output_tokens) = GeminiFamily::classify(model).limits();
-    ModelCapabilities {
-        supports_temperature: true,
-        supports_streaming: true,
-        supports_tools: true,
-        supports_system_prompt: true,
-        max_context_tokens,
-        max_output_tokens,
-        limits_source: LimitsSource::Builtin,
-    }
+    media::adjusted(
+        model,
+        ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens,
+            max_output_tokens,
+            limits_source: LimitsSource::Builtin,
+        },
+    )
 }
 
 /// The models this build names when the listing cannot be read, as
@@ -148,6 +155,9 @@ pub struct GeminiProvider {
 
     /// How often an uploaded file still processing is checked on.
     file_poll: Duration,
+
+    /// How often a Veo operation is checked on.
+    video_poll: Duration,
 }
 
 impl GeminiProvider {
@@ -162,6 +172,7 @@ impl GeminiProvider {
             capability_overrides: HashMap::new(),
             extra_headers: Vec::new(),
             file_poll: Duration::from_secs(2),
+            video_poll: Duration::from_secs(10),
         }
     }
 
@@ -252,6 +263,9 @@ impl GeminiProvider {
 #[async_trait]
 impl Provider for GeminiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if media::kind(&request.model) == Some(media::Kind::Video) {
+            return self.video(request, self.video_poll).await;
+        }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
         crate::provider::collect_stream(self.infer_stream(request).await?).await
@@ -262,15 +276,24 @@ impl Provider for GeminiProvider {
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling Gemini API");
+        let kind = media::kind(&request.model);
+        if kind == Some(media::Kind::Video) {
+            return Ok(crate::media::one_chunk(
+                self.video(request, self.video_poll).await?,
+            ));
+        }
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
 
-        let body = request::build(
-            request,
-            self.capabilities(&request.model).supports_temperature,
-        );
+        let body = match kind {
+            Some(_) => media::prompted_body(request),
+            None => request::build(
+                request,
+                self.capabilities(&request.model).supports_temperature,
+            ),
+        };
         let response = send_chat_request(
             &self.client,
             "gemini",
@@ -284,10 +307,13 @@ impl Provider for GeminiProvider {
 
         let peer = leviath_net::read_caps::peer_of(&response);
         let stream = stream::sse_stream(response.bytes_stream()).sent_by(peer);
-        Ok(crate::rate_limit::meter_stream(
-            self.rate_limiter.as_ref(),
-            Box::pin(stream),
-        ))
+        let metered = crate::rate_limit::meter_stream(self.rate_limiter.as_ref(), Box::pin(stream));
+        Ok(
+            match kind.and(self.pricing(&request.model).and_then(|p| p.unit)) {
+                Some(unit) => media::priced_by_unit(metered, unit),
+                None => metered,
+            },
+        )
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
@@ -329,8 +355,10 @@ impl Provider for GeminiProvider {
         // the capability table's shape: that table answers how big a window to
         // assume, and its fallback for an unknown model is a guess that can
         // look exactly like a real entry.
-        (model_key.starts_with("gemini") || self.capability_overrides.contains_key(model_key))
-            .then(|| model_key.to_string())
+        (model_key.starts_with("gemini")
+            || media::kind(model_key).is_some()
+            || self.capability_overrides.contains_key(model_key))
+        .then(|| model_key.to_string())
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
@@ -348,9 +376,11 @@ impl Provider for GeminiProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        let base = self
-            .learned
-            .corrected(model, self.builtin_capabilities(model));
+        let base = media::adjusted(
+            model,
+            self.learned
+                .corrected(model, self.builtin_capabilities(model)),
+        );
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
@@ -366,12 +396,20 @@ impl Provider for GeminiProvider {
             Some(o) => o.apply_mime(base),
             None => base,
         };
-        crate::mime::WireShape::Gemini.carried(mime)
+        match media::kind(model) {
+            Some(_) => mime,
+            None => crate::mime::WireShape::Gemini.carried(mime),
+        }
     }
 
-    /// Images, audio, video and PDFs by file uri.
-    fn media_limits(&self, _model: &str) -> crate::files::MediaLimits {
-        crate::files::provider_limits("google")
+    /// Images, audio, video and PDFs by file uri for a chat model. A media
+    /// model is sent its inputs in the request.
+    fn media_limits(&self, model: &str) -> crate::files::MediaLimits {
+        let limits = crate::files::provider_limits("google");
+        match media::kind(model) {
+            Some(_) => limits.inline_only(),
+            None => limits,
+        }
     }
 
     async fn upload_file(
@@ -436,12 +474,16 @@ impl Provider for GeminiProvider {
 fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)> {
     let name = item.get("name")?.as_str()?;
     let id = name.strip_prefix("models/").unwrap_or(name).to_string();
+    // Veo speaks `predictLongRunning` alone, and is served.
     if let Some(methods) = item
         .get("supportedGenerationMethods")
         .and_then(|v| v.as_array())
-        && !methods
-            .iter()
-            .any(|m| m.as_str() == Some("generateContent"))
+        && !methods.iter().any(|m| {
+            matches!(
+                m.as_str(),
+                Some("generateContent") | Some("predictLongRunning")
+            )
+        })
     {
         return None;
     }

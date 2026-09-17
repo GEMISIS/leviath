@@ -69,24 +69,44 @@ impl Wizard {
             if row.provider.auth_kind() != category {
                 continue;
             }
-            let kind = row.provider.modality();
-            if !out.contains(&kind) {
-                out.push(kind);
+            for kind in row.provider.kinds() {
+                if !out.contains(kind) {
+                    out.push(kind);
+                }
             }
         }
         out
     }
 
-    /// The rows of `providers` under `category` and `kind`.
+    /// The rows of `providers` under `category` that make `kind`.
     fn provider_rows_of(&self, category: &str, kind: &str) -> Vec<usize> {
         self.providers
             .iter()
             .enumerate()
             .filter(|(_, row)| {
-                row.provider.auth_kind() == category && row.provider.modality() == kind
+                row.provider.auth_kind() == category && row.provider.kinds().contains(&kind)
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Every provider as a chooser option: its name, and what it does and how
+    /// it is reached as the note a search also reads.
+    fn provider_option(&self, index: usize) -> PickerOption {
+        let row = &self.providers[index];
+        let mut detail = format!(
+            "{} ({}; {})",
+            row.provider.blurb,
+            row.provider.auth_kind(),
+            row.provider.kinds().join(", ")
+        );
+        if row.selected {
+            detail.push_str(" (already set up)");
+        }
+        PickerOption {
+            value: row.provider.display.to_string(),
+            detail,
+        }
     }
 
     /// The providers the Providers screen lists: the ones this install has,
@@ -119,17 +139,24 @@ impl Wizard {
                 detail: category_detail(category).to_string(),
             })
             .collect();
+        let every_provider = (0..self.providers.len())
+            .map(|index| self.provider_option(index))
+            .collect();
         self.picker_purpose = PickerPurpose::Category;
-        self.picker = Some(Picker::new(
-            "Add a provider",
-            vec![
-                "How is the provider reached? Pick a category, then what it makes, then \
-                 the provider itself."
-                    .to_string(),
-            ],
-            options,
-            0,
-        ));
+        self.picker = Some(
+            Picker::new(
+                "Add a provider",
+                vec![
+                    "How is the provider reached? Pick a category, then what it makes, then \
+                     the provider itself. Or type a provider's name, or what it does, to go \
+                     straight to it."
+                        .to_string(),
+                ],
+                options,
+                0,
+            )
+            .with_search_only(every_provider),
+        );
     }
 
     /// The second level: what providers of `category` make.
@@ -194,8 +221,12 @@ impl Wizard {
         match self.picker_purpose.clone() {
             PickerPurpose::Field(_) => self.commit_picker(chosen),
             PickerPurpose::Category => {
-                if let Some(category) = self.provider_categories().get(chosen).copied() {
-                    self.open_kind_picker(category);
+                // The categories are listed first; a search finds the
+                // providers after them, in catalog order.
+                let categories = self.provider_categories();
+                match categories.get(chosen).copied() {
+                    Some(category) => self.open_kind_picker(category),
+                    None => self.open_provider_modal(chosen - categories.len()),
                 }
             }
             PickerPurpose::Kind { category } => {

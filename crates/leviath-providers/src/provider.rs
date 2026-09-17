@@ -689,6 +689,12 @@ pub struct InferenceRequest {
     pub request_timeout_secs: Option<u64>,
 }
 
+/// The user turn a request carries when its context holds none: every
+/// provider refuses a request without one. It is a placeholder, not something
+/// anyone asked, so a model that takes its prompt from the request's text (an
+/// image, video or speech model) reads past it.
+pub const OPENING_TURN: &str = "Begin.";
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {

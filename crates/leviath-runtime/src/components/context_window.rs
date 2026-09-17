@@ -1112,7 +1112,7 @@ impl ContextWindow {
         if !messages.iter().any(|m| m.role == "user") {
             messages.push(leviath_providers::Message {
                 role: "user".to_string(),
-                content: "Begin.".into(),
+                content: leviath_providers::OPENING_TURN.into(),
                 cache_breakpoint: false,
                 reasoning: None,
             });

@@ -407,7 +407,12 @@ impl Provider for XaiProvider {
             Some(over) => over.apply_mime(base),
             None => base,
         };
-        crate::mime::WireShape::Responses.carried(mime)
+        // A media model's route takes what it takes: narrowed to a Responses
+        // body, `grok-stt` lost its audio and was handed a stand-in.
+        match media::kind(&id) {
+            Some(_) => mime,
+            None => crate::mime::WireShape::Responses.carried(mime),
+        }
     }
 
     fn learned_models(&self) -> Option<&LearnedModels> {
@@ -508,8 +513,21 @@ impl Provider for XaiProvider {
         (self.learned.is_empty() && named).then_some(id)
     }
 
+    /// The listing, and the speech routes no listing names. A catalogue
+    /// without them refused a `grok-tts` stage at spawn that routing takes.
     fn served_catalog(&self) -> Option<Vec<String>> {
-        self.learned.catalog()
+        self.learned.catalog().map(|mut ids| {
+            for (id, _) in media::CATALOG {
+                if matches!(
+                    media::kind(id),
+                    Some(media::Kind::Speech | media::Kind::Transcribe)
+                ) && !ids.iter().any(|known| known == id)
+                {
+                    ids.push((*id).to_string());
+                }
+            }
+            ids
+        })
     }
 
     /// A subscription's usage this week and this month. `None` for an API

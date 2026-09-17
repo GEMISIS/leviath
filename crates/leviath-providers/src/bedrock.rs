@@ -18,6 +18,7 @@ pub(crate) mod catalog;
 mod convert;
 mod count;
 mod eventstream;
+pub(crate) mod media;
 mod pricing;
 mod stream;
 
@@ -728,6 +729,9 @@ impl Provider for BedrockProvider {
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
+        if media::is_image_model(&request.model) {
+            return self.run_image(request).await;
+        }
         let caps = self.capabilities(&request.model);
         let body = convert::converse_body(request, &caps, catalog::vendor_of(&request.model));
         let response = self
@@ -752,6 +756,9 @@ impl Provider for BedrockProvider {
         tracing::debug!(model = %request.model, "Calling Bedrock ConverseStream");
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
+        }
+        if media::is_image_model(&request.model) {
+            return Ok(crate::media::one_chunk(self.run_image(request).await?));
         }
         let caps = self.capabilities(&request.model);
         let body = convert::converse_body(request, &caps, catalog::vendor_of(&request.model));
@@ -909,9 +916,16 @@ impl Provider for BedrockProvider {
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the
         // listing and the card said, what this build was compiled with.
-        let base = self
+        let mut base = self
             .learned
             .corrected(model, catalog::table_capabilities(model));
+        // An image model is sent its prompt alone and answers with images.
+        if media::is_image_model(model) {
+            base.supports_tools = false;
+            base.supports_temperature = false;
+            base.max_output_tokens = base.max_output_tokens.min(4_096);
+            base.max_context_tokens = base.max_context_tokens.max(32_000);
+        }
         match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
             None => base,
@@ -924,7 +938,10 @@ impl Provider for BedrockProvider {
             Some(o) => o.apply_mime(base),
             None => base,
         };
-        crate::mime::WireShape::Bedrock.carried(mime)
+        match media::is_image_model(model) {
+            true => mime,
+            false => crate::mime::WireShape::Bedrock.carried(mime),
+        }
     }
 
     /// Read the listing, the profiles and the price file into `Self::learned`.
@@ -1031,7 +1048,8 @@ impl Provider for BedrockProvider {
                 catalog::Vendor::Anthropic => {
                     crate::pricing::published_rates("anthropic", catalog::vendor_model(model))
                 }
-                _ => None,
+                // An image model's price per image, from the shipped table.
+                _ => crate::pricing::published_rates(PROVIDER_NAME, catalog::bare_id(model)),
             })
     }
 }

@@ -389,6 +389,8 @@ Small changes worth trying, each of which reaches for one more idea:
 
 ## Where to go next
 
+- [Build an advanced agent](/docs/advanced-agent) builds one whose stages hand pictures and video
+  to each other: an idea, concept art, and a short film.
 - [Agent blueprints](/docs/agents) is the field-by-field reference for everything used here.
 - [Multi-stage workflows](/docs/stages) covers the rest of the graph: conditions, gates, revisit
   limits, and what happens at a dead end.
