@@ -104,6 +104,12 @@ same list.
 
 ### Added
 
+- Yolo profiles have documentation of their own. [Write your first yolo
+  profile](https://leviath.dev/docs/first-yolo-profile) walks one profile from
+  `lev yolo init` to a run, and [Yolo
+  profiles](https://leviath.dev/docs/yolo) is the reference: every field, the
+  order a verdict is decided in, the shell rules, and what a profile can never
+  loosen. They were previously a section inside the `config.toml` reference.
 - `read_file_bytes(path)` for Rhai tools: a workdir file's exact bytes as a
   blob, ready for `write_part`. A picture a shell command rendered, or a
   design someone dropped in the workdir, can now become a part without
@@ -245,6 +251,18 @@ same list.
 
 ### Fixed
 
+- `[mcp_overrides]` in `policy.toml` now applies. It sets an MCP tool's
+  sensitivity, direction and clearance for the taint gate, and it had never
+  reached a tool in any spelling: the loader keyed overrides by
+  `<server>.<tool>` while the gate looks them up by the name the tool is
+  dispatched under, `<server>__<tool>`. An override was parsed, stored, and
+  never read, so a call you believed you had restricted was gated on the
+  tool's default classification. Write it as
+  `[mcp_overrides.<server>.tools.<tool>]`, where a dotted server or tool name
+  needs no escaping; the flat `[mcp_overrides.<server>__<tool>]` that
+  `lev policy add` writes is also read, so editing an allowlist rule no longer
+  drops every override in the file. `lev policy list` prints the name each
+  override landed on.
 - A run that hands back a file a model or provider made (a mesh, an image)
   hands back its own file, not one an earlier run of the same agent left in
   the working directory under the same name. The run's part is looked for
