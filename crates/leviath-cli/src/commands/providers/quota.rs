@@ -301,6 +301,7 @@ mod tests {
         assert!(fake.infer(&request).await.is_err());
         assert_eq!(fake.count_tokens("", "").await, 1);
         assert_eq!(fake.max_context_tokens(""), 1);
+        assert_eq!(fake.name(), "codex");
         let _ = fake.capabilities("");
     }
 }
