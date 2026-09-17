@@ -216,6 +216,39 @@ async fn speech_is_the_reply_bytes_typed_by_the_header_and_priced_by_the_charact
     assert_eq!(untyped.parts[0].mime_type.as_str(), "audio/mpeg");
     assert_eq!(untyped.tokens_used.reported_cost_usd, None);
 
+    // gpt-4o-mini-tts is billed by the second of audio made, read from the
+    // file: one second of 128 kbps MP3 at $0.90 an hour.
+    let mut one_second = vec![0xFF, 0xF3, 0xC4, 0xC4];
+    one_second.resize(16_000, 0);
+    let url =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: audio/mpeg\r\n", one_second).await;
+    let per_second = run(
+        &endpoint(&url),
+        Kind::Speech,
+        &request("gpt-4o-mini-tts", "hello", vec![], Value::Null),
+        &unit(0.9, PriceUnit::AudioHour),
+        FAST,
+    )
+    .await
+    .expect("speech");
+    assert!((per_second.tokens_used.reported_cost_usd.unwrap() - 0.00025).abs() < 1e-12);
+    let url =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: audio/ogg\r\n", b"OggS".to_vec())
+            .await;
+    let unmeasured = run(
+        &endpoint(&url),
+        Kind::Speech,
+        &request("gpt-4o-mini-tts", "hello", vec![], Value::Null),
+        &unit(0.9, PriceUnit::AudioHour),
+        FAST,
+    )
+    .await
+    .expect("speech");
+    assert_eq!(
+        unmeasured.tokens_used.reported_cost_usd, None,
+        "a length it cannot read"
+    );
+
     let err = run(
         &endpoint("http://127.0.0.1:1"),
         Kind::Speech,

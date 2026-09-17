@@ -640,15 +640,22 @@ pub fn parse_litellm_units(body: &str, today: &str) -> Result<Vec<UnitRow>> {
             "video_generation" => number("output_cost_per_video_per_second")
                 .or_else(|| number("output_cost_per_second"))
                 .map(|usd| ("video_second", usd)),
-            "audio_speech" => {
-                number("input_cost_per_character").map(|usd| ("million_chars", usd * 1e6))
-            }
+            // Speech is priced by the character sent, or (gpt-4o-mini-tts) by
+            // the second of audio made, which the provider measures from the
+            // file since the reply counts nothing.
+            "audio_speech" => number("input_cost_per_character")
+                .map(|usd| ("million_chars", usd * 1e6))
+                .or_else(|| {
+                    number("output_cost_per_second").map(|usd| ("audio_hour", usd * 3600.0))
+                }),
             "audio_transcription" => {
                 number("input_cost_per_second").map(|usd| ("audio_hour", usd * 3600.0))
             }
-            "image_generation" | "image_edit" if !by_token => {
-                number("output_cost_per_image").map(|usd| ("image", usd))
-            }
+            // xAI's image rows carry the price of the image made under
+            // `input_cost_per_image`.
+            "image_generation" | "image_edit" if !by_token => number("output_cost_per_image")
+                .or_else(|| number("input_cost_per_image"))
+                .map(|usd| ("image", usd)),
             "chat" if id.starts_with("lyria") => {
                 number("output_cost_per_image").map(|usd| ("clip", usd))
             }
