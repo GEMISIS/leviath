@@ -1410,11 +1410,27 @@ tool             = "http_post"
 to               = ["https://hooks.internal/*"]
 max_sensitivity  = "internal"   # public | internal | private
 
-[mcp_overrides."tracker__create_issue"]
+[mcp_overrides.tracker.tools.create_issue]
 sensitivity = "internal"
 direction   = "outbound"
 clearance   = "internal"
 ```
+
+`[mcp_overrides]` reclassifies one [MCP](/docs/mcp) tool for the taint gate. Name the server, then
+`tools`, then the tool, each as its own key. A dot inside either name needs no special handling
+that way: `[mcp_overrides."my.tools".tools."find.all"]` is read as the server `my.tools` and the
+tool `find.all`.
+
+Leviath stores the override under the name the tool is advertised to the model as, which is
+`<server>__<tool>` with every character a provider refuses rewritten. That is the name the gate
+looks up, so `my.tools` and `find.all` above are classified as `my_tools__find_all`. `lev policy
+add` writes that flat name directly, and both spellings are read.
+
+> [!NOTE]
+> When two servers advertise the same tool, the second one gets a `_2` suffix, and only the daemon
+> knows which is which. An override for a tool in that position has to name the suffixed spelling.
+> `lev policy list` prints the name each override landed on, and `lev policy test <tool>` says how
+> one is classified.
 
 Scripted rules live as `.rhai` files in a `rules/` directory beside `policy.toml`, so
 `~/Library/Application Support/leviath/rules/` on macOS and `~/.config/leviath/rules/` on Linux. See

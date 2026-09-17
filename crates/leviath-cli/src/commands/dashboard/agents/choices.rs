@@ -143,5 +143,5 @@ pub(super) fn tool_choices(
 /// daemon advertises it under, `<server>__<tool>` with every character a
 /// provider refuses replaced.
 pub(super) fn mcp_tool_name(server: &str, tool: &str) -> String {
-    leviath_mcp::execution::sanitize_tool_name(&format!("{server}__{tool}"))
+    leviath_core::mcp_names::advertised_name(server, tool)
 }
