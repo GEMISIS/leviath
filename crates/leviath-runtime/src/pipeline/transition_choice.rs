@@ -259,7 +259,7 @@ pub(crate) fn dispatch_transition_choice(
             tokens,
         );
 
-        let request = routing_request(
+        let mut request = routing_request(
             &window,
             config,
             si,
@@ -274,8 +274,14 @@ pub(crate) fn dispatch_transition_choice(
             },
         );
 
+        // The routing question carries the stage's context, so it is held to
+        // the same retention rule and sent the same request fields.
+        providers
+            .0
+            .apply_retention_knobs(&si.provider_name, &mut request.extra);
         let job = InferenceJob {
             entity,
+            refused: providers.0.retention_refusal(&si.provider_name, &si.model),
             provider,
             request,
             permit,
@@ -344,6 +350,8 @@ type CollectTransitionChoiceQuery = (
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static mut StageLedger>,
+    Option<&'static StageInference>,
+    Option<&'static mut crate::pipeline::StageIoBuffer>,
 );
 
 /// Transition-choice collect: drain completed routing inferences, match each to a
@@ -373,6 +381,8 @@ pub(crate) fn collect_transition_choice(
             metadata,
             mut totals,
             mut ledger,
+            called,
+            buffer,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -410,9 +420,14 @@ pub(crate) fn collect_transition_choice(
                 // for a resume. Landing it at a stage boundary parks it too:
                 // failing here throws away every completed stage over a blip
                 // that is usually gone in seconds.
-                let provider = &stage_infs.0[cursor.index].provider_name;
-                if let Some((blocker, message)) =
-                    crate::pipeline::response::setup_park(&err, provider)
+                //
+                // The provider named is the one this call went to: the live
+                // component, which a failover earlier in the stage moved on
+                // from the one the stage resolved to.
+                let provider = called
+                    .map(|si| si.provider_name.as_str())
+                    .unwrap_or(&stage_infs.0[cursor.index].provider_name);
+                if let Some((blocker, message)) = crate::pipeline::park::setup_park(&err, provider)
                 {
                     tracing::warn!(
                         provider = %provider,
@@ -420,6 +435,11 @@ pub(crate) fn collect_transition_choice(
                         error = %err,
                         "pausing the run until the machine is fixed"
                     );
+                    if let Some(mut buffer) = buffer {
+                        buffer
+                            .logs
+                            .push((cursor.index, format!("[paused] {message}")));
+                    }
                     state.status = AgentStatus::Paused;
                     commands
                         .entity(outcome.entity)

@@ -432,6 +432,10 @@ pub enum ModelProviderKind {
     /// A server speaking OpenAI's chat API, reached natively with no script:
     /// llama.cpp, vLLM, LM Studio, or a gateway.
     OpenaiCompatible,
+    /// OpenAI's own API (the Responses route) at another host, under a name
+    /// of its own: an Azure resource or an API gateway in front of OpenAI.
+    /// Several can sit side by side, each with its own key.
+    Openai,
 }
 
 impl ModelProviderKind {
@@ -440,6 +444,7 @@ impl ModelProviderKind {
         match self {
             Self::Script => "script",
             Self::OpenaiCompatible => "openai-compatible",
+            Self::Openai => "openai",
         }
     }
 
@@ -448,6 +453,7 @@ impl ModelProviderKind {
         match text {
             "script" => Some(Self::Script),
             "openai-compatible" => Some(Self::OpenaiCompatible),
+            "openai" => Some(Self::Openai),
             _ => None,
         }
     }
@@ -544,12 +550,13 @@ const ENDPOINT_KEYS: &[&str] = &[
     "models",
     "retention",
     "zero_retention_request",
+    "auth_header",
 ];
 
 /// The keys an endpoint entry reads off `extra`, where a `flatten` puts them:
-/// what the host keeps of its requests, and which built-in provider's
-/// zero-retention request field it takes.
-const ENDPOINT_EXTRA_KEYS: &[&str] = &["retention", "zero_retention_request"];
+/// what the host keeps of its requests, which built-in provider's
+/// zero-retention request field it takes, and the header its key goes in.
+const ENDPOINT_EXTRA_KEYS: &[&str] = &["retention", "zero_retention_request", "auth_header"];
 
 impl ModelProviderConfig {
     /// The kind this entry is, with absent read as a script.
@@ -557,10 +564,27 @@ impl ModelProviderConfig {
         self.kind.unwrap_or_default()
     }
 
-    /// Whether this entry is an OpenAI-compatible endpoint rather than a
-    /// script.
+    /// Whether this entry is a host Leviath reaches natively (either
+    /// OpenAI-shaped kind) rather than a script.
     pub fn is_endpoint(&self) -> bool {
-        self.kind() == ModelProviderKind::OpenaiCompatible
+        self.kind() != ModelProviderKind::Script
+    }
+
+    /// Whether this entry is OpenAI's own API at a host of its own.
+    pub fn is_openai(&self) -> bool {
+        self.kind() == ModelProviderKind::Openai
+    }
+
+    /// The header the key goes in instead of `Authorization: Bearer`, when
+    /// the entry names one (`api-key` for an Azure key, or
+    /// `Ocp-Apim-Subscription-Key` for an API Management gateway).
+    pub fn auth_header(&self) -> Option<String> {
+        self.extra
+            .get("auth_header")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
     }
 
     /// What is wrong with this entry, if anything, named against `name`.
@@ -570,6 +594,31 @@ impl ModelProviderConfig {
     /// message should name the table to fix while the file is still in front
     /// of the person who wrote it.
     pub fn validate(&self, name: &str) -> anyhow::Result<()> {
+        let kind = self.kind().as_str();
+        if self.is_openai()
+            && self
+                .base_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        {
+            anyhow::bail!(
+                "[model_providers.{name}] has kind = \"openai\" but no base_url; set \
+                 base_url to the host's API root, such as \
+                 \"https://<resource>.openai.azure.com/openai/v1\""
+            );
+        }
+        if self.is_openai()
+            && self
+                .api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            anyhow::bail!(
+                "[model_providers.{name}] has kind = \"openai\" but no api_key; set the \
+                 key the host issued (add auth_header = \"api-key\" when the host wants \
+                 it in that header rather than as a bearer token)"
+            );
+        }
         if self.is_endpoint()
             && self
                 .base_url
@@ -580,6 +629,14 @@ impl ModelProviderConfig {
                 "[model_providers.{name}] has kind = \"openai-compatible\" but no \
                  base_url; set base_url to where the server listens, such as \
                  \"http://localhost:8080/v1\""
+            );
+        }
+        if self.is_endpoint()
+            && self.extra.contains_key("auth_header")
+            && self.auth_header().is_none()
+        {
+            anyhow::bail!(
+                "[model_providers.{name}] auth_header must name a header, such as \"api-key\""
             );
         }
         // `extra` exists to reach a script's `initialize`. An endpoint has no
@@ -597,7 +654,7 @@ impl ModelProviderConfig {
         if self.is_endpoint() && !keys.is_empty() {
             keys.sort_unstable();
             anyhow::bail!(
-                "[model_providers.{name}] has kind = \"openai-compatible\" and \
+                "[model_providers.{name}] has kind = \"{kind}\" and \
                  unknown key(s) {}; an endpoint reads only {}",
                 keys.join(", "),
                 ENDPOINT_KEYS.join(", ")

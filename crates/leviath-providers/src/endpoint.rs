@@ -62,6 +62,8 @@ pub struct EndpointProvider {
     api_key: Option<String>,
     /// Extra headers on every request, as the config wrote them.
     headers: Vec<(String, String)>,
+    /// The header the key goes in instead of `Authorization: Bearer`.
+    auth_header: Option<String>,
     /// Client-side rate limit, when the entry set one.
     rate_limiter: Option<RateLimiter>,
     /// `[model_capabilities]` entries, merged onto what the server said.
@@ -74,6 +76,9 @@ pub struct EndpointProvider {
     /// Models this server has refused a temperature for, so the next request
     /// omits it instead of paying the round trip again.
     temperature_unsupported: crate::provider::ModelMemo,
+    /// Models this server has refused `max_tokens` for, so the next request
+    /// sends the cap as `max_completion_tokens` straight away.
+    max_completion_tokens: crate::provider::ModelMemo,
     /// Models already warned about as falling back to the assumed window.
     warned_unknown: crate::provider::ModelMemo,
     /// What `GET /models` said, once priming has read it.
@@ -103,15 +108,24 @@ impl EndpointProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             headers,
+            auth_header: None,
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             configured_models: None,
             serves: Vec::new(),
             temperature_unsupported: Default::default(),
+            max_completion_tokens: Default::default(),
             warned_unknown: Default::default(),
             learned: Default::default(),
             request_timeout_secs: None,
         }
+    }
+
+    /// Send the key in `header` instead of as a bearer token (Azure's
+    /// `api-key`). `None` keeps the bearer.
+    pub fn with_auth_header(mut self, header: Option<String>) -> Self {
+        self.auth_header = header;
+        self
     }
 
     /// Bound the provider's own side calls by the entry's timeout.
@@ -181,7 +195,10 @@ impl EndpointProvider {
     fn request_headers(&self) -> Vec<(&str, String)> {
         let mut headers: Vec<(&str, String)> = Vec::with_capacity(self.headers.len() + 2);
         if let Some(key) = &self.api_key {
-            headers.push(("Authorization", format!("Bearer {key}")));
+            match &self.auth_header {
+                Some(name) => headers.push((name.as_str(), key.clone())),
+                None => headers.push(("Authorization", format!("Bearer {key}"))),
+            }
         }
         for (name, value) in &self.headers {
             headers.push((name.as_str(), value.clone()));
@@ -191,17 +208,21 @@ impl EndpointProvider {
     }
 
     /// The request body, with the temperature dropped for a model that has
-    /// refused one or that the operator marked as taking none.
+    /// refused one or that the operator marked as taking none, and the cap
+    /// under `max_completion_tokens` for a model that has refused `max_tokens`.
     fn build_body(&self, request: &InferenceRequest) -> serde_json::Value {
         let mut body = build_openai_request_body(request);
         if !self.capabilities(&request.model).supports_temperature {
             crate::provider::drop_temperature(&mut body);
         }
+        if self.max_completion_tokens.contains(&request.model) {
+            crate::provider::use_max_completion_tokens(&mut body);
+        }
         body
     }
 
-    /// POST `/chat/completions`, retrying once without a temperature when the
-    /// server refuses the one it was sent.
+    /// POST `/chat/completions`, resending with the field fixed when the
+    /// server refuses a temperature or `max_tokens`.
     async fn post_chat(
         &self,
         request: &InferenceRequest,
@@ -217,7 +238,12 @@ impl EndpointProvider {
             limiter: self.rate_limiter.as_ref(),
             timeout_secs: request.request_timeout_secs,
         }
-        .send_dropping_refused_temperature(&mut body, &request.model, &self.temperature_unsupported)
+        .send_adapting(
+            &mut body,
+            &request.model,
+            &self.temperature_unsupported,
+            Some(&self.max_completion_tokens),
+        )
         .await
     }
 
@@ -240,6 +266,7 @@ impl EndpointProvider {
     fn warn_if_unknown(&self, model: &str, resolved: &ModelCapabilities) {
         if resolved.limits_source != LimitsSource::Builtin
             || self.learned.contains(model)
+            || crate::capabilities::vendor_capabilities(model).is_some()
             || !self.warned_unknown.insert(model)
         {
             return;
@@ -342,7 +369,13 @@ impl Provider for EndpointProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        let base = self.learned.corrected(model, FALLBACK_CAPABILITIES);
+        // A compatible server fronting a vendor's model under its published id
+        // (Azure serving `gpt-5.5`) is that model, and the vendor's table
+        // sizes it the way the native provider would. Only an id no table
+        // knows falls back to the assumed window.
+        let assumed =
+            crate::capabilities::vendor_capabilities(model).unwrap_or(FALLBACK_CAPABILITIES);
+        let base = self.learned.corrected(model, assumed);
         let mut caps = match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
             None => {
@@ -506,6 +539,39 @@ mod tests {
         let keyless = plain.request_headers();
         assert_eq!(keyless.len(), 1);
         assert_eq!(keyless[0].0, "Content-Type");
+
+        // A host that wants the key in a header of its own gets it there,
+        // bare, and no bearer beside it.
+        let azure = EndpointProvider::new(
+            client(),
+            "azure",
+            "http://h/v1",
+            Some("secret".to_string()),
+            Vec::new(),
+        )
+        .with_auth_header(Some("api-key".to_string()));
+        assert_eq!(
+            azure.request_headers(),
+            vec![
+                ("api-key", "secret".to_string()),
+                ("Content-Type", "application/json".to_string()),
+            ]
+        );
+    }
+
+    /// Moving the cap leaves a body without `max_tokens`, or one that is not
+    /// an object, as it was, and keeps a `max_completion_tokens` already set.
+    #[test]
+    fn moving_the_cap_leaves_what_it_cannot_move() {
+        let mut none = serde_json::json!({"model": "m"});
+        crate::provider::use_max_completion_tokens(&mut none);
+        assert_eq!(none, serde_json::json!({"model": "m"}));
+        let mut not_an_object = serde_json::json!([1]);
+        crate::provider::use_max_completion_tokens(&mut not_an_object);
+        assert_eq!(not_an_object, serde_json::json!([1]));
+        let mut both = serde_json::json!({"max_tokens": 5, "max_completion_tokens": 9});
+        crate::provider::use_max_completion_tokens(&mut both);
+        assert_eq!(both, serde_json::json!({"max_completion_tokens": 9}));
     }
 
     // ─── capabilities ───────────────────────────────────────────────────────
@@ -523,6 +589,32 @@ mod tests {
         // The second ask is the same answer and no second warning.
         provider.capabilities("mystery");
         assert_eq!(provider.warned_unknown.len(), 1);
+    }
+
+    /// Azure serving `gpt-5.5` behind a compatible endpoint is the same model
+    /// the native provider sizes, and must not shrink to the assumed window.
+    #[test]
+    fn a_vendor_model_is_sized_from_the_vendors_table() {
+        let provider = provider_at("http://h/v1");
+        for model in ["gpt-5.5", "openai/gpt-5.5"] {
+            let caps = provider.capabilities(model);
+            assert_eq!(caps.max_context_tokens, 922_000, "{model}");
+            assert_eq!(caps.max_output_tokens, 128_000, "{model}");
+            assert!(!caps.supports_temperature, "{model}");
+        }
+        assert_eq!(
+            provider.capabilities("gpt-5.4-mini").max_context_tokens,
+            272_000
+        );
+        assert_eq!(
+            provider
+                .capabilities("anthropic/claude-opus-5")
+                .max_output_tokens,
+            crate::anthropic::table_capabilities("claude-opus-5").max_output_tokens
+        );
+        assert!(provider.warned_unknown.is_empty());
+        // A vendor prefix no table covers is still unknown.
+        assert_eq!(provider.capabilities("acme/gpt-5.5"), FALLBACK_CAPABILITIES);
     }
 
     #[test]
@@ -786,6 +878,54 @@ mod tests {
         assert!(!sent[1].contains("temperature"));
         assert!(!sent[2].contains("temperature"));
         assert!(!provider.capabilities("strict").supports_temperature);
+    }
+
+    /// Every current OpenAI reasoning model refuses `max_tokens` and names
+    /// the field it takes instead. The body is resent with the cap under that
+    /// name, and the model is remembered so the next request starts there.
+    #[tokio::test]
+    async fn a_refused_max_tokens_is_resent_as_max_completion_tokens() {
+        let _guard = always_on_tracing_guard();
+        let refusal = br#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let (url, bodies) = spawn_mock_sequence(vec![
+            (400, "Bad Request", refusal.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        let provider = provider_at(&url);
+        provider.infer(&request("gpt-5.5")).await.expect("retried");
+        provider.infer(&request("gpt-5.5")).await.expect("answered");
+
+        let sent = bodies.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(sent[0].contains("\"max_tokens\""));
+        for body in &sent[1..] {
+            assert!(!body.contains("\"max_tokens\""));
+            assert!(body.contains("\"max_completion_tokens\""));
+        }
+    }
+
+    /// A model that refuses both fields gets both fixed, one refusal at a
+    /// time, and neither retry undoes the other.
+    #[tokio::test]
+    async fn a_model_refusing_both_fields_is_adapted_to_both() {
+        let tokens = br#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let temperature = br#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.2 with this model.","param":"temperature","code":"unsupported_value"}}"#;
+        let (url, bodies) = spawn_mock_sequence(vec![
+            (400, "Bad Request", tokens.to_vec()),
+            (400, "Bad Request", temperature.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        provider_at(&url)
+            .infer(&request("o-strict"))
+            .await
+            .expect("adapted");
+        let sent = bodies.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(!sent[2].contains("temperature"));
+        assert!(sent[2].contains("\"max_completion_tokens\""));
     }
 
     #[tokio::test]

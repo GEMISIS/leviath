@@ -41,6 +41,9 @@ pub struct Endpoint {
     pub rate_limiter: Option<RateLimiter>,
     /// The request deadline, when one is configured.
     pub request_timeout_secs: Option<u64>,
+    /// The header a static key goes in instead of `Authorization: Bearer`,
+    /// for a host that wants it under its own name (Azure's `api-key`).
+    pub auth_header: Option<String>,
 }
 
 impl Endpoint {
@@ -53,6 +56,7 @@ impl Endpoint {
             extra_headers: Vec::new(),
             rate_limiter: None,
             request_timeout_secs: None,
+            auth_header: None,
         }
     }
 
@@ -86,7 +90,9 @@ impl Endpoint {
         }
     }
 
-    /// One request with `bearer`, uninterpreted.
+    /// One request with `bearer`, uninterpreted. The credential goes in
+    /// [`Self::auth_header`] when one is named, and as a bearer token
+    /// otherwise.
     async fn once(
         &self,
         builder: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
@@ -95,8 +101,11 @@ impl Endpoint {
         let request = crate::provider::apply_request_timeout(
             builder(&self.client),
             self.request_timeout_secs,
-        )
-        .bearer_auth(bearer);
+        );
+        let request = match &self.auth_header {
+            Some(name) => request.header(name.as_str(), bearer),
+            None => request.bearer_auth(bearer),
+        };
         crate::provider::with_extra_headers(request, &self.extra_headers)
             .send()
             .await

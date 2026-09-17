@@ -297,9 +297,10 @@ pub(crate) fn fail_stalled_dispatch(
         // provider went out of service. The three have three different fixes,
         // so they are three different answers rather than one "unavailable".
         use leviath_core::run_meta::SetupBlocker;
-        let last_reason = circuits
+        let last = circuits
             .as_ref()
-            .and_then(|c| c.last_reason(&si.provider_name));
+            .and_then(|c| c.last_failure(&si.provider_name));
+        let last_reason = last.map(|c| c.reason);
         let blocker = match stall.reason {
             StallReason::ProviderCircuitOpen => match last_reason {
                 Some(leviath_providers::UnavailableReason::CreditsExhausted) => {
@@ -307,10 +308,15 @@ pub(crate) fn fail_stalled_dispatch(
                 }
                 Some(leviath_providers::UnavailableReason::AuthFailed) => SetupBlocker::AuthFailed,
                 Some(leviath_providers::UnavailableReason::Forbidden) => SetupBlocker::Forbidden,
-                // Unreachable, or nothing recorded: the account and the key
-                // are both fine as far as anyone knows, so neither screen is
-                // the right one to send somebody to.
-                _ => SetupBlocker::ProvidersUnavailable,
+                // No answer: what the transport knew says whether the
+                // provider was never reached, timed out, or failed.
+                Some(leviath_providers::UnavailableReason::Unreachable) => {
+                    super::park::blocker_for_kind(last.and_then(|c| c.kind))
+                }
+                // Nothing recorded: the account and the key are both fine as
+                // far as anyone knows, so neither screen is the right one to
+                // send somebody to.
+                None => SetupBlocker::ProvidersUnavailable,
             },
             _ => SetupBlocker::ProviderMissing,
         };
@@ -335,6 +341,14 @@ pub(crate) fn fail_stalled_dispatch(
                 si.provider_name
             ),
             _ => stall.reason.give_up_message(&si.provider_name),
+        };
+        // The last failure's own words, when the breaker kept them: "out of
+        // service" alone leaves somebody guessing which of a dozen things it was.
+        let remedy = match last.and_then(|c| c.error.as_deref()) {
+            Some(error) if stall.reason == StallReason::ProviderCircuitOpen => {
+                format!("{remedy} (last error from '{}': {error})", si.provider_name)
+            }
+            _ => remedy,
         };
         // Every run parks, unattended included. Failing an unattended one on
         // the reasoning that a scheduler watches for a terminal status and
@@ -846,36 +860,56 @@ mod tests {
     #[test]
     fn each_kind_of_provider_failure_names_its_own_remedy() {
         use leviath_core::run_meta::SetupBlocker;
+        use leviath_providers::FailureKind;
         let cases = [
             (
                 leviath_providers::UnavailableReason::CreditsExhausted,
+                None,
                 SetupBlocker::CreditsExhausted,
                 "top up",
             ),
             (
                 leviath_providers::UnavailableReason::AuthFailed,
+                None,
                 SetupBlocker::AuthFailed,
                 "rejected the API key",
             ),
             (
                 leviath_providers::UnavailableReason::Forbidden,
+                None,
                 SetupBlocker::Forbidden,
                 "will not serve this model",
             ),
+            // No answer: the transport's kind says which way. Neither the
+            // account nor the key is known to be wrong in any of them.
             (
-                // Nothing anyone can point at: neither the account nor the key
-                // is known to be wrong, so neither screen is the right one.
                 leviath_providers::UnavailableReason::Unreachable,
-                SetupBlocker::ProvidersUnavailable,
+                Some(FailureKind::DnsFailure),
+                SetupBlocker::ProviderUnreachable,
                 "out of service",
             ),
+            (
+                leviath_providers::UnavailableReason::Unreachable,
+                Some(FailureKind::Timeout),
+                SetupBlocker::ProviderTimedOut,
+                "out of service",
+            ),
+            (
+                leviath_providers::UnavailableReason::Unreachable,
+                Some(FailureKind::ServerError),
+                SetupBlocker::ProviderFailed,
+                "last error from 'ghost': [server-error] boom",
+            ),
         ];
-        for (reason, expected, remedy) in cases {
+        for (reason, kind, expected, remedy) in cases {
             let mut world = World::new();
             world.insert_resource(StallTimeout(60));
             let mut circuits = super::super::circuit::ProviderCircuits::default();
             let policy = super::super::circuit::CircuitPolicy::default();
-            circuits.record_failure("ghost", reason, None, NOW - 1, &policy);
+            circuits.record_failure("ghost", reason, kind, NOW - 1, &policy);
+            if kind == Some(FailureKind::ServerError) {
+                circuits.note_error("ghost", "[server-error] boom".to_string());
+            }
             world.insert_resource(circuits);
             let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
 

@@ -191,6 +191,11 @@ pub enum ProviderError {
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
+    /// Zero data retention is on and the model keeps something: refused
+    /// before sending, never retried, failed over or held against the provider.
+    #[error("{0}")]
+    RetentionRefused(String),
+
     /// The prompt plus the reply budget cannot fit the model's context window.
     ///
     /// `used` is the prompt alone: the pre-flight guard refuses when
@@ -321,6 +326,7 @@ impl ProviderError {
             // same work and reads the same certificate store, so it fails the
             // same way - and so would every other provider.
             | ProviderError::ClientBuild(_)
+            | ProviderError::RetentionRefused(_)
             | ProviderError::Other(_) => false,
         }
     }

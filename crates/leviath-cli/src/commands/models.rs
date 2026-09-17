@@ -95,6 +95,10 @@ struct ModelRow {
     /// `[model_capabilities]` entry declares zero and the provider's own
     /// account says otherwise.
     retention_conflict: Option<String>,
+    /// Why this row's provider could not be asked, when it could not: the row
+    /// then comes from this build's table, not from the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listing_error: Option<String>,
 }
 
 /// Arguments for `lev models show`.
@@ -278,6 +282,9 @@ async fn list_with_registry_within(
     let mut live_providers: Vec<String> = Vec::new();
     // What each provider said, for the shared record of provider checks.
     let mut answers: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
+    // Every provider that could not be asked, and why, in the words
+    // `lev setup` and `lev doctor` use for the same failure.
+    let mut failures: Vec<(String, String)> = Vec::new();
     if !args.offline {
         registry.prime_capabilities(prime_within, &[]).await;
         // What a provider reads about retention from its account (Bedrock's
@@ -322,22 +329,16 @@ async fn list_with_registry_within(
                     live_providers.push(provider_name);
                 }
                 Ok(Err(e)) => {
-                    eprintln!(
-                        "Warning: could not fetch models from '{}': {}; showing this build's table",
-                        provider_name, e
-                    );
-                    answers.push((
-                        provider_name.clone(),
-                        Err(crate::commands::setup::verify::describe(&e.to_string())),
-                    ));
+                    answers.push((provider_name.clone(), Err(e.describe())));
+                    failures.push((provider_name, e.describe()));
                 }
-                Err(_) => {
-                    eprintln!(
-                        "Warning: '{}' did not list its models within {}s; showing this build's table",
-                        provider_name,
+                Err(_) => failures.push((
+                    provider_name,
+                    format!(
+                        "[timeout] did not list its models within {}s",
                         prime_within.as_secs()
-                    );
-                }
+                    ),
+                )),
             }
         }
     }
@@ -431,6 +432,10 @@ async fn list_with_registry_within(
             .into_iter()
             .zip(retention)
             .map(|(e, (retention, retention_conflict))| ModelRow {
+                listing_error: failures
+                    .iter()
+                    .find(|(name, _)| name == &e.provider)
+                    .map(|(_, why)| why.clone()),
                 retention,
                 retention_conflict,
                 capabilities_overridden: overridden.contains(&e.id),
@@ -451,7 +456,7 @@ async fn list_with_registry_within(
             "{}",
             serde_json::to_string_pretty(&rows).expect("a model listing serializes")
         );
-        return Ok(());
+        return every_listing_failed(&failures, &live_providers);
     }
 
     if entries.is_empty() {
@@ -472,12 +477,32 @@ async fn list_with_registry_within(
                  model Leviath knows about)"
             );
         }
-        return Ok(());
+        marks::print_failures(&failures);
+        return every_listing_failed(&failures, &live_providers);
     }
 
     let conflicts: Vec<Option<String>> = retention.into_iter().map(|(_, c)| c).collect();
     print_listing(&entries, &overridden, &live_providers, &conflicts);
-    Ok(())
+    marks::print_failures(&failures);
+    every_listing_failed(&failures, &live_providers)
+}
+
+/// The exit status once the listing has printed: an error when providers were
+/// asked and not one of them answered, so a script or CI check sees a broken
+/// setup rather than a healthy-looking table built from this binary.
+fn every_listing_failed(failures: &[(String, String)], live: &[String]) -> anyhow::Result<()> {
+    match failures.is_empty() || !live.is_empty() {
+        true => Ok(()),
+        false => anyhow::bail!(
+            "no provider could list its models ({}); the rows shown come from this \
+             build's table",
+            failures
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// The listing as a table, with a trailing line saying which rows are the
@@ -746,7 +771,8 @@ async fn show_with_registry_within(
                 Ok(Err(e)) => {
                     eprintln!(
                         "Warning: could not fetch models from '{}': {}",
-                        provider_name, e
+                        provider_name,
+                        e.describe()
                     );
                 }
                 Err(_) => {
@@ -1732,10 +1758,15 @@ mod tests {
             mime: leviath_providers::ModelMime::new(&["text/*", "image/*"], &["text/*"]),
             retention: leviath_providers::retention::builtin("p", "m"),
             retention_conflict: None,
+            listing_error: None,
         };
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
         assert_eq!(value["id"], serde_json::json!("m"));
+        assert!(
+            value.get("listing_error").is_none(),
+            "absent when the listing answered"
+        );
         assert_eq!(value["capabilities_overridden"], serde_json::json!(true));
         assert!(value["capabilities"]["supports_tools"].is_boolean());
         assert_eq!(value["learned"], serde_json::json!(true));
@@ -1972,9 +2003,10 @@ mod tests {
                 );
                 assert_eq!(cache.model_ids("mock"), ["mock-recorded"]);
 
-                list_with_registry(live_args(), &mock_registry("mock", vec![], true))
+                let err = list_with_registry(live_args(), &mock_registry("mock", vec![], true))
                     .await
-                    .expect("a failed listing still prints the table");
+                    .expect_err("every listing failed, so the command does too");
+                assert!(err.to_string().contains("no provider could list"), "{err}");
                 let cache = leviath_providers::CapabilityCache::load(&path).expect("recorded");
                 assert_eq!(
                     cache.check("mock").expect("recorded").outcome,
@@ -2244,10 +2276,13 @@ mod tests {
         .await;
     }
 
+    /// A provider that cannot list is reported, and when it was the only one
+    /// asked the command fails, so a broken setup is not a healthy-looking
+    /// table with exit status 0. The JSON rows still print and carry why.
     #[tokio::test]
-    async fn list_remote_provider_error_warns_and_continues() {
+    async fn list_remote_provider_error_is_reported_and_fails_the_command() {
         crate::config::with_isolated_config_path_async(
-            "models-list_remote_provider_error_warns_and_continues",
+            "models-list_remote_provider_error_is_reported",
             |_fake_dir| async move {
                 let args = ListArgs {
                     remote: true,
@@ -2258,8 +2293,32 @@ mod tests {
                     accepts: None,
                     produces: None,
                 };
+                // Anthropic has rows in this build's table, so its rows are
+                // the ones that say why they were not asked.
+                let json = ListArgs {
+                    remote: true,
+                    offline: false,
+                    provider: Some("anthropic".to_string()),
+                    all: false,
+                    json: true,
+                    accepts: None,
+                    produces: None,
+                };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
-                assert!(result.is_ok());
+                assert!(result.is_err());
+                let result =
+                    list_with_registry(json, &mock_registry("anthropic", vec![], true)).await;
+                assert!(result.is_err());
+                assert!(!every_listing_failed(&[], &[]).is_err());
+                assert!(
+                    every_listing_failed(
+                        &[("a".to_string(), "down".to_string())],
+                        &["b".to_string()]
+                    )
+                    .is_ok(),
+                    "one provider answering is a usable listing"
+                );
+                marks::print_failures(&[("a".to_string(), "down".to_string())]);
             },
         )
         .await;

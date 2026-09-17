@@ -160,8 +160,30 @@ that parked because its provider ran out of credits moves to whatever the file n
 `lev resume` it.
 
 A run that gets past that and still can't dispatch (say you removed a provider key after it
-started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
-records the reason. Set the limit to `0` to wait indefinitely instead.
+started, or every provider it can use is out of service) is paused after
+`[limits] stall_timeout_secs`, 60 seconds by default, so nothing it did is lost. Set the limit to
+`0` to wait indefinitely instead.
+
+## A run says `paused` and I did not pause it
+
+Leviath pauses a run when something outside it has to change first. `lev ps` shows which kind of
+problem it is in the STATUS column and, under the table, what happened and what to do, with the
+provider's own error. The stage log in `lev dash` has the same line, starting `[paused]`. Fix it,
+then `lev resume` the run.
+
+| STATUS | What happened | What to do |
+|---|---|---|
+| `paused: needs provider` | The stage names a provider this install does not have | Add it with `lev setup` |
+| `paused: needs credits` | The account is out of credits | Top it up |
+| `paused: needs key` | The provider rejected the API key | Replace it with `lev setup` |
+| `paused: needs access` | The key cannot use this model | Check the account's plan |
+| `paused: provider unreachable` | No connection: the name did not resolve, the port refused, or TLS failed | Check the network and the provider's `base_url` |
+| `paused: provider timed out` | The provider was reached and did not answer in time | Resume to try again; a very large request may need a longer `request_timeout_secs` |
+| `paused: provider failed` | The provider was reached and failed: a server error, or a reply that stopped part-way | Resume once the provider recovers |
+| `paused: needs providers` | Every provider the stage can use is out of service, for reasons that do not agree | Read the line under the table |
+
+`lev doctor`, `lev setup` and `lev models list` print a provider failure in the same words, so the
+error in a paused run's line is the one to look up.
 
 Waiting for a busy model is *not* this. An agent queued behind other in-flight requests to the same
 model is working as intended and is never failed, however long the queue takes. Raise

@@ -12,8 +12,9 @@ Every prompt a run sends carries your task, your files, and whatever the agent r
 way. Once the reply is back, the provider may keep a copy for days, for abuse review, or for
 nothing at all, and nothing in the request tells you which. Leviath keeps a table of what each
 provider keeps, reads the settings a provider exposes, and lets you ask for zero retention
-everywhere. With the switch on, a stage whose model would keep something is refused before a
-request goes out, in the provider's own words.
+everywhere. With the switch on, a model that would keep something is never sent a request: not
+a stage's, not the run's title call or a compaction summary, and not `lev test` or the
+`lev doctor` probe. Each is refused in the same words.
 
 ```bash
 lev providers retention              # what each configured provider keeps, and who controls it
@@ -109,6 +110,11 @@ zero`, the setup wizard's **Zero data retention** row, or `lev setup --zero-rete
 A stage is judged by the model it would start on. Its fallbacks are judged the same way, and one
 that keeps something is dropped from failover, with a line in the stage's log saying so. Nothing
 is rerouted: an author who pinned a model would not see it swapped for one at another vendor.
+
+The switch holds past the spawn too. A run's title is written by the first model in its title
+chain that keeps nothing, and a blueprint whose `compaction_config` names a model that keeps
+something is refused at spawn. Turning the switch on under a running daemon refuses the next call
+of a run already going, which then ends with the reason rather than sending it.
 
 `lev validate` says the same thing before a run does. A stage whose model would be refused is a
 `retention-not-zero` error, and a fallback that would be dropped is a `retention-fallback-dropped`

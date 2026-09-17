@@ -841,7 +841,7 @@
     },
     "model_providers": {
       "type": "object",
-      "description": "Custom providers, keyed by the name an agent references. Without a kind, overrides for a Rhai script provider (any key not listed here is forwarded verbatim to the script's initialize()); with kind = \"openai-compatible\", a native provider for the server at base_url.",
+      "description": "Custom providers, keyed by the name an agent references. Without a kind, overrides for a Rhai script provider (any key not listed here is forwarded verbatim to the script's initialize()); with kind = \"openai-compatible\", a native provider for the server at base_url; with kind = \"openai\", OpenAI's own API at another host (an Azure resource or a gateway).",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": true,
@@ -849,9 +849,14 @@
           "kind": {
             "enum": [
               "script",
-              "openai-compatible"
+              "openai-compatible",
+              "openai"
             ],
-            "description": "What backs the entry. Absent means script. openai-compatible requires base_url."
+            "description": "What backs the entry. Absent means script. openai-compatible requires base_url; openai requires base_url and api_key."
+          },
+          "auth_header": {
+            "type": "string",
+            "description": "The header the api_key is sent in instead of Authorization: Bearer, such as api-key for an Azure key or Ocp-Apim-Subscription-Key for an API Management gateway."
           },
           "script": {
             "type": "string"
@@ -960,6 +965,11 @@
       "type": "boolean",
       "default": true,
       "description": "Whether lev asks GitHub for a newer release once a day and says so under a command's output. Set false where reaching out is the problem rather than the answer."
+    },
+    "load_dotenv": {
+      "type": "boolean",
+      "default": false,
+      "description": "Read a .env file from the directory lev runs in. Off by default, since that directory is often a repository someone else wrote. Only ./.env is read, a variable already set keeps its value, and names that steer lev (LEVIATH_*, PATH, EDITOR and the like) are skipped."
     },
     "mime": {
       "type": "object",

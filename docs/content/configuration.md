@@ -42,6 +42,7 @@ taint_tracking       = false         # global master switch, see below
 batch_tool_hint      = true          # global master switch, see below
 shell_hint           = true          # global master switch, see below
 update_check         = true          # ask whether a newer release exists
+load_dotenv          = false         # read ./.env from the directory lev runs in
 ```
 
 | Key | Type | Default | Notes |
@@ -57,6 +58,7 @@ update_check         = true          # ask whether a newer release exists
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
 | `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on Windows today |
 | `update_check` | bool | `true` | Lets this copy ask whether a newer release exists on its own channel, at most once an hour. Set `false` on an air-gapped machine, or anywhere an outbound request nobody asked for is the problem. Off, `lev update` still says how to update and [`GET /api/update`](/docs/api#asking-how-to-upgrade) still answers; both report `null` for whether anything newer exists |
+| `load_dotenv` | bool | `false` | Reads a `.env` file from the directory `lev` runs in. Off unless you turn it on, because that directory is often a repository someone else wrote. See [environment variables](#environment-variables) |
 
 All three of those cascade: a stage setting beats an agent setting, which beats this file.
 
@@ -1038,11 +1040,12 @@ api_key  = "..."                   # optional; sent as a bearer token
 headers  = { "X-Org" = "research" }  # optional; extra headers on every request
 
 [model_providers.azure]
-kind      = "openai-compatible"
-base_url  = "https://my-resource.openai.azure.com/openai/v1"
-headers   = { api-key = "..." }      # Azure authenticates with this header, not a bearer token
-serves    = ["gpt-5.5"]
-retention = "zero"                   # only with Azure's abuse-monitoring exemption approved
+kind        = "openai-compatible"
+base_url    = "https://my-resource.openai.azure.com/openai/v1"
+api_key     = "..."
+auth_header = "api-key"              # Azure takes the key in this header, not as a bearer token
+serves      = ["gpt-5.5"]
+retention   = "zero"                 # only with Azure's abuse-monitoring exemption approved
 zero_retention_request = "openai"    # send store = false when zero_retention is on
 ```
 
@@ -1056,7 +1059,10 @@ endpoint has nowhere to send them), so a misspelled `models` or `headers` is an 
 entry rather than a catalogue or header that quietly never arrives.
 
 The fourth entry above is Azure OpenAI, whose `/openai/v1/` surface speaks OpenAI's chat API and
-authenticates with an `api-key` header. Two keys on an endpoint are about
+takes its key in an `api-key` header. `auth_header` names the header `api_key` goes in, in place of
+`Authorization: Bearer`; leave it out for a server that takes a bearer token. To reach Azure through
+OpenAI's Responses API instead, with file uploads and reasoning replay, use
+[`kind = "openai"`](#openai-at-another-host). Two keys on an endpoint are about
 [data retention](/docs/data-retention). `retention` says what the host keeps, which Leviath
 cannot know for a custom host: Azure keeps prompts up to 30 days for abuse monitoring unless the
 exemption is approved for your subscription, so write `zero` only then.
@@ -1065,8 +1071,11 @@ host takes when `[providers] zero_retention` is on: `openai` sends `store = fals
 the `provider.zdr` routing fields. Without it an endpoint is sent neither, because Leviath cannot
 tell an Azure deployment from a llama.cpp server that would reject the field.
 
-Streaming and tool calls are on. Each request carries the temperature the stage asks for, and a
-server that refuses one is asked again without it and remembered for the rest of the process.
+Streaming and tool calls are on. Each request carries the temperature the stage asks for and its
+output cap as `max_tokens`. A server that refuses the temperature is asked again without it. One
+that refuses `max_tokens` and asks for `max_completion_tokens`, which is how OpenAI's reasoning
+models answer, is asked again with the cap under that name. Either way the model is remembered for
+the rest of the process, so later requests start in the shape it takes.
 
 **Detection.** At start-up Leviath asks each endpoint `GET /models` and uses the ids it lists,
 with no filtering: `lev models list --provider llama-cpp` and `GET /api/models` show them, and the
@@ -1084,8 +1093,10 @@ models   = ["mixtral-8x22b", "llama-3-70b"]
 With neither a listing nor a `models` list the provider does not say what it serves, and a
 blueprint that pins a model on it is sent through rather than refused.
 
-**Windows and cost.** A `/models` listing says nothing reliable about context windows, so an
-endpoint's models are assumed to hold 128 000 tokens until a
+**Windows and cost.** A `/models` listing says nothing reliable about context windows. A model
+served under a vendor's own id (`gpt-5.5`, or `openai/gpt-5.5` through a gateway) is sized from
+that vendor's table, the same as the native provider sizes it. Any other id, such as an Azure
+deployment you named yourself, is assumed to hold 128 000 tokens until a
 [`[model_capabilities]`](#model_capabilitiesmodel_id) entry names the real figure; `lev models
 show <model>` reports which it is. Token counts are the local estimate, and cost is reported as
 unknown unless the same entry sets a price.
@@ -1094,6 +1105,37 @@ Ollama keeps its own native provider ([`[providers] ollama_base_url`](#providers
 going through this kind, because Leviath reads a model's context window and tool support from
 Ollama's `/api/show`, which the OpenAI-style shim does not report. Pointing an
 `openai-compatible` entry at Ollama works, but loses that.
+
+## OpenAI at another host
+
+`[providers] openai_base_url` points the built-in `openai` provider at one other host. When you
+have more than one, such as two Azure resources behind different API Management gateways with
+different keys, give each its own `[model_providers.<name>]` entry with `kind = "openai"`. Each is
+OpenAI's own provider, speaking the Responses API, under the name you give it:
+
+```toml
+[model_providers.azure-east]
+kind        = "openai"
+base_url    = "https://east-resource.openai.azure.com/openai/v1"
+api_key     = "..."
+auth_header = "api-key"
+
+[model_providers.azure-west]
+kind     = "openai"
+base_url = "https://west-gateway.azure-api.net/openai/v1"
+api_key  = "..."
+auth_header = "Ocp-Apim-Subscription-Key"
+serves   = ["prod-gpt55"]               # a deployment name, so a bare model name can route here
+```
+
+A blueprint reaches them as `azure-east/gpt-5.5` and `azure-west/prod-gpt55`. `base_url` and
+`api_key` are required. `auth_header` names the header the key goes in; without it the key is sent
+as a bearer token, which Azure's `/openai/v1/` surface also accepts. `headers`, `rate_limit`,
+`serves`, `retention` and `zero_retention_request` mean what they mean on an
+[OpenAI-compatible entry](#openai-compatible-endpoints), and `models` routes the same way `serves`
+does. A model is sized from OpenAI's table by its id, so a deployment you named yourself needs a
+[`[model_capabilities]`](#model_capabilitiesmodel_id) entry. Azure keeps prompts for abuse
+monitoring unless your subscription has the exemption, so write `retention = "zero"` only then.
 
 ## `[[mcp_servers]]`
 
@@ -1186,11 +1228,14 @@ the cap when it starts. See [the daemon page](/docs/daemon#where-it-logs) for wh
 
 ## Environment variables
 
-Leviath reads a `.env` file from the working directory unless `LEVIATH_SKIP_DOTENV` is set. Only
-that one file, never a walk up the tree, and a variable you have already exported always wins.
+Leviath can read provider keys from a `.env` file in the directory you run `lev` in. It does not
+unless you ask: set `load_dotenv = true` at the top of `config.toml` (the **Load ./.env** switch on
+the advanced screen of `lev setup`), or run one command with `LEVIATH_LOAD_DOTENV=1`.
+`LEVIATH_SKIP_DOTENV` turns it off whatever the other two say. Only that one file is read, never a
+walk up the tree, and a variable you have already exported always wins.
 
-A cloned repository *is* the working directory, so its `.env` is content somebody else wrote.
-Credentials from it load normally, which is what the feature is for. The handful of names that
+It is off by default because a cloned repository *is* the working directory, so its `.env` is
+content somebody else wrote. With it on, credentials from it load normally. The handful of names that
 decide where configuration comes from, or what gets executed, are ignored instead, with a warning
 naming them. That covers the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, and the
 `LD_*` and `DYLD_*` loader variables. It also covers the interpreter and tool hook variables that
@@ -1204,7 +1249,8 @@ Export those yourself if you meant them.
 |---|---|
 | `LEVIATH_HOME` | Redirects the whole data root. Every home-relative path honors it, so an isolated test or a second install works |
 | `LEVIATH_CONFIG_PATH` | Path to an exact config file, bypassing the default location |
-| `LEVIATH_SKIP_DOTENV` | Set to skip `.env` loading |
+| `LEVIATH_LOAD_DOTENV` | `1` or `true` reads `./.env` for this command, as `load_dotenv = true` does |
+| `LEVIATH_SKIP_DOTENV` | Set to skip `.env` loading, whatever `load_dotenv` says |
 | `LEVIATH_RUNS_DIR` | Overrides where run directories are written |
 | `LEVIATH_API_TOKEN` | Bearer token for `lev serve`. The server refuses to start without one |
 | `LEVIATH_CONTROL_TIMEOUT_SECS` | Deadline for one control-socket request |

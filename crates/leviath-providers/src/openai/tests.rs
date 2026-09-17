@@ -94,10 +94,13 @@ fn the_table_sizes_each_family() {
         "gpt-5.5 takes only its default"
     );
     assert!(gpt55.supports_streaming);
-    assert_eq!(gpt55.max_context_tokens, 1_050_000);
+    assert_eq!(gpt55.max_context_tokens, 922_000);
     assert_eq!(gpt55.max_output_tokens, 128_000);
-    for family in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5-mini"] {
+    for family in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5-mini"] {
         assert_eq!(provider.max_context_tokens(family), 272_000, "{family}");
+    }
+    for large in ["gpt-5.4", "gpt-5.4-pro"] {
+        assert_eq!(provider.max_context_tokens(large), 922_000, "{large}");
     }
     assert_eq!(provider.max_context_tokens("gpt-5.6-terra"), 922_000);
     let gpt41 = provider.builtin_capabilities("gpt-4.1");
@@ -550,4 +553,33 @@ async fn a_callers_own_non_object_reasoning_and_text_are_left_as_written() {
     let body = sent_json(&bodies.lock().unwrap()[0]);
     assert_eq!(body["reasoning"], "high");
     assert_eq!(body["text"], "plain");
+}
+
+/// A second host of OpenAI's API: registered under its own name, listing
+/// under that name, sending its key in the header it was told to, and
+/// routing the deployment names it serves.
+#[tokio::test]
+async fn a_named_host_uses_its_own_name_header_and_deployments() {
+    let listing = br#"{"data":[{"id":"gpt-5.5","created":1}]}"#;
+    let (url, recorded) = spawn_mock_recorder(200, "OK", listing.to_vec()).await;
+    let provider = OpenAIProvider::new(client(), "azure-key".to_string())
+        .with_base_url(Some(url))
+        .named("azure-east")
+        .with_auth_header(Some("api-key".to_string()))
+        .with_serves(vec!["prod-gpt55".to_string()]);
+    assert_eq!(provider.name(), "azure-east");
+    assert_eq!(
+        provider.serves_model("prod-gpt55").as_deref(),
+        Some("prod-gpt55")
+    );
+    assert_eq!(provider.serves_model("gpt-5.5").as_deref(), Some("gpt-5.5"));
+    assert_eq!(provider.serves_model("llama"), None);
+
+    let listed = provider.list_models().await.expect("lists");
+    assert_eq!(listed[0].provider, "azure-east");
+    let catalog = provider.served_catalog().expect("primed");
+    assert!(catalog.contains(&"prod-gpt55".to_string()));
+    let request = recorded.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(request.contains("api-key: azure-key"));
+    assert!(!request.contains("authorization"));
 }

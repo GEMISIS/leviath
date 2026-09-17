@@ -94,6 +94,10 @@ pub(crate) struct Circuit {
     pub opened_at: Option<i64>,
     /// What the provider last complained about, for the operator-facing text.
     pub reason: UnavailableReason,
+    /// What the transport knew about the last failure, when it knew anything.
+    pub kind: Option<FailureKind>,
+    /// The last failure's own message, for a run parked because of it.
+    pub error: Option<String>,
 }
 
 /// What an open circuit looks like to a client (`lev ps`, `--json`, telemetry).
@@ -155,9 +159,12 @@ impl ProviderCircuits {
             consecutive_failures: 0,
             opened_at: None,
             reason,
+            kind,
+            error: None,
         });
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.reason = reason;
+        entry.kind = kind;
         let threshold = policy.threshold_for(kind);
         if threshold == 0 {
             return false; // breaker disabled; keep counting for the record
@@ -171,18 +178,26 @@ impl ProviderCircuits {
         !was_open && entry.opened_at.is_some()
     }
 
+    /// Keep `error` as what `provider` last failed with. A provider with no
+    /// failure on record is left alone: only a counted failure has a circuit
+    /// to hang the words on.
+    pub(crate) fn note_error(&mut self, provider: &str, error: String) {
+        if let Some(circuit) = self.0.get_mut(provider) {
+            circuit.error = Some(error);
+        }
+    }
+
+    /// The last failure recorded against `provider`, open or not: why, what
+    /// the transport knew, and the message. The stall watchdog asks, to tell
+    /// "out of credits" from a rejected key from a provider that went quiet,
+    /// and to say what it last answered.
+    pub(crate) fn last_failure(&self, provider: &str) -> Option<&Circuit> {
+        self.0.get(provider)
+    }
+
     /// Forget `provider`'s failures. Any success proves it is serving again.
     pub(crate) fn record_success(&mut self, provider: &str) {
         self.0.remove(provider);
-    }
-
-    /// The reason of the last recorded failure for `provider`, open or not.
-    ///
-    /// The stall watchdog asks this to tell "out of credits" apart from the
-    /// other ways a provider leaves service: the former pauses the run for a
-    /// resume instead of failing it.
-    pub(crate) fn last_reason(&self, provider: &str) -> Option<UnavailableReason> {
-        self.0.get(provider).map(|c| c.reason)
     }
 
     /// Forget every recorded failure, so the next dispatch is a real probe.
@@ -486,15 +501,28 @@ mod tests {
     }
 
     #[test]
-    fn last_reason_reports_the_most_recent_failure_or_nothing() {
+    fn last_failure_reports_the_most_recent_failure_or_nothing() {
         let mut circuits = ProviderCircuits::default();
-        assert_eq!(circuits.last_reason("p"), None);
+        assert_eq!(circuits.last_failure("p"), None);
+        circuits.note_error("p", "ignored: nothing counted yet".to_string());
+        assert_eq!(circuits.last_failure("p"), None);
         circuits.record_failure("p", UnavailableReason::CreditsExhausted, None, 0, &policy());
         assert_eq!(
-            circuits.last_reason("p"),
+            circuits.last_failure("p").map(|c| c.reason),
             Some(UnavailableReason::CreditsExhausted),
             "one failure is enough for the reason, open or not"
         );
+        circuits.record_failure(
+            "p",
+            UnavailableReason::Unreachable,
+            Some(FailureKind::Timeout),
+            1,
+            &policy(),
+        );
+        circuits.note_error("p", "[timeout] waiting".to_string());
+        let last = circuits.last_failure("p").expect("recorded");
+        assert_eq!(last.kind, Some(FailureKind::Timeout));
+        assert_eq!(last.error.as_deref(), Some("[timeout] waiting"));
     }
 
     #[test]
@@ -509,7 +537,7 @@ mod tests {
         assert!(circuits.is_open("openrouter", now, &policy()));
         circuits.reset();
         assert!(!circuits.is_open("openrouter", now, &policy()));
-        assert_eq!(circuits.last_reason("openrouter"), None);
+        assert_eq!(circuits.last_failure("openrouter"), None);
     }
 
     #[test]

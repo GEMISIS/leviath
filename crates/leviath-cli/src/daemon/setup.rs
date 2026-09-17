@@ -166,7 +166,7 @@ pub(crate) async fn setup_daemon_host_with(
     // name silently gets a 128 000-token window, with every percentage region
     // budget sized against it. Awaited rather than spawned so the first run has
     // the answer instead of racing it; failures are warnings.
-    providers
+    let prime_failures = providers
         .prime_capabilities(
             std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
             // The machine's default, so a script provider named there can
@@ -186,6 +186,7 @@ pub(crate) async fn setup_daemon_host_with(
         cache_path.as_deref(),
         chrono::Utc::now().timestamp(),
         &crate::provider_checks::fingerprints(cache_path.as_deref(), &config),
+        &prime_failures,
     );
     // Keeps that registry in step with `config.toml` from here on: a run
     // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves

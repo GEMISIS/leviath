@@ -410,6 +410,13 @@ async fn run_test_case(
             provider_name
         )
     })?;
+    // A test sends the case's input the way a run would, so zero retention
+    // refuses it in the same words the spawn gate uses.
+    if let Some(refusal) = registry.retention_refusal(provider_name, model_name) {
+        anyhow::bail!("stage '{}' names {refusal}", stage.name);
+    }
+    let mut extra = serde_json::Value::Null;
+    registry.apply_retention_knobs(provider_name, &mut extra);
 
     // Build a standalone context window from the blueprint's layout, seeding the
     // test input as the task, then assemble a single inference request. This
@@ -447,7 +454,7 @@ async fn run_test_case(
         // unsatisfiable: the model cannot call a tool it was never offered, so
         // every such assertion failed whatever the agent did.
         tools: stage_tools(stage),
-        extra: serde_json::Value::Null,
+        extra,
         request_timeout_secs: None,
     };
 
@@ -1737,6 +1744,40 @@ max_tokens = 4000
         };
         let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
+    }
+
+    /// A case is refused, not sent, when zero retention is on and the stage's
+    /// model keeps something; with it off the same case runs.
+    #[tokio::test]
+    async fn run_test_case_is_refused_by_zero_retention() {
+        let blueprint = blueprint_with_tool_results_region();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "hello world".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+        let registry = registry.with_retention(leviath_providers::retention::RetentionSettings {
+            zero_requested: true,
+            ..Default::default()
+        });
+        let tc = TestCase {
+            name: "refused".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let err = run_test_case(&blueprint, &registry, &tc, &Default::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("which does not run with zero data retention"),
+            "{err}"
+        );
     }
 
     /// Covers `fs::read_to_string(&manifest_path)?` failing by making

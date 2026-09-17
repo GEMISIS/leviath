@@ -11,7 +11,7 @@ use super::*;
 /// the wizard appends (see `Wizard::rebuild_advanced_models`). Their indices
 /// are what `apply_limits_fields` matches on, so the two are kept in step by
 /// a test rather than by counting.
-pub(super) const LIMITS_FIXED: usize = 12;
+pub(super) const LIMITS_FIXED: usize = 13;
 
 /// The Limits screen's fields, seeded from a config.
 pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
@@ -43,7 +43,7 @@ pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
         },
         Field {
             label: "Stall timeout (seconds)",
-            help: "Fail a run that can never dispatch (unconfigured provider). 0 waits forever.",
+            help: "Pause a run that can never dispatch (unconfigured or out-of-service provider) for a `lev resume`. 0 waits forever.",
             value: FieldValue::Number(Some(config.limits.stall_timeout_secs)),
         },
         Field {
@@ -88,6 +88,11 @@ pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
                     .max_run_write_bytes
                     .unwrap_or(SUGGESTED_RUN_WRITE_BYTES),
             )),
+        },
+        Field {
+            label: "Load ./.env",
+            help: "Read provider keys from a .env file in the directory lev runs in. Off by default: that directory is often a repository someone else wrote.",
+            value: FieldValue::Bool(config.load_dotenv),
         },
     ]
 }
@@ -159,6 +164,7 @@ pub(super) fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             // stores `None` rather than reinstating a number they just removed.
             (10, FieldValue::Number(n)) => config.limits.max_tool_call_write_bytes = *n,
             (11, FieldValue::Number(n)) => config.limits.max_run_write_bytes = *n,
+            (12, FieldValue::Bool(b)) => config.load_dotenv = *b,
             // The two model fields past here are read by `build_config` itself.
             _ => {}
         }
@@ -174,5 +180,17 @@ mod tests {
     #[test]
     fn the_fixed_field_count_matches_the_form() {
         assert_eq!(limits_fields(&Config::default()).len(), LIMITS_FIXED);
+    }
+
+    /// The `.env` switch starts off and round-trips through the form.
+    #[test]
+    fn the_dot_env_switch_is_off_and_writes_back() {
+        let mut fields = limits_fields(&Config::default());
+        let mut config = Config::default();
+        apply_limits_fields(&mut config, &fields);
+        assert!(!config.load_dotenv);
+        fields[12].value = FieldValue::Bool(true);
+        apply_limits_fields(&mut config, &fields);
+        assert!(config.load_dotenv);
     }
 }

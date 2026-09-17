@@ -250,6 +250,20 @@ pub struct Config {
     #[serde(default = "default_update_check")]
     pub update_check: bool,
 
+    /// Read a `.env` file from the directory `lev` is run in, for provider
+    /// keys kept beside a project.
+    ///
+    /// **Off by default (opt-in).** `lev` is run inside repositories other
+    /// people wrote, and a `.env` there is theirs: loading it by default put
+    /// their values into this process without anyone asking. On, only
+    /// `./.env` is read (never a parent directory), a variable already set
+    /// keeps its value, and names that steer the process (`LEVIATH_*`,
+    /// `PATH`, `EDITOR` and the like) are skipped. `LEVIATH_LOAD_DOTENV=1`
+    /// turns it on for one command; `LEVIATH_SKIP_DOTENV` turns it off
+    /// whatever this says.
+    #[serde(default)]
+    pub load_dotenv: bool,
+
     /// Runtime resource limits (inference concurrency + iteration caps).
     #[serde(default)]
     pub limits: LimitsConfig,
@@ -363,6 +377,7 @@ impl Default for Config {
             openrouter_api_key: None,
             ollama_base_url: None,
             update_check: default_update_check(),
+            load_dotenv: false,
             mcp_servers: Vec::new(),
             override_model: None,
             fallback_model: None,
@@ -508,12 +523,19 @@ impl Config {
         // steer the process are filtered out, and the credentials this feature
         // exists to load are not. See `leviath_core::dotenv_var_allowed`.
         //
+        // And even filtered it is a stranger's file, so it is read only when
+        // asked for: `load_dotenv = true` in the config, or
+        // `LEVIATH_LOAD_DOTENV=1` for one command. The config file is read
+        // first to find out, and the environment fallbacks are applied after,
+        // so a key the `.env` supplies still fills an unset one.
+        //
         // `LEVIATH_SKIP_DOTENV` lets tests isolate `Config::load()` completely.
-        if std::env::var_os("LEVIATH_SKIP_DOTENV").is_none() {
+        let path = Self::config_path();
+        let config = Self::read_file(&path)?;
+        if dotenv_wanted(config.load_dotenv) {
             load_dotenv_filtered(".env");
         }
-
-        let config = Self::load_from_path_faulted(&Self::config_path())?;
+        let config = config.with_env_fallbacks();
 
         // Check config file permissions on Unix
         check_permissions();
@@ -750,9 +772,14 @@ impl Config {
     /// last good config and has to be able to *say* what is wrong with the
     /// new one, down to the line.
     pub(crate) fn load_from_path_faulted(path: &std::path::Path) -> Result<Self, Box<ConfigFault>> {
-        let mut config = Self::read_file(path)?;
+        Ok(Self::read_file(path)?.with_env_fallbacks())
+    }
 
-        // Env var fallbacks (env vars override config file if set)
+    /// Fill every provider setting the file left unset from the environment,
+    /// then from the credential store. A value in the file wins.
+    fn with_env_fallbacks(self) -> Self {
+        let mut config = self;
+
         if config.providers.anthropic_api_key.is_none() {
             config.providers.anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         }
@@ -824,7 +851,7 @@ impl Config {
 
         config.fill_from_credential_store();
 
-        Ok(config)
+        config
     }
 
     /// Fill any provider key still unset from the configured credential store.
@@ -1180,6 +1207,7 @@ pub(crate) fn config_isolation_vars(
             Some(fake_dir.join("config.toml").into_os_string()),
         ),
         ("LEVIATH_SKIP_DOTENV", Some(std::ffi::OsString::from("1"))),
+        ("LEVIATH_LOAD_DOTENV", None),
     ];
     for &key in PROVIDER_KEY_ENV_VARS {
         vars.push((key, None));
@@ -1238,9 +1266,77 @@ where
     result
 }
 
+/// Whether `./.env` is read: the config's `load_dotenv`, turned on for one
+/// command by `LEVIATH_LOAD_DOTENV` (`1` or `true`), and off whatever either
+/// says while `LEVIATH_SKIP_DOTENV` is set.
+fn dotenv_wanted(configured: bool) -> bool {
+    if std::env::var_os("LEVIATH_SKIP_DOTENV").is_some() {
+        return false;
+    }
+    configured
+        || std::env::var("LEVIATH_LOAD_DOTENV")
+            .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+}
+
 #[cfg(test)]
 mod dotenv_tests {
     use super::*;
+
+    /// Off by default: a `.env` in the working directory is not read unless
+    /// the config or the environment asks for it, and `load_dotenv = true` in
+    /// the config file is enough to ask.
+    #[test]
+    fn a_dot_env_is_read_only_when_asked_for() {
+        let dir = make_fake_config_dir("dotenv-opt-in");
+        std::fs::write(dir.join(".env"), "LEV_DOTENV_OPT_IN=seen\n").unwrap();
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+            let vars = |load: Option<&str>| {
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", load.map(std::ffi::OsString::from)),
+                    ("LEV_DOTENV_OPT_IN", None),
+                ]
+            };
+            temp_env::with_vars(vars(None), || {
+                Config::load().expect("loads");
+                assert!(std::env::var("LEV_DOTENV_OPT_IN").is_err(), "not asked for");
+            });
+            temp_env::with_vars(vars(Some("0")), || {
+                Config::load().expect("loads");
+                assert!(std::env::var("LEV_DOTENV_OPT_IN").is_err(), "0 is not on");
+            });
+            std::fs::write(dir.join("config.toml"), "load_dotenv = true\n").unwrap();
+            temp_env::with_vars(vars(None), || {
+                let config = Config::load().expect("loads");
+                assert!(config.load_dotenv);
+                assert_eq!(
+                    std::env::var("LEV_DOTENV_OPT_IN").ok().as_deref(),
+                    Some("seen")
+                );
+            });
+        }
+        temp_env::with_vars(
+            [
+                ("LEVIATH_SKIP_DOTENV", Some("1")),
+                ("LEVIATH_LOAD_DOTENV", Some("true")),
+            ],
+            || assert!(!dotenv_wanted(true), "skipping wins over both"),
+        );
+        temp_env::with_vars(
+            [
+                ("LEVIATH_SKIP_DOTENV", None),
+                ("LEVIATH_LOAD_DOTENV", Some("TRUE")),
+            ],
+            || assert!(dotenv_wanted(false)),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `Config::load()` reads `./.env`, and every isolated test sets
     /// `LEVIATH_SKIP_DOTENV` - so that branch would otherwise never run.
@@ -1271,6 +1367,7 @@ mod dotenv_tests {
                         Some(dir.join("config.toml").into_os_string()),
                     ),
                     ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEV_DOTENV_PROBE", None),
                 ],
                 || {
@@ -1317,6 +1414,7 @@ mod dotenv_tests {
                         Some(dir.join("config.toml").into_os_string()),
                     ),
                     ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEVIATH_API_TOKEN", None),
                     ("EDITOR", None),
                     ("LD_PRELOAD", None),
@@ -1379,6 +1477,7 @@ mod dotenv_tests {
                         Some(dir.join("config.toml").into_os_string()),
                     ),
                     ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEV_DOTENV_ORDINARY", None),
                 ],
                 || {
@@ -1439,6 +1538,7 @@ mod dotenv_tests {
                         Some(dir.join("config.toml").into_os_string()),
                     ),
                     ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEV_DOTENV_BACKSLASH", None),
                     ("LEV_DOTENV_AFTER", None),
                 ],
@@ -1482,6 +1582,7 @@ mod dotenv_tests {
                         Some(dir.join("config.toml").into_os_string()),
                     ),
                     ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEV_DOTENV_AWKWARD", None),
                 ],
                 || {
@@ -3318,6 +3419,7 @@ bedrock_base_url = "https://gw/from-file"
         for kind in [
             ModelProviderKind::Script,
             ModelProviderKind::OpenaiCompatible,
+            ModelProviderKind::Openai,
         ] {
             assert_eq!(ModelProviderKind::parse(kind.as_str()), Some(kind));
         }
@@ -3440,6 +3542,75 @@ script = \"groq.rhai\"
         .unwrap();
         let loaded = Config::load_from_path(&path).expect("loads");
         assert!(loaded.model_providers["mock"].is_endpoint());
+    }
+
+    /// Two Azure resources side by side as `kind = "openai"` entries: each
+    /// loads with its own address, key and auth header, and an entry missing
+    /// either the address or the key is refused naming what to add.
+    #[test]
+    fn openai_host_entries_load_side_by_side_and_refuse_what_they_cannot_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model_providers.azure-east]
+kind = "openai"
+base_url = "https://east.openai.azure.com/openai/v1"
+api_key = "east"
+auth_header = "api-key"
+serves = ["prod-gpt55"]
+
+[model_providers.azure-west]
+kind = "openai"
+base_url = "https://west.azure-api.net/openai/v1"
+api_key = "west"
+headers = { Ocp-Apim-Subscription-Key = "sub" }
+"#,
+        )
+        .unwrap();
+        let loaded = Config::load_from_path(&path).expect("loads");
+        let east = &loaded.model_providers["azure-east"];
+        assert!(east.is_endpoint() && east.is_openai());
+        assert_eq!(east.auth_header().as_deref(), Some("api-key"));
+        assert_eq!(loaded.model_providers["azure-west"].auth_header(), None);
+
+        std::fs::write(
+            &path,
+            "[model_providers.a]\nkind = \"openai\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("kind = \"openai\" but no base_url"), "{err}");
+
+        std::fs::write(
+            &path,
+            "[model_providers.a]\nkind = \"openai\"\nbase_url = \"https://h/v1\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("no api_key"), "{err}");
+
+        std::fs::write(
+            &path,
+            "[model_providers.a]\nkind = \"openai\"\nbase_url = \"https://h/v1\"\n\
+             api_key = \"k\"\nauth_header = \" \"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("auth_header must name a header"), "{err}");
+
+        std::fs::write(
+            &path,
+            "[model_providers.a]\nkind = \"openai\"\nbase_url = \"https://h/v1\"\n\
+             api_key = \"k\"\nregion = \"east\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("kind = \"openai\" and unknown key(s) region"),
+            "{err}"
+        );
     }
 
     /// An endpoint has no script to forward `extra` to, so a key it does not
@@ -4318,6 +4489,7 @@ enabled = false
 
         let config = Config {
             update_check: true,
+            load_dotenv: false,
             mime: MimeConfig::default(),
             mime_types: toml::Table::new(),
             default_provider: "anthropic".to_string(),

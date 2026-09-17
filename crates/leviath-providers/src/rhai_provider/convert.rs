@@ -327,7 +327,15 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
                 Some("rate_limited") => ProviderError::RateLimitExceeded {
                     retry_after_secs: None,
                 },
-                Some("transport") | Some("server") => ProviderError::RequestFailed(message),
+                Some("transport") => ProviderError::RequestFailed(message),
+                // The script reached its server and the server failed: said
+                // so, so a run parked over it does not read as a network
+                // problem.
+                Some("server") => ProviderError::labelled(
+                    crate::FailureKind::ServerError,
+                    "the provider script's server",
+                    &message,
+                ),
                 // A script's `api` error is the same shape a built-in provider
                 // gets back from an HTTP call, so it classifies the same way:
                 // an OpenAI-compatible endpoint answering 402 through a Rhai

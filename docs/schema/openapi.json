@@ -2980,7 +2980,8 @@
                           "type": "string",
                           "enum": [
                             "script",
-                            "openai-compatible"
+                            "openai-compatible",
+                            "openai"
                           ],
                           "description": "Absent leaves the existing kind; an entry created without one is a script."
                         },
@@ -4302,9 +4303,10 @@
             "type": "string",
             "enum": [
               "script",
-              "openai-compatible"
+              "openai-compatible",
+              "openai"
             ],
-            "description": "How the entry reaches its provider: a Rhai script, or an OpenAI-compatible endpoint spoken to directly."
+            "description": "How the entry reaches its provider: a Rhai script, an OpenAI-compatible endpoint spoken to directly, or OpenAI's own API at another host."
           },
           "script": {
             "type": "string",

@@ -612,10 +612,22 @@ pub(crate) fn dispatch_title(
             commands.entity(entity).remove::<PendingTitle>();
             continue;
         }
+        let mut refused = None;
         let picked = loop {
             let Some((provider_name, model)) = chain.0.first().cloned() else {
                 break None;
             };
+            // A title call carries the task, so a model zero retention
+            // refuses is passed over the way an unregistered one is.
+            if let Some(refusal) = providers.0.retention_refusal(&provider_name, &model) {
+                tracing::debug!(
+                    run_id = %meta.run_id,
+                    "title candidate refused: {refusal}"
+                );
+                refused = Some(refusal);
+                chain.0.remove(0);
+                continue;
+            }
             match providers.0.get(&provider_name) {
                 Some(provider) => break Some((provider_name, model, provider)),
                 None => {
@@ -631,7 +643,12 @@ pub(crate) fn dispatch_title(
         let Some((provider_name, model, provider)) = picked else {
             record_title_failure(
                 &mut meta,
-                "no configured provider could serve a title call".to_string(),
+                match refused {
+                    Some(refusal) => {
+                        format!("no title call was sent: the last candidate was {refusal}")
+                    }
+                    None => "no configured provider could serve a title call".to_string(),
+                },
             );
             commands.entity(entity).remove::<PendingTitle>();
             continue;
@@ -1965,6 +1982,33 @@ mod tests {
             world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
             Some("no configured provider could serve a title call")
         );
+    }
+
+    /// A title call sends the task, so a candidate zero retention refuses is
+    /// passed over, and a run with nothing left says which model refused.
+    #[tokio::test]
+    async fn dispatch_passes_over_a_candidate_zero_retention_refuses() {
+        let (mut world, _title_rx) = build_world(Ok("t"), default_pools());
+        world.resource_mut::<Providers>().0.set_retention(
+            leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+        );
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        assert!(world.get::<AwaitingTitle>(e).is_none());
+        let error = world.get::<RunMetadata>(e).unwrap().title_error.clone();
+        assert!(error.is_some_and(|e| e.starts_with(
+            "no title call was sent: the last candidate was mock/m, which does not run"
+        )));
     }
 
     /// The title call takes the operator's `[limits]` retry schedule, not a

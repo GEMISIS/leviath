@@ -357,7 +357,7 @@ on `GET /api/agents/{id}/result`, and on the `agent_status` frames coming off th
 | `starting` | Accepted and being set up. No inference has been issued yet |
 | `running` | Working: inferring, calling tools, or moving between stages |
 | `waiting_input` | Parked. `wait_reason` says on what, and only some of those want a person |
-| `paused` | Paused by somebody. Resumes on request, and comes back paused after a daemon restart |
+| `paused` | Paused, by somebody or by Leviath when something outside the run has to change first (then `wait_reason` is `needs_setup`, below). Resumes on request, and comes back paused after a daemon restart |
 | `complete` | Finished, with nothing further to accept |
 | `complete_interactive` | Every required stage is done and the run still takes follow-up input |
 | `error` | Stopped by a failure. The run's `error` carries what went wrong |
@@ -1726,7 +1726,12 @@ run. See [Statuses](#statuses) for the list and for what a server that predates
 `events.run_status` sends instead.
 
 `wait_reason` is present only on a parked run, and says what it is parked on rather than making
-you fetch the run to find out. `ok` on `tool_call_finished` is `false` for a result the engine
+you fetch the run to find out. A run Leviath paused carries
+`{"reason":"needs_setup","blocker":"...","remedy":"..."}`, where `remedy` is a sentence with the
+provider's own error in it and `blocker` is one of `provider_missing`, `credits_exhausted`,
+`auth_failed`, `forbidden`, `provider_unreachable`, `provider_timed_out`, `provider_failed` or
+`providers_unavailable`. [Troubleshooting](/docs/troubleshooting#a-run-says-paused-and-i-did-not-pause-it)
+says what each one asks of you. `ok` on `tool_call_finished` is `false` for a result the engine
 refused or could not run, so a client should not read a finish frame as a success on its own.
 
 `stage_transition`, `tool_call_started` and `tool_call_finished` used to arrive wrapped as

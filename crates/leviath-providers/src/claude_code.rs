@@ -262,10 +262,14 @@ impl ClaudeCodeProvider {
         let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
             .map_err(|_| {
-                ProviderError::RequestFailed(format!(
-                    "Claude Code process timed out after {}s",
-                    timeout_duration.as_secs()
-                ))
+                ProviderError::labelled(
+                    crate::FailureKind::Timeout,
+                    "waiting for Claude Code",
+                    &format!(
+                        "Claude Code process timed out after {}s",
+                        timeout_duration.as_secs()
+                    ),
+                )
             })?
             .expect("wait_with_output cannot fail for a normally-spawned process");
         // The writer has finished (the child exited, closing the pipe); join it
@@ -274,10 +278,17 @@ impl ClaudeCodeProvider {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ProviderError::RequestFailed(format!(
-                "Claude Code exited with status {}: {}",
-                output.status, stderr
-            )));
+            // The CLI ran and failed, which is its own answer: its stderr
+            // says why (signed out, a bad flag), and a network was never
+            // what went wrong.
+            return Err(ProviderError::labelled(
+                crate::FailureKind::ServerError,
+                "running Claude Code",
+                &format!(
+                    "Claude Code exited with status {}: {}",
+                    output.status, stderr
+                ),
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);

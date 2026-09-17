@@ -1267,6 +1267,70 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
 /// A provider that never answered says nothing about the run, so ending it
 /// throws away completed work for a condition that is usually over in seconds.
 #[test]
+fn collect_choice_parks_without_a_stage_log_to_write_to() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::labelled(
+            leviath_providers::FailureKind::ConnectionRefused,
+            "sending the request",
+            "refused",
+        )),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect_transition(&mut world);
+    let parked = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("parked");
+    assert_eq!(
+        parked.blocker,
+        leviath_core::run_meta::SetupBlocker::ProviderUnreachable
+    );
+}
+
+#[test]
+fn setup_park_says_which_way_a_call_with_no_answer_went() {
+    use leviath_core::run_meta::SetupBlocker;
+    use leviath_providers::{FailureKind, ProviderError};
+    let park = |kind| {
+        crate::pipeline::park::setup_park(
+            &ProviderError::labelled(kind, "reading the response stream", "cut off"),
+            "p",
+        )
+        .expect("parks")
+    };
+    let (blocker, remedy) = park(FailureKind::ConnectionDropped);
+    assert_eq!(blocker, SetupBlocker::ProviderFailed);
+    assert!(remedy.starts_with("'p' failed while answering"), "{remedy}");
+    assert!(remedy.contains("cut off"), "{remedy}");
+    assert_eq!(
+        park(FailureKind::ServerError).0,
+        SetupBlocker::ProviderFailed
+    );
+    assert_eq!(park(FailureKind::Timeout).0, SetupBlocker::ProviderTimedOut);
+    let (blocker, remedy) = park(FailureKind::ConnectionRefused);
+    assert_eq!(blocker, SetupBlocker::ProviderUnreachable);
+    assert!(remedy.starts_with("could not reach 'p'"), "{remedy}");
+    // A refusal by rule is not the provider's failure and never parks.
+    assert!(
+        crate::pipeline::park::setup_park(&ProviderError::RetentionRefused("no".into()), "p")
+            .is_none()
+    );
+}
+
+#[test]
 fn collect_parks_a_run_whose_provider_is_unreachable() {
     let (mut world, tx) = world_with_results();
     let e = world
@@ -1292,9 +1356,10 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
     let parked = world
         .get::<crate::pipeline::PausedForSetup>(e)
         .expect("it parks with a remedy a person can act on");
+    // An unlabelled transport failure is taken as never reaching the provider.
     assert_eq!(
         parked.blocker,
-        leviath_core::run_meta::SetupBlocker::ProvidersUnavailable
+        leviath_core::run_meta::SetupBlocker::ProviderUnreachable
     );
     assert!(
         parked.remedy.contains("lev resume"),
@@ -9480,6 +9545,42 @@ async fn compaction_dispatches_when_over_threshold() {
     assert!(world.get::<ReadyToInfer>(e).is_none());
 }
 
+/// Zero retention switched on under a running daemon: a compaction model
+/// that keeps something is not sent the run's context, on either lane.
+#[tokio::test]
+async fn compaction_is_skipped_for_a_model_zero_retention_refuses() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.set_retention(
+        leviath_providers::retention::RetentionSettings {
+            zero_requested: true,
+            ..Default::default()
+        },
+    );
+    let e = world
+        .spawn((
+            compacting_window(),
+            compaction_settings("cfg", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+    run_dispatch_compaction(&mut world);
+    assert!(world.get::<AwaitingCompaction>(e).is_none());
+
+    let edge = world
+        .spawn((
+            scratch_window(),
+            PendingEdgeCompact(vec!["scratch".to_string()]),
+            compaction_settings("cfg", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+    run_dispatch_edge_compact(&mut world);
+    assert!(world.get::<AwaitingCompaction>(edge).is_none());
+    assert!(world.get::<PendingEdgeCompact>(edge).is_none());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_compaction_job_reports_an_error_instead_of_vanishing() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
@@ -14034,6 +14135,11 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
         vec![si("m0"), si("m1")],
         vec![plain_edge("b")],
     );
+    // Failed over mid-stage: the live component names the provider this call
+    // went to, and that is the one the pause names.
+    let mut live = si("m0");
+    live.provider_name = "fallback".to_string();
+    world.entity_mut(e).insert((live, StageIoBuffer::default()));
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
@@ -14055,9 +14161,20 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
     let parked = world
         .get::<crate::pipeline::PausedForSetup>(e)
         .expect("parked rather than failed");
+    // Reached and slow, which is not the same as down, and says so.
     assert_eq!(
         parked.blocker,
-        leviath_core::run_meta::SetupBlocker::ProvidersUnavailable
+        leviath_core::run_meta::SetupBlocker::ProviderTimedOut
+    );
+    assert!(
+        parked
+            .remedy
+            .starts_with("'fallback' did not answer in time")
+    );
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    assert!(
+        logs.iter()
+            .any(|(_, line)| line.starts_with("[paused] 'fallback'"))
     );
     // The routing choice is put back, not the stage: a resume asks where to go
     // next rather than re-running the stage that already answered.

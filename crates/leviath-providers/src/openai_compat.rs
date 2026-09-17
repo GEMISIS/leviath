@@ -637,6 +637,24 @@ pub(crate) fn temperature_refused(detail: &str) -> bool {
             || detail.contains("unsupported"))
 }
 
+/// Whether the API refused the request over `max_tokens`.
+///
+/// OpenAI's reasoning models take the cap only as `max_completion_tokens`,
+/// and say so with `"param":"max_tokens","code":"unsupported_parameter"`.
+/// Compatible servers put that in front of every current OpenAI model, so
+/// asking the server beats a table of which ones refuse. A range complaint
+/// about the value ("max_tokens is too large") is not this refusal: the field
+/// was accepted, and renaming it would not help.
+pub(crate) fn token_limit_refused(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("max_tokens")
+        && (detail.contains("unsupported_parameter")
+            || detail.contains("unsupported parameter")
+            || detail.contains("not supported")
+            || detail.contains("use 'max_completion_tokens'")
+            || detail.contains("use max_completion_tokens"))
+}
+
 /// The request's tools in the OpenAI `tools` wire shape.
 ///
 /// One function for the three OpenAI-shaped providers (OpenAI-compatible
@@ -1227,6 +1245,25 @@ mod tests {
             chunk.tool_calls[0].thought_signature.as_deref(),
             Some("sig-abc")
         );
+    }
+
+    #[test]
+    fn a_max_tokens_refusal_is_told_apart_from_other_errors() {
+        assert!(super::token_limit_refused(
+            "HTTP 400: {\"error\":{\"message\":\"Unsupported parameter: 'max_tokens' is not \
+             supported with this model. Use 'max_completion_tokens' instead.\",\
+             \"param\":\"max_tokens\",\"code\":\"unsupported_parameter\"}}"
+        ));
+        assert!(super::token_limit_refused(
+            "max_tokens: use max_completion_tokens for this model"
+        ));
+        assert!(!super::token_limit_refused(
+            "max_tokens is too large: 200000. This model supports at most 128000 completion tokens"
+        ));
+        assert!(!super::token_limit_refused(
+            "Unsupported parameter: 'temperature' is not supported with this model."
+        ));
+        assert!(!super::token_limit_refused("rate limited"));
     }
 
     /// The refusal that killed a run, and the shapes that must NOT trip it.

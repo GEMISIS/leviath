@@ -1067,7 +1067,10 @@ async fn probe_model_takes_the_catalogue_first() {
     let provider = StubProvider::answering("hi")
         .with_catalog(&["c-1", "c-2"])
         .listing(&["l-1"]);
-    assert_eq!(probe_model(&provider).await.as_deref(), Some("c-1"));
+    assert_eq!(
+        probe_model(&provider).await.unwrap().as_deref(),
+        Some("c-1")
+    );
 }
 
 #[tokio::test]
@@ -1079,20 +1082,52 @@ async fn probe_model_prefers_a_listed_model_the_provider_also_serves() {
         .with_catalog(&[])
         .listing(&["text-embedding-3", "chat-1"])
         .serving(&["chat-1"]);
-    assert_eq!(probe_model(&provider).await.as_deref(), Some("chat-1"));
+    assert_eq!(
+        probe_model(&provider).await.unwrap().as_deref(),
+        Some("chat-1")
+    );
 }
 
 #[tokio::test]
 async fn probe_model_falls_back_to_the_first_listed_model() {
     let provider = StubProvider::answering("hi").listing(&["l-1", "l-2"]);
-    assert_eq!(probe_model(&provider).await.as_deref(), Some("l-1"));
+    assert_eq!(
+        probe_model(&provider).await.unwrap().as_deref(),
+        Some("l-1")
+    );
 }
 
 #[tokio::test]
-async fn probe_model_is_none_with_nothing_to_go_on() {
-    assert_eq!(probe_model(&StubProvider::answering("hi")).await, None);
+async fn probe_model_is_none_with_nothing_to_go_on_and_the_error_when_listing_fails() {
+    assert_eq!(
+        probe_model(&StubProvider::answering("hi")).await.unwrap(),
+        None
+    );
     let refusing = StubProvider::answering("hi").listing_fails();
-    assert_eq!(probe_model(&refusing).await, None);
+    assert!(probe_model(&refusing).await.is_err());
+}
+
+/// A provider whose listing fails is not "a provider with nothing to probe":
+/// the inference line fails with the listing's own error.
+#[tokio::test]
+async fn run_checks_reports_a_failed_listing_instead_of_skipping() {
+    let checks = with_env(|root| async move {
+        write_config(&root, "stub", None, "");
+        let build = always(registry_with(
+            "stub",
+            StubProvider::answering("PONG").listing_fails().arc(),
+        ));
+        run_checks(&DoctorArgs::default(), &build, DaemonTarget::Skip).await
+    })
+    .await;
+    let inference = checks.last().expect("checks ran");
+    assert_eq!(inference.name, "inference");
+    assert_eq!(inference.status, CheckStatus::Fail);
+    assert!(
+        inference.detail.contains("could not list its models"),
+        "{}",
+        inference.detail
+    );
 }
 
 #[test]
@@ -1213,7 +1248,7 @@ fn resolve_check_stays_quiet_under_an_explicit_model_override() {
 #[tokio::test]
 async fn inference_check_reports_usage_and_the_echo() {
     let provider = StubProvider::replying("PONG");
-    let check = inference_check(provider.as_ref(), "m").await;
+    let check = inference_check(provider.as_ref(), "m", serde_json::Value::Null).await;
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(
         check
@@ -1230,7 +1265,7 @@ async fn inference_check_passes_even_without_the_expected_word() {
     // The call is what is being checked. What the model chose to say is a note,
     // not a verdict - otherwise this command would be flaky across providers.
     let provider = StubProvider::replying("Sure! Hello there.");
-    let check = inference_check(provider.as_ref(), "m").await;
+    let check = inference_check(provider.as_ref(), "m", serde_json::Value::Null).await;
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(
         check.detail.contains("no PONG in the reply"),
@@ -1243,7 +1278,7 @@ async fn inference_check_passes_even_without_the_expected_word() {
 async fn inference_check_reports_the_provider_error_verbatim() {
     let raw = r#"HTTP 402 Payment Required: {"error":{"message":"credit balance too low"}}"#;
     let provider = StubProvider::failing(raw);
-    let check = inference_check(provider.as_ref(), "m").await;
+    let check = inference_check(provider.as_ref(), "m", serde_json::Value::Null).await;
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(
         check.detail.contains("credit balance too low") && check.detail.contains("402"),
@@ -1759,6 +1794,34 @@ async fn run_checks_probes_a_catalogue_model_when_the_config_names_none() {
         checks[3].detail.starts_with("c-1: "),
         "{}",
         checks[3].detail
+    );
+}
+
+/// Zero retention holds for the probe the way it holds for a run: a model the
+/// provider's retention does not clear is never sent, and the line says why.
+#[tokio::test]
+async fn run_checks_refuses_to_probe_a_model_zero_retention_refuses() {
+    let checks = with_env(|root| async move {
+        write_config(&root, "stub", None, "");
+        let stub = StubProvider::answering("PONG").with_catalog(&["c-1"]).arc();
+        let build = always(registry_with("stub", stub).with_retention(
+            leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+        ));
+        run_checks(&DoctorArgs::default(), &build, DaemonTarget::Skip).await
+    })
+    .await;
+    let inference = checks.last().expect("checks ran");
+    assert_eq!(inference.name, "inference");
+    assert_eq!(inference.status, CheckStatus::Fail);
+    assert!(
+        inference
+            .detail
+            .starts_with("not sent: stub/c-1, which does not run with zero data retention"),
+        "{}",
+        inference.detail
     );
 }
 

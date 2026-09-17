@@ -177,19 +177,22 @@ fn preference_check(
 /// provider that cannot say is asked to list instead, and the first entry its
 /// own table also knows wins, because a listing (OpenAI's, measured) carries
 /// embedding and speech models too, and a probe sent to one of those fails for
-/// a reason that says nothing about the credential. Nothing at all is `None`,
-/// and the caller says so rather than guessing a name.
-pub(super) async fn probe_model(provider: &dyn Provider) -> Option<String> {
+/// a reason that says nothing about the credential. Nothing at all is
+/// `Ok(None)`, and the caller says so rather than guessing a name. A listing
+/// that failed is the error itself, which is the finding.
+pub(super) async fn probe_model(
+    provider: &dyn Provider,
+) -> Result<Option<String>, leviath_providers::ProviderError> {
     if let Some(first) = provider
         .served_catalog()
         .and_then(|catalog| catalog.into_iter().next())
     {
-        return Some(first);
+        return Ok(Some(first));
     }
-    let listed = provider.list_models().await.ok()?;
-    listed
+    let listed = provider.list_models().await?;
+    Ok(listed
         .iter()
         .find(|m| provider.serves_model(model_key(&m.id)).is_some())
         .or_else(|| listed.first())
-        .map(|m| m.id.clone())
+        .map(|m| m.id.clone()))
 }

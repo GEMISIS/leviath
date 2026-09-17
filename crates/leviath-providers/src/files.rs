@@ -229,7 +229,10 @@ pub(crate) fn file_part(upload: &FileUpload) -> Result<reqwest::multipart::Part>
     reqwest::multipart::Part::stream_with_length(body, len)
         .file_name(upload.name.clone())
         .mime_str(&upload.mime_type)
-        .map_err(|e| ProviderError::RequestFailed(format!("building the upload: {e}")))
+        // A mime type the multipart builder will not take is this machine's
+        // mistake, found before anything was sent: not a network failure, and
+        // not worth a retry.
+        .map_err(|e| ProviderError::Other(format!("building the upload: {e}")))
 }
 
 /// An `Arc<[u8]>` the `bytes` crate can own.

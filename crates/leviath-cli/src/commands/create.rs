@@ -58,7 +58,7 @@ fn execute_with(
         gitignore_content.as_bytes(),
     )?;
 
-    let env_example_content = "# Copy this to .env and fill in your API key\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n";
+    let env_example_content = "# Copy this to .env and fill in your API key.\n# Leviath reads it only with load_dotenv = true in ~/.leviath/config.toml,\n# or LEVIATH_LOAD_DOTENV=1 for one command.\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n";
     write_file(
         &blueprint_dir.join(".env.example"),
         env_example_content.as_bytes(),

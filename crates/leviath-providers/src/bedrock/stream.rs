@@ -202,8 +202,9 @@ pub(super) fn map_frame(frame: &Frame, state: &mut EventState) -> Option<Result<
                 &message,
             )))
         }
+        // Bedrock reached, and reporting a failure of its own mid-stream.
         Some("error") => Some(Err(ProviderError::labelled(
-            FailureKind::ConnectionDropped,
+            FailureKind::ServerError,
             "reading the response stream",
             &format!(
                 "{}: {}",
@@ -540,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_error_frame_reads_as_a_dropped_connection() {
+    async fn an_error_frame_reads_as_the_servers_own_failure() {
         let frames = vec![encode(
             &[
                 (":message-type", HeaderValue::String("error".to_string())),
@@ -554,7 +555,7 @@ mod tests {
         )];
         let err = collect(stream(frames)).await.unwrap_err();
         assert!(err.to_string().contains("InternalError: boom"), "{err}");
-        assert_eq!(err.failure_kind(), Some(FailureKind::ConnectionDropped));
+        assert_eq!(err.failure_kind(), Some(FailureKind::ServerError));
         let bare = stream(vec![encode(
             &[(":message-type", HeaderValue::String("error".to_string()))],
             b"",

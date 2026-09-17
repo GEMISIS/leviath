@@ -100,6 +100,23 @@ pub(super) fn produces(mime: &leviath_providers::ModelMime, pattern: &str) -> bo
         .any(|have| leviath_providers::capabilities::pattern_covers(have, pattern))
 }
 
+/// Say which providers could not be asked and why, under the table, where
+/// the rows they explain were printed. Printed to stdout with the table: a
+/// warning on stderr alone scrolled past, and the table above it looked like
+/// a healthy provider's.
+pub(super) fn print_failures(failures: &[(String, String)]) {
+    if failures.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "Could not list models from these providers; their rows come from this build's table:"
+    );
+    for (name, why) in failures {
+        println!("  x {name}: {why}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

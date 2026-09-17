@@ -75,7 +75,7 @@ pub(crate) const MODELS: &[Row] = &[
         matches: &[Match::Prefix("gpt-5.5")],
         temperature: false,
         tools: true,
-        context: 1_050_000,
+        context: 922_000,
         output: 128_000,
     },
     Row {
@@ -183,7 +183,7 @@ mod tests {
         // 400,000 for both, which no vendor publishes for either, and the
         // weekly window check is what now holds them to the source.
         assert_eq!(capabilities("gpt-5.6-sol").max_context_tokens, 922_000);
-        assert_eq!(capabilities("gpt-5.5").max_context_tokens, 1_050_000);
+        assert_eq!(capabilities("gpt-5.5").max_context_tokens, 922_000);
     }
 
     #[test]
