@@ -803,8 +803,9 @@ writes its result to an S3 bucket, which a Bedrock API key cannot read.
 tokens (OpenAI's image models, Gemini's image and speech models, the `gpt-4o` transcription
 models), and otherwise per image, per second of video, per hour of audio, per million characters or
 per music clip, from the shipped price table. Those unit prices are read from LiteLLM by
-`cargo xtask prices`. `gpt-4o-mini-tts` reports nothing to price its audio by, so its calls read as
-unpriced.
+`cargo xtask prices`, which a weekly job runs. `gpt-4o-mini-tts` is billed by the second of audio
+it makes and its reply does not say how long that is, so Leviath reads the length from the MP3 or
+WAV it returns; a format it cannot measure (Opus, AAC, FLAC) leaves the call unpriced.
 
 **Not offered here.** The realtime and live models (`gpt-realtime-*`, `gemini-*-live*`,
 `lyria-realtime-exp`) speak a streaming socket rather than a request, and `gpt-audio-*` is a chat

@@ -308,6 +308,48 @@ pub(crate) fn audio_type(response: &reqwest::Response) -> MimeType {
         .unwrap_or_else(|| MimeType::parse("audio/mpeg").expect("audio/mpeg is a mime type"))
 }
 
+/// How long an audio file plays, in seconds, when its format says: a WAV by
+/// its header's byte rate, and an MP3 by its first frame's bitrate, which
+/// holds for the constant-bitrate files the speech routes return (OpenAI's
+/// 76 032-byte, 128 kbps clip measured 4.752 s). `None` for anything else.
+pub(crate) fn audio_seconds(audio: &Blob) -> Option<f64> {
+    let bytes = &audio.bytes;
+    match audio.mime_type.as_str() {
+        "audio/wav" | "audio/x-wav" => {
+            let field = bytes.get(28..32)?;
+            let byte_rate = u32::from_le_bytes([field[0], field[1], field[2], field[3]]);
+            (byte_rate > 0).then(|| bytes.len().saturating_sub(44) as f64 / f64::from(byte_rate))
+        }
+        "audio/mpeg" => {
+            // An ID3 tag ahead of the audio is skipped by its stated size.
+            let start = match bytes.get(..10) {
+                Some([b'I', b'D', b'3', _, _, _, a, b, c, d]) => {
+                    10 + ((usize::from(*a) << 21)
+                        | (usize::from(*b) << 14)
+                        | (usize::from(*c) << 7)
+                        | usize::from(*d))
+                }
+                _ => 0,
+            };
+            let header = bytes.get(start..start + 4)?;
+            if header[0] != 0xFF || header[1] & 0xE0 != 0xE0 {
+                return None;
+            }
+            let mpeg1 = header[1] & 0x18 == 0x18;
+            let index = usize::from(header[2] >> 4);
+            const V1: [u32; 16] = [
+                0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+            ];
+            const V2: [u32; 16] = [
+                0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+            ];
+            let kbps = if mpeg1 { V1[index] } else { V2[index] };
+            (kbps > 0).then(|| (bytes.len() - start) as f64 * 8.0 / f64::from(kbps * 1000))
+        }
+        _ => None,
+    }
+}
+
 /// A JSON part the provider built itself, so its type is known good.
 pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
     Blob::new(
@@ -483,6 +525,59 @@ mod tests {
             reasoning: None,
         }];
         assert_eq!(request_text(&opening), "draw a cat");
+    }
+
+    /// Lengths read from the files the speech routes return: the MP3 header
+    /// is the one OpenAI's and xAI's clips carry (`FF F3 C4`, MPEG-2 at
+    /// 128 kbps), so 16 000 bytes play for one second.
+    #[test]
+    fn audio_length_is_read_from_the_file() {
+        let clip = |mime: &str, bytes: Vec<u8>| Blob::new(MimeType::parse(mime).unwrap(), bytes);
+        let mut mp3 = vec![0xFF, 0xF3, 0xC4, 0xC4];
+        mp3.resize(16_000, 0);
+        assert_eq!(audio_seconds(&clip("audio/mpeg", mp3.clone())), Some(1.0));
+
+        // An ID3 tag of 6 bytes ahead of the audio is not counted.
+        let mut tagged = vec![b'I', b'D', b'3', 3, 0, 0, 0, 0, 0, 6, 1, 2, 3, 4, 5, 6];
+        tagged.extend(&mp3);
+        assert_eq!(audio_seconds(&clip("audio/mpeg", tagged)), Some(1.0));
+
+        // MPEG-1 at 128 kbps.
+        let mut v1 = vec![0xFF, 0xFB, 0x90, 0x00];
+        v1.resize(32_000, 0);
+        assert_eq!(audio_seconds(&clip("audio/mpeg", v1)), Some(2.0));
+
+        let mut wav = vec![0u8; 44];
+        wav[28..32].copy_from_slice(&48_000u32.to_le_bytes());
+        wav.resize(44 + 96_000, 0);
+        assert_eq!(audio_seconds(&clip("audio/wav", wav)), Some(2.0));
+
+        assert_eq!(
+            audio_seconds(&clip("audio/wav", vec![0; 44])),
+            None,
+            "no byte rate"
+        );
+        assert_eq!(
+            audio_seconds(&clip("audio/wav", vec![0; 10])),
+            None,
+            "no header"
+        );
+        assert_eq!(
+            audio_seconds(&clip("audio/mpeg", vec![0; 16])),
+            None,
+            "no frame"
+        );
+        assert_eq!(
+            audio_seconds(&clip("audio/mpeg", vec![0xFF])),
+            None,
+            "cut short"
+        );
+        assert_eq!(
+            audio_seconds(&clip("audio/mpeg", vec![0xFF, 0xF3, 0x04, 0])),
+            None,
+            "a free-format bitrate says nothing"
+        );
+        assert_eq!(audio_seconds(&clip("audio/ogg", vec![0; 16])), None);
     }
 
     #[test]

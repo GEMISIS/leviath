@@ -133,7 +133,9 @@ same list.
   Large and the editing tools) and Nova Canvas run the same way.
 - Unit prices for media models (per image, second of video, hour of audio,
   million characters or music clip) are read from LiteLLM by
-  `cargo xtask prices`; a hand-written row still wins.
+  `cargo xtask prices`; a hand-written row still wins, and is kept only
+  where LiteLLM has no price. `gpt-4o-mini-tts` is priced by the length of
+  the audio it returns, read from the file.
 - `lev setup` files a provider under every kind it makes (text and images,
   video, speech and audio, 3D models), and typing at "Add a provider" finds
   one by its name or what it does.

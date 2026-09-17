@@ -1529,54 +1529,6 @@ source = "manual"
 checked_on = "2026-09-16"
 
 [[unit_rate]]
-provider = "meta"
-prefix = "muse-voice-transcribe-1.0"
-unit = "audio_hour"
-usd = 0.18
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
-provider = "xai"
-prefix = "grok-imagine-image"
-unit = "image"
-usd = 0.02
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
-provider = "xai"
-prefix = "grok-imagine-image-2.0"
-unit = "image"
-usd = 0.04
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
-provider = "xai"
-prefix = "grok-imagine-image-quality"
-unit = "image"
-usd = 0.05
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
-provider = "xai"
-prefix = "grok-imagine-video"
-unit = "video_second"
-usd = 0.05
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
-provider = "xai"
-prefix = "grok-imagine-video-1.5"
-unit = "video_second"
-usd = 0.08
-source = "manual"
-checked_on = "2026-09-16"
-
-[[unit_rate]]
 provider = "xai"
 prefix = "grok-stt"
 unit = "audio_hour"
@@ -1929,6 +1881,30 @@ source = "litellm"
 checked_on = "2026-09-17"
 
 [[unit_rate]]
+provider = "meta"
+prefix = "muse-voice-transcribe-1.0"
+unit = "audio_hour"
+usd = 0.18
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "openai"
+prefix = "dall-e-2"
+unit = "image"
+usd = 0.02
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "openai"
+prefix = "dall-e-3"
+unit = "image"
+usd = 0.04
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
 provider = "openai"
 prefix = "gpt-4o-mini-transcribe"
 unit = "audio_hour"
@@ -1949,6 +1925,30 @@ provider = "openai"
 prefix = "gpt-4o-mini-transcribe-2025-12-15"
 unit = "audio_hour"
 usd = 0.18
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "openai"
+prefix = "gpt-4o-mini-tts"
+unit = "audio_hour"
+usd = 0.9
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "openai"
+prefix = "gpt-4o-mini-tts-2025-03-20"
+unit = "audio_hour"
+usd = 0.9
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "openai"
+prefix = "gpt-4o-mini-tts-2025-12-15"
+unit = "audio_hour"
+usd = 0.9
 source = "litellm"
 checked_on = "2026-09-17"
 
@@ -2053,6 +2053,78 @@ provider = "openai"
 prefix = "whisper-1"
 unit = "audio_hour"
 usd = 0.36
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image"
+unit = "image"
+usd = 0.02
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-2.0"
+unit = "image"
+usd = 0.06
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-2026-03-02"
+unit = "image"
+usd = 0.02
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-pro"
+unit = "image"
+usd = 0.05
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-quality"
+unit = "image"
+usd = 0.05
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-quality-20260403"
+unit = "image"
+usd = 0.05
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-image-quality-latest"
+unit = "image"
+usd = 0.05
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-video"
+unit = "video_second"
+usd = 0.05
+source = "litellm"
+checked_on = "2026-09-17"
+
+[[unit_rate]]
+provider = "xai"
+prefix = "grok-imagine-video-1.5"
+unit = "video_second"
+usd = 0.08
 source = "litellm"
 checked_on = "2026-09-17"
 

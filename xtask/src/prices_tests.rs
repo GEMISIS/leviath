@@ -1065,6 +1065,8 @@ fn litellm_unit_prices_are_read_per_second_character_hour_image_and_clip() {
         "openai/sora-2": {"litellm_provider": "openai", "mode": "video_generation", "output_cost_per_video_per_second": 0.1},
         "gemini/veo-3.1-lite-generate-preview": {"litellm_provider": "gemini", "mode": "video_generation", "output_cost_per_second": 0.05},
         "tts-1": {"litellm_provider": "openai", "mode": "audio_speech", "input_cost_per_character": 1.5e-05},
+        "gpt-4o-mini-tts": {"litellm_provider": "openai", "mode": "audio_speech", "input_cost_per_token": 6e-07, "output_cost_per_second": 0.00025},
+        "xai/grok-imagine-image": {"litellm_provider": "xai", "mode": "image_generation", "input_cost_per_image": 0.02},
         "whisper-1": {"litellm_provider": "openai", "mode": "audio_transcription", "input_cost_per_second": 0.0001},
         "stability.sd3-5-large-v1:0": {"litellm_provider": "bedrock", "mode": "image_generation", "output_cost_per_image": 0.08},
         "gemini/lyria-3-clip-preview": {"litellm_provider": "gemini", "mode": "chat", "output_cost_per_image": 0.04},
@@ -1101,9 +1103,11 @@ fn litellm_unit_prices_are_read_per_second_character_hour_image_and_clip() {
                 "video_second",
                 0.05
             ),
+            ("openai", "gpt-4o-mini-tts", "audio_hour", 0.9),
             ("openai", "sora-2", "video_second", 0.1),
             ("openai", "tts-1", "million_chars", 15.0),
             ("openai", "whisper-1", "audio_hour", 0.36),
+            ("xai", "grok-imagine-image", "image", 0.02),
         ]
     );
     assert!(

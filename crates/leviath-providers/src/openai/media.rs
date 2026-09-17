@@ -254,8 +254,15 @@ async fn speech(
     let name = format!("speech.{}", media::extension(mime.as_str()));
     let parts =
         vec![leviath_core::mime::Blob::new(mime, media::body_bytes(response).await?).named(&name)];
-    let chars = text.chars().count() as f64 / 1_000_000.0;
-    let cost = billing.unit.map(|u| u.cost(chars));
+    // `tts-1` bills the characters sent; `gpt-4o-mini-tts` bills the seconds
+    // of audio made, which the reply does not count, so they are read from
+    // the file. A file whose length cannot be read leaves the call unpriced.
+    let cost = billing.unit.and_then(|unit| match unit.unit {
+        crate::pricing::PriceUnit::AudioHour => {
+            media::audio_seconds(&parts[0]).map(|seconds| unit.cost(seconds / 3600.0))
+        }
+        _ => Some(unit.cost(text.chars().count() as f64 / 1_000_000.0)),
+    });
     Ok(media::response(
         media::summary(&route(request), &parts),
         parts,
