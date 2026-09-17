@@ -177,6 +177,17 @@ pub enum SetupBlocker {
     /// Every candidate is out of service, for reasons that do not agree or are
     /// not known. The remedy names what was tried last.
     ProvidersUnavailable,
+    /// The provider could not be reached at all: the name did not resolve,
+    /// the connection was refused, or the TLS handshake failed. The network
+    /// or the address is what to check.
+    ProviderUnreachable,
+    /// The provider was reached and did not answer in time. It is up, but
+    /// slow, or the request was large; a resume tries again.
+    ProviderTimedOut,
+    /// The provider was reached and failed: a server error, a reply that
+    /// stopped part-way, or one that could not be read. Nothing about the
+    /// setup is known to be wrong; a resume tries again once it recovers.
+    ProviderFailed,
 }
 
 impl std::fmt::Display for SetupBlocker {
@@ -187,6 +198,9 @@ impl std::fmt::Display for SetupBlocker {
             Self::AuthFailed => f.write_str("key"),
             Self::Forbidden => f.write_str("access"),
             Self::ProvidersUnavailable => f.write_str("providers"),
+            Self::ProviderUnreachable => f.write_str("unreachable"),
+            Self::ProviderTimedOut => f.write_str("timed out"),
+            Self::ProviderFailed => f.write_str("failed"),
         }
     }
 }
@@ -292,6 +306,15 @@ impl std::fmt::Display for WaitReason {
             Self::Children { outstanding } => write!(f, "children({outstanding})"),
             // The remedy is a sentence; this is a table cell. The blocker is
             // the half that fits, and the half that says which screen to open.
+            // The three that describe the provider rather than something the
+            // install lacks say what happened to it.
+            Self::NeedsSetup {
+                blocker:
+                    blocker @ (SetupBlocker::ProviderUnreachable
+                    | SetupBlocker::ProviderTimedOut
+                    | SetupBlocker::ProviderFailed),
+                ..
+            } => write!(f, "provider {blocker}"),
             Self::NeedsSetup { blocker, .. } => write!(f, "needs {blocker}"),
         }
     }
@@ -1443,20 +1466,38 @@ mod tests {
                 "providers_unavailable",
                 "providers",
             ),
+            (
+                SetupBlocker::ProviderUnreachable,
+                "provider_unreachable",
+                "unreachable",
+            ),
+            (
+                SetupBlocker::ProviderTimedOut,
+                "provider_timed_out",
+                "timed out",
+            ),
+            (SetupBlocker::ProviderFailed, "provider_failed", "failed"),
         ] {
             assert_eq!(serde_json::to_value(blocker).unwrap(), wire);
             assert_eq!(blocker.to_string(), label);
             let back: SetupBlocker = serde_json::from_value(serde_json::json!(wire)).unwrap();
             assert_eq!(back, blocker);
             // The row renders the kind, not the sentence: a remedy is a
-            // sentence and this is a table cell.
+            // sentence and this is a table cell. A blocker that describes the
+            // provider says what happened to it rather than what is needed.
+            let lead = match blocker {
+                SetupBlocker::ProviderUnreachable
+                | SetupBlocker::ProviderTimedOut
+                | SetupBlocker::ProviderFailed => "provider",
+                _ => "needs",
+            };
             assert_eq!(
                 WaitReason::NeedsSetup {
                     blocker,
                     remedy: "a whole sentence that would not fit".to_string(),
                 }
                 .to_string(),
-                format!("needs {label}")
+                format!("{lead} {label}")
             );
         }
     }

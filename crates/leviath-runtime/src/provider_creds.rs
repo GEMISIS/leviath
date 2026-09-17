@@ -52,6 +52,10 @@ pub struct ProviderCreds {
 const KIND_OPTION: &str = "kind";
 /// The `kind` value for one.
 const OPENAI_COMPATIBLE: &str = "openai-compatible";
+/// The `kind` value for OpenAI's own API at a host of its own.
+const OPENAI_HOST: &str = "openai";
+/// The `options` key naming the header a key goes in instead of a bearer.
+const AUTH_HEADER_OPTION: &str = "auth_header";
 /// The `options` key prefix a request header travels under: `header:0:X-Org`.
 const HEADER_PREFIX: &str = "header:";
 /// The `options` key holding the configured model ids, as a JSON array.
@@ -77,6 +81,8 @@ pub struct EndpointSpec {
     pub models: Option<Vec<String>>,
     /// Ids a bare model name may route here on.
     pub serves: Vec<String>,
+    /// The header the key goes in instead of `Authorization: Bearer`.
+    pub auth_header: Option<String>,
 }
 
 impl EndpointSpec {
@@ -122,6 +128,62 @@ impl EndpointSpec {
             headers,
             models: list(MODELS_OPTION)?,
             serves: list(SERVES_OPTION)?.unwrap_or_default(),
+            auth_header: creds.options.get(AUTH_HEADER_OPTION).cloned(),
+        }))
+    }
+}
+
+/// What [`build_provider_registry`] needs to register OpenAI's own provider
+/// under another name, read back out of a [`ProviderCreds`] made by
+/// [`ProviderCreds::openai_host`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenaiHostSpec {
+    /// The host's API root.
+    pub base_url: String,
+    /// Extra headers on every request, in the order the config listed them.
+    pub headers: Vec<(String, String)>,
+    /// Ids a bare model name may route here on: deployment names.
+    pub serves: Vec<String>,
+    /// The header the key goes in instead of `Authorization: Bearer`.
+    pub auth_header: Option<String>,
+    /// The key the host issued.
+    pub api_key: String,
+}
+
+impl OpenaiHostSpec {
+    /// The host `creds` describes, or `Ok(None)` when it is not one, or is
+    /// one with no address or no key to reach it with (the config layer
+    /// refuses both at load, so this is a second guard).
+    pub fn from_creds(
+        creds: &ProviderCreds,
+    ) -> Result<Option<Self>, leviath_providers::ProviderError> {
+        let (Some(OPENAI_HOST), Some(base_url), Some(api_key)) = (
+            creds.options.get(KIND_OPTION).map(String::as_str),
+            creds.base_url.clone(),
+            creds.api_key.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let serves = creds
+            .options
+            .get(SERVES_OPTION)
+            .map(|json| serde_json::from_str::<Vec<String>>(json))
+            .transpose()
+            .map_err(|_| {
+                leviath_providers::ProviderError::Other(format!(
+                    "provider '{}': the '{SERVES_OPTION}' option is not a JSON list of \
+                     strings; the runtime wrote it from the config, so this is a bug in \
+                     leviath rather than in the config",
+                    creds.name
+                ))
+            })?
+            .unwrap_or_default();
+        Ok(Some(Self {
+            base_url,
+            headers: creds.headers()?,
+            serves,
+            auth_header: creds.options.get(AUTH_HEADER_OPTION).cloned(),
+            api_key,
         }))
     }
 }
@@ -264,6 +326,40 @@ impl ProviderCreds {
             options,
         }
     }
+
+    /// A cred entry for OpenAI's own API at another host, registered as
+    /// `name`: an Azure resource, or a gateway in front of OpenAI.
+    /// [`OpenaiHostSpec::from_creds`] reads it back.
+    pub fn openai_host(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: String,
+        headers: Vec<(String, String)>,
+        serves: Vec<String>,
+    ) -> Self {
+        let mut creds = Self::simple(name).with_headers(headers);
+        creds.api_key = Some(api_key);
+        creds.base_url = Some(base_url.into());
+        creds
+            .options
+            .insert(KIND_OPTION.to_string(), OPENAI_HOST.to_string());
+        if !serves.is_empty() {
+            creds.options.insert(
+                SERVES_OPTION.to_string(),
+                serde_json::to_string(&serves).expect("a list of strings is JSON"),
+            );
+        }
+        creds
+    }
+
+    /// Send the key in `header` instead of as a bearer token. `None` leaves
+    /// the entry as it was.
+    pub fn with_auth_header(mut self, header: Option<String>) -> Self {
+        if let Some(header) = header {
+            self.options.insert(AUTH_HEADER_OPTION.to_string(), header);
+        }
+        self
+    }
 }
 
 /// Outbound HTTPS clients, one per distinct request timeout.
@@ -403,6 +499,25 @@ pub fn build_provider_registry_probing(
         // Decided by kind before the name is looked at: an endpoint is
         // registered under whatever name the config gave it, and that name is
         // the user's to choose.
+        if let Some(host) = OpenaiHostSpec::from_creds(c)? {
+            registry.register(
+                c.name.clone(),
+                Arc::new(
+                    leviath_providers::OpenAIProvider::with_overrides(
+                        clients.get_or_build(timeout, build_client)?,
+                        host.api_key,
+                        caps,
+                        c.rate_limit.as_ref(),
+                    )
+                    .named(c.name.clone())
+                    .with_base_url(Some(host.base_url))
+                    .with_headers(host.headers)
+                    .with_auth_header(host.auth_header)
+                    .with_serves(host.serves),
+                ),
+            );
+            continue;
+        }
         if let Some(endpoint) = EndpointSpec::from_creds(c)? {
             registry.register(
                 c.name.clone(),
@@ -414,6 +529,7 @@ pub fn build_provider_registry_probing(
                         c.api_key.clone(),
                         endpoint.headers,
                     )
+                    .with_auth_header(endpoint.auth_header)
                     .with_overrides(caps)
                     .with_rate_limit(c.rate_limit.as_ref())
                     .with_request_timeout(timeout)
@@ -849,6 +965,7 @@ mod tests {
                 ],
                 models: Some(vec!["llama-3".to_string()]),
                 serves: vec!["llama".to_string()],
+                auth_header: None,
             }
         );
 
@@ -860,6 +977,77 @@ mod tests {
         assert_eq!(spec.models, None);
         assert!(spec.serves.is_empty());
         assert!(spec.headers.is_empty());
+    }
+
+    /// Two hosts of OpenAI's API, each with its own key, sit side by side in
+    /// one registry: each is registered under its own name, reaches its own
+    /// address, and sends its own credential the way it was told to.
+    #[tokio::test]
+    async fn two_openai_hosts_register_side_by_side_with_their_own_keys() {
+        let listing = br#"{"data":[{"id":"gpt-5.5","created":1}]}"#;
+        let (east_url, east) =
+            leviath_testkit::spawn_mock_recorder(200, "OK", listing.to_vec()).await;
+        let (west_url, west) =
+            leviath_testkit::spawn_mock_recorder(200, "OK", listing.to_vec()).await;
+        let creds = [
+            ProviderCreds::openai_host("azure-east", &east_url, "east-key".into(), vec![], vec![])
+                .with_auth_header(Some("api-key".to_string())),
+            ProviderCreds::openai_host(
+                "azure-west",
+                &west_url,
+                "west-key".into(),
+                vec![("X-Team".to_string(), "search".to_string())],
+                vec!["prod-gpt55".to_string()],
+            ),
+        ];
+        let spec = OpenaiHostSpec::from_creds(&creds[1])
+            .expect("decodes")
+            .expect("a host");
+        assert_eq!(spec.serves, vec!["prod-gpt55".to_string()]);
+        assert_eq!(spec.auth_header, None);
+        // No header named leaves the entry as it was.
+        assert_eq!(creds[1].clone().with_auth_header(None), creds[1]);
+        // A host with no key is not one this can register.
+        let mut keyless = creds[1].clone();
+        keyless.api_key = None;
+        assert_eq!(OpenaiHostSpec::from_creds(&keyless).expect("decodes"), None);
+        // A serves list the runtime could not have written is a named bug,
+        // and fails the registry rather than routing nothing.
+        let mut garbled = creds[0].clone();
+        garbled
+            .options
+            .insert(SERVES_OPTION.to_string(), "not json".to_string());
+        let err = build_provider_registry(&[garbled]).err().expect("refused");
+        assert!(err.to_string().contains("azure-east"));
+        let mut misnumbered = creds[0].clone();
+        misnumbered
+            .options
+            .insert(format!("{HEADER_PREFIX}first:X-Team"), "search".to_string());
+        assert!(OpenaiHostSpec::from_creds(&misnumbered).is_err());
+        // And a client that will not build fails the registry too.
+        assert!(build_provider_registry_with(&creds[..1], &failing_client).is_err());
+
+        let registry = build_provider_registry(&creds).expect("builds");
+        let east_provider = registry.get("azure-east").expect("east registered");
+        let west_provider = registry.get("azure-west").expect("west registered");
+        assert!(registry.get("openai").is_none());
+        assert_eq!(east_provider.name(), "azure-east");
+        assert_eq!(
+            west_provider.serves_model("prod-gpt55").as_deref(),
+            Some("prod-gpt55")
+        );
+        assert_eq!(east_provider.serves_model("prod-gpt55"), None);
+
+        let listed = east_provider.list_models().await.expect("east lists");
+        assert_eq!(listed[0].provider, "azure-east");
+        west_provider.list_models().await.expect("west lists");
+
+        let east = east.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(east.contains("api-key: east-key"), "{east}");
+        assert!(!east.contains("authorization"), "{east}");
+        let west = west.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(west.contains("authorization: bearer west-key"), "{west}");
+        assert!(west.contains("x-team: search"), "{west}");
     }
 
     /// A built-in provider's extra headers ride the same numbered options an

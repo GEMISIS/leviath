@@ -1320,7 +1320,7 @@ mod tests {
         terminal.backend().text()
     }
 
-    /// The tuning screen has thirteen two-line fields, which is more than most
+    /// The tuning screen has fourteen two-line fields, which is more than most
     /// windows are tall. Drawn as a `List` it would stop at the bottom of the
     /// pane, leaving the last fields and the Continue button unreachable with
     /// no sign they existed.
@@ -1333,7 +1333,7 @@ mod tests {
         let top = rendered_at(&w, 90, 20);
         assert!(top.contains("Max concurrent inferences"), "{top}");
         assert!(
-            !top.contains("Max bytes one run may write"),
+            !top.contains("Load ./.env"),
             "the far end of the form is not on the first screenful:\n{top}"
         );
         // The scrollbar is what says there is more, since nothing else can.
@@ -1341,7 +1341,7 @@ mod tests {
 
         w.scroll_end();
         let bottom = rendered_at(&w, 90, 20);
-        assert!(bottom.contains("Max bytes one run may write"), "{bottom}");
+        assert!(bottom.contains("Load ./.env"), "{bottom}");
         assert!(
             bottom.contains("Continue:"),
             "the button has to be reachable:\n{bottom}"

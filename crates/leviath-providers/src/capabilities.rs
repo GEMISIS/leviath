@@ -92,6 +92,39 @@ pub(crate) fn lookup(table: &[Row], model: &str, fallback: ModelCapabilities) ->
         .map_or(fallback, Row::capabilities)
 }
 
+/// The first row of `table` that recognises `model`, if any does.
+pub(crate) fn find(table: &[Row], model: &str) -> Option<ModelCapabilities> {
+    table
+        .iter()
+        .find(|row| row.hits(model))
+        .map(Row::capabilities)
+}
+
+/// What a vendor's own table says about `model`, for a host that serves
+/// another vendor's models under their published ids: an OpenAI-compatible
+/// gateway, or Azure in front of OpenAI's.
+///
+/// A gateway prefix (`openai/gpt-5.5`) picks the vendor; a bare id is tried
+/// against each vendor table in turn, which is safe because their names do
+/// not overlap. `None` when no table knows the id, which is the case for a
+/// deployment name an operator made up.
+pub(crate) fn vendor_capabilities(model: &str) -> Option<ModelCapabilities> {
+    let tables: [(&str, &[Row]); 4] = [
+        ("openai", crate::openai::MODELS),
+        ("anthropic", crate::anthropic::MODELS),
+        ("x-ai", crate::xai::catalog::MODELS),
+        ("meta", crate::meta::MODELS),
+    ];
+    let lower = model.to_ascii_lowercase();
+    match lower.split_once('/') {
+        Some((vendor, rest)) => tables
+            .iter()
+            .find(|(name, _)| *name == vendor)
+            .and_then(|(_, table)| find(table, rest)),
+        None => tables.iter().find_map(|(_, table)| find(table, &lower)),
+    }
+}
+
 /// One model this build names outright, for a listing that cannot ask.
 ///
 /// The tables above recognise a model by a pattern in its name and so cannot

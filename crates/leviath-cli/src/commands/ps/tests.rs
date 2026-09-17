@@ -370,6 +370,28 @@ fn an_empty_listing_still_says_why_nothing_is_running() {
     assert!(out.contains("openrouter (credits-exhausted"), "{out}");
 }
 
+/// A run parked until something is fixed is not "waiting for an answer": it
+/// gets a line under the table saying what happened and what to do, which the
+/// status cell has no room for.
+#[test]
+fn format_runs_spells_out_why_a_parked_run_is_paused() {
+    use leviath_core::run_meta::SetupBlocker;
+    let mut parked = entry("run-parked", AgentStatus::Paused);
+    parked.wait_reason = Some(WaitReason::NeedsSetup {
+        blocker: SetupBlocker::ProviderTimedOut,
+        remedy: "'openai' did not answer in time ([timeout] waiting)".to_string(),
+    });
+    let out = format_runs(&[parked], &[], &healthy_daemon(), 0);
+    assert!(out.contains("paused: provider timed out"), "{out}");
+    assert!(!out.contains("needs an answer"), "{out}");
+    assert!(
+        out.contains(
+            "paused until something is fixed:\n  run-parked: 'openai' did not answer in time"
+        ),
+        "{out}"
+    );
+}
+
 /// The whole point of the change: two runs both `Waiting`, telling the operator
 /// which one needs them and which one is fine.
 #[test]

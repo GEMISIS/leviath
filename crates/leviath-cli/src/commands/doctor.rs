@@ -617,7 +617,10 @@ fn broken_config_check(fault: &crate::config::ConfigFault) -> Check {
 /// One real call to the resolved provider. No context window, no blueprint, no
 /// world: the point is to isolate "can this credential reach this model" from
 /// everything the framework layers on top of it.
-async fn inference_check(provider: &dyn Provider, model: &str) -> Check {
+///
+/// `extra` is the request's extra parameters: the zero-retention fields, when
+/// they apply, so the probe goes out the way a run's call would.
+async fn inference_check(provider: &dyn Provider, model: &str, extra: serde_json::Value) -> Check {
     let caps = provider.capabilities(model);
     let request = InferenceRequest {
         system: Vec::new(),
@@ -633,7 +636,7 @@ async fn inference_check(provider: &dyn Provider, model: &str) -> Check {
         // parameter outright get the same value and ignore it.
         temperature: 0.0,
         tools: Vec::new(),
-        extra: serde_json::Value::Null,
+        extra,
         request_timeout_secs: Some(60),
     };
 
@@ -1012,8 +1015,22 @@ pub(crate) async fn run_checks_with(
     let (model, picked) = match resolved.model.clone() {
         Some(model) => (model, false),
         None => match probe_model(resolved.provider.as_ref()).await {
-            Some(model) => (model, true),
-            None => {
+            Ok(Some(model)) => (model, true),
+            // The listing is how a model is found, so a listing that failed
+            // is the inference check's answer: the same words `lev setup` and
+            // `lev models list` print for it.
+            Err(e) => {
+                checks.push(Check::fail(
+                    "inference",
+                    format!(
+                        "'{}' could not list its models to pick one to probe: {}",
+                        resolved.provider_name,
+                        e.describe()
+                    ),
+                ));
+                return checks;
+            }
+            Ok(None) => {
                 checks.push(Check::warn(
                     "inference",
                     format!(
@@ -1026,7 +1043,16 @@ pub(crate) async fn run_checks_with(
             }
         },
     };
-    let mut check = inference_check(resolved.provider.as_ref(), &model).await;
+    // Zero retention holds for the probe the way it holds for a run: a model
+    // that keeps something is not sent even the one-word prompt, and the line
+    // says why in the words the spawn gate uses.
+    if let Some(refusal) = registry.retention_refusal(&resolved.provider_name, &model) {
+        checks.push(Check::fail("inference", format!("not sent: {refusal}")));
+        return checks;
+    }
+    let mut extra = serde_json::Value::Null;
+    registry.apply_retention_knobs(&resolved.provider_name, &mut extra);
+    let mut check = inference_check(resolved.provider.as_ref(), &model, extra).await;
     if picked {
         check.detail = format!("{model}: {}", check.detail);
     }

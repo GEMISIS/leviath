@@ -202,37 +202,66 @@ impl ChatTarget<'_> {
         model: &str,
         memo: &ModelMemo,
     ) -> Result<reqwest::Response> {
-        let sent = self.send(body).await;
-        self.retry_without_temperature(sent, body, model, memo)
-            .await
+        self.send_adapting(body, model, memo, None).await
     }
 
-    /// The retry half of [`Self::send_dropping_refused_temperature`] alone,
-    /// for a provider that looks at the first answer for other refusals
-    /// before this one. Any outcome but a temperature refusal comes back as it
-    /// was.
-    pub(crate) async fn retry_without_temperature(
+    /// POST `body`, fixing what the API refuses and sending again: a
+    /// temperature it will not take (remembered in `temperature`), and, when
+    /// `token_limit` is given, a `max_tokens` it wants as
+    /// `max_completion_tokens` (remembered there).
+    ///
+    /// Each refusal names one field, so a model refusing both answers twice.
+    /// A fix is only tried while the body still carries the refused field,
+    /// which bounds the loop: every retry removes one, and an answer the body
+    /// no longer explains comes back as it was.
+    pub(crate) async fn send_adapting(
         &self,
-        sent: Result<reqwest::Response>,
         body: &mut serde_json::Value,
         model: &str,
-        memo: &ModelMemo,
+        temperature: &ModelMemo,
+        token_limit: Option<&ModelMemo>,
     ) -> Result<reqwest::Response> {
-        match sent {
-            Err(ProviderError::ApiError(detail))
-                if crate::openai_compat::temperature_refused(&detail) =>
+        loop {
+            let detail = match self.send(body).await {
+                Err(ProviderError::ApiError(detail)) => detail,
+                other => return other,
+            };
+            if body.get("temperature").is_some()
+                && crate::openai_compat::temperature_refused(&detail)
             {
                 tracing::debug!(
                     provider = self.provider,
                     model,
                     "the API refused the temperature we sent; retrying without it"
                 );
-                memo.insert(model);
+                temperature.insert(model);
                 drop_temperature(body);
-                self.send(body).await
+            } else if let Some(memo) = token_limit
+                && body.get("max_tokens").is_some()
+                && crate::openai_compat::token_limit_refused(&detail)
+            {
+                tracing::debug!(
+                    provider = self.provider,
+                    model,
+                    "the API refused max_tokens; retrying with max_completion_tokens"
+                );
+                memo.insert(model);
+                use_max_completion_tokens(body);
+            } else {
+                return Err(ProviderError::ApiError(detail));
             }
-            other => other,
         }
+    }
+}
+
+/// Move a body's output cap from `max_tokens` to `max_completion_tokens`,
+/// the name OpenAI's reasoning models take. A `max_completion_tokens` the
+/// stage's parameters already set is kept: it is what the author asked for.
+pub(crate) fn use_max_completion_tokens(body: &mut serde_json::Value) {
+    if let Some(fields) = body.as_object_mut()
+        && let Some(cap) = fields.remove("max_tokens")
+    {
+        fields.entry("max_completion_tokens").or_insert(cap);
     }
 }
 

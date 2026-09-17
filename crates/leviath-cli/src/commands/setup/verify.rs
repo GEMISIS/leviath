@@ -144,29 +144,11 @@ pub(crate) async fn verify_via_registry_with(
         Ok(models) => Outcome::Reachable {
             models: models.into_iter().map(|m| m.id).collect(),
         },
+        // The whole error, cause and remedy included: the same words
+        // `lev models list` and `lev doctor` print for the same failure.
         Err(e) => Outcome::Failed {
-            message: describe(&e.to_string()),
+            message: e.describe(),
         },
-    }
-}
-
-/// Turn a provider error into something a person can act on.
-///
-/// The raw strings are HTTP-shaped (`API error 401: {"type":"error",...}`) and
-/// the status code is the only part that tells the user what to *do*.
-pub(crate) fn describe(raw: &str) -> String {
-    if raw.contains("401") || raw.contains("Unauthorized") || raw.contains("invalid_api_key") {
-        "rejected - check the key".to_string()
-    } else if raw.contains("403") {
-        "forbidden - the key is valid but lacks access".to_string()
-    } else if raw.contains("429") {
-        "rate limited - the key works".to_string()
-    } else if raw.contains("timed out") || raw.contains("timeout") {
-        "timed out - no answer from the provider".to_string()
-    } else if raw.contains("dns") || raw.contains("connect") || raw.contains("Connection") {
-        "unreachable - check your network".to_string()
-    } else {
-        raw.to_string()
     }
 }
 
@@ -263,46 +245,6 @@ mod tests {
         assert!(!Outcome::Reachable { models: vec![] }.is_failure());
     }
 
-    // ─── describe ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn describe_turns_status_codes_into_advice() {
-        assert_eq!(
-            describe("API error 401: bad key"),
-            "rejected - check the key"
-        );
-        assert_eq!(describe("Unauthorized"), "rejected - check the key");
-        assert_eq!(describe("invalid_api_key"), "rejected - check the key");
-        assert_eq!(
-            describe("API error 403: no access"),
-            "forbidden - the key is valid but lacks access"
-        );
-        // A 429 proves the credential works, which is the useful part.
-        assert_eq!(
-            describe("API error 429: slow down"),
-            "rate limited - the key works"
-        );
-        assert_eq!(
-            describe("operation timed out"),
-            "timed out - no answer from the provider"
-        );
-        assert_eq!(
-            describe("error trying to connect"),
-            "unreachable - check your network"
-        );
-        assert_eq!(describe("dns error"), "unreachable - check your network");
-        assert_eq!(
-            describe("Connection refused"),
-            "unreachable - check your network"
-        );
-    }
-
-    #[test]
-    fn describe_passes_through_anything_it_does_not_recognise() {
-        // Better a raw provider message than a wrong guess about what it means.
-        assert_eq!(describe("something entirely new"), "something entirely new");
-    }
-
     // ─── verifiers ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -370,12 +312,27 @@ mod tests {
 
         let outcome = verify_via_registry(&creds).await;
 
-        assert_eq!(
-            outcome,
-            Outcome::Failed {
-                message: "rejected - check the key".to_string()
-            }
-        );
+        // What to do first, then what the provider actually said.
+        let message = outcome.summary();
+        assert!(message.starts_with("the API key was rejected"), "{message}");
+        assert!(message.contains("bad key"), "{message}");
+    }
+
+    /// A host that cannot be reached says which way it could not: the kind,
+    /// the cause the transport reported, and the remedy, not one folded
+    /// "check your network".
+    #[tokio::test]
+    async fn an_unreachable_host_says_why() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let closed = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener);
+        let mut creds = creds("ollama");
+        creds.api_key = None;
+        creds.base_url = Some(closed);
+
+        let message = verify_via_registry(&creds).await.summary();
+        assert!(message.contains("[connection-refused]"), "{message}");
+        assert!(message.contains("error sending request"), "{message}");
     }
 
     #[tokio::test]

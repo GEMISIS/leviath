@@ -143,6 +143,16 @@ pub(crate) fn dispatch_compaction(
         let Some(provider) = providers.0.get(&config.provider) else {
             continue; // compaction provider not registered - skip, non-fatal
         };
+        // A summary sends the run's context, so a compaction model zero
+        // retention refuses is never called; the spawn gate refuses such a
+        // blueprint, so this is a switch turned on under a running daemon.
+        if let Some(refusal) = providers
+            .0
+            .retention_refusal(&config.provider, &config.model)
+        {
+            tracing::warn!("compaction skipped: its model is {refusal}");
+            continue;
+        }
         // A summary request carries the run's context, so the zero-retention
         // fields ride it the way they ride a stage's own request.
         for (_, request) in requests.iter_mut() {
@@ -492,6 +502,17 @@ pub(crate) fn dispatch_edge_compact(
                     );
                     return None;
                 };
+                if let Some(refusal) = providers
+                    .0
+                    .retention_refusal(&config.provider, &config.model)
+                {
+                    tracing::warn!(
+                        regions = ?pending.0,
+                        "edge transform asked to compact, but its model is {refusal} \
+                         Carrying the regions as written"
+                    );
+                    return None;
+                }
                 let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
                     tracing::warn!(
                         model = %config.model,

@@ -192,18 +192,41 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         else {
             continue;
         };
-        let mut cred = ProviderCreds::openai_compatible(
-            name.clone(),
-            base_url,
-            mp.api_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(str::to_string),
-            mp.header_pairs(),
-            mp.models.clone(),
-            mp.serves.clone().unwrap_or_default(),
-        );
+        let api_key = mp
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+        let mut cred = match (mp.is_openai(), api_key) {
+            // OpenAI's own API at a host of its own. A deployment name does
+            // not look like an OpenAI model id, so `models` routes here the
+            // way `serves` does.
+            (true, Some(key)) => ProviderCreds::openai_host(
+                name.clone(),
+                base_url,
+                key,
+                mp.header_pairs(),
+                mp.serves
+                    .iter()
+                    .flatten()
+                    .chain(mp.models.iter().flatten())
+                    .cloned()
+                    .collect(),
+            ),
+            // Refused at load; one built by hand is skipped rather than
+            // registered with nothing to authenticate with.
+            (true, None) => continue,
+            (false, api_key) => ProviderCreds::openai_compatible(
+                name.clone(),
+                base_url,
+                api_key,
+                mp.header_pairs(),
+                mp.models.clone(),
+                mp.serves.clone().unwrap_or_default(),
+            ),
+        }
+        .with_auth_header(mp.auth_header());
         cred.model_capabilities = caps.clone();
         cred.request_timeout_secs = timeout;
         cred.rate_limit = mp.rate_limit.clone();
@@ -931,8 +954,44 @@ mod tests {
                 ..Default::default()
             },
         );
+        // OpenAI's own API at another host, with a key: registered as that,
+        // routing both its `serves` and its `models`. One with no key is
+        // skipped (a loaded config cannot hold one either).
+        config.model_providers.insert(
+            "azure".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::Openai),
+                base_url: Some("https://r.openai.azure.com/openai/v1".to_string()),
+                api_key: Some("az".to_string()),
+                serves: Some(vec!["prod".to_string()]),
+                models: Some(vec!["stage".to_string()]),
+                extra: [(
+                    "auth_header".to_string(),
+                    toml::Value::String("api-key".to_string()),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+        config.model_providers.insert(
+            "azure-keyless".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::Openai),
+                base_url: Some("https://r.openai.azure.com/openai/v1".to_string()),
+                ..Default::default()
+            },
+        );
 
         let creds = provider_creds_from_config(&config);
+        let azure = creds.iter().find(|c| c.name == "azure").expect("azure");
+        let host = leviath_runtime::provider_creds::OpenaiHostSpec::from_creds(azure)
+            .expect("decodes")
+            .expect("an openai host");
+        assert_eq!(host.serves, ["prod", "stage"]);
+        assert_eq!(host.auth_header.as_deref(), Some("api-key"));
+        assert!(!creds.iter().any(|c| c.name == "azure-keyless"));
+        let creds: Vec<_> = creds.into_iter().filter(|c| c.name != "azure").collect();
         let names: Vec<&str> = creds
             .iter()
             .filter(|c| c.options.contains_key("kind"))

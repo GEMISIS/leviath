@@ -277,8 +277,8 @@ pub(super) async fn put_config(
                     err(
                         StatusCode::BAD_REQUEST,
                         format!(
-                            "gateway '{}': unknown kind '{text}'; use \"script\" or \
-                             \"openai-compatible\"",
+                            "gateway '{}': unknown kind '{text}'; use \"script\", \
+                             \"openai-compatible\" or \"openai\"",
                             gateway.name
                         ),
                     )

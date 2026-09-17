@@ -902,6 +902,18 @@ pub fn resolve_stages(
     unattended: bool,
     output_request: Option<&leviath_core::output::OutputSpec>,
 ) -> Result<Vec<ResolvedStage>, String> {
+    // The compaction model is sent the run's context too. Judged only when
+    // its provider is registered: one that is not is never called.
+    if let Some(compaction) = &blueprint.compaction_config
+        && registry.has(&compaction.provider)
+        && let Some(refusal) = registry.retention_refusal_with(
+            &defaults.retention,
+            &compaction.provider,
+            &compaction.model,
+        )
+    {
+        return Err(format!("the blueprint's compaction model is {refusal}"));
+    }
     blueprint
         .stages
         .iter()
@@ -964,21 +976,12 @@ pub fn resolve_stages(
             // for one at another vendor.
             let mut dropped = Vec::new();
             if defaults.retention.zero_requested {
-                let policy =
-                    registry.retention_with(&defaults.retention, &head.provider, &head.model);
-                if !policy.is_zero() {
-                    return Err(format!(
-                        "stage '{}' names {}/{}, which does not run with zero data \
-                         retention (retention {}: {}). `[providers] zero_retention` is \
-                         on: name a model that keeps nothing, declare the agreement \
-                         in `zero_retention_agreements` if you hold one, or turn the \
-                         setting off.",
-                        stage.name,
-                        head.provider,
-                        head.model,
-                        policy.retention.describe(),
-                        policy.note,
-                    ));
+                if let Some(refusal) = registry.retention_refusal_with(
+                    &defaults.retention,
+                    &head.provider,
+                    &head.model,
+                ) {
+                    return Err(format!("stage '{}' names {refusal}", stage.name));
                 }
                 // The fallbacks are held to the same bar. A failover is the
                 // one place a request could otherwise reach a model that
@@ -1762,6 +1765,49 @@ mod tests {
             None,
         )
         .expect("a declared agreement makes OpenAI zero");
+    }
+
+    /// The compaction model is held to the same rule as the stages, since a
+    /// summary sends the run's context; one on a provider that is not
+    /// registered is never called and so is not judged.
+    #[test]
+    fn resolve_stages_refuses_a_retaining_compaction_model() {
+        let stage = leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("ollama", "q")]));
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        bp.compaction_config = Some(leviath_core::lifecycle::CompactionConfig {
+            provider: "openai".to_string(),
+            model: "gpt-5.5".to_string(),
+            ..Default::default()
+        });
+        let defaults = ModelDefaults {
+            retention: leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+            ..ModelDefaults::default()
+        };
+        let registry = registry_publishing(&[("openai", &["gpt-5.5"]), ("ollama", &["q"])]);
+        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+            .expect_err("the compaction model keeps an abuse log");
+        assert!(
+            err.starts_with("the blueprint's compaction model is openai/gpt-5.5, which does not"),
+            "{err}"
+        );
+
+        let only_local = registry_publishing(&[("ollama", &["q"])]);
+        resolve_stages(&bp, None, &defaults, &only_local, catalog(&[]), false, None)
+            .expect("an unregistered compaction provider is never called");
+        resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("not asked for, not refused");
     }
 
     /// And when the provider can say *why*, the spawn error says that instead.

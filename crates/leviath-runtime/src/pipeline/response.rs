@@ -133,64 +133,6 @@ fn dedupe_identical_blobs(blobs: Vec<leviath_core::mime::Blob>) -> Vec<leviath_c
         .collect()
 }
 
-/// What a person has to do about a provider that could not be reached.
-///
-/// A separate constant rather than a line-continued literal inside the
-/// `format!`: rustfmt reflows those, and it silently baked the source's own
-/// indentation into the middle of the sentence a user reads.
-const UNREACHABLE_REMEDY: &str = "check the network connection, then `lev resume` this run";
-
-/// Whether a failed provider call is the machine's problem rather than the
-/// run's, and if so what to tell the person who has to fix it.
-///
-/// `None` means the run itself is what went wrong and the caller should fail it.
-///
-/// Two lanes ask - the stage call in [`collect_inference`] and the routing call
-/// at a stage boundary in `collect_transition_choice` - and they have to answer
-/// the same way. Split the decision between them and one blip parks a run or
-/// kills it depending on which call happened to be in flight when the network
-/// went. The decision and the wording live here so the two cannot drift; what
-/// each lane must do to keep its own continuation alive is still its own
-/// business, because those genuinely differ.
-pub(super) fn setup_park(
-    err: &leviath_providers::ProviderError,
-    provider: &str,
-) -> Option<(leviath_core::run_meta::SetupBlocker, String)> {
-    use leviath_core::run_meta::SetupBlocker;
-    use leviath_providers::UnavailableReason;
-
-    match err.unavailable_reason()? {
-        // Running out of credits is an account state, not a defect in the run:
-        // the operator tops up and resumes. Failing here would make the run
-        // permanently unresumable and throw away every iteration it has already
-        // paid for, to punish somebody for a billing lapse. Unattended included
-        // - a harness that cannot rescue a run cancels it instead.
-        UnavailableReason::CreditsExhausted => Some((
-            SetupBlocker::CreditsExhausted,
-            format!("out of credits ({err}): top up the account, then `lev resume` this run"),
-        )),
-        // The provider could not be reached and there is no candidate left to
-        // try. That is the network being down, not the run being wrong: the
-        // request never got an answer, so nothing about this run is known to be
-        // bad, and the condition is usually over in seconds and always somebody
-        // else's to fix.
-        //
-        // Reachable only once the retry policy is spent - a transport failure is
-        // transient, so the dispatch job has already tried and backed off
-        // `inference_retry_attempts` times before the outcome gets here.
-        UnavailableReason::Unreachable => Some((
-            SetupBlocker::ProvidersUnavailable,
-            format!("could not reach '{provider}' ({err}): {UNREACHABLE_REMEDY}"),
-        )),
-        // A rejected key or a model the account may not have is a real setup
-        // problem, but one the failover list may still route around, and the
-        // stall watchdog already parks a run whose every candidate is out of
-        // service (see `fail_stalled_dispatch`). Left to the caller's error
-        // path so this change adds no new parking reason.
-        UnavailableReason::AuthFailed | UnavailableReason::Forbidden => None,
-    }
-}
-
 /// What `collect_inference` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -302,14 +244,20 @@ pub(crate) fn collect_inference(
         // counts against it and may take it out of service for everyone.
         if let Some(circuits) = circuits.as_deref_mut() {
             let failed = outcome.result.as_ref().err();
-            match failed.and_then(|e| e.unavailable_reason()) {
-                Some(reason) => {
+            match failed.and_then(|e| e.unavailable_reason().map(|r| (e, r))) {
+                Some((err, reason)) => {
                     // The kind travels with the reason: a provider that
                     // accepted the connection and then answered slowly is not
                     // the same as one that refused it, and the breaker gives the
                     // first far more rope before taking it away from every run.
-                    let kind = failed.and_then(|e| e.failure_kind());
-                    if circuits.record_failure(&called_provider, reason, kind, now, &policy) {
+                    let kind = err.failure_kind();
+                    let opened =
+                        circuits.record_failure(&called_provider, reason, kind, now, &policy);
+                    // The words, kept for the watchdog: a run that later finds
+                    // every provider out of service says what the last one
+                    // actually answered, not only that it stopped.
+                    circuits.note_error(&called_provider, err.describe());
+                    if opened {
                         // Loud and once, on the transition only: without it,
                         // ten dead runs in a row look like ten unrelated
                         // failures.
@@ -511,7 +459,7 @@ pub(crate) fn collect_inference(
                         .insert(ReadyToInfer);
                     continue;
                 }
-                if let Some((blocker, message)) = setup_park(&err, &called_provider) {
+                if let Some((blocker, message)) = super::park::setup_park(&err, &called_provider) {
                     tracing::warn!(
                         provider = %called_provider,
                         blocker = %blocker,

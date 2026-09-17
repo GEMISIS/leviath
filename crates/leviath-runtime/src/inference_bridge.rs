@@ -280,6 +280,10 @@ impl JobHydration {
 pub(crate) struct InferenceJob {
     /// The agent this inference is for.
     pub entity: Entity,
+    /// Why this call may not be sent, decided where the job was built: zero
+    /// data retention is on and the model keeps something. The job reports
+    /// it as its outcome without touching the provider.
+    pub refused: Option<String>,
     /// The provider to call (already resolved for the agent's model).
     pub provider: Arc<dyn Provider>,
     /// The assembled request.
@@ -498,6 +502,7 @@ pub(crate) async fn run_inference_job(
 ) {
     let InferenceJob {
         entity,
+        refused,
         provider,
         mut request,
         permit,
@@ -505,6 +510,18 @@ pub(crate) async fn run_inference_job(
         stream,
         hydration,
     } = job;
+    // Refused before anything leaves the machine, uploads included.
+    if let Some(refusal) = refused {
+        drop(permit);
+        let _ = results.send(InferenceOutcome {
+            entity,
+            result: Err(ProviderError::RetentionRefused(refusal)),
+            latency: std::time::Duration::ZERO,
+            pricing: None,
+        });
+        wake.notify_one();
+        return;
+    }
     // Bytes go in here and nowhere earlier: the assembled request, the
     // journal and every snapshot carry references only.
     if let Some(hydration) = &hydration {
@@ -697,6 +714,7 @@ mod tests {
         InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             provider,
             request: test_request(),
             permit: pools.try_acquire("p", "m").expect("free pool"),
@@ -726,6 +744,7 @@ mod tests {
         let job = InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             provider,
             request: test_request(),
             permit,
@@ -764,6 +783,34 @@ mod tests {
         );
     }
 
+    /// A job refused by zero retention reports the refusal as its outcome
+    /// without calling the provider, and frees its slot.
+    #[tokio::test]
+    async fn a_refused_job_never_reaches_the_provider() {
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(vec![Step::Hang].into()),
+            calls: std::sync::Mutex::new(0),
+        });
+        let mut refused = job(provider.clone());
+        refused.refused =
+            Some("openai/gpt-5.5, which does not run with zero data retention".into());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            refused,
+            tx,
+            Arc::new(Notify::new()),
+            instant(),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("an outcome");
+        let err = outcome.result.expect_err("refused");
+        assert!(err.to_string().contains("zero data retention"));
+        assert!(!err.is_transient());
+        assert_eq!(err.unavailable_reason(), None);
+        assert_eq!(*provider.calls.lock().unwrap(), 0);
+    }
+
     #[tokio::test]
     async fn run_job_aborts_a_hung_call_and_frees_the_pool_slot() {
         // A model pool of one slot, taken by the (hung) job under test.
@@ -780,6 +827,7 @@ mod tests {
         let job = InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             provider,
             request: test_request(),
             permit,
@@ -928,6 +976,7 @@ mod tests {
         InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             provider,
             request: sized_request(prompt_bytes), // max_tokens: 100
             permit: pools.try_acquire("p", "m").expect("free pool"),
@@ -1255,6 +1304,7 @@ mod tests {
         let job = InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             // `infer` is scripted to fail outright, so an `Ok` below can only
             // have come through `infer_stream`.
             provider: Arc::new(Scripted {
@@ -1293,6 +1343,7 @@ mod tests {
         let job = InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
+            refused: None,
             provider: Arc::new(Scripted {
                 steps: std::sync::Mutex::new(vec![Step::Permanent].into()),
                 calls: std::sync::Mutex::new(0),

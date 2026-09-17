@@ -44,8 +44,16 @@ pub const DIALECT: Dialect = Dialect {
 
 /// OpenAI provider.
 pub struct OpenAIProvider {
+    /// The name it is registered under: `openai`, or the name a
+    /// `[model_providers.<name>]` entry gave a second host.
+    name: String,
+
     /// The host, the key, the operator's headers and the rate limit.
     endpoint: Endpoint,
+
+    /// Ids a bare model name may route here on beyond OpenAI's own shapes:
+    /// the deployment names an Azure resource serves.
+    serves: Vec<String>,
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
@@ -124,12 +132,33 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 /// that refuses a temperature (verified against the API: it takes only its
 /// default and rejects any other value outright), and `gpt-4.1` above the
 /// implicit `gpt-4` default because its window is eight times larger.
+///
+/// The 1,050,000-token models (5.4, 5.5, 5.6) are sized at 922,000: on the
+/// Responses API the prompt and the reply share that budget, whatever the
+/// model's nominal window, so a region sized past it is a refused request.
+/// Azure publishes the same numbers for its deployments.
 pub(crate) const MODELS: &[Row] = &[
     Row {
         matches: &[Match::Prefix("gpt-5.5")],
         temperature: false,
         tools: true,
-        context: 1_050_000,
+        context: 922_000,
+        output: 128_000,
+    },
+    // The small 5.4 models keep the family window; the full-size ones below
+    // do not, so these have to match first.
+    Row {
+        matches: &[Match::Prefix("gpt-5.4-mini"), Match::Prefix("gpt-5.4-nano")],
+        temperature: true,
+        tools: true,
+        context: 272_000,
+        output: 128_000,
+    },
+    Row {
+        matches: &[Match::Prefix("gpt-5.4")],
+        temperature: true,
+        tools: true,
+        context: 922_000,
         output: 128_000,
     },
     // Its own row rather than the family's: the 5.6 models carry a window
@@ -143,7 +172,7 @@ pub(crate) const MODELS: &[Row] = &[
         context: 922_000,
         output: 128_000,
     },
-    // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini). 272,000 is the
+    // The rest of the GPT-5 family (5-mini and earlier). 272,000 is the
     // family's published input window.
     Row {
         matches: &[Match::Prefix("gpt-5")],
@@ -173,7 +202,9 @@ impl OpenAIProvider {
     /// Create a new OpenAI provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
+            name: PROVIDER_NAME.to_string(),
             endpoint: Endpoint::new(client, DEFAULT_BASE_URL, Auth::Key(api_key)),
+            serves: Vec::new(),
             capability_overrides: HashMap::new(),
             temperature_unsupported: Default::default(),
             learned: Default::default(),
@@ -197,6 +228,29 @@ impl OpenAIProvider {
     /// what a gateway named in `with_base_url` wants of its own.
     pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.endpoint.extra_headers = headers;
+        self
+    }
+
+    /// Register under `name` rather than `openai`: a second host of OpenAI's
+    /// API, with its own key, beside the first. The vendor tables, prices
+    /// and dialect stay OpenAI's; only what the registry and the listing call
+    /// it changes.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Send the key in `header` instead of as a bearer token. `None` keeps
+    /// the bearer.
+    pub fn with_auth_header(mut self, header: Option<String>) -> Self {
+        self.endpoint.auth_header = header;
+        self
+    }
+
+    /// Route these ids here too: deployment names that do not look like
+    /// OpenAI's own model ids.
+    pub fn with_serves(mut self, serves: Vec<String>) -> Self {
+        self.serves = serves;
         self
     }
 
@@ -356,15 +410,17 @@ impl Provider for OpenAIProvider {
     }
 
     fn name(&self) -> &str {
-        PROVIDER_NAME
+        &self.name
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {
         // OpenAI's chat models are `gpt-*`, and its reasoning line is `o1`/`o3`
         // and successors. See the note on the Gemini provider for why the
         // capability table is the wrong thing to ask.
-        (is_chat_model_id(model_key) || self.capability_overrides.contains_key(model_key))
-            .then(|| model_key.to_string())
+        (is_chat_model_id(model_key)
+            || self.capability_overrides.contains_key(model_key)
+            || self.serves.iter().any(|id| id == model_key))
+        .then(|| model_key.to_string())
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
@@ -437,9 +493,12 @@ impl Provider for OpenAIProvider {
     /// to it. The same rule routes a bare name, so nothing routing accepts is
     /// refused here.
     fn served_catalog(&self) -> Option<Vec<String>> {
-        self.learned
-            .catalog()
-            .map(|ids| ids.into_iter().filter(|id| is_chat_model_id(id)).collect())
+        self.learned.catalog().map(|ids| {
+            ids.into_iter()
+                .filter(|id| is_chat_model_id(id))
+                .chain(self.serves.iter().cloned())
+                .collect()
+        })
     }
 
     /// Read `GET /v1/models` into `Self::learned`.
@@ -476,7 +535,7 @@ impl Provider for OpenAIProvider {
             .collect();
         let count = learned.len();
         self.learned.replace(learned);
-        tracing::debug!(models = count, "learned OpenAI model ids and dates");
+        tracing::debug!(provider = %self.name, models = count, "learned OpenAI model ids and dates");
         Ok(())
     }
 
@@ -491,7 +550,7 @@ impl Provider for OpenAIProvider {
         }
         Ok(self
             .learned
-            .to_model_infos(PROVIDER_NAME, |id| self.capabilities(id))
+            .to_model_infos(&self.name, |id| self.capabilities(id))
             .into_iter()
             .filter(|m| is_chat_model_id(&m.id))
             .collect())

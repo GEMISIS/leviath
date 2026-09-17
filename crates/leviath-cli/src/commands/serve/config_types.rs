@@ -606,7 +606,7 @@ pub(super) struct GatewayInfo {
     pub(super) base_url: Option<String>,
     /// Whether a key is configured for it.
     pub(super) has_api_key: bool,
-    /// What backs it: `script` or `openai-compatible`.
+    /// What backs it: `script`, `openai-compatible` or `openai`.
     pub(super) kind: String,
     /// The Rhai provider script backing it, when the entry names one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -646,7 +646,7 @@ pub(super) struct GatewayWrite {
     /// Absent leaves the existing script name.
     #[serde(default)]
     pub(super) script: Option<String>,
-    /// `script` or `openai-compatible`. Absent leaves the existing kind, and
+    /// `script`, `openai-compatible` or `openai`. Absent leaves the existing kind, and
     /// an entry created without one is a script, as in the file.
     #[serde(default)]
     pub(super) kind: Option<String>,

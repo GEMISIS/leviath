@@ -283,6 +283,26 @@ fn error_chain_text(e: &dyn std::error::Error) -> String {
     text
 }
 
+/// Every message in an error's cause chain, as written, joined with `: `.
+///
+/// What a person debugging a setup needs: `reqwest`'s own sentence ("error
+/// sending request for url (...)") says where, and only the causes under it
+/// say what happened ("dns error: failed to lookup address information").
+/// A cause whose text an outer message already carries is left out, since
+/// some layers repeat the one beneath them.
+pub fn error_chain_display(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !parts.iter().any(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
 impl ProviderError {
     /// A transport failure, with what `reqwest` knew about it kept.
     ///
@@ -293,7 +313,27 @@ impl ProviderError {
     /// exists, and carried in the message so it survives every layer that only
     /// passes strings.
     pub fn transport(context: &str, e: &reqwest::Error) -> Self {
-        ProviderError::labelled(FailureKind::from_reqwest(e), context, &e.to_string())
+        ProviderError::labelled(
+            FailureKind::from_reqwest(e),
+            context,
+            &error_chain_display(e),
+        )
+    }
+
+    /// This failure as one message for a person checking their setup: what
+    /// `lev setup`, `lev models list` and `lev doctor` all print, so the three
+    /// never disagree about why a provider did not answer.
+    ///
+    /// The error's own text, which already leads with its kind and ends with
+    /// what to do. A rate limit is the one exception worth a word: it means
+    /// the credential was accepted.
+    pub fn describe(&self) -> String {
+        match self {
+            ProviderError::RateLimitExceeded { .. } => {
+                "rate limited - the key works; the provider asked to slow down".to_string()
+            }
+            other => other.to_string(),
+        }
     }
 
     /// The same error, for the places no `reqwest::Error` ever reaches.
@@ -347,6 +387,52 @@ impl ProviderError {
 mod tests {
     use super::*;
     use crate::provider::build_http_client;
+
+    /// The chain keeps every cause once, in order, so a wrapper that repeats
+    /// the message beneath it does not print it twice.
+    #[test]
+    fn an_error_chain_is_written_out_once_per_cause() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|l| l as _)
+            }
+        }
+        let chain = Layer(
+            "error sending request",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer(
+                    "dns error",
+                    Some(Box::new(Layer(
+                        "",
+                        Some(Box::new(Layer("dns error", None))),
+                    ))),
+                ))),
+            ))),
+        );
+        assert_eq!(
+            super::error_chain_display(&chain),
+            "error sending request: client error (Connect): dns error"
+        );
+    }
+
+    #[test]
+    fn describe_is_the_error_itself_and_a_rate_limit_says_the_key_works() {
+        let refused =
+            ProviderError::labelled(FailureKind::ConnectionRefused, "listing models", "no");
+        assert_eq!(refused.describe(), refused.to_string());
+        let limited = ProviderError::RateLimitExceeded {
+            retry_after_secs: None,
+        };
+        assert!(limited.describe().contains("the key works"));
+    }
 
     /// A host that accepts the connection and never answers is a timeout, not a
     /// refusal - something is listening, it is just not replying. Told apart

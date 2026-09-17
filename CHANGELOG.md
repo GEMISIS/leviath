@@ -15,6 +15,28 @@ same list.
 
 ### Changed
 
+- Leviath no longer reads a `.env` file from the working directory unless
+  you ask: set `load_dotenv = true` in `config.toml` (the **Load ./.env**
+  switch on `lev setup`'s advanced screen), or run one command with
+  `LEVIATH_LOAD_DOTENV=1`. The directory `lev` runs in is often a repository
+  someone else wrote. If your keys live in a `.env`, turn the switch on.
+- `lev models list` prints, under the table, each provider it could not
+  list and why, and exits with an error when not one of them answered.
+  `--json` rows from such a provider carry `listing_error`. `lev setup`,
+  `lev models list` and `lev doctor` print a provider failure in the same
+  words, with the transport's own cause (`dns error: failed to lookup
+  address`) rather than "unreachable - check your network".
+- A run paused because its provider did not answer says which way:
+  `paused: provider unreachable`, `provider timed out` or `provider failed`,
+  with blockers `provider_unreachable`, `provider_timed_out` and
+  `provider_failed` on the API. Before, every one of these, a slow call and a
+  server error included, read `paused: needs providers`. `lev ps` lists what
+  happened to each paused run under the table, and the watchdog's pause
+  names the provider's last error.
+- `gpt-5.5`, `gpt-5.4` and `gpt-5.4-pro` are sized at 922,000 tokens, the
+  budget prompt and reply share on the Responses API, as `gpt-5.6` already
+  was. `gpt-5.4` had been sized with the 272,000-token family.
+
 - The OpenAI provider calls OpenAI's Responses API instead of Chat
   Completions, with `store: false` on every request. A stage's
   `reasoning_effort` and `response_format` parameters are translated to
@@ -81,6 +103,14 @@ same list.
   empty string is a 400.
 
 ### Added
+
+- `[model_providers.<name>] kind = "openai"`: OpenAI's own provider, on the
+  Responses API, at a host of its own under the name you give it. Several
+  sit side by side, each with its own `base_url` and `api_key`, so two Azure
+  resources behind different gateways work at once.
+- `auth_header` on an `openai` or `openai-compatible` entry sends the key in
+  that header (`api-key`, `Ocp-Apim-Subscription-Key`) instead of as a bearer
+  token.
 
 - `write_file` takes an optional `append`. Set to `true`, the content goes
   on the end of the file, which is created if missing. A file too large for
@@ -183,6 +213,24 @@ same list.
   `--zero-retention-agreements anthropic,openai`.
 
 ### Fixed
+
+- An OpenAI-compatible endpoint can talk to OpenAI's reasoning models. They
+  refuse `max_tokens` with `400 unsupported_parameter`; the request is sent
+  again with the cap as `max_completion_tokens`, and the model is remembered.
+- An OpenAI-compatible endpoint serving a vendor's model under its own id
+  (Azure's `gpt-5.5`) is sized from that vendor's table, not the 128,000-token
+  guess for a model nothing knows.
+- Zero data retention refuses every call to a model that keeps something,
+  not only a stage's at spawn: the run's title call, compaction and content
+  summaries, the routing call at a stage boundary, `lev test` and the
+  `lev doctor` probe. A blueprint whose compaction model keeps something is
+  refused at spawn, and turning the switch on under a running daemon holds
+  from the next call. The routing call now carries the zero-retention request
+  fields too.
+- `lev doctor` reports a provider whose listing failed as a failed inference
+  check with the error, not "lists no model to probe with".
+- A provider whose model list the daemon could not read is recorded as a
+  failed check with the error, so `lev setup` opens on it.
 
 - A streamed reply that reached Leviath in one read no longer ends as "the
   stream ended before the model said it had finished". The reader stopped at

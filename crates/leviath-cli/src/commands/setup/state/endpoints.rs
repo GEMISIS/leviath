@@ -246,7 +246,11 @@ impl EndpointRow {
     /// set by hand survives a pass through the wizard.
     fn to_config(&self, existing: Option<&ModelProviderConfig>) -> ModelProviderConfig {
         let mut entry = existing.cloned().unwrap_or_default();
-        entry.kind = Some(ModelProviderKind::OpenaiCompatible);
+        // An `openai` entry written by hand keeps its kind: the wizard edits
+        // the address, key and headers both kinds share.
+        if !entry.is_openai() {
+            entry.kind = Some(ModelProviderKind::OpenaiCompatible);
+        }
         entry.script = None;
         entry.base_url = Some(self.base_url.trim().to_string());
         entry.api_key = Some(self.api_key.trim().to_string()).filter(|k| !k.is_empty());
@@ -549,6 +553,22 @@ impl Wizard {
 mod tests {
     use super::super::tests::test_wizard;
     use super::*;
+
+    /// An `openai` entry written by hand keeps its kind through a wizard pass;
+    /// anything else the wizard writes is an OpenAI-compatible endpoint.
+    #[test]
+    fn a_wizard_pass_keeps_an_openai_hosts_kind() {
+        let hand_written = ModelProviderConfig {
+            kind: Some(ModelProviderKind::Openai),
+            base_url: Some("https://east.openai.azure.com/openai/v1".to_string()),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        };
+        let row = EndpointRow::from_config("azure-east", &hand_written);
+        assert!(row.to_config(Some(&hand_written)).is_openai());
+        let fresh = row.to_config(None);
+        assert_eq!(fresh.kind, Some(ModelProviderKind::OpenaiCompatible));
+    }
 
     fn preset_index(wizard: &Wizard, id: &str) -> usize {
         wizard
