@@ -375,8 +375,8 @@ Groups and names mix freely, so the four shapes people actually want are each on
 
 ```toml
 available_tools = ["read_file", "edit_file", "shell"]          # a hand-picked set
-available_tools = ["@builtin", "summarize", "github__search"]  # every built-in, plus a few others by name
-available_tools = ["@builtin", "@scripts", "github__search"]   # every built-in and script, one MCP tool
+available_tools = ["@builtin", "summarize", "tracker__search"] # every built-in, plus a few others by name
+available_tools = ["@builtin", "@scripts", "tracker__search"]  # every built-in and script, one MCP tool
 available_tools = ["@all"]                                     # everything this install has
 ```
 
