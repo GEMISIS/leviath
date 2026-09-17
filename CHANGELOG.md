@@ -184,6 +184,10 @@ same list.
 
 ### Fixed
 
+- A streamed reply that reached Leviath in one read no longer ends as "the
+  stream ended before the model said it had finished". The reader stopped at
+  the first event it had nothing to pass on and waited for bytes that had
+  already arrived, so a short, fast reply lost its ending and the run paused.
 - A tool call cut off by the output cap no longer kills the run on the
   next request. The call was refused, but its half-written arguments stayed
   in the conversation as plain text, and every later request sent them that

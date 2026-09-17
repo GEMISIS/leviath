@@ -104,7 +104,7 @@ pub(crate) fn parse_event(
             record_usage(turn, json.pointer("/metadata/total_usage"));
             match delta.get("type").and_then(Value::as_str)? {
                 "text" => Some(Some(Ok(text_chunk(str_of(delta, "text"))))),
-                "thought" => {
+                "thought" | "thought_signature" => {
                     remember_signature(turn, delta);
                     None
                 }

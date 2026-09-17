@@ -84,6 +84,31 @@ fn a_call_is_assembled_from_its_pieces_and_carries_the_thoughts_signature() {
     assert_eq!(last.tokens.clone().unwrap().prompt_tokens, 1);
 }
 
+/// The events gemini-3.5-flash sent for one call, as recorded: the signature
+/// comes as its own `thought_signature` delta.
+#[test]
+fn a_signature_sent_as_its_own_delta_rides_on_the_call() {
+    let chunks = run(&[
+        json!({ "event_type": "interaction.created", "interaction": { "id": "", "status": "in_progress" } }),
+        json!({ "event_type": "interaction.status_update", "interaction_id": "", "status": "in_progress" }),
+        json!({ "event_type": "step.start", "index": 0, "step": { "type": "thought" } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "signature": "EoEDCv4C", "type": "thought_signature" } }),
+        json!({ "event_type": "step.stop", "index": 0 }),
+        json!({ "event_type": "step.start", "index": 1, "step": { "id": "call_308410", "type": "function_call", "name": "current_time", "arguments": {} } }),
+        json!({ "event_type": "step.stop", "index": 1 }),
+        json!({ "event_type": "interaction.completed", "interaction": { "id": "", "status": "requires_action",
+            "usage": { "total_input_tokens": 33, "total_cached_tokens": 0, "total_output_tokens": 10, "total_thought_tokens": 49 } } }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    let calls: Vec<&ToolCallDelta> = chunks.iter().flat_map(|c| c.tool_calls.iter()).collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thought_signature.as_deref(), Some("EoEDCv4C"));
+    assert_eq!(
+        chunks.last().unwrap().finish_reason,
+        Some(FinishReason::ToolCall)
+    );
+}
+
 #[test]
 fn media_the_model_makes_is_a_part() {
     let chunks = run(&[

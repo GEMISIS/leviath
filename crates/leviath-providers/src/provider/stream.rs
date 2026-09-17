@@ -151,6 +151,22 @@ impl FramedStream {
         self
     }
 
+    /// The next item in the bytes already held. A parser answers `None` both
+    /// for "no whole frame yet" and for a frame it read and had nothing to
+    /// say about, so it is asked again for as long as it keeps consuming:
+    /// the frames behind a silent one may be all that is left of the reply.
+    fn next_held(&mut self) -> Option<Option<Result<StreamChunk>>> {
+        loop {
+            let before = self.buffer.len();
+            if let Some(item) = (self.parse)(&mut self.buffer) {
+                return Some(item);
+            }
+            if self.buffer.len() == before {
+                return None;
+            }
+        }
+    }
+
     /// Lower the frame cap, so a test can overrun it with a few kilobytes.
     #[cfg(test)]
     pub fn with_frame_cap(mut self, cap: usize) -> Self {
@@ -168,7 +184,7 @@ impl Stream for FramedStream {
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
-            if let Some(item) = (this.parse)(&mut this.buffer) {
+            if let Some(item) = this.next_held() {
                 return std::task::Poll::Ready(item);
             }
             match this.inner.as_mut().poll_next(cx) {
@@ -196,12 +212,10 @@ impl Stream for FramedStream {
                     ))));
                 }
                 std::task::Poll::Ready(None) => {
-                    // The bytes are over: a frame that arrived whole with the
-                    // last of them, then whatever the format does with a tail.
+                    // The bytes are over, and every whole frame in them was
+                    // read at the top of the loop: what is left is a tail,
+                    // for the format to make what it can of.
                     this.carry.finish(&mut this.buffer);
-                    if let Some(item) = (this.parse)(&mut this.buffer) {
-                        return std::task::Poll::Ready(item);
-                    }
                     if let Some(flush) = this.flush.as_mut()
                         && let Some(chunk) = flush(&mut this.buffer)
                     {
@@ -437,6 +451,30 @@ mod tests {
             out.push(item.expect("a text chunk").delta);
         }
         out
+    }
+
+    /// Frames the parser consumes without answering (a stream's bookkeeping
+    /// events) are read past in the bytes already held. A whole reply that
+    /// lands in one read, as a fast one over HTTP/2 does, keeps the frames
+    /// after them.
+    #[tokio::test]
+    async fn frames_after_silent_ones_in_the_same_read_are_not_lost() {
+        let bytes = [Ok::<bytes::Bytes, reqwest::Error>(
+            bytes::Bytes::from_static(b"skip\nskip\nhello\nskip\n"),
+        )];
+        let stream = FramedStream::new(
+            tokio_stream::iter(bytes),
+            Box::new(|buffer: &mut String| {
+                let idx = buffer.find('\n')?;
+                let line: String = buffer.drain(..=idx).collect();
+                match line.trim_end() {
+                    "skip" => None,
+                    text => Some(Some(Ok(text_chunk(text)))),
+                }
+            }),
+            None,
+        );
+        assert_eq!(deltas(stream).await, vec!["hello".to_string()]);
     }
 
     /// The transport cuts wherever it likes, including through a character.
