@@ -232,7 +232,7 @@ restart. The scripted half needed this most, because it failed in a way no resta
 the rule sources were read into the compiled checker at boot, so editing a `.rhai` file changed
 nothing at all and the gate went on answering from the text it started with.
 
-[`yolo.toml`](/docs/configuration#yolotoml) is read whenever a run is spawned under a named
+[`yolo.toml`](/docs/yolo) is read whenever a run is spawned under a named
 profile and again when such a run resumes, so an edited rule is in force for the next `lev run
 --yolo=<name>` and for a parked run you `lev resume`. Three of a profile's keys are decided once,
 when the run is built: `questions`, `checkpoints` and `gate`. Those reach the next run, not one

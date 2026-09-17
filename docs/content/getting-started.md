@@ -191,7 +191,8 @@ structured answers.
 Expect to be asked things along the way. The agent **stops and waits** before it writes a file or
 runs a shell command. Answer in `lev dash` (select the run, `Enter`, then `i`) or with
 [`lev respond`](/docs/interaction), or pass `--yolo` to pre-approve everything for an unattended
-run.
+run. To pre-approve some of it and keep the rest,
+[write a yolo profile](/docs/first-yolo-profile).
 
 > [!TIP]
 > Prefer a visual UI? Serve the daemon over HTTP and open

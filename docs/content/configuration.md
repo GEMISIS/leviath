@@ -1383,95 +1383,15 @@ older `config.toml` loads as it was, wrapper and all. A run's tools may not writ
 
 ## `yolo.toml`
 
-The named profiles behind `lev run --yolo=<name>` live in `yolo.toml`, beside `config.toml`
-(so under the data root, and wherever `LEVIATH_CONFIG_PATH` points when that is set). Bare
-`--yolo` is one bit: every tool call the config does not deny runs, the model's questions are
-answered for it, and every stage checkpoint approves itself. A profile is that bit taken apart.
-Each table is a name you can pass, and says which calls run unprompted, which still go through
-the ordinary approval prompt (the one you would see without `--yolo`), and which are refused,
-down to individual shell commands and the paths they may touch. `lev yolo init` writes this
-example to start from; the [live copy](/schema/yolo.example.toml) is the one the tests check.
+The named profiles behind `lev run --yolo=<name>` live in `yolo.toml`, beside `config.toml`,
+and follow `LEVIATH_CONFIG_PATH` when that is set. Each table is a name you can pass, and says
+which tool calls run unprompted, which still raise the ordinary approval prompt, and which are
+refused. `lev yolo init` writes an example to start from.
 
-```toml
-[careful]
-default     = "ask"     # allow | ask: a call no rule below names, when the config would ask
-questions   = "ask"     # ask | auto: ask_user_*, present_for_review, edit_document
-checkpoints = "ask"     # ask | auto: stage checkpoints
-gate        = "auto"    # ask | auto: taint-gate prompts, where taint tracking is on
+With `[security] lock_permission_files` on (the default), no run's tools may write this file.
 
-[careful.tools]
-allow = ["@builtin"]                 # names in any spelling, globs over MCP names, or @groups
-ask   = ["web_fetch", "install_tool"]
-deny  = []
-
-[[careful.shell.allow]]
-command = "cargo *"                  # leading words, one glob per word
-
-[[careful.shell.allow]]
-command = "rm -r*"
-args    = ["target/**", "-*"]        # every remaining word must match one of these
-
-[[careful.shell.ask]]
-command = "git push*"
-
-[[careful.shell.deny]]
-command = "curl"
-```
-
-**`default`** is the yolo waiver, and only that. It decides a call no list names *when the
-config would ask*: `allow` runs it, which is what bare `--yolo` does, and `ask` leaves the
-ordinary prompt in place. A tool the config already allows (`read_file`) stays allowed under
-`default = "ask"`; a tool the config denies stays denied under everything, as it does under bare
-`--yolo`. There is no `deny` default on purpose. A profile that refused everything it did not
-list would be a denylist by omission; a call you want refused goes in a `deny` list where it can
-be read.
-
-**`tools`** lists tighten as well as loosen. `deny` wins over `ask`, `ask` over `allow`, and an
-`ask` or `deny` entry applies even to a tool the config allows. An entry is a tool name in any of
-its spellings (`bash` covers `shell`), a glob over an MCP name (`github__*`), or one of the groups
-`@builtin`, `@subagent`, `@scripts`, `@mcp` and `@all`. A tool named by `--allow` on the command
-line keeps its allow through an `ask` list, because the launch flag is the most specific thing
-you said, but not through a `deny`.
-
-**`shell`** rules refine the `shell` tool. `command` is the leading words of the line, one glob
-per word, so `rm -r*` covers `rm -rf` and `cargo *` covers every cargo subcommand. `args`, when
-present, is a list of globs every remaining word must satisfy; leave it off to accept any
-remaining words, or set it to `[]` to accept none. A word that starts with `-` is matched as
-text. Any other word is a path, and is matched only as the path it really names: `~` expanded,
-joined to the run's workdir, `..` folded, and symlinks followed as far as the path exists, so
-`~/scratch/../.ssh` and a link out of `~/scratch` do not pass `~/scratch/**`. A relative pattern
-means "under the workdir" (`target/**`); an absolute one means what it says (`/**` is anywhere).
-
-A line is judged one command at a time, and takes the verdict of its strictest command, so
-`cargo test && curl x` is only as free as `curl`. A command no rule names takes the tool-level
-verdict for `shell`. A command that redirects to a file also answers to what the profile says
-about `write_file`. Some lines cannot be matched by an `allow` rule at all: one whose word is an
-expansion (`rm -r $DIR`), one that binds a variable in front of its program (`PATH=x cargo`), one
-using `trap`, `alias` or `function`, and one the reader cannot parse (a backtick, an unbalanced
-quote). Those take the tool-level `shell` verdict when the profile has no shell rules, and ask
-when it has any, because the rules cannot be checked and a person can.
-
-**`questions`, `checkpoints` and `gate`** are the human-in-the-loop knobs, and default to
-`auto`. `questions = "ask"` keeps the tools that wait on a person (`ask_user_*`,
-`present_for_review`, `edit_document`) advertised, and their calls come to you; `auto` is bare
-`--yolo`, where they are not offered and a stray call is answered for it. `checkpoints = "ask"`
-opens every stage checkpoint; `auto` approves them, apart from any the blueprint marks
-`unattended = "ask"`, which hold under every profile. `gate` is the same choice for taint-gate
-prompts. A blueprint's own `required_tools` and `unattended = "ask"` hold whatever the profile
-says: a profile adds holds, it never removes the blueprint's.
-
-A profile is read when a run spawns under its name and again when that run resumes, never
-mid-batch, so an edit reaches the next `lev run` and a parked run you `lev resume`, and a rule
-an agent somehow changed never applies to the run that changed it. `questions`, `checkpoints`
-and `gate` are decided when the run is built and reach the next run only. A name the file does
-not have fails the spawn before the daemon is asked, listing the names it does have. `default`
-is reserved: bare `--yolo` is not configurable, and a profile named that is refused. Names are
-letters, digits, `_` and `-`.
-
-`lev yolo list` shows what is here, `lev yolo show <name>` prints one, and `lev yolo test <name>
---tool shell --command "rm -r target"` says what it would decide and which rule decided it. The
-same four questions are on the [API](/docs/api#yolo-profiles). With `[security]
-lock_permission_files` on (the default), no run's tools may write this file.
+See [yolo profiles](/docs/yolo) for every field and how a verdict is reached, or
+[write your first yolo profile](/docs/first-yolo-profile) for a walkthrough.
 
 ## `policy.toml`
 

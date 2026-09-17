@@ -69,7 +69,7 @@ before the run starts, and `lev validate` reports it as `holds-under-yolo`.
 
 `--yolo` can turn an `ask` into an `allow`, but it can never lift a `deny`.
 
-**`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/configuration#yolotoml)
+**`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/yolo)
 says which tool calls and shell commands run unprompted, which still go through the ordinary
 approval prompt, and which are refused, and whether the model's questions, the stage checkpoints
 and the taint gate still come to you. The equals sign is required: `lev run --yolo coder` keeps
@@ -1177,7 +1177,7 @@ Manage [taint tracking](/docs/security#taint-tracking-experimental) policy rules
 
 ### `lev yolo`
 
-The profiles behind [`--yolo=<name>`](/docs/configuration#yolotoml): what you have, what one
+The profiles behind [`--yolo=<name>`](/docs/yolo): what you have, what one
 says, and what it would decide. Every subcommand reads `yolo.toml` as it stands, the same way a
 spawn does, so what it prints is what the next run gets.
 
