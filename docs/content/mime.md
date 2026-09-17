@@ -97,8 +97,7 @@ what they claim. Without one, a declared type is taken at its word, as every pro
 ## What a model sees
 
 A model declares what it takes, as mime types. Anthropic and OpenAI models list `image/*` and
-`application/pdf`; Gemini adds `audio/*` (it takes video too, but the request shape Leviath sends
-it has no slot for one, so a video reaches it as its stand-in); a local model you describe in
+`application/pdf`; Gemini and Meta's Muse Spark add `audio/*` and `video/*`; a local model you describe in
 `[model_capabilities]` lists whatever it can do. Where a provider publishes this per model,
 Leviath reads it: OpenRouter's catalogue carries each model's input and output modalities and
 Ollama's `/api/show` reports vision, and both win over the built-in tables. The vendors whose
@@ -110,7 +109,7 @@ When a request is built, each stored part goes one of three ways:
 
 | Delivery | When | What is sent |
 |---|---|---|
-| native | the model's `input_types` cover the part's type | the bytes, as that provider's image, audio or document block |
+| native | the model's `input_types` cover the part's type | the bytes, as that provider's image, audio or document block, or the id of the copy uploaded to the provider (see [Files and size limits](#files-and-size-limits)) |
 | text | the registry says `text = true`, or the stage's `as_text` names the type, or the part says `deliver = "text"` | the bytes decoded as UTF-8, as an ordinary text block |
 | stand-in | anything else | one line: `[image/png 1024x768, 240 KB] hero.png` |
 
@@ -125,7 +124,12 @@ own count corrects the estimate after the first call.
 
 ## What a model hands back
 
-A model that draws or speaks answers with bytes as well as words. An OpenAI-shaped provider
+A model that draws or speaks answers with bytes as well as words. The image, video and speech
+models on [xAI](/docs/providers#xai) and [Meta](/docs/providers#meta) hand back images, MP4
+videos, audio and transcripts this way, as [Meshy](/docs/providers#meshy) hands back 3D models.
+A stage whose output routing or format names an image, video or audio type, and whose model
+answers with words only, is told so and asked again, up to three times, since that is usually a
+generation the vendor refused. An OpenAI-shaped provider
 reads them off the message as data URIs, from OpenRouter's `images` list and from `image_url`
 items in a content array, streamed or not; a [Rhai provider](/docs/rhai-providers) returns them
 under `parts`. The runtime stores each one in the run's blob store and writes it beside the
@@ -226,19 +230,67 @@ Over HTTP, `POST /api/agents` and `POST /api/agents/{id}/message` take `multipar
 with any number of file parts, or a JSON `parts` list naming files already inside the workdir.
 [The API page](/docs/api) has the shapes.
 
+## Files and size limits
+
+A provider with a Files API takes a part once and lets later requests name it by id, so a 30 MB
+PDF crosses the network once for the whole run rather than on every turn and every retry. When a
+request carries a stored part its model takes natively, and the provider can store that type,
+Leviath uploads it the first time and names it by id after. The same part in a later stage, a
+retry, or the next turn reuses the upload.
+
+| Provider | Uploaded | Largest file | Inline limits, when not uploaded |
+|---|---|---|---|
+| Anthropic | images, PDFs, plain text | 500 MB | 32 MB a request, 5 MB an image |
+| OpenAI | images, PDFs | 512 MB | 50 MB a file, 20 MB an image |
+| Google | images, audio, video, PDFs | 2 GB | 100 MB a request, 50 MB a PDF |
+| xAI and Grok | PDFs, plain text | 512 MB | 20 MB an image |
+| Meta | images, audio, video, PDFs | 1 GiB | 50 MB a request |
+| Bedrock | nothing (no Files API) | | 3.75 MB an image, 4.5 MB a document, 25 MB a video |
+| everything else | nothing | | `[mime] max_media_bytes_per_request` |
+
+Nothing is uploaded when:
+
+- **zero data retention is on.** An upload is data the provider keeps, so the switch turns
+  uploads off whatever else says. Anthropic's Files API is not eligible for zero data retention.
+- **`[providers] file_uploads = false`.** The same switch is on the Defaults screen of
+  `lev setup` ("Upload media to provider file storage") and is `--file-uploads false` headlessly.
+- **the run's store keeps nothing on disk**, as an embedder's in-memory store does, since there
+  would be no record to delete the uploads from.
+
+A part sent inline is held to the provider's inline limits. One over a limit reaches the model
+as its stand-in with the reason, and when the provider could have stored it, why it was not
+uploaded:
+
+```
+[application/pdf, 60.0 MiB] report.pdf [not sent: 60.0 MiB is over the 50.0 MiB this provider takes inline; zero data retention is on, so nothing is uploaded]
+```
+
+Each run records its uploads in `provider-files.json` in its directory. The files are deleted
+from the provider when the run finishes, when it is deleted (from `lev serve`, the dashboard, or
+`lev doctor`), and when the daemon starts for a run that finished while it was not running. Every
+upload also asks the provider to delete it after `[mime] provider_file_ttl_secs` (a day by
+default, clamped to what each provider takes; Google always keeps a file 48 hours). A request
+the provider refuses because a file it names is gone uploads the part again and is retried once.
+
 ## Limits
 
 ```toml
 [mime]
-max_part_bytes = 33554432               # one part, at every ingress
+# max_part_bytes = 33554432             # one part, at every ingress
 inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
-max_media_bytes_per_request = 20971520  # bytes of stored media one model request carries
+max_media_bytes_per_request = 20971520  # stored media one request carries, where a provider names no limit
+provider_file_ttl_secs = 86400          # how long an upload lives in a provider's file storage
 ```
 
+`max_part_bytes`, left unset, is the largest part a configured provider takes, by upload or
+inline: 1 GiB with Meta, 500 MiB with Anthropic, 32 MiB when no configured provider names a
+limit. A value you set always wins. `lev mime list` prints the ceiling in force, where it came
+from, whether uploads are on, and each configured provider's limits.
+
 `max_media_bytes_per_request` is a backstop for the vendor request-size limits a token budget
-cannot see: an image costs the same few thousand tokens whatever its byte size, so a request
-can sit inside its context window and still be megabytes of media. Past it, the oldest stored
-parts are sent as their stand-ins.
+cannot see, for a provider that documents none of its own: an image costs the same few thousand
+tokens whatever its byte size, so a request can sit inside its context window and still be
+megabytes of media. Past it, the oldest stored parts are sent as their stand-ins.
 
 `lev doctor` reports a `[mime_types]` row that will not load, or a `check` it cannot compile;
 the daemon keeps the built-in table until it is fixed.

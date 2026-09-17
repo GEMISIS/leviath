@@ -278,7 +278,7 @@ across passes so the report ranks them by severity.
 
 ## 3D models (Meshy)
 
-Four agents build 3D assets through the [Meshy provider](/docs/providers#meshy-generative-3d).
+Four agents build 3D assets through the [Meshy provider](/docs/providers#meshy).
 Configure Meshy (set `MESHY_API_KEY`, or `lev setup` and choose Meshy) and hand each one its input.
 
 - **`sprite-to-3d`** turns a sprite sheet or character image into a rigged, game-ready model: it

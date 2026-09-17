@@ -218,3 +218,28 @@ async fn muse_spark_takes_media_by_file_and_the_media_models_take_none() {
     let deleted = deleted.lock().unwrap().join("");
     assert!(deleted.contains("DELETE /files/file-m"), "{deleted}");
 }
+
+#[tokio::test]
+async fn a_media_model_runs_through_both_entry_points_and_the_listing_skips_a_nameless_entry() {
+    let reply = serde_json::json!({ "data": [ { "b64_json": "SlBFRw==" } ] })
+        .to_string()
+        .into_bytes();
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", reply.clone()), (200, "OK", reply)]).await;
+    let meta = provider(&url);
+    let buffered = meta.infer(&request("muse-image-1.0")).await.unwrap();
+    assert_eq!(buffered.parts.len(), 1);
+    assert_eq!(
+        buffered.tokens_used.reported_cost_usd,
+        Some(0.01),
+        "priced per image"
+    );
+    let mut stream = meta.infer_stream(&request("muse-image-1.0")).await.unwrap();
+    use tokio_stream::StreamExt;
+    assert_eq!(stream.next().await.unwrap().unwrap().parts.len(), 1);
+    assert_eq!(meta.count_tokens("12345678", "muse-spark-1.3").await, 2);
+
+    let listing = br#"{"data":[{"object":"model"},{"id":5},{"id":"muse-spark-1.3","created":1}]}"#;
+    let listed = provider(&spawn_mock_server(200, "OK", listing.to_vec()).await);
+    let models = listed.list_models().await.unwrap();
+    assert_eq!(models.len(), 1);
+}

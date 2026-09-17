@@ -271,6 +271,15 @@ pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
     Ok(Blob::new(mime_type, bytes).named(name))
 }
 
+/// A JSON part the provider built itself, so its type is known good.
+pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
+    Blob::new(
+        MimeType::parse("application/json").expect("application/json is a mime type"),
+        bytes,
+    )
+    .named(name)
+}
+
 /// The response for a media call: a one-line summary as the text, the files
 /// as parts, and the call's cost when it is known.
 pub(crate) fn response(
@@ -338,13 +347,25 @@ mod tests {
     use leviath_core::mime::{MimeRegistry, Part as CorePart};
 
     fn hydrated(mime: &str, name: &str, bytes: &[u8]) -> ContentBlock {
+        carrying(
+            mime,
+            name,
+            bytes,
+            &base64::engine::general_purpose::STANDARD.encode(bytes),
+        )
+    }
+
+    /// A stored part of `bytes` whose block carries `data`.
+    fn carrying(mime: &str, name: &str, bytes: &[u8], data: &str) -> ContentBlock {
         let blob = Blob::new(MimeType::parse(mime).unwrap(), bytes.to_vec()).named(name);
         let part = CorePart::stored(blob.describe(&MimeRegistry::builtin())).named(name);
-        let mut block = ContentBlock::mime(&part).unwrap();
-        if let ContentBlock::Mime { data, .. } = &mut block {
-            *data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        ContentBlock::Mime {
+            part: part.blob().unwrap().clone(),
+            data: data.to_string(),
+            name: part.name.clone(),
+            deliver: None,
+            remote: None,
         }
-        block
     }
 
     fn request(blocks: Vec<ContentBlock>) -> InferenceRequest {
@@ -373,10 +394,7 @@ mod tests {
     #[test]
     fn parts_and_text_are_read_apart() {
         let png = hydrated("image/png", "ref.png", b"PNGBYTES");
-        let stand_in = match &png {
-            ContentBlock::Mime { part, .. } => part.stand_in.clone(),
-            _ => unreachable!("built as a mime block"),
-        };
+        let stand_in = png.stand_in().unwrap().to_string();
         let req = request(vec![
             ContentBlock::Text {
                 text: format!("[image] {stand_in}"),
@@ -394,6 +412,15 @@ mod tests {
         assert_eq!(part.bytes, b"PNGBYTES");
         assert_eq!(part.name.as_deref(), Some("ref.png"));
         assert!(first_part(&req, |m| m.starts_with("audio/")).is_none());
+        let torn = carrying("image/png", "torn.png", b"x", "not base64!");
+        assert!(
+            first_part(&request(vec![torn]), |m| m.starts_with("image/")).is_none(),
+            "bytes that do not decode are no part"
+        );
+        assert_eq!(
+            json_blob(b"{}".to_vec(), "a.json").mime_type.as_str(),
+            "application/json"
+        );
     }
 
     #[test]
@@ -517,5 +544,11 @@ mod tests {
         ] {
             assert_eq!(extension(mime), ext, "{mime}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_download_cut_short_is_an_error() {
+        let url = leviath_testkit::spawn_mock_server_truncated_body(200, "OK").await;
+        assert!(download(&reqwest::Client::new(), &url).await.is_err());
     }
 }

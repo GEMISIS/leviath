@@ -690,3 +690,72 @@ async fn a_chat_model_takes_documents_by_file_and_a_media_model_takes_none() {
     let deleted = deleted.lock().unwrap().join("");
     assert!(deleted.contains("DELETE /files/file-x"), "{deleted}");
 }
+
+#[tokio::test]
+async fn a_media_model_runs_through_both_entry_points() {
+    let reply = serde_json::json!({ "data": [ { "b64_json": "SlBFRw==" } ],
+        "usage": { "cost_in_usd_ticks": 200000000 } })
+    .to_string()
+    .into_bytes();
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", reply.clone()), (200, "OK", reply)]).await;
+    let provider = keyed(&url).with_poll_interval(std::time::Duration::from_millis(1));
+    let buffered = provider
+        .infer(&request("grok-imagine-image"))
+        .await
+        .unwrap();
+    assert_eq!(buffered.tokens_used.reported_cost_usd, Some(0.02));
+    let mut stream = provider
+        .infer_stream(&request("grok-imagine-image"))
+        .await
+        .unwrap();
+    use tokio_stream::StreamExt;
+    assert_eq!(stream.next().await.unwrap().unwrap().parts.len(), 1);
+    assert_eq!(provider.count_tokens("12345678", "grok-4.3").await, 2);
+}
+
+#[tokio::test]
+async fn a_refusal_saying_reasoning_is_not_supported_is_retried_and_a_lost_retry_is_an_error() {
+    let (url, _) = spawn_mock_sequence(vec![(
+        400,
+        "Bad Request",
+        b"reasoning is not supported for this model".to_vec(),
+    )])
+    .await;
+    let err = keyed(&url)
+        .with_reasoning_effort(Some("high".into()))
+        .infer(&request("grok-4.3"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Request failed"), "{err}");
+}
+
+#[test]
+fn account_and_catalog_readers_skip_what_they_cannot_read() {
+    let efforts = account::efforts(&serde_json::json!({ "data": [
+        { "object": "no id" },
+        { "id": 5 },
+        { "id": "grok-4.6", "reasoning_efforts": [ { "label": "no value" }, { "id": "low" } ] }
+    ]}));
+    assert_eq!(efforts.len(), 1);
+    assert_eq!(efforts["grok-4.6"], vec!["low".to_string()]);
+    let report = account::quota(
+        Some(&serde_json::json!({ "config": { "onDemandCap": { "val": 5.0 }, "prepaidBalance": 3.0 } })),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        report.windows[0].used, None,
+        "a missing amount is no amount"
+    );
+
+    let mut listing = catalog::Listing::default();
+    catalog::read_models(
+        &serde_json::json!({ "data": [
+            { "id": "no-prices", "context_length": 1000, "completion_text_token_price": 10000 },
+            { "id": "half-priced", "prompt_text_token_price": 10000, "completion_text_token_price": "free" }
+        ]}),
+        &mut listing,
+    );
+    assert!(listing.models["no-prices"].pricing.is_none());
+    assert!(listing.models["half-priced"].pricing.is_none());
+}

@@ -731,3 +731,23 @@ mod upload_tests {
         assert!(settings.why_inline().contains("file_uploads"));
     }
 }
+
+#[cfg(test)]
+mod new_provider_tests {
+    use super::*;
+
+    #[test]
+    fn xai_grok_and_meta_each_say_what_they_keep() {
+        assert_eq!(builtin("xai", "grok-4.3").retention, Retention::Days(30));
+        assert_eq!(builtin("xai", "grok-4.3").control, Control::Agreement);
+        assert_eq!(builtin("grok", "grok-4.6").retention, Retention::Unknown);
+        assert_eq!(
+            builtin("meta", "muse-spark-1.3-contributor").retention,
+            Retention::Indefinite
+        );
+        assert_eq!(
+            builtin("meta", "muse-spark-1.3").retention,
+            Retention::Unknown
+        );
+    }
+}

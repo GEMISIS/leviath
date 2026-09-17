@@ -534,3 +534,20 @@ fn a_refused_temperature_outranks_the_table_and_the_override() {
     provider.temperature_unsupported.insert("gpt-5.5");
     assert!(!provider.capabilities("gpt-5.5").supports_temperature);
 }
+
+#[tokio::test]
+async fn a_callers_own_non_object_reasoning_and_text_are_left_as_written() {
+    let (url, bodies) = spawn_mock_sequence(vec![(200, "OK", sse("ok"))]).await;
+    let provider = provider_with_url(url);
+    let request = InferenceRequest {
+        extra: serde_json::json!({
+            "reasoning": "high", "reasoning_effort": "low",
+            "text": "plain", "response_format": { "type": "json_object" }
+        }),
+        ..simple_request()
+    };
+    provider.infer(&request).await.unwrap();
+    let body = sent_json(&bodies.lock().unwrap()[0]);
+    assert_eq!(body["reasoning"], "high");
+    assert_eq!(body["text"], "plain");
+}

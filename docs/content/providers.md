@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Configure Anthropic, OpenAI, Codex, Google, OpenRouter, Bedrock, Meshy, Ollama, or Claude Code from a key or a browser sign-in, and pick each stage's model.
+description: Set up Anthropic, OpenAI, Google, xAI, Meta, OpenRouter, Bedrock, Meshy, Ollama, or a Codex, Grok or Claude Code sign-in, and pick each stage's model.
 group: Get started
 group_order: 1
 order: 3
@@ -19,9 +19,12 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
 | OpenAI Codex | none (ChatGPT subscription; browser sign-in) | [see below](#openai-codex-chatgpt-subscription) |
-| Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
+| Google | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
+| xAI | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) |
+| Grok | none (SuperGrok or X Premium+ subscription; browser sign-in) | [see below](#grok-supergrok-or-x-premium) |
+| Meta | `META_AI_API_KEY` | [dev.meta.ai](https://dev.meta.ai/) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| Meshy (3D models) | `MESHY_API_KEY` | [meshy.ai](https://www.meshy.ai/api) |
+| Meshy | `MESHY_API_KEY` | [meshy.ai](https://www.meshy.ai/api) |
 | AWS Bedrock | `AWS_BEARER_TOKEN_BEDROCK` (region from `AWS_REGION`) | [console.aws.amazon.com/bedrock](https://console.aws.amazon.com/bedrock/home#/api-keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
 | Claude Code | none (subscription; terms caveat below; not in the wizard) | [see below](#claude-code-transport) |
@@ -51,6 +54,9 @@ provider verbatim, so it has to be spelled the way the provider spells it:
 | OpenAI | the bare model name | `gpt-5.4-mini` |
 | OpenAI Codex | `codex/model` (prefix required) | `codex/gpt-5.5` |
 | Google | the bare model name | `gemini-2.5-pro` |
+| xAI | the bare model name or one of its aliases | `grok-4.3` |
+| Grok | `grok/model` (prefix required) | `grok/grok-4.6` |
+| Meta | the bare model name | `muse-spark-1.3` |
 | OpenRouter | `vendor/model` | `deepseek/deepseek-v4-flash` |
 | Ollama | `model:tag` | `qwen3.5:9b` |
 | AWS Bedrock | the inference-profile id, or the bare model id | `us.anthropic.claude-sonnet-5` |
@@ -442,10 +448,14 @@ are for the times there is no wizard to run: a headless machine, a script, or a
 session someone revoked from the ChatGPT settings page.
 
 ```bash
-lev auth status          # which account, and on what plan
-lev auth login codex     # sign in again
+lev auth status          # which account, on what plan, and how much of it is used
+lev auth login codex     # sign in again (or: lev auth login grok)
 lev auth logout codex    # forget it (leaves the provider enabled)
+lev providers quota      # what each subscription has left, for scripts too (--json)
 ```
+
+Two providers sign in this way: OpenAI Codex, on a ChatGPT plan, and Grok, on a SuperGrok or X
+Premium+ plan. Signing out of Grok also revokes the session at xAI.
 
 **The access token renews itself.** Leviath refreshes it a couple of minutes
 before it lapses, on whichever call needs it next, and writes the rotated token
@@ -505,7 +515,10 @@ What each shipped provider does, as documented on 2026-09-14:
 | `bedrock` | nothing, for a model that allows mode `none` | the account's data retention mode, `GET`/`PUT /data-retention`, and what the model listing allows | Modes are ordered `none < default < aws_review`; Leviath reads the mode and each model's allowed modes at start-up, and `lev providers retention` reads the mode live. An account set to `inherit` serves each model under that model's own default. Claude Fable 5 and Mythos 5 require `aws_review` and keep 30 days inside AWS for the human review Anthropic requires; under `none` they are unavailable, as is any model the listing does not offer under `none`. Model invocation logging is a separate, opt-in setting on your account |
 | `openai` | up to 30 days, for abuse monitoring | a Zero Data Retention agreement with OpenAI | `store = false` stops the stored-completion copy on every request; only the agreement removes the abuse log. Declare it in `zero_retention_agreements` |
 | `anthropic` | up to 30 days, for trust and safety | a zero data retention agreement with Anthropic | Declare it in `zero_retention_agreements`. Claude Fable 5 and 5.1, Mythos 5 and 5.1 keep 30 days regardless and are not available under ZDR without Anthropic's express authorisation |
-| `google` | 55 days, for abuse monitoring (paid tier) | per project, on request to Google | Declare it in `zero_retention_agreements`. The free tier trains on prompts |
+| `google` | 55 days, for abuse monitoring (paid tier) | per project, on request to Google | Declare it in `zero_retention_agreements`. The free tier trains on prompts. Requests are sent with `store: false`, so no interaction is kept beyond that |
+| `xai` | up to 30 days, for abuse monitoring; never trained on | a zero data retention agreement with xAI | Declare it in `zero_retention_agreements` |
+| `grok` | not published for this route | nothing Leviath can set | `lev providers retention` shows the account's coding data opt-out as xAI reports it |
+| `meta` | not published for the standard models; the `-contributor` models are trained on | nothing | A `-contributor` model is refused under zero retention |
 | `openrouter` | nothing itself unless prompt logging is on; the endpoint's own policy applies | `provider.zdr` on each request | `GET https://openrouter.ai/api/v1/endpoints/zdr` lists the endpoints that qualify; Leviath reads it at start-up and refuses a model with none up front |
 | `meshy` | 3 days (enterprise: indefinitely) | nothing | A task's model files, previews and textures are kept so they can be downloaded; nothing is used for training |
 | `ollama`, `llama-cpp`, `lm-studio` | nothing | nothing | Local inference |
@@ -545,7 +558,7 @@ example are in [OpenAI-compatible endpoints](/docs/configuration#openai-compatib
 A server that needs more than the OpenAI shape, or a different one altogether, is a small Rhai
 script instead. [Rhai providers](/docs/rhai-providers) walks through a complete Groq provider.
 
-## Meshy (generative 3D)
+## Meshy
 
 Meshy is not a chat backend: it turns reference images or an existing mesh into a textured 3D
 model. It is a provider all the same, because a stage that runs it takes typed input and produces
@@ -596,7 +609,7 @@ stage (a `rig`, say) can see it. A Meshy job runs for minutes, so give the stage
 `[stages.<name>.model] request_timeout_secs`; the provider polls to completion under it.
 
 A generated mesh is a large file: a full-resolution GLB can run to tens of megabytes, past the
-default `[mime] max_part_bytes` ceiling (32 MiB), which drops it with a note in the reply. Two
+`[mime] max_part_bytes` ceiling (32 MiB when no configured provider names a larger limit), which drops it with a note in the reply. Two
 knobs keep it in bounds - `target_polycount` with `should_remesh = true` in the stage
 parameters, which is also what makes the mesh game-ready, and a higher `[mime] max_part_bytes` in
 your config for when you do want the full-resolution model.
@@ -694,6 +707,139 @@ the count routes are not read, since a gateway that fronts inference rarely fron
 read the key; the provider reads it from the daemon's own environment, and
 `[security] allow_env_vars` is the escape hatch for a tool that needs one of them.
 
+## Files sent to a provider
+
+A large image, PDF, video or recording is uploaded to the provider's own file storage the first
+time a request carries it, and every later turn, retry and stage names it by id. Anthropic, OpenAI,
+Google, xAI, Grok and Meta take files this way; the rest are sent the bytes on each request.
+Nothing is uploaded with zero data retention on, or with `[providers] file_uploads = false`. A
+run's uploads are deleted when it finishes or is deleted. The limits each provider takes, and what
+happens to a part that is too large, are in [Files and size limits](/docs/mime#files-and-size-limits).
+
+## OpenAI and Google request shapes
+
+The OpenAI provider calls OpenAI's Responses API, and the Google provider calls Gemini's
+Interactions API. Both are sent `store: false`, so neither vendor keeps the exchange as a stored
+object. A stage's parameters written for Chat Completions keep working: `reasoning_effort` is sent
+as OpenAI's `reasoning.effort` or Gemini's `thinking_level`, and OpenAI's `response_format` as
+`text.format`. OpenRouter, Ollama and OpenAI-compatible endpoints still use Chat Completions.
+
+`google_base_url` names the native API root, `https://generativelanguage.googleapis.com/v1beta`.
+A URL ending in `/openai` is read as the root above it. A gateway that speaks only Gemini's OpenAI
+compatible API is set up as an [OpenAI-compatible endpoint](#custom-openai-compatible-providers)
+instead.
+
+## xAI
+
+xAI's API serves the Grok models on an API key. Set `XAI_API_KEY`, or pick xAI in `lev setup`.
+
+```toml
+[providers]
+xai_api_key = "xai-..."
+```
+
+The model list, context windows and prices are read from xAI's own listings when Leviath starts,
+aliases included, so `grok-4.20` routes to the model it points at. Every call also reports what it
+cost, and that figure is what a run records. `lev models list --provider xai` shows the live
+prices.
+
+**Long prompts cost more.** A request whose prompt reaches a model's threshold (200 000 tokens on
+the current models) is billed at a higher rate for the whole request. `lev models list` marks
+such a model with `+`, `lev models show` prints both rates, and `lev validate` adds a
+`long-context-price` note for a stage whose context can grow that far. Model choice never looks
+at it.
+
+**Reasoning effort.** A model that takes an effort is sent one from the stage's parameters, and a
+model that refuses one is asked again without it, once per model.
+
+**Image, video and speech models.** These run as stages that take parts and produce parts, the
+same way [Meshy](#meshy) does. Give the stage an `output_routing` for what it makes:
+
+| Model | Takes | Makes | Parameters |
+|---|---|---|---|
+| `grok-imagine-image`, `grok-imagine-image-2.0`, `grok-imagine-image-quality` | text, and images to edit | JPEG images | `n`, `aspect_ratio`, `resolution`, `quality` |
+| `grok-imagine-video`, `grok-imagine-video-1.5` | text, and an image, video or audio to start from | an MP4 video | `duration` (1 to 15 seconds), `aspect_ratio`, `resolution`, `operation = "extend"` |
+| `grok-tts` | text | speech, MP3 unless `codec` says otherwise | `voice_id`, `language`, `codec`, `sample_rate`, `speed` |
+| `grok-stt` | an audio part | the transcript as text, with a `transcript.json` part of word timings | `language`, `diarization` |
+
+A video is made in the background at xAI and waited for, so give the stage a generous
+`request_timeout_secs`. `grok-tts` and `grok-stt` are Leviath's names for xAI's speech routes,
+which take no model name. Unit prices for these models (per image, per second of video, per
+million characters, per hour of audio) are in the shipped price table, and a call that reports
+its own cost is billed at that instead.
+
+```toml
+[stages.picture.model]
+models = ["xai/grok-imagine-image"]
+parameters = { aspect_ratio = "16:9" }
+[stages.picture.output_routing]
+"image/*" = "pictures"
+```
+
+## Grok (SuperGrok or X Premium+)
+
+With a SuperGrok or X Premium+ plan, Leviath can bill Grok to the subscription instead of an API
+balance. Sign in once with a browser; no key is involved.
+
+```bash
+lev setup                # select "Grok", then sign in with your browser
+lev auth login grok      # or sign in from a script or a headless machine
+```
+
+```toml
+[providers]
+grok_enabled = true
+```
+
+Grok uses the same API and models as xAI, so everything in [xAI](#xai) holds, image and speech
+models included. The differences:
+
+- **The sign-in is the Grok CLI's.** xAI publishes no sign-in for other programs, so Leviath uses
+  the one the Grok CLI uses, with its redirect to `127.0.0.1:56121`. xAI can change or withdraw it.
+- **Cost is recorded as zero.** The subscription pays. `lev auth status` and `lev providers quota`
+  show this week's and this month's use against the plan's limits, and a rate limit with no
+  `Retry-After` waits for the billing period to reset.
+- **It never wins a bare model name.** Like Codex, it is only used when named: `grok/grok-4.6`,
+  a `fallback_order` entry, `provider_order`, or `default_provider`.
+- **Retention.** xAI publishes no retention policy for this route. `lev providers retention` quotes
+  the account's coding data opt-out as xAI reports it.
+
+## Meta
+
+Meta's Model API serves the Muse models on a key from [dev.meta.ai](https://dev.meta.ai/). Set
+`META_AI_API_KEY` (not `MODEL_API_KEY` or `META_API_KEY`, which Leviath does not read), or pick
+Meta in `lev setup`.
+
+```toml
+[providers]
+meta_api_key = "..."
+```
+
+| Model | Takes | Makes |
+|---|---|---|
+| `muse-spark-1.3`, `-1.2`, `-1.1` | text, images, video, audio and PDFs (1 048 576 tokens) | text and tool calls |
+| `muse-spark-1.3-contributor`, `-1.2-contributor` | the same, at a much lower price | the same |
+| `muse-image-1.0` | text, and images to edit | images |
+| `muse-voice-transcribe-1.0` | WAV audio | the transcript, with a `transcript.json` part of turns |
+
+**Contributor models.** Meta trains on what a `-contributor` model is sent and returns, which is
+why it costs less. `lev models list` flags one with `!` while zero retention is on, and a stage on
+one is refused.
+
+**Muse Spark always reasons.** An effort of `none` is refused by Meta and never sent; `minimal`,
+`low`, `medium`, `high` and `xhigh` are taken. `stop`, `logit_bias`, `n` and log probabilities are
+refused too, so Leviath removes them from a stage's parameters.
+
+**Transcription takes WAV only:** mono, 16-bit, 16 or 24 kHz, at most 32 MB and ten minutes.
+Leviath does not convert audio, and refuses anything else with a message naming the format.
+Parameters: `mode`, `language_bias`, `keywords`.
+
+**Rate limits are per team**, 3 000 requests a minute on the standard models and 100 on the
+contributor ones. A team shared by several people wants a lower `[rate_limits.meta]`.
+
+Meta publishes no prices through its API; they come from the shipped price table, which
+`cargo xtask prices` refreshes.
+
 ## OpenAI Codex (ChatGPT subscription)
 
 If you have a ChatGPT Plus, Pro, Business or Enterprise plan, Leviath can bill
@@ -766,8 +912,8 @@ at all.
 
 **Cost is reported as zero, because it is.** A subscription has no per-call
 price. What to watch instead is the quota: a rolling five-hour window and a
-weekly one, both of which Leviath reads to decide how long to wait after a rate
-limit rather than guessing.
+weekly one. `lev auth status` and `lev providers quota` show both, and Leviath
+reads them to decide how long to wait after a rate limit rather than guessing.
 
 **The model list is compiled in.** The route publishes no catalogue, so the
 context windows are this build's belief, and which models answer depends on

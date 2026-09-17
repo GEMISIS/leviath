@@ -432,6 +432,31 @@ the model returned only text, say - the stage falls back to the ordinary `submit
 This is what lets a pure "bytes in, bytes out" pipeline run with no text provider at all: the
 bundled `image-to-model` and `model-to-animated-model` need only Meshy configured.
 
+Image, video and speech models work the same way. A stage on xAI's video model hands back an
+MP4, one on `grok-tts` an audio file, and one on Meta's image model a picture:
+
+```toml
+[stages.clip]
+mode = "output"
+
+[stages.clip.model]
+models = ["xai/grok-imagine-video"]
+parameters = { duration = 6, resolution = "720p" }
+request_timeout_secs = 900
+
+[stages.clip.output_routing]
+"video/*" = "clip"
+
+[[stages.clip.output.artifacts]]
+name = "clip"
+type = "video/mp4"
+required = true
+```
+
+A stage whose routing or format names an image, video or audio type, and whose model answers with
+words only, is told it produced nothing and asked again, up to three times. The model's own words
+are quoted back to it, since a refused generation usually says why.
+
 This is why there is no pagination. What a caller reads is bounded by what a model can say. What
 gets big is a file, and files are fetched by path.
 

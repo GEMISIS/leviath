@@ -305,11 +305,7 @@ async fn transcribe(
         .to_string();
     let hours = reply.get("duration").and_then(Value::as_f64).unwrap_or(0.0) / 3600.0;
     let transcript = serde_json::to_vec_pretty(&reply).expect("a JSON value serialises");
-    let parts = vec![media::blob(
-        "application/json",
-        transcript,
-        "transcript.json",
-    )?];
+    let parts = vec![media::json_blob(transcript, "transcript.json")];
     let cost = billing.cost(&reply, hours);
     Ok(media::response(text, parts, cost))
 }

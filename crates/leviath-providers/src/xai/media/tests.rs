@@ -324,3 +324,207 @@ async fn an_image_model_goes_through_the_shared_images_route() {
     .unwrap();
     assert_eq!(response.tokens_used.reported_cost_usd, Some(0.02));
 }
+
+#[tokio::test]
+async fn every_way_a_video_speech_or_transcription_call_can_fail_is_an_error() {
+    let b = Billing {
+        reported: false,
+        unit: None,
+    };
+    let video = request("grok-imagine-video", "x", vec![], Value::Null);
+    let speech = request("grok-tts", "say it", vec![], Value::Null);
+    let transcription = request(
+        "grok-stt",
+        "",
+        vec![part("audio/wav", "a.wav")],
+        Value::Null,
+    );
+    let nobody = endpoint("http://127.0.0.1:9");
+    for (kind, req) in [
+        (Kind::Video, &video),
+        (Kind::Speech, &speech),
+        (Kind::Transcribe, &transcription),
+    ] {
+        assert!(
+            run(&nobody, "xai", kind, req, &b, FAST).await.is_err(),
+            "{kind:?}"
+        );
+        let (refused, _) = spawn_mock_sequence(vec![(500, "Boom", b"{}".to_vec())]).await;
+        assert!(
+            run(&endpoint(&refused), "xai", kind, req, &b, FAST)
+                .await
+                .is_err(),
+            "{kind:?}"
+        );
+    }
+    for (kind, req) in [(Kind::Video, &video), (Kind::Transcribe, &transcription)] {
+        let (garbled, _) = spawn_mock_sequence(vec![(200, "OK", b"not json".to_vec())]).await;
+        assert!(
+            run(&endpoint(&garbled), "xai", kind, req, &b, FAST)
+                .await
+                .is_err(),
+            "{kind:?}"
+        );
+    }
+
+    // A status check that cannot be read, a download that fails, and a video
+    // whose type is no type.
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"request_id":"r"}"#.to_vec()),
+        (500, "Boom", b"{}".to_vec()),
+    ])
+    .await;
+    assert!(
+        run(&endpoint(&url), "xai", Kind::Video, &video, &b, FAST)
+            .await
+            .is_err()
+    );
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"request_id":"r"}"#.to_vec()),
+        (
+            200,
+            "OK",
+            br#"{"status":"done","url":"http://127.0.0.1:9/v.mp4"}"#.to_vec(),
+        ),
+    ])
+    .await;
+    assert!(
+        run(&endpoint(&url), "xai", Kind::Video, &video, &b, FAST)
+            .await
+            .is_err()
+    );
+    let odd =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/\r\n", b"MP4".to_vec())
+            .await;
+    let done = serde_json::json!({ "status": "done", "url": odd });
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"request_id":"r"}"#.to_vec()),
+        (200, "OK", done.to_string().into_bytes()),
+    ])
+    .await;
+    assert!(
+        run(&endpoint(&url), "xai", Kind::Video, &video, &b, FAST)
+            .await
+            .is_err()
+    );
+
+    // Speech whose body is cut short, and speech whose type is no type.
+    let torn = leviath_testkit::spawn_mock_server_truncated_body(200, "OK").await;
+    assert!(
+        run(&endpoint(&torn), "xai", Kind::Speech, &speech, &b, FAST)
+            .await
+            .is_err()
+    );
+    let odd =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: audio/\r\n", b"ID3".to_vec())
+            .await;
+    assert!(
+        run(&endpoint(&odd), "xai", Kind::Speech, &speech, &b, FAST)
+            .await
+            .is_err()
+    );
+
+    // A transcription of an unnamed clip is named for the route.
+    let blob = Blob::new(MimeType::parse("audio/wav").unwrap(), vec![1, 2, 3]);
+    let stored = Part::stored(blob.describe(&MimeRegistry::builtin()));
+    let unnamed = request(
+        "grok-stt",
+        "",
+        vec![ContentBlock::Mime {
+            part: stored.blob().unwrap().clone(),
+            data: "AQID".into(),
+            name: None,
+            deliver: None,
+            remote: None,
+        }],
+        Value::Null,
+    );
+    let (url, seen) = spawn_mock_recorder(200, "OK", br#"{"text":"hi"}"#.to_vec()).await;
+    run(&endpoint(&url), "xai", Kind::Transcribe, &unnamed, &b, FAST)
+        .await
+        .unwrap();
+    assert!(seen.lock().unwrap().join("").contains("filename=\"audio\""));
+}
+
+#[tokio::test]
+async fn a_failure_reason_that_is_an_object_is_quoted_and_speech_takes_a_codec_alone() {
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"request_id":"r"}"#.to_vec()),
+        (
+            200,
+            "OK",
+            br#"{"status":"failed","error":{"code":7}}"#.to_vec(),
+        ),
+    ])
+    .await;
+    let video = request("grok-imagine-video", "x", vec![], Value::Null);
+    let b = Billing {
+        reported: false,
+        unit: None,
+    };
+    let err = run(&endpoint(&url), "xai", Kind::Video, &video, &b, FAST)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("\"code\":7"), "{err}");
+
+    let (url, seen) = spawn_mock_recorder(200, "OK", b"ID3".to_vec()).await;
+    let speech = request(
+        "grok-tts",
+        "hi",
+        vec![],
+        serde_json::json!({ "codec": "wav" }),
+    );
+    run(&endpoint(&url), "xai", Kind::Speech, &speech, &b, FAST)
+        .await
+        .unwrap();
+    let raw = seen.lock().unwrap().join("");
+    assert!(
+        raw.contains("\"output_format\":{\"codec\":\"wav\"}"),
+        "{raw}"
+    );
+}
+
+#[tokio::test]
+async fn a_video_past_its_deadline_and_audio_that_does_not_decode_are_errors() {
+    let b = Billing {
+        reported: false,
+        unit: None,
+    };
+    let (url, _) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"request_id":"r"}"#.to_vec()),
+        (200, "OK", br#"{"status":"pending"}"#.to_vec()),
+    ])
+    .await;
+    let mut video = request("grok-imagine-video", "x", vec![], Value::Null);
+    video.request_timeout_secs = Some(0);
+    let err = run(&endpoint(&url), "xai", Kind::Video, &video, &b, FAST)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("deadline"), "{err}");
+
+    let blob = Blob::new(MimeType::parse("audio/wav").unwrap(), vec![1]);
+    let stored = Part::stored(blob.describe(&MimeRegistry::builtin()));
+    let torn = request(
+        "grok-stt",
+        "",
+        vec![ContentBlock::Mime {
+            part: stored.blob().unwrap().clone(),
+            data: "not base64!".into(),
+            name: None,
+            deliver: None,
+            remote: None,
+        }],
+        Value::Null,
+    );
+    let err = run(
+        &endpoint("http://127.0.0.1:9"),
+        "xai",
+        Kind::Transcribe,
+        &torn,
+        &b,
+        FAST,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("needs an audio part"), "{err}");
+}

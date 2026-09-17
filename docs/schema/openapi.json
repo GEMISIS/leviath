@@ -1668,6 +1668,17 @@
           "providers"
         ],
         "summary": "Providers that sign in with a browser, and whether they are signed in",
+        "parameters": [
+          {
+            "name": "quota",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Read each signed-in subscription's usage too, into its `quota` field."
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
@@ -1685,7 +1696,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Reports `enabled` (what `config.toml` says) and `signed_in` (whether a grant is stored) separately, because either can be true alone and a provider that is enabled without a sign-in fails every run. While a sign-in is in flight `signin` carries `{\"state\": \"waiting\", \"authorize_url\": ...}`; after one fails it carries `{\"state\": \"failed\", \"message\": ...}` until the next attempt, and it is absent when there is neither. Open to any caller: it discloses the account address and plan tier, the same facts `lev auth status` prints, and no token."
+        "description": "Reports `enabled` (what `config.toml` says) and `signed_in` (whether a grant is stored) separately, because either can be true alone and a provider that is enabled without a sign-in fails every run. While a sign-in is in flight `signin` carries `{\"state\": \"waiting\", \"authorize_url\": ...}`; after one fails it carries `{\"state\": \"failed\", \"message\": ...}` until the next attempt, and it is absent when there is neither. Open to any caller: it discloses the account address and plan tier, the same facts `lev auth status` prints, and no token. With `?quota=true`, each enabled, signed-in provider also carries `quota`: `{\"report\": {\"plan\", \"windows\": [{\"label\", \"used_percent\" or \"used\", \"limit\", \"unit\", \"resets_at\"}], \"balance\", \"limit_reached\"}}`, or `{\"error\": ...}` when the account could not be read. Off by default: it reads each account over the network."
       }
     },
     "/api/providers/{name}/login": {
@@ -2922,9 +2933,25 @@
                     "type": ["string", "null"],
                     "description": "Same three states as `anthropic_key`."
                   },
+                  "xai_key": {
+                    "type": ["string", "null"],
+                    "description": "An xAI API key, which starts `xai-`. Same three states as `anthropic_key`."
+                  },
+                  "meta_key": {
+                    "type": ["string", "null"],
+                    "description": "A Meta Model API key. Same three states as `anthropic_key`."
+                  },
                   "openrouter_key": {
                     "type": ["string", "null"],
                     "description": "Same three states as `anthropic_key`."
+                  },
+                  "grok_enabled": {
+                    "type": "boolean",
+                    "description": "Bill Grok to a SuperGrok or X Premium+ subscription. Flips the switch only; the sign-in is `POST /api/providers/grok/login`."
+                  },
+                  "file_uploads": {
+                    "type": "boolean",
+                    "description": "Upload large parts to a provider's file storage once and name them by id. Zero data retention turns uploads off whatever this says."
                   },
                   "bedrock_key": {
                     "type": ["string", "null"],
@@ -3092,7 +3119,7 @@
         "summary": "Models this install can reach, from the server's catalogue",
         "responses": {
           "200": {
-            "description": "Success. The listing comes from a catalogue the server keeps; the providers are asked once per config and then behind the answer.",
+            "description": "Success. The listing comes from a catalogue the server keeps; the providers are asked once per config and then behind the answer. A model's `pricing` may carry `long_context` (`threshold_tokens` and the rates a whole request is billed at once its prompt reaches it) and, for an image, video or speech model, `unit` (`usd` per `image`, `video_second`, `audio_hour` or `million_chars`).",
             "headers": {
               "X-Leviath-Catalog-Age": {
                 "description": "Seconds since the listing was built.",
@@ -4356,6 +4383,20 @@
           },
           "has_openrouter_key": {
             "type": "boolean"
+          },
+          "has_xai_key": {
+            "type": "boolean"
+          },
+          "has_meta_key": {
+            "type": "boolean"
+          },
+          "grok_enabled": {
+            "type": "boolean",
+            "description": "Whether Grok is billed to a subscription. Whether a sign-in is stored is `GET /api/providers`."
+          },
+          "file_uploads": {
+            "type": "boolean",
+            "description": "Whether large parts upload to a provider's file storage. Zero data retention turns uploads off whatever this says."
           },
           "has_bedrock_key": {
             "type": "boolean"

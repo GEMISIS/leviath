@@ -140,4 +140,35 @@ mod tests {
         };
         assert!(provider.delete(&file).await.is_err());
     }
+
+    #[tokio::test]
+    async fn the_trait_reaches_the_files_api_and_a_refusal_or_a_bad_type_is_an_error() {
+        use crate::provider::Provider;
+        let (url, _) = spawn_mock_recorder(200, "OK", br#"{"id":"file_9"}"#.to_vec()).await;
+        let provider =
+            AnthropicProvider::new(reqwest::Client::new(), "k".into()).with_base_url(Some(url));
+        let pdf = leviath_core::mime::MimeType::parse("application/pdf").unwrap();
+        assert!(provider.media_limits("claude-sonnet-5").by_file(&pdf, 1));
+        assert_eq!(provider.upload_file(&upload()).await.unwrap().id, "file_9");
+        let (gone, _) = spawn_mock_recorder(404, "Not Found", b"{}".to_vec()).await;
+        let provider =
+            AnthropicProvider::new(reqwest::Client::new(), "k".into()).with_base_url(Some(gone));
+        let file = RemoteFile {
+            id: "file_9".into(),
+            uri: None,
+            expires_at: None,
+        };
+        provider.delete_file(&file).await.unwrap();
+
+        let (refused, _) = spawn_mock_recorder(413, "Too Large", b"{}".to_vec()).await;
+        let provider =
+            AnthropicProvider::new(reqwest::Client::new(), "k".into()).with_base_url(Some(refused));
+        let limits = crate::files::provider_limits("anthropic");
+        assert!(provider.upload(&upload(), &limits).await.is_err());
+        let bad = FileUpload {
+            mime_type: "not a type\n".into(),
+            ..upload()
+        };
+        assert!(provider.upload(&bad, &limits).await.is_err());
+    }
 }

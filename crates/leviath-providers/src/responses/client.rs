@@ -255,10 +255,12 @@ mod tests {
 
     #[test]
     fn a_read_refusal_is_classified_like_a_live_one() {
-        assert!(matches!(
-            api_error(400, "prompt too long"),
-            ProviderError::ApiError(_)
-        ));
+        assert!(
+            api_error(400, "prompt too long")
+                .to_string()
+                .starts_with("API error")
+        );
+        assert!(Gone.grant().is_none());
         assert_eq!(
             api_error(402, "out of credits").unavailable_reason(),
             Some(UnavailableReason::CreditsExhausted)

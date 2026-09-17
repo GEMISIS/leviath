@@ -216,4 +216,18 @@ mod tests {
         })));
         assert_eq!(claims.plan_type, None);
     }
+
+    #[test]
+    fn an_xai_token_names_its_tier_and_an_id_token_its_nonce() {
+        assert_eq!(tier(&jwt(serde_json::json!({ "tier": 3 }))), Some(3));
+        assert_eq!(tier(&jwt(serde_json::json!({}))), None);
+        assert_eq!(tier("not a jwt"), None);
+        assert_eq!(
+            nonce(&jwt(serde_json::json!({ "nonce": "n-1" }))).as_deref(),
+            Some("n-1")
+        );
+        assert_eq!(nonce(&jwt(serde_json::json!({ "nonce": 5 }))), None);
+        assert_eq!(nonce(&jwt(serde_json::json!({}))), None);
+        assert_eq!(nonce("not a jwt"), None);
+    }
 }

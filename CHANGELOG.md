@@ -15,6 +15,28 @@ same list.
 
 ### Changed
 
+- The OpenAI provider calls OpenAI's Responses API instead of Chat
+  Completions, with `store: false` on every request. A stage's
+  `reasoning_effort` and `response_format` parameters are translated to
+  `reasoning.effort` and `text.format`, and a reasoning model's chain of
+  thought is replayed on the next turn. OpenRouter, Ollama and
+  OpenAI-compatible endpoints still use Chat Completions.
+- The Google provider calls Gemini's Interactions API instead of the
+  OpenAI-compatible endpoint, with `store: false`. Video now reaches Gemini
+  models. `google_base_url` names the native API root
+  (`.../v1beta`); a URL ending in `/openai` is read as the root above it,
+  and a gateway that speaks only the compatible API moves to an
+  `openai-compatible` endpoint entry.
+- `[mime] max_part_bytes`, left unset, is the largest part a configured
+  provider takes (1 GiB with Meta, 500 MiB with Anthropic) rather than a
+  fixed 32 MiB. A value you set still wins.
+- A stored part the model takes is held to its provider's documented inline
+  limits; a part over one reaches the model as its stand-in with the
+  reason, rather than a refused request.
+- The setup wizard's cards read Google, Meshy, OpenAI Codex and Ollama,
+  with what each is in its description.
+- A stage that should produce video or audio and gets only text is nudged
+  to try again, as an image stage already was.
 - `lev serve` answers The Lair's connect-time requests from memory. Every
   run listing reads through one parse cache over the runs directory, filled
   at start-up and read off the async runtime, so a page of fifty costs a
@@ -65,6 +87,40 @@ same list.
   one reply can now be written in parts, and file tracking keeps the parts
   together under the one path.
 
+- **xAI** as a provider (`XAI_API_KEY`), with its model list, windows,
+  aliases and prices read live, the cost each call reports recorded as its
+  cost, and the image (`grok-imagine-image`), video (`grok-imagine-video`),
+  text to speech (`grok-tts`) and speech to text (`grok-stt`) models run as
+  stages that produce parts.
+- **Grok** as a subscription provider: sign in with a browser
+  (`lev auth login grok`) and bill Grok to a SuperGrok or X Premium+ plan.
+  Signing out revokes the session at xAI.
+- **Meta** as a provider (`META_AI_API_KEY`): Muse Spark, its contributor
+  models (flagged, and refused under zero data retention, since Meta trains
+  on them), Muse Image and Muse Voice Transcribe.
+- Large images, PDFs, video and audio upload once to the provider's own
+  file storage (Anthropic, OpenAI, Google, xAI, Grok, Meta) and are named by
+  id on later turns, retries and stages. Nothing uploads under zero data
+  retention or with `[providers] file_uploads = false` (a Defaults row in
+  `lev setup`, `--file-uploads`, and a `PUT /api/config` key). A run deletes
+  its uploads when it finishes or is deleted; each also expires after
+  `[mime] provider_file_ttl_secs`.
+- Subscription quota: `lev auth status` and `lev providers quota` show how
+  much of a Codex or Grok plan is used and when each window resets, `lev
+  doctor` warns when a limit is reached, and `GET /api/providers?quota=true`
+  carries the reports.
+- A model that bills long prompts at a higher rate is billed that way, and
+  shown: a `+` beside its price in `lev models list`, both rates in `lev
+  models show`, and a `long-context-price` note from `lev validate`. Model
+  choice does not change.
+- `lev models list` marks with `!` a model whose retention conflicts with
+  your settings, and takes `--produces <MIME_TYPE>`. Media models show a
+  unit price (`0.05/s`, `0.01/img`).
+- `lev mime list` prints the part ceiling in force, whether uploads are on,
+  and each configured provider's limits.
+- `cargo xtask prices` covers Meta and xAI, reads LiteLLM's long-context
+  tiers, keeps hand-written unit prices for media models and reports one not
+  checked in 90 days, and reports window drift for xAI and Meta.
 - `GET /api/models` carries `X-Leviath-Catalog-Age` and
   `X-Leviath-Catalog-Complete`, takes `?refresh=1` to ask the providers
   again, and announces the `models.cached` capability.

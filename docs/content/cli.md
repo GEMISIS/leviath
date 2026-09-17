@@ -277,6 +277,7 @@ that was looked for.
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
+| note | `long-context-price` | A stage's context can grow past the size at which its model bills a whole request at a higher rate. The message gives both rates and the threshold; nothing needs to change unless the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token) |
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
 | note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
@@ -452,8 +453,8 @@ includes those checks, so a broken script is caught without spending anything.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MIME_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MIME` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`) |
-| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above |
+| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MIME_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--produces <MIME_TYPE>` (only models that hand back `video/mp4`, `image/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MIME` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`). A `+` after a price marks a model that bills long prompts at a higher rate, and a `!` before a model id marks one whose retention conflicts with your settings (a model that keeps data while `zero_retention` is on), with the reasons listed under the table |
+| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above. Prints both rates of a model with a long-context tier, a media model's unit price, and a retention conflict when there is one |
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,
 and print what the provider said: the columns include the release date and the input and output
@@ -481,7 +482,7 @@ The mime registry as this install sees it, and what a file resolves to under it.
 
 | Command | Flags |
 |---|---|
-| `lev mime list` | `--json`. Every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `mime_types.toml`) and the [check](/docs/rhai-mime-checks) its bytes must pass |
+| `lev mime list` | `--json`. The part ceiling in force and where it came from, whether uploads to provider file storage are on, each configured provider's inline and file limits, then every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `mime_types.toml`) and the [check](/docs/rhai-mime-checks) its bytes must pass |
 | `lev mime show <TYPE>` | `--json`. One type as the registry resolves it: every field, the token rule spelled out, the check and whether it loaded, and the source of the most specific row |
 | `lev mime check <FILE>` | `--type <MIME_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest, and the verdict of the type's check over the file's bytes when a row names one |
 | `lev mime init` | `--force`. Write a commented example [`mime_types.toml`](/docs/configuration#mime_typestoml) beside your config |
@@ -942,13 +943,16 @@ nothing of your prompts and replies once a reply is returned, with a row under i
 provider that settles retention by contract (Anthropic, OpenAI, Google), so an agreement your
 organisation holds can be declared where the key is. Each row's help spells out what the provider
 keeps without it. What the switch does, provider by provider, is
-[data retention](/docs/providers#data-retention).
+[data retention](/docs/providers#data-retention). Under those rows, **Upload media to provider
+file storage** turns off uploading large parts to a provider's Files API; zero data retention
+turns uploads off whatever it says. See [Files and size limits](/docs/mime#files-and-size-limits).
 
 | Flag | Purpose |
 |---|---|
 | `--non-interactive` | Use only flag values, ask nothing |
 | `--no-verify` | Skip checking credentials against the provider APIs |
-| `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
+| `--anthropic-key`, `--openai-key`, `--google-key`, `--xai-key`, `--meta-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
+| `--file-uploads <true\|false>` | Upload large parts to a provider's file storage once and name them by id. On unless set; zero data retention turns uploads off whatever this says |
 | `--bedrock-region <REGION>` | AWS region for Bedrock (default `us-east-1`; also read from `AWS_REGION`) |
 | `--zero-retention <true\|false>` | Ask every provider for zero data retention (ZDR): nothing of a prompt or reply is kept once the reply is returned. Writes `[providers] zero_retention`; see [data retention](/docs/providers#data-retention) |
 | `--zero-retention-agreements <NAMES>` | Providers your organisation holds a zero data retention agreement with, comma separated (`anthropic,openai,google`). Replaces `zero_retention_agreements` |
@@ -958,6 +962,7 @@ keeps without it. What the switch does, provider by provider, is
 | `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it: this flag is the way to turn it on |
 | `--claude-code-effort <LEVEL>` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--codex <true\|false>` | Enable the Codex transport, which bills a ChatGPT subscription. Flips the switch only: interactive `lev setup` signs in from its own screen, and a non-interactive run has nobody watching a browser, so sign in with `lev auth login codex` on that path |
+| `--grok <true\|false>` | Enable the Grok transport, which bills a SuperGrok or X Premium+ subscription. Flips the switch only, as `--codex` does: sign in with `lev auth login grok` |
 | `--install-agents` | Install the bundled blueprints without asking |
 
 ```bash
@@ -1035,6 +1040,7 @@ serves it.
 | `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's account mode read live. See [data retention](/docs/providers#data-retention) |
 | `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
 | `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review` or `inherit` |
+| `lev providers quota` | `--json` | How much of each signed-in subscription (Codex, Grok) is used, against what limit, and when each window resets |
 
 The order is the whole list of providers a bare model name may run on: a configured provider that
 is not in it, a subscription transport (Codex, Claude Code) as much as an API key, is reachable
@@ -1061,9 +1067,9 @@ Transport is inferred from whether you pass `--url` or `--command`.
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev auth status` | | Which credential backend is in use and what it holds |
-| `lev auth login <provider>` | | Sign in with a browser (`codex`); stores the grant outside `config.toml`. `lev setup` does this on its own screen, so this is for headless machines and revoked sessions |
-| `lev auth logout <provider>` | | Forget a browser sign-in, leaving the provider enabled |
+| `lev auth status` | | Which credential backend is in use and what it holds, and for each signed-in subscription the plan and how much of it is used |
+| `lev auth login <provider>` | | Sign in with a browser (`codex` or `grok`); stores the grant outside `config.toml`. `lev setup` does this on its own screen, so this is for headless machines and revoked sessions |
+| `lev auth logout <provider>` | | Forget a browser sign-in, leaving the provider enabled. Grok's session is also revoked at xAI |
 | `lev auth migrate` | `--to-file`, `--dry-run` | Move secrets between `config.toml` and the OS keychain |
 
 `lev auth migrate` moves keys into the OS store by default; `--to-file` moves them back out. Set

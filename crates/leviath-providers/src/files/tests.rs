@@ -205,3 +205,28 @@ async fn an_openai_shaped_delete_treats_a_gone_file_as_deleted() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_unreachable_host_fails_an_upload_and_a_delete() {
+    let endpoint = Endpoint::new(
+        reqwest::Client::new(),
+        "http://127.0.0.1:9",
+        Auth::Key("k".into()),
+    );
+    assert!(
+        upload_openai_shape(
+            &endpoint,
+            &upload("application/pdf"),
+            "x",
+            &provider_limits("xai")
+        )
+        .await
+        .is_err()
+    );
+    let file = RemoteFile {
+        id: "f".into(),
+        uri: None,
+        expires_at: None,
+    };
+    assert!(delete_openai_shape(&endpoint, &file).await.is_err());
+}

@@ -241,3 +241,37 @@ fn text_of_reads_every_shape() {
         json!([{ "type": "text", "text": "hi" }])
     );
 }
+
+#[test]
+fn a_call_with_no_words_and_no_signature_is_just_the_call_on_a_model_that_needs_none() {
+    let mut req = request(vec![
+        message("user", MessageContent::Text("go".into())),
+        message(
+            "assistant",
+            MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "c".into(),
+                name: "read_file".into(),
+                input: json!({ "p": 1 }),
+                thought_signature: None,
+            }]),
+        ),
+        message(
+            "user",
+            MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "c".into(),
+                content: "ok".into(),
+                is_error: false,
+            }]),
+        ),
+    ]);
+    // A model outside the Gemini family is not held to signed calls.
+    req.model = "learnlm-custom".into();
+    let body = build(&req, true);
+    let kinds: Vec<&str> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["user_input", "function_call", "function_result"]);
+}
