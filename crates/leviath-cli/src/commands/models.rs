@@ -1943,6 +1943,7 @@ mod tests {
             all: false,
             json: false,
             accepts: None,
+            produces: None,
         }
     }
 
