@@ -180,6 +180,7 @@ mod tests {
     #[test]
     fn memory_store_round_trip() {
         let store = MemoryBlobStore::new();
+        assert_eq!(store.run_dir("run"), None, "memory keeps nothing on disk");
         let reg = MimeRegistry::builtin();
         let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]);
         let r1 = store.put("run-a", &blob, &reg).unwrap();
