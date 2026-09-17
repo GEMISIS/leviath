@@ -742,6 +742,24 @@ impl Config {
                 ))
             })?;
         }
+        // Two servers under one name would advertise one set of tool names
+        // between them, and only whichever connected first would be reachable.
+        // `lev mcp add` and the API refuse a duplicate, so this catches a
+        // hand-edited file.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for server in &c.mcp_servers {
+            if !seen.insert(server.name.as_str()) {
+                return Err(Box::new(ConfigFault::validation(
+                    path,
+                    &format!("mcp_servers.{}", server.name),
+                    &format!(
+                        "two [[mcp_servers]] entries are both named {:?}. Every tool is named \
+                         <server>__<tool>, so the two would claim the same names. Rename one",
+                        server.name
+                    ),
+                )));
+            }
+        }
         // An endpoint with no address is the same kind of mistake, and is
         // named against its table for the same reason.
         for (name, provider) in &c.model_providers {
@@ -4021,6 +4039,72 @@ name = "broken"
         let err = Config::load_from_path(&path).expect_err("malformed entry must fail load");
         let msg = err.to_string();
         assert!(msg.contains("broken"), "must name the server: {msg}");
+    }
+
+    /// A server name goes into every one of that server's tool names, so a
+    /// character a provider refuses has to be caught here.
+    ///
+    /// It used to be rewritten instead: `my.tools` became the prefix
+    /// `my_tools`, which is also what a server actually named `my_tools`
+    /// produces. The two servers then fought over one set of tool names and
+    /// the loser's tools were handed a `_2` suffix nobody could predict.
+    #[test]
+    fn load_rejects_an_mcp_server_name_a_provider_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "anthropic"
+agent_paths = []
+
+[providers]
+
+[[mcp_servers]]
+name = "my.tools"
+command = "echo"
+"#,
+        )
+        .unwrap();
+
+        let err = Config::load_from_path(&path).expect_err("a dotted name must fail load");
+        let msg = err.to_string();
+        assert!(msg.contains("my.tools"), "must name the server: {msg}");
+        assert!(
+            msg.contains("letters, digits"),
+            "must say what is allowed: {msg}"
+        );
+    }
+
+    /// Two entries under one name would claim the same tool names, and only
+    /// whichever connected first would be reachable.
+    #[test]
+    fn load_rejects_two_mcp_servers_with_the_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "anthropic"
+agent_paths = []
+
+[providers]
+
+[[mcp_servers]]
+name = "tracker"
+command = "echo"
+
+[[mcp_servers]]
+name = "tracker"
+url = "https://example.com/mcp"
+"#,
+        )
+        .unwrap();
+
+        let err = Config::load_from_path(&path).expect_err("a duplicate name must fail load");
+        let msg = err.to_string();
+        assert!(msg.contains("tracker"), "must name the server: {msg}");
+        assert!(msg.contains("Rename one"), "must say what to do: {msg}");
     }
 
     #[test]

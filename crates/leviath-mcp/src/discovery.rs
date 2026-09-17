@@ -171,7 +171,13 @@ impl MCPServerConfig {
     /// For callers that only want to know whether the config is usable - a
     /// broken entry should be caught when the config loads, not at the first
     /// tool call.
+    ///
+    /// The name is checked first, because every one of this server's tools is
+    /// named after it and a name a provider refuses would fail every request
+    /// the server's tools appear in, long after the config loaded cleanly.
     pub fn validate(&self) -> anyhow::Result<()> {
+        leviath_core::mcp_names::validate_server_name(&self.name)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.resolve()
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("mcp_servers entry '{}' {}", self.name, e))
@@ -629,6 +635,19 @@ mod tests {
     #[test]
     fn validate_accepts_a_usable_entry() {
         assert!(cfg(None, Some("npx"), None).validate().is_ok());
+    }
+
+    /// The name is checked before the transport, because a name a provider
+    /// refuses breaks every request this server's tools appear in, and would
+    /// otherwise surface as a model error long after the config loaded.
+    #[test]
+    fn validate_rejects_a_name_a_provider_would_refuse() {
+        let mut config = cfg(None, Some("npx"), None);
+        config.name = "my.tools".to_string();
+        let err = config
+            .validate()
+            .expect_err("a dotted name must not validate");
+        assert!(err.to_string().contains("my.tools"), "got: {err}");
     }
 
     // ─── constructors and serde shape ─────────────────────────────────────

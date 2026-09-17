@@ -925,7 +925,9 @@
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,63}$",
+            "description": "Used verbatim in every one of this server's tool names (<server>__<tool>), so it has to be a name a model provider accepts: letters, digits, _ or -. A dot is refused rather than rewritten."
           },
           "transport": {
             "enum": [

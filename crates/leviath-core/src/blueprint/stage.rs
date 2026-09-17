@@ -518,10 +518,10 @@ pub struct Stage {
     /// This is the per-server form. `@mcp` in `available_tools` is the
     /// every-server form; a connector grant is the one to reach for when a
     /// stage should see one server's tools and not another's. Kept as a
-    /// separate field rather than a `github__*` pattern because the advertised
-    /// name of an MCP tool does not reliably carry its server (a server named
-    /// `my.tools` sanitizes to `my_tools`, and a collision appends `_2`), so
-    /// matching the string is a guess where naming the server is a fact.
+    /// separate field rather than a `tracker__*` pattern because the server
+    /// half of an advertised name cannot be read back out of it: a server name
+    /// may itself contain `_`, so `a__b__c` is either `a`'s `b__c` or `a__b`'s
+    /// `c`. Naming the server is a fact; matching the string is a guess.
     #[serde(default)]
     pub available_connectors: Vec<String>,
 

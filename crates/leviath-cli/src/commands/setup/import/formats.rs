@@ -127,6 +127,11 @@ pub(crate) fn parse_json_entry(name: &str, value: &serde_json::Value) -> Option<
     if is_disabled(entry) {
         return None;
     }
+    // Another harness is free to name a server `my.tools`; Leviath is not,
+    // because the name goes into every one of that server's tool names and a
+    // provider refuses a dot there. Renaming on the way in keeps the import
+    // working, and the wizard shows the name it will write before writing it.
+    let name = &leviath_core::mcp_names::sanitize_tool_name(name);
 
     // Zed nests the launch under a `command` *object*; everyone else uses a
     // string (or, for OpenCode, an argv array).

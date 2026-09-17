@@ -1168,6 +1168,12 @@ env       = { LOG_LEVEL = "debug" }
 
 Values in `headers` and `env` may use `${VAR}` to pull from the environment.
 
+`name` must be letters, digits, `_` or `-`, and no two entries may share one. The name goes into
+every one of that server's tool names as `<server>__<tool>`, and a model provider refuses a tool
+name with anything else in it. A name Leviath cannot use is refused when the config loads rather
+than rewritten, since rewriting `my.tools` to `my_tools` would collide with a server actually
+called `my_tools`. See [naming a server](/docs/mcp#naming-a-server).
+
 ## `[nudge]`
 
 Machine-wide defaults for the empty-response nudge: the `[System]` message injected when a stage's
@@ -1427,10 +1433,9 @@ looks up, so `my.tools` and `find.all` above are classified as `my_tools__find_a
 add` writes that flat name directly, and both spellings are read.
 
 > [!NOTE]
-> When two servers advertise the same tool, the second one gets a `_2` suffix, and only the daemon
-> knows which is which. An override for a tool in that position has to name the suffixed spelling.
-> `lev policy list` prints the name each override landed on, and `lev policy test <tool>` says how
-> one is classified.
+> The advertised name is always exactly `<server>__<tool>`, so you can write an override before the
+> server has ever connected. `lev policy list` prints the name each override landed on, and
+> `lev policy test <tool>` says how one is classified.
 
 Scripted rules live as `.rhai` files in a `rules/` directory beside `policy.toml`, so
 `~/Library/Application Support/leviath/rules/` on macOS and `~/.config/leviath/rules/` on Linux. See

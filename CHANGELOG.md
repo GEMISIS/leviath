@@ -251,6 +251,23 @@ same list.
 
 ### Fixed
 
+- An MCP tool's name is now always exactly `<server>__<tool>`, with nothing
+  appended. A tool whose advertised name was already taken used to be renamed
+  with a `_2` suffix, which no blueprint, `[mcp_overrides]` key or grant could
+  have predicted and which changed with the order servers happened to connect
+  in. The name can now be read straight off `config.toml` and written down
+  before the server has ever been reached. A name that genuinely collides is
+  refused, and the daemon log says which two names ran into each other.
+- An `[[mcp_servers]]` name must be letters, digits, `_` or `-`, and no two
+  entries may share one. Both are refused when the config loads, by
+  `lev doctor`, `lev mcp add` and `POST /api/mcp/servers`. The name is used
+  verbatim in every one of that server's tool names, and a model provider
+  refuses a tool name containing anything else. Leviath no longer rewrites the
+  offending character, because `my.tools` and `my_tools` would both become the
+  prefix `my_tools` and then two servers would claim one set of tool names. A
+  dot and an underscore are different characters. A server name imported by
+  `lev setup` from another tool's config is still adjusted to fit, and the
+  wizard shows the name it will write.
 - `[mcp_overrides]` in `policy.toml` now applies. It sets an MCP tool's
   sensitivity, direction and clearance for the taint gate, and it had never
   reached a tool in any spelling: the loader keyed overrides by
