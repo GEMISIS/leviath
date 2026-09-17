@@ -177,11 +177,11 @@ An MCP tool is always named `<server>__<tool>` - the server it came from, two un
 the server calls it:
 
 ```toml
-available_tools = ["read_file", "github__create_issue"]
+available_tools = ["read_file", "tracker__create_issue"]
 ```
 
 The server is part of the name whether or not anything would have collided, so two servers that both
-offer `search` are `github__search` and `gitlab__search`, and a grant means the same thing however
+offer `search` are `tracker__search` and `wiki__search`, and a grant means the same thing however
 your `config.toml` is ordered.
 
 The separator is `__` rather than a dot because the name is passed to the model provider, and

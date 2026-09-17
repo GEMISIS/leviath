@@ -1153,10 +1153,10 @@ monitoring unless your subscription has the exemption, so write `retention = "ze
 
 ```toml
 [[mcp_servers]]
-name      = "github"
+name      = "tracker"
 transport = "http"        # stdio | http; inferred from command/url when omitted
 url       = "https://api.example.com/mcp"
-headers   = { Authorization = "Bearer ${GITHUB_TOKEN}" }
+headers   = { Authorization = "Bearer ${TRACKER_TOKEN}" }
 
 [[mcp_servers]]
 name      = "local-fs"

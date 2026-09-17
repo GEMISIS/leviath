@@ -54,8 +54,9 @@ That question is asked with the headers as they will actually be sent, `${VAR}` 
 expanded, so a credential that comes from the environment is recognised as the credential it is.
 
 > [!NOTE]
-> GitHub's MCP server accepts either. A personal access token in an `Authorization` header needs no
-> login at all, and the same endpoint runs the browser flow if you configure no header.
+> GitHub's MCP server is a published example of one that accepts either. A personal access token
+> in an `Authorization` header needs no login at all, and the same endpoint runs the browser flow
+> if you configure no header.
 
 Or configure in `~/.leviath/config.toml`:
 
@@ -83,10 +84,10 @@ On connect, Leviath discovers the server's tools and exposes them to any stage w
 ### How an MCP tool is named
 
 Always `<server>__<tool>`: the name you gave the server, two underscores, the name the server gives
-the tool. A `github` server offering `create_issue` is advertised as `github__create_issue`.
+the tool. A `tracker` server offering `create_issue` is advertised as `tracker__create_issue`.
 
 The server is always part of the name, not only when something would clash. Two servers that both
-offer `search` become `github__search` and `gitlab__search`, so a grant says which one it means and
+offer `search` become `tracker__search` and `wiki__search`, so a grant says which one it means and
 keeps meaning that however your `config.toml` is ordered.
 
 > [!NOTE]
@@ -107,7 +108,7 @@ in the text with its URI and type, since its bytes were never sent. A part the r
 (over `[mime] max_part_bytes`) is described in the text instead of dropped.
 
 Tools used to be advertised bare, with the server prefixed only on a clash, so a blueprint written
-against that naming grants `create_issue` where the tool is now `github__create_issue`. Such a grant
+against that naming grants `create_issue` where the tool is now `tracker__create_issue`. Such a grant
 still resolves, **as long as exactly one server offers a tool by that name**. Two do and the name is
 genuinely ambiguous: it resolves to nothing and the manifest has to say which. Worth updating the
 manifest either way, since the ambiguity can arrive later when somebody adds a second server.
@@ -133,19 +134,20 @@ sequenceDiagram
 ## Granting a whole server
 
 `available_tools` is an exact-match list, so granting a server tool by tool means knowing what it
-advertises - and that is not yours to know. It is whatever the server ships today. GitHub's server
-has dozens; a house server gains one when somebody deploys. A tool added later is never
-offered, and nothing says so, so the stage quietly cannot do a thing you believed it could.
+advertises, and that is not yours to know. It is whatever the server ships today. GitHub's
+server, to name a public one, advertises dozens of tools. A house server gains one when somebody
+deploys. A tool added later is never offered, and nothing says so, so the stage quietly cannot do
+a thing you believed it could.
 
 Name the server instead:
 
 ```toml
 [stages.triage]
-available_tools = ["read_file", "gitlab__create_issue"]
-available_connectors = ["github"]
+available_tools = ["read_file", "wiki__search"]
+available_connectors = ["tracker"]
 ```
 
-That stage gets the built-in `read_file`, one named tool from `gitlab`, and everything `github`
+That stage gets the built-in `read_file`, one named tool from `wiki`, and everything `tracker`
 advertises. The two forms mix freely, and a tool named individually *and* covered by a connector is
 granted once.
 
@@ -167,7 +169,7 @@ you named by hand.
 > `available_tools` instead (see [tool groups](/docs/tools#tool-groups)); `@mcp` and
 > `available_connectors` compose, so `["@builtin", "@mcp"]` with no connector list is the
 > "all built-ins and every MCP tool" shape in one line. There is no pattern form such as
-> `github__*`: a server named `my.tools` sanitizes to `my_tools`, and a name collision appends
+> `tracker__*`: a server named `my.tools` sanitizes to `my_tools`, and a name collision appends
 > `_2`, so matching the string would be a guess where the connector grant is a fact.
 > `available_connectors` asks Leviath which tools a server owns rather than inferring it from how
 > they are spelled.
