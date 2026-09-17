@@ -258,7 +258,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 ### Spawning under a yolo profile
 
 `POST /api/agents` takes `"yolo": true` for a plain unattended run, and `"yolo_profile":
-"<name>"` to run under a named profile from [`yolo.toml`](/docs/configuration#yolotoml) instead.
+"<name>"` to run under a named profile from [`yolo.toml`](/docs/yolo) instead.
 A profile implies `yolo`, so the two need not both be sent. A name the file does not have fails
 the spawn with a 400 that lists the profiles it does have. Under `--no-remote-yolo` a profile is
 refused with `yolo` and `allow`: the operator's flag says nothing about which one.
@@ -838,7 +838,7 @@ reports this.
 ## Yolo profiles
 
 The profiles a run can be launched under with `--yolo=<name>` live in
-[`yolo.toml`](/docs/configuration#yolotoml) beside the config, and these four routes are `lev
+[`yolo.toml`](/docs/yolo) beside the config, and these four routes are `lev
 yolo` over HTTP. Every one of them reads the file as it stands at that moment, the same way a
 spawn does, so what they report is what the next run gets.
 
