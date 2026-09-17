@@ -174,6 +174,7 @@ mod tests {
                         cache_read: None,
                         cache_write: None,
                         output: 2.0,
+                        long_context: None,
                     },
                 )
             })

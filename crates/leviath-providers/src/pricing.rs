@@ -765,7 +765,9 @@ mod cost_tests {
         assert!(bad_source.is_empty(), "unknown source: {bad_source:?}");
         let bad_provider: Vec<&PublishedRate> = rows
             .iter()
-            .filter(|r| !["anthropic", "openai", "google"].contains(&r.provider.as_str()))
+            .filter(|r| {
+                !["anthropic", "google", "meta", "openai", "xai"].contains(&r.provider.as_str())
+            })
             .collect();
         assert!(
             bad_provider.is_empty(),

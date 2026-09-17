@@ -4553,38 +4553,53 @@ fn infer_with_image() -> crate::components::InferenceResult {
 }
 
 #[test]
-fn stage_expects_image_reads_format_and_routing() {
-    assert!(!stage_expects_image(None));
+fn stage_expected_media_reads_format_and_routing() {
+    assert_eq!(stage_expected_media(None), None);
     let plain = stage_named("a", None, false, None);
-    assert!(!stage_expects_image(Some(&plain)));
+    assert_eq!(stage_expected_media(Some(&plain)), None);
 
     let mut routed = stage_named("b", None, false, None);
     routed.output_routing.insert("image/*".into(), "r".into());
-    assert!(stage_expects_image(Some(&routed)));
+    assert_eq!(stage_expected_media(Some(&routed)), Some("image"));
 
     let mut fmt_image = stage_named("c", None, false, None);
     fmt_image.output = Some(leviath_core::output::OutputSpec {
         format: Some("image/*".into()),
         ..Default::default()
     });
-    assert!(stage_expects_image(Some(&fmt_image)));
+    assert_eq!(stage_expected_media(Some(&fmt_image)), Some("image"));
 
     let mut fmt_text = stage_named("d", None, false, None);
     fmt_text.output = Some(leviath_core::output::OutputSpec {
         format: Some("markdown".into()),
         ..Default::default()
     });
-    assert!(!stage_expects_image(Some(&fmt_text)));
+    assert_eq!(stage_expected_media(Some(&fmt_text)), None);
+
+    let mut video = stage_named("e", None, false, None);
+    video
+        .output_routing
+        .insert("video/mp4".into(), "clip".into());
+    assert_eq!(stage_expected_media(Some(&video)), Some("video"));
+    let mut speech = stage_named("f", None, false, None);
+    speech.output = Some(leviath_core::output::OutputSpec {
+        format: Some("audio/mpeg".into()),
+        ..Default::default()
+    });
+    assert_eq!(stage_expected_media(Some(&speech)), Some("audio"));
 }
 
 #[test]
-fn no_image_nudge_quotes_the_reply_and_truncates_a_long_one() {
-    assert!(no_image_nudge("   ").contains("may have failed"));
-    let short = no_image_nudge("I cannot draw that");
+fn no_media_nudge_quotes_the_reply_names_the_family_and_truncates_a_long_one() {
+    assert!(no_media_nudge("   ", "image").contains("may have failed"));
+    let short = no_media_nudge("I cannot draw that", "image");
     assert!(short.contains("I cannot draw that"));
+    assert!(short.contains("an image"));
     assert!(!short.contains("..."));
-    let long = no_image_nudge(&"z".repeat(600));
+    let long = no_media_nudge(&"z".repeat(600), "video");
     assert!(long.contains("..."), "a long reply is truncated: {long}");
+    assert!(long.contains("a video"));
+    assert!(no_media_nudge("", "audio").contains("produces audio"));
 }
 
 #[test]
@@ -4609,7 +4624,7 @@ fn image_stage_nudges_when_the_reply_has_no_image() {
     assert_eq!(p.no_image_nudges, 1);
     assert_eq!(p.images_produced, 0);
     assert_eq!(p.text_only_nudges, 0);
-    assert!(conversation_text(&world, e).contains("no image"));
+    assert!(conversation_text(&world, e).contains("contained none"));
 }
 
 #[test]

@@ -13,6 +13,7 @@
 
 pub(crate) mod account;
 pub mod catalog;
+pub(crate) mod media;
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -81,6 +82,8 @@ pub struct XaiProvider {
     efforts: Arc<RwLock<Option<Efforts>>>,
     /// A subscription's coding data retention opt-out, once read.
     retention_opt_out: Arc<RwLock<Option<bool>>>,
+    /// How often a video task is polled.
+    poll_interval: std::time::Duration,
 }
 
 impl XaiProvider {
@@ -102,7 +105,38 @@ impl XaiProvider {
             account_url: crate::grok::ACCOUNT_BASE_URL.to_string(),
             efforts: Arc::new(RwLock::new(None)),
             retention_opt_out: Arc::new(RwLock::new(None)),
+            poll_interval: std::time::Duration::from_secs(5),
         }
+    }
+
+    /// Poll a video task this often. Tests shorten it.
+    #[must_use]
+    pub fn with_poll_interval(mut self, interval: std::time::Duration) -> Self {
+        self.poll_interval = interval;
+        self
+    }
+
+    /// Run a media model: images, video or speech.
+    async fn run_media(
+        &self,
+        kind: media::Kind,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse> {
+        let mut request = request.clone();
+        request.model = self.canonical(&request.model);
+        let billing = media::Billing {
+            reported: self.dialect.reported_cost,
+            unit: self.pricing(&request.model).and_then(|p| p.unit),
+        };
+        media::run(
+            &self.endpoint,
+            self.dialect.provider,
+            kind,
+            &request,
+            &billing,
+            self.poll_interval,
+        )
+        .await
     }
 
     /// Point a subscription's account reads somewhere else. Tests use this.
@@ -295,6 +329,9 @@ fn refuses_effort(body: &str) -> bool {
 #[async_trait]
 impl Provider for XaiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if let Some(kind) = media::kind(&self.canonical(&request.model)) {
+            return self.run_media(kind, request).await;
+        }
         // The route streams; a buffered call is the stream collected, so the two
         // paths cannot parse the same answer differently.
         crate::provider::collect_stream(self.stream_inference(request).await?).await
@@ -304,6 +341,11 @@ impl Provider for XaiProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        if let Some(kind) = media::kind(&self.canonical(&request.model)) {
+            return Ok(crate::media::one_chunk(
+                self.run_media(kind, request).await?,
+            ));
+        }
         self.stream_inference(request).await
     }
 
@@ -399,9 +441,22 @@ impl Provider for XaiProvider {
         if self.learned.is_empty() {
             self.prime_capabilities().await?;
         }
-        Ok(self
+        let mut models = self
             .learned
-            .to_model_infos(self.dialect.provider, |id| self.capabilities(id)))
+            .to_model_infos(self.dialect.provider, |id| self.capabilities(id));
+        // The speech routes are in no listing: they take no model field.
+        for (id, display) in media::CATALOG {
+            if media::kind(id)
+                .is_some_and(|k| matches!(k, media::Kind::Speech | media::Kind::Transcribe))
+                && !self.learned.contains(id)
+            {
+                models.push(
+                    ModelInfo::new(*id, self.dialect.provider, self.capabilities(id))
+                        .named(Some((*display).to_string())),
+                );
+            }
+        }
+        Ok(models)
     }
 
     /// Read the listings, which the credential has to be good for: a key or a
@@ -416,9 +471,19 @@ impl Provider for XaiProvider {
         if self.learned.contains(&id) {
             return Some(id);
         }
+        // The speech routes are in no listing, so they are always served.
+        if matches!(
+            media::kind(&id),
+            Some(media::Kind::Speech | media::Kind::Transcribe)
+        ) {
+            return Some(id);
+        }
         // Before the listing is read, the compiled table's own names.
-        (self.learned.is_empty() && catalog::CATALOG.iter().any(|(known, _)| *known == id))
-            .then_some(id)
+        let named = catalog::CATALOG
+            .iter()
+            .chain(media::CATALOG)
+            .any(|(known, _)| *known == id);
+        (self.learned.is_empty() && named).then_some(id)
     }
 
     fn served_catalog(&self) -> Option<Vec<String>> {

@@ -43,12 +43,9 @@ pub struct Row {
     pub output: u64,
 }
 
-/// The windows LiteLLM publishes for OpenAI's chat models.
-///
-/// Only OpenAI: the other vendors' tables are checked the same way when
-/// somebody wires them up, and reporting on a vendor nobody compares against
-/// would be noise.
-pub fn parse_litellm_windows(body: &str) -> Result<Windows> {
+/// The windows LiteLLM publishes for one provider's chat models, named as
+/// LiteLLM's `litellm_provider` names it.
+pub fn parse_litellm_windows(body: &str, provider: &str) -> Result<Windows> {
     let doc: serde_json::Value = serde_json::from_str(body).context("LiteLLM: not JSON")?;
     let entries = doc.as_object().context("LiteLLM: not an object")?;
     let mut out = Windows::new();
@@ -56,7 +53,7 @@ pub fn parse_litellm_windows(body: &str) -> Result<Windows> {
         if entry
             .get("litellm_provider")
             .and_then(serde_json::Value::as_str)
-            != Some("openai")
+            != Some(provider)
             || entry.get("mode").and_then(serde_json::Value::as_str) != Some("chat")
             || key.contains(':')
         {

@@ -23,6 +23,7 @@ pub mod failure;
 pub mod gemini;
 pub mod grok;
 pub mod learned;
+pub(crate) mod media;
 pub mod meshy;
 pub mod meta;
 pub mod mime;

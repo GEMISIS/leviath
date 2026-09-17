@@ -343,10 +343,19 @@ async fn priming_reads_all_four_listings_and_answers_for_aliases() {
     assert_eq!(provider.serves_model("grok-4.3"), Some("grok-4.3".into()));
     let models = provider.check_credential().await.expect("listed");
     let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    // The speech routes take no model field and are in no listing, so they
+    // are always offered.
     assert_eq!(
         ids,
-        ["grok-4.3", "grok-imagine-image", "grok-imagine-video"]
+        [
+            "grok-4.3",
+            "grok-imagine-image",
+            "grok-imagine-video",
+            "grok-tts",
+            "grok-stt"
+        ]
     );
+    assert_eq!(provider.serves_model("grok-tts"), Some("grok-tts".into()));
 
     assert_eq!(
         provider.serves_model("grok-4.3-latest"),
@@ -388,9 +397,9 @@ async fn a_media_listing_that_fails_leaves_the_chat_listing_standing() {
     ])
     .await;
     let provider = keyed(&url);
-    assert_eq!(provider.list_models().await.expect("listed").len(), 1);
+    assert_eq!(provider.list_models().await.expect("listed").len(), 3);
     // A primed provider does not ask again.
-    assert_eq!(provider.list_models().await.expect("listed again").len(), 1);
+    assert_eq!(provider.list_models().await.expect("listed again").len(), 3);
 }
 
 #[tokio::test]

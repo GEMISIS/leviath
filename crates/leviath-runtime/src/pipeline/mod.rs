@@ -128,7 +128,7 @@ mod response;
 pub use response::StageLedger;
 #[cfg(test)]
 pub(crate) use response::{
-    GlobalNudge, MAX_NO_IMAGE_NUDGES, edited_path, no_image_nudge, stage_expects_image,
+    GlobalNudge, MAX_NO_IMAGE_NUDGES, edited_path, no_media_nudge, stage_expected_media,
     to_inference_result,
 };
 pub(crate) use response::{

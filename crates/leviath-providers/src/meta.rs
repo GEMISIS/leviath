@@ -16,6 +16,8 @@
 //! and completions. They are listed and priced like any other; zero data
 //! retention refuses them (see [`crate::retention`]).
 
+pub(crate) mod media;
+
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -78,7 +80,7 @@ pub(crate) const MODELS: &[Row] = &[
         temperature: true,
         tools: true,
         context: 1_048_576,
-        output: 128_000,
+        output: 131_072,
     },
     Row {
         // Media models: no chat window, no tools, no temperature.
@@ -170,9 +172,24 @@ impl MetaProvider {
     }
 }
 
+impl MetaProvider {
+    /// Run a media model, priced by its unit row.
+    async fn run_media(
+        &self,
+        kind: media::Kind,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse> {
+        let unit = self.pricing(&request.model).and_then(|p| p.unit);
+        media::run(&self.endpoint, kind, request, unit).await
+    }
+}
+
 #[async_trait]
 impl Provider for MetaProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if let Some(kind) = media::kind(&request.model) {
+            return self.run_media(kind, request).await;
+        }
         crate::provider::collect_stream(self.infer_stream(request).await?).await
     }
 
@@ -180,6 +197,11 @@ impl Provider for MetaProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        if let Some(kind) = media::kind(&request.model) {
+            return Ok(crate::media::one_chunk(
+                self.run_media(kind, request).await?,
+            ));
+        }
         let mut body = request_body::build(
             request,
             &DIALECT,

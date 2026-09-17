@@ -981,13 +981,14 @@ pub(crate) fn handle_empty_response(
         // here too); if the stage still has no image, send the model's own words
         // back so the retry is informed. Bounded, so a model that keeps refusing
         // lets the stage end rather than looping.
-        if stage_expects_image(stage) {
-            progress.images_produced += image_part_count(&infer.parts);
+        if let Some(family) = stage_expected_media(stage) {
+            progress.images_produced += media_part_count(&infer.parts, family);
             if progress.images_produced == 0 && progress.no_image_nudges < MAX_NO_IMAGE_NUDGES {
                 progress.no_image_nudges += 1;
                 tracing::warn!(
                     stage = stage.map(|s| s.name.as_str()).unwrap_or(""),
-                    "image stage returned text and no image; likely an image-generation failure"
+                    family,
+                    "a media stage returned text and nothing it makes; likely a generation failure"
                 );
                 store_reply(
                     &mut window,
@@ -996,7 +997,7 @@ pub(crate) fn handle_empty_response(
                     stage,
                     sink.as_ref(),
                 );
-                inject_system_nudge(&mut window, &no_image_nudge(&infer.response));
+                inject_system_nudge(&mut window, &no_media_nudge(&infer.response, family));
                 commands
                     .entity(entity)
                     .remove::<ReadyForTransition>()
@@ -1072,47 +1073,57 @@ pub(crate) fn handle_empty_response(
 /// `require_output`/`max_iterations` then ends it rather than looping.
 pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
 
-/// True when the stage declares image output: a `format`, or an
-/// `output_routing` target, for `image/*`. A plain prefix check, because both
-/// are opaque labels the manifest already validated as mime patterns.
-pub(crate) fn stage_expects_image(stage: Option<&leviath_core::blueprint::Stage>) -> bool {
-    let Some(stage) = stage else {
-        return false;
-    };
-    let format_is_image = stage
-        .output
-        .as_ref()
-        .and_then(|o| o.format.as_deref())
-        .is_some_and(|f| f.starts_with("image/"));
-    format_is_image || stage.output_routing.keys().any(|k| k.starts_with("image/"))
+/// The media family a stage declares it makes (`image`, `video` or `audio`),
+/// from a `format` or an `output_routing` target: `None` for a stage that
+/// makes text. A plain prefix check, because both are opaque labels the
+/// manifest already validated as mime patterns. Image first, then video, then
+/// audio, when a stage names more than one.
+pub(crate) fn stage_expected_media(
+    stage: Option<&leviath_core::blueprint::Stage>,
+) -> Option<&'static str> {
+    let stage = stage?;
+    let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
+    ["image", "video", "audio"].into_iter().find(|family| {
+        let prefix = format!("{family}/");
+        format.is_some_and(|f| f.starts_with(&prefix))
+            || stage.output_routing.keys().any(|k| k.starts_with(&prefix))
+    })
 }
 
-/// Image parts among a reply's produced parts.
-fn image_part_count(parts: &[leviath_core::mime::Part]) -> usize {
+/// Parts of `family` among a reply's produced parts.
+fn media_part_count(parts: &[leviath_core::mime::Part], family: &str) -> usize {
+    let pattern = format!("{family}/*");
     parts
         .iter()
-        .filter(|p| p.mime_type.matches("image/*"))
+        .filter(|p| p.mime_type.matches(&pattern))
         .count()
 }
 
-/// The `[System]` line sent back when an image stage returned text and no
-/// image. It quotes the model's own words, because a refusal or a filtered
-/// request states its reason there, so the retry is informed rather than blind.
-pub(crate) fn no_image_nudge(reply_text: &str) -> String {
+/// The `[System]` line sent back when a media stage returned text and nothing
+/// of the `family` it makes. It quotes the model's own words, because a
+/// refusal or a filtered request states its reason there, so the retry is
+/// informed rather than blind.
+pub(crate) fn no_media_nudge(reply_text: &str, family: &str) -> String {
+    let what = match family {
+        "image" => "an image",
+        "video" => "a video",
+        _ => "audio",
+    };
     let trimmed = reply_text.trim();
     if trimmed.is_empty() {
-        return "This stage produces an image, but your last reply contained no image. \
-                The image generation may have failed. Generate the image and try again."
-            .to_string();
+        return format!(
+            "This stage produces {what}, but your last reply contained none. The \
+             generation may have failed. Generate {what} and try again."
+        );
     }
     let mut quoted = leviath_core::text::truncate_chars(trimmed, 500);
     if trimmed.chars().count() > 500 {
         quoted.push_str("...");
     }
     format!(
-        "This stage produces an image, but your last reply contained no image, only text: \
-         \"{quoted}\". That usually means the image generation failed or was refused. If that \
-         text names a problem, address it; then generate the image and try again."
+        "This stage produces {what}, but your last reply contained none, only text: \
+         \"{quoted}\". That usually means the generation failed or was refused. If that \
+         text names a problem, address it; then generate {what} and try again."
     )
 }
 

@@ -137,7 +137,7 @@ clap = { version = "4.6", features = ["derive"] }
 # `Accept-Encoding`, but a server can still answer compressed, and `Response::text`
 # then decodes the compressed bytes lossily into a page of replacement characters
 # that `web_fetch` hands to the model as if it were the article.
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2", "system-proxy", "blocking", "form", "gzip", "brotli", "zstd"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2", "system-proxy", "blocking", "form", "multipart", "gzip", "brotli", "zstd"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # OpenTelemetry export ([observability] config, issue #73). OTLP goes over
