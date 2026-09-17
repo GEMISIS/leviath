@@ -160,6 +160,7 @@ impl LiveLimits {
             inline_text_bytes: config.mime.inline_text_bytes,
             max_media_bytes_per_request: config.mime.max_media_bytes_per_request,
             provider_file_ttl_secs: config.mime.provider_file_ttl_secs,
+            overwrite_artifacts: config.mime.overwrite_artifacts,
         });
 
         // Read when a prompt opens, so a prompt already waiting keeps the
@@ -249,6 +250,28 @@ mod tests {
         config.providers.zero_retention = true;
         assert!(live.apply(&config, &mut world), "the switch is a change");
         assert!(asked(&world));
+    }
+
+    /// `[mime] overwrite_artifacts` flipped in the file reaches the runs on the
+    /// next pass without a restart.
+    #[test]
+    fn the_artifact_overwrite_policy_follows_the_config() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut world = world(&runtime, 8);
+        let live = applier();
+        let mut config = Config::default();
+        assert!(live.apply(&config, &mut world));
+        let overwrite = |world: &PipelineWorld| {
+            world
+                .world()
+                .get_resource::<leviath_runtime::blob_store::MimeLimits>()
+                .expect("the world has limits")
+                .overwrite_artifacts
+        };
+        assert!(!overwrite(&world));
+        config.mime.overwrite_artifacts = true;
+        assert!(live.apply(&config, &mut world), "the switch is a change");
+        assert!(overwrite(&world));
     }
 
     #[test]

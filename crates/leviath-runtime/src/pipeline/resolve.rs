@@ -2868,6 +2868,7 @@ mod tests {
                 schema: None,
                 validator: None,
                 on_validator_error: None,
+                overwrite_artifacts: None,
                 artifacts: Vec::new(),
             }),
         );

@@ -164,6 +164,15 @@ pub(super) fn parse_output_spec(
             }
         },
     };
+    let overwrite_artifacts = match table.get("overwrite_artifacts") {
+        None => None,
+        Some(toml::Value::Boolean(b)) => Some(*b),
+        Some(value) => {
+            return Err(Error::Other(format!(
+                "{where_}: overwrite_artifacts must be true or false, got: {value}"
+            )));
+        }
+    };
     let mut artifacts = Vec::new();
     if let Some(listed) = table.get("artifacts") {
         let items = listed.as_array().ok_or_else(|| {
@@ -190,6 +199,7 @@ pub(super) fn parse_output_spec(
             .and_then(|v| serde_json::to_value(v).ok()),
         validator: string_field("validator"),
         on_validator_error,
+        overwrite_artifacts,
     })
 }
 
@@ -247,6 +257,7 @@ pub(super) const OUTPUT_KEYS: &[&str] = &[
     "format",
     "instructions",
     "on_validator_error",
+    "overwrite_artifacts",
     "schema",
     "validator",
 ];

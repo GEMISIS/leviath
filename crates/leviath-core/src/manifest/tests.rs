@@ -3214,6 +3214,46 @@ on_validator_error = 3
     assert!(err.contains("got: 3"), "{err}");
 }
 
+/// The artifact overwrite policy is read at both levels, and anything but a
+/// boolean is refused rather than loading as "unset".
+#[test]
+fn overwrite_artifacts_parses_at_agent_and_stage_level() {
+    let toml = r#"
+[agent]
+name = "overwrite-test"
+
+[agent.output]
+overwrite_artifacts = true
+
+[stages.summary]
+mode = "output"
+
+[stages.summary.output]
+overwrite_artifacts = false
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert_eq!(
+        bp.output.as_ref().and_then(|s| s.overwrite_artifacts),
+        Some(true)
+    );
+    let stage = bp.find_stage("summary").expect("the stage exists");
+    assert_eq!(
+        stage.output.as_ref().and_then(|s| s.overwrite_artifacts),
+        Some(false)
+    );
+
+    let toml = r#"
+[agent]
+name = "overwrite-test"
+
+[agent.output]
+overwrite_artifacts = "yes"
+"#;
+    let err = parse_manifest(toml).expect_err("refused").to_string();
+    assert!(err.contains("[agent.output]"), "{err}");
+    assert!(err.contains("true or false"), "{err}");
+}
+
 #[test]
 fn parse_manifest_with_stage_system_prompt() {
     let toml = r#"

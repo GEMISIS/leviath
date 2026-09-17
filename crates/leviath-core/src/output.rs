@@ -120,6 +120,14 @@ pub struct OutputSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_validator_error: Option<OnValidatorError>,
 
+    /// Whether an artifact named after a part the run produced may replace a
+    /// different file already at that path in the working directory. `None`
+    /// defers to the user's `[mime] overwrite_artifacts`, which defaults to
+    /// false: the existing file is left alone and the part is written beside
+    /// it under a name carrying its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overwrite_artifacts: Option<bool>,
+
     /// The files the stage hands back beside its answer, by name and type.
     /// A submission is checked against them: a `required` one must be
     /// present, and one that is present must be of the declared type.
@@ -137,6 +145,7 @@ impl OutputSpec {
             && self.schema.is_none()
             && self.validator.is_none()
             && self.on_validator_error.is_none()
+            && self.overwrite_artifacts.is_none()
             && self.artifacts.is_empty()
     }
 }
@@ -451,6 +460,7 @@ pub fn resolve_output_spec(
         schema: shape_field(|s| s.schema.clone()),
         validator,
         on_validator_error,
+        overwrite_artifacts: field(agent, stage, request, |s| s.overwrite_artifacts),
         artifacts,
     })
 }
@@ -460,10 +470,9 @@ pub fn resolve_output_spec(
 ///
 /// Retiring the declared Rhai validator and JSON schema when the request names
 /// a different format is deliberate and stays: a check written for one shape
-/// cannot judge another. What this adds is the saying-so. Before it, the
-/// retirement was completely silent, so a caller who typed
-/// `--output-format json` over a blueprint with a validator kept believing the
-/// run was still being checked.
+/// cannot judge another. These warnings say so out loud, so a caller who types
+/// `--output-format json` over a blueprint with a validator does not go on
+/// believing the run is still being checked.
 ///
 /// One line per group of stages losing the same checks, so an agent-level
 /// validator shared by four stages reads as one sentence naming four stages.
@@ -817,6 +826,7 @@ mod tests {
             schema: None,
             validator: None,
             on_validator_error: None,
+            overwrite_artifacts: None,
             artifacts: Vec::new(),
         };
         let stage = OutputSpec {
@@ -917,6 +927,42 @@ mod tests {
             resolved.validator.as_deref(),
             Some("a2ui.rhai"),
             "the validator itself still falls through from the agent"
+        );
+    }
+
+    /// The artifact overwrite policy cascades on its own, reshape or not: a
+    /// stage beats the agent, a request beats both, and unset stays unset so
+    /// the user's config can decide.
+    #[test]
+    fn the_overwrite_policy_cascades_field_by_field() {
+        let agent = OutputSpec {
+            format: Some("markdown".to_string()),
+            overwrite_artifacts: Some(true),
+            ..OutputSpec::default()
+        };
+        let stage = OutputSpec {
+            overwrite_artifacts: Some(false),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), None, None).unwrap();
+        assert_eq!(resolved.overwrite_artifacts, Some(true));
+        let resolved = resolve_output_spec(Some(&agent), Some(&stage), None).unwrap();
+        assert_eq!(resolved.overwrite_artifacts, Some(false));
+        let request = OutputSpec {
+            format: Some("json".to_string()),
+            overwrite_artifacts: Some(true),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), Some(&stage), Some(&request)).unwrap();
+        assert_eq!(resolved.overwrite_artifacts, Some(true));
+        let resolved = resolve_output_spec(None, Some(&OutputSpec::default()), None).unwrap();
+        assert_eq!(resolved.overwrite_artifacts, None);
+        assert!(
+            !OutputSpec {
+                overwrite_artifacts: Some(false),
+                ..OutputSpec::default()
+            }
+            .is_empty()
         );
     }
 
@@ -1244,6 +1290,7 @@ mod tests {
             schema: Some(json!({"type": "object"})),
             validator: None,
             on_validator_error: None,
+            overwrite_artifacts: None,
             artifacts: Vec::new(),
         });
         assert!(described.contains("Return it in this format: a2ui."));

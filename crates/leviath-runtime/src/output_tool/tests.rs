@@ -60,6 +60,7 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         1234,
         &mut w,
@@ -92,6 +93,7 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -115,6 +117,7 @@ fn a_format_with_no_schema_never_parses_the_content() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -141,6 +144,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -157,6 +161,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -177,6 +182,7 @@ fn no_spec_at_all_still_records_an_answer() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -203,6 +209,7 @@ fn a_submission_matching_its_schema_is_accepted() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -227,6 +234,7 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -254,6 +262,7 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -278,6 +287,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -297,6 +307,7 @@ fn a_missing_content_argument_is_refused() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -319,6 +330,7 @@ fn a_blank_submission_is_refused() {
                 stage_names: &[],
                 workdir: None,
                 sink: None,
+                overwrite_artifacts: false,
             },
             0,
             &mut w,
@@ -341,6 +353,7 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -368,6 +381,7 @@ fn a_second_submission_replaces_the_first() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         1,
         &mut w,
@@ -382,6 +396,7 @@ fn a_second_submission_replaces_the_first() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         2,
         &mut w,
@@ -405,6 +420,7 @@ fn a_window_without_the_region_still_records_the_output() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut bare,
@@ -436,6 +452,7 @@ fn artifacts_inside_the_workdir_are_recorded() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -464,6 +481,7 @@ fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -486,6 +504,7 @@ fn no_artifacts_argument_records_an_empty_list() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -507,6 +526,7 @@ fn artifacts_with_no_workdir_are_refused() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -532,6 +552,7 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -567,6 +588,7 @@ fn a_submission_that_is_not_the_format_it_claims_is_refused() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -587,6 +609,7 @@ fn a_well_formed_submission_in_a_known_format_is_accepted() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -608,6 +631,7 @@ fn an_unknown_format_is_still_never_inspected() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -632,6 +656,7 @@ fn the_format_check_reports_before_the_schema_check() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -690,6 +715,7 @@ fn an_agent_supplied_validator_rejects_a_bad_answer() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -719,6 +745,7 @@ fn an_agent_supplied_validator_accepts_a_good_answer() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -743,6 +770,7 @@ fn a_throwing_validator_rejects_the_submission_by_default() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -776,6 +804,7 @@ fn an_accept_policy_records_the_submission_unchecked() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -810,6 +839,7 @@ fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
                 stage_names: &[],
                 workdir: None,
                 sink: None,
+                overwrite_artifacts: false,
             },
             0,
             &mut w,
@@ -836,6 +866,7 @@ fn a_working_validator_records_nothing() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -857,6 +888,7 @@ fn a_named_validator_with_nothing_compiled_is_skipped() {
             stage_names: &[],
             workdir: None,
             sink: None,
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -898,6 +930,7 @@ fn ctx<'a>(stage: &'a str, stage_names: &'a [String]) -> OutputContext<'a> {
         stage_names,
         workdir: None,
         sink: None,
+        overwrite_artifacts: false,
     }
 }
 
@@ -1024,6 +1057,7 @@ fn stored_artifacts_are_mirrored_beside_the_answer() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1098,6 +1132,7 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1140,6 +1175,7 @@ fn an_artifact_that_is_neither_a_file_nor_a_produced_part_is_refused() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1212,6 +1248,7 @@ fn a_produced_part_resolves_by_its_file_name() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1249,6 +1286,7 @@ fn a_produced_part_resolves_by_sha_prefix() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1298,6 +1336,7 @@ fn a_produced_part_whose_store_read_fails_is_refused() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
@@ -1334,10 +1373,119 @@ fn a_produced_part_written_to_a_missing_directory_is_refused() {
             stage_names: &[],
             workdir: Some(dir.path()),
             sink: Some(&sink),
+            overwrite_artifacts: false,
         },
         0,
         &mut w,
     );
     assert!(output.is_none());
     assert!(message.contains("could not be written"), "{message}");
+}
+
+/// Submit `path` as the `image` artifact over [`window_with_produced_png`]'s
+/// part, into `dir`, under the given overwrite policy.
+fn submit_produced_png(
+    dir: &std::path::Path,
+    path: &str,
+    overwrite_artifacts: bool,
+) -> (String, Option<FinalOutput>, leviath_core::mime::BlobRef) {
+    let (mut w, store, registry, reference) = window_with_produced_png("image-1.png");
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+        inline_text_bytes: 1024,
+    };
+    let (message, output) = handle_output_tool(
+        &json!({
+            "content": "described",
+            "artifacts": [{"name": "image", "path": path}],
+        }),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "describe",
+            stage_names: &[],
+            workdir: Some(dir),
+            sink: Some(&sink),
+            overwrite_artifacts,
+        },
+        0,
+        &mut w,
+    );
+    (message, output, reference)
+}
+
+/// The reported failure: an earlier run left `image-1.png` in the shared
+/// working directory, and this run's own part of that name must still be the
+/// answer. The old file is left alone and the part lands beside it under a
+/// name carrying its hash, which is the path recorded.
+#[test]
+fn a_stale_workdir_file_does_not_stand_in_for_the_produced_part() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // Named by sha prefix, the path has no extension to keep.
+    let sha = leviath_core::mime::sha256_hex(b"\x89PNG\r\n\x1a\n produced pixels");
+    let prefix = sha.get(..16).unwrap();
+    std::fs::write(dir.path().join(prefix), b"something else").unwrap();
+    let (_, output, _) = submit_produced_png(dir.path(), prefix, false);
+    assert_eq!(
+        output.expect("recorded").artifacts[0].path,
+        format!("{prefix}-{}", sha.get(..8).unwrap())
+    );
+    std::fs::create_dir(dir.path().join("out")).unwrap();
+    for path in ["image-1.png", "out/image-1.png"] {
+        std::fs::write(dir.path().join(path), b"a previous run's pixels").unwrap();
+        let (message, output, reference) = submit_produced_png(dir.path(), path, false);
+        let artifact = &output.expect("recorded").artifacts[0];
+        assert_eq!(artifact.sha256, reference.sha256, "{message}");
+        let sibling = path.replace(
+            "image-1.png",
+            &format!("image-1-{}.png", reference.sha256.get(..8).unwrap()),
+        );
+        assert_eq!(artifact.path, sibling);
+        assert!(
+            message.contains(&sibling),
+            "the ack names the new path: {message}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(path)).unwrap(),
+            b"a previous run's pixels",
+            "the existing file is untouched"
+        );
+        assert_eq!(
+            leviath_core::mime::sha256_hex(&std::fs::read(dir.path().join(&sibling)).unwrap()),
+            reference.sha256
+        );
+    }
+}
+
+/// With overwriting allowed, the part replaces the file at the path it names.
+#[test]
+fn an_overwriting_run_replaces_the_stale_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("image-1.png"), b"a previous run's pixels").unwrap();
+    let (message, output, reference) = submit_produced_png(dir.path(), "image-1.png", true);
+    let artifact = &output.expect("recorded").artifacts[0];
+    assert_eq!(artifact.path, "image-1.png");
+    assert_eq!(artifact.sha256, reference.sha256, "{message}");
+    assert_eq!(
+        leviath_core::mime::sha256_hex(&std::fs::read(dir.path().join("image-1.png")).unwrap()),
+        reference.sha256
+    );
+}
+
+/// A file that already holds the part's bytes is the part: nothing is written
+/// beside it, and the path stays the one named.
+#[test]
+fn a_file_already_holding_the_part_keeps_its_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("image-1.png"),
+        b"\x89PNG\r\n\x1a\n produced pixels",
+    )
+    .unwrap();
+    let (_, output, _) = submit_produced_png(dir.path(), "image-1.png", false);
+    assert_eq!(output.expect("recorded").artifacts[0].path, "image-1.png");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

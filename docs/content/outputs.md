@@ -365,12 +365,28 @@ sees it in the `final_output` region the way it sees any other part. The answer 
 `name`, `path`, `mime_type`, `size` and `sha256` per file.
 
 A file the run **produced** but never wrote to disk - a picture from an image model, say, which
-lives in the run's store - can be named the same way. When the path is not a file in the working
-directory, the name (then a sha256 prefix) is resolved against the parts the run has produced, and a
-match is written to that path before it is recorded. So a describe-the-image stage can attach the
-picture it was handed with `artifacts: [{ name: "image", path: "image-1.png" }]` (the file name is
-shown beside the part in its region), and the user gets a real file. A name that is neither a file
-nor a produced part is refused, saying both places were checked.
+lives in the run's store - can be named the same way. The name (then a sha256 prefix) is checked
+against the parts the run has produced first, and a match is written to that path before it is
+recorded. So a describe-the-image stage can attach the picture it was handed with
+`artifacts: [{ name: "image", path: "image-1.png" }]` (the file name is shown beside the part in its
+region), and the user gets a real file. Only a name no part answers to is read from the working
+directory. A name that is neither a produced part nor a file is refused, saying both places were
+checked.
+
+The part comes first because a file with the same name may already be sitting in the working
+directory, left by an earlier run of the same agent or put there by you. If it holds the same bytes,
+nothing is written. If it holds something else, it is left alone, the part is written beside it as
+`<stem>-<sha8>.<ext>` (`image-1-5ea93f29.png`), and that is the path the answer records and the
+model is told about. To replace the file instead, set `overwrite_artifacts`:
+
+```toml
+[agent.output]
+overwrite_artifacts = true
+```
+
+It can go on a stage's output table too, and a caller's requested shape can set it. When no level
+says, `[mime] overwrite_artifacts` in [your config](/docs/configuration#mime) decides, and it is off
+unless you turn it on.
 
 A stage can say up front which files it hands back:
 

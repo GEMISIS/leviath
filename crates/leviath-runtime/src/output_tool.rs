@@ -99,6 +99,10 @@ pub(crate) struct OutputContext<'a> {
     /// The run's blob store and registry, for typing and storing artifacts.
     /// `None` types them with the built-in registry and stores nothing.
     pub sink: Option<&'a crate::context_setup::PartSink<'a>>,
+    /// Whether a produced part named as an artifact may replace a different
+    /// file at its path: the blueprint's `overwrite_artifacts`, else the
+    /// operator's `[mime]` value.
+    pub overwrite_artifacts: bool,
 }
 
 /// Apply a `submit_output` call.
@@ -124,6 +128,7 @@ pub(crate) fn handle_output_tool(
         stage_names,
         workdir,
         sink,
+        overwrite_artifacts,
     } = *ctx;
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
         return ("[error] missing 'content' argument".to_string(), None);
@@ -231,9 +236,16 @@ pub(crate) fn handle_output_tool(
     let declared = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
     // The parts the run has already produced, so a submission can name one (an
     // image a model drew) as an artifact even though it never touched the
-    // workdir: `resolve` writes it to the named path before recording it.
+    // workdir: `resolve` writes it to disk before recording it.
     let produced = window.stored_parts();
-    let ingested = match artifacts::resolve(args, workdir, declared, &produced, sink) {
+    let ingested = match artifacts::resolve(
+        args,
+        workdir,
+        declared,
+        &produced,
+        sink,
+        overwrite_artifacts,
+    ) {
         Ok(ingested) => ingested,
         Err(message) => return (message, None),
     };
@@ -260,6 +272,9 @@ pub(crate) fn handle_output_tool(
             .map(leviath_core::output::Artifact::short_label)
             .collect();
         ack.push_str(&format!(" Artifacts: {}.", listed.join(", ")));
+    }
+    for sentence in &ingested.moved {
+        ack.push_str(&format!(" {sentence}."));
     }
     if output.truncated {
         ack.push_str(&format!(
