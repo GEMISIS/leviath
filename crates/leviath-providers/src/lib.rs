@@ -20,6 +20,7 @@ pub mod codex;
 pub(crate) mod debug_http;
 pub mod endpoint;
 pub mod failure;
+pub mod files;
 pub mod gemini;
 pub mod grok;
 pub mod learned;

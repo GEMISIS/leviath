@@ -189,3 +189,32 @@ async fn an_override_can_price_turn_off_temperature_and_retype_a_model() {
     // With no override, the shipped table prices it (or nothing does).
     let _ = provider.pricing("muse-spark-1.2");
 }
+
+#[tokio::test]
+async fn muse_spark_takes_media_by_file_and_the_media_models_take_none() {
+    let (url, seen) = spawn_mock_recorder(200, "OK", br#"{"id":"file-m"}"#.to_vec()).await;
+    let meta = provider(&url);
+    let mp4 = leviath_core::mime::MimeType::parse("video/mp4").unwrap();
+    assert!(meta.media_limits("muse-spark-1.3").by_file(&mp4, 1));
+    assert!(!meta.media_limits("muse-image-1.0").by_file(&mp4, 1));
+    let upload = crate::files::FileUpload {
+        bytes: std::sync::Arc::from(&b"....ftyp"[..]),
+        mime_type: "video/mp4".into(),
+        name: "a.mp4".into(),
+        ttl_secs: 3_600,
+    };
+    assert_eq!(meta.upload_file(&upload).await.unwrap().id, "file-m");
+    let (gone, deleted) = spawn_mock_recorder(404, "Not Found", b"{}".to_vec()).await;
+    provider(&gone)
+        .delete_file(&crate::files::RemoteFile {
+            id: "file-m".into(),
+            uri: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let raw = seen.lock().unwrap().join("");
+    assert!(raw.contains("name=\"purpose\"\r\n\r\nuser_data"), "{raw}");
+    let deleted = deleted.lock().unwrap().join("");
+    assert!(deleted.contains("DELETE /files/file-m"), "{deleted}");
+}

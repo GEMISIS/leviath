@@ -661,3 +661,32 @@ async fn a_subscription_quotes_its_retention_setting_once_read() {
     assert!(key.live_retention("grok-4.3").is_none());
     let _ = subscription("http://x", "http://y").with_account_url(None);
 }
+
+#[tokio::test]
+async fn a_chat_model_takes_documents_by_file_and_a_media_model_takes_none() {
+    let (url, seen) = spawn_mock_recorder(200, "OK", br#"{"id":"file-x"}"#.to_vec()).await;
+    let provider = keyed(&url);
+    let pdf = leviath_core::mime::MimeType::parse("application/pdf").unwrap();
+    assert!(provider.media_limits("grok-4.3").by_file(&pdf, 1));
+    assert!(!provider.media_limits("grok-imagine-image").by_file(&pdf, 1));
+    let upload = crate::files::FileUpload {
+        bytes: Arc::from(&b"%PDF"[..]),
+        mime_type: "application/pdf".into(),
+        name: "a.pdf".into(),
+        ttl_secs: 3_600,
+    };
+    assert_eq!(provider.upload_file(&upload).await.unwrap().id, "file-x");
+    let (gone, deleted) = spawn_mock_recorder(404, "Not Found", b"{}".to_vec()).await;
+    keyed(&gone)
+        .delete_file(&crate::files::RemoteFile {
+            id: "file-x".into(),
+            uri: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let raw = seen.lock().unwrap().join("");
+    assert!(raw.contains("name=\"purpose\"\r\n\r\nassistants"), "{raw}");
+    let deleted = deleted.lock().unwrap().join("");
+    assert!(deleted.contains("DELETE /files/file-x"), "{deleted}");
+}

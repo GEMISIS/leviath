@@ -546,6 +546,7 @@ pub enum ContentBlock {
     /// The neutral form. Assembly emits one per stored part with `data` empty;
     /// hydration (`crate::mime::hydrate_request`) fills `data` with the base64
     /// bytes when the model takes the type, or turns the block into text. A
+    /// part the vendor already holds carries `remote` instead of bytes. A
     /// built-in provider encodes a hydrated block into its own shape (an
     /// Anthropic `image` block, an OpenAI `image_url` part); a block that
     /// reaches a provider with `data` still empty is sent as its stand-in
@@ -564,6 +565,10 @@ pub enum ContentBlock {
         /// The part's delivery override, when it has one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliver: Option<leviath_core::mime::Delivery>,
+        /// The vendor's copy of the part, when it was uploaded: the request
+        /// names it by id and carries no bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<crate::files::RemoteFile>,
     },
 }
 
@@ -576,6 +581,7 @@ impl ContentBlock {
             data: String::new(),
             name: part.name.clone(),
             deliver: part.deliver,
+            remote: None,
         })
     }
 
@@ -587,9 +593,10 @@ impl ContentBlock {
         }
     }
 
-    /// Whether this is a mime block carrying its bytes.
+    /// Whether this is a mime block carrying its bytes, or naming the
+    /// vendor's copy of them.
     pub fn is_hydrated_mime(&self) -> bool {
-        matches!(self, ContentBlock::Mime { data, .. } if !data.is_empty())
+        matches!(self, ContentBlock::Mime { data, remote, .. } if !data.is_empty() || remote.is_some())
     }
 }
 
@@ -1086,6 +1093,34 @@ pub trait Provider: Send + Sync {
     /// with an error when that read failed.
     async fn quota(&self) -> Option<Result<crate::quota::QuotaReport>> {
         None
+    }
+
+    /// What this provider documents about the media a request to `model` may
+    /// carry, and whether a part can go by file id. The default documents
+    /// nothing: the Leviath settings bound the request and nothing uploads.
+    fn media_limits(&self, model: &str) -> crate::files::MediaLimits {
+        let _ = model;
+        crate::files::MediaLimits::NONE
+    }
+
+    /// Put `upload` in the vendor's file storage. Called only for a model
+    /// whose [`Self::media_limits`] names a file size, which the default does
+    /// not.
+    async fn upload_file(
+        &self,
+        upload: &crate::files::FileUpload,
+    ) -> Result<crate::files::RemoteFile> {
+        let _ = upload;
+        Err(ProviderError::Other(format!(
+            "{} has no file storage",
+            self.name()
+        )))
+    }
+
+    /// Delete a file this provider uploaded. One already gone is deleted.
+    async fn delete_file(&self, file: &crate::files::RemoteFile) -> Result<()> {
+        let _ = file;
+        Ok(())
     }
 
     /// Prove the stored credential works *right now*, and report the models it

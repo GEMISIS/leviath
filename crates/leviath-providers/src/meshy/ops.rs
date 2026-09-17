@@ -442,6 +442,7 @@ mod tests {
             data: data.into(),
             name: Some(name.into()),
             deliver: None,
+            remote: None,
         }
     }
 

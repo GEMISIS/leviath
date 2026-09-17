@@ -361,6 +361,28 @@ impl Provider for XaiProvider {
         self.dialect.provider
     }
 
+    /// Documents by file id for a chat model. A media model's own route takes
+    /// its inputs inline and names no file.
+    fn media_limits(&self, model: &str) -> crate::files::MediaLimits {
+        let limits = crate::files::provider_limits(PROVIDER_NAME);
+        match media::kind(&self.canonical(model)) {
+            Some(_) => limits.inline_only(),
+            None => limits,
+        }
+    }
+
+    async fn upload_file(
+        &self,
+        upload: &crate::files::FileUpload,
+    ) -> Result<crate::files::RemoteFile> {
+        let limits = crate::files::provider_limits(PROVIDER_NAME);
+        crate::files::upload_openai_shape(&self.endpoint, upload, "assistants", &limits).await
+    }
+
+    async fn delete_file(&self, file: &crate::files::RemoteFile) -> Result<()> {
+        crate::files::delete_openai_shape(&self.endpoint, file).await
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         let id = self.canonical(model);
         let base = self

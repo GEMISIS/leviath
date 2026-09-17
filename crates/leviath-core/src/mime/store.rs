@@ -84,6 +84,15 @@ pub trait BlobStore: Send + Sync {
     fn has(&self, run_id: &str, sha256: &str) -> bool {
         self.read(run_id, sha256).is_ok()
     }
+
+    /// The directory holding `run_id`'s files on disk, for a store that has
+    /// one. A store with nowhere to keep a run's records (the in-memory one)
+    /// answers `None`, and nothing that needs a record, such as an upload to
+    /// a vendor that must later be deleted, is done for it.
+    fn run_dir(&self, run_id: &str) -> Option<std::path::PathBuf> {
+        let _ = run_id;
+        None
+    }
 }
 
 /// One run's blobs, by hash.

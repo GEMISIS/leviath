@@ -171,16 +171,26 @@ pub(crate) struct JobHydration {
     /// What the model takes and hands back.
     pub mime: leviath_providers::ModelMime,
     /// The bytes of stored media one request carries before the oldest parts
-    /// become stand-ins.
+    /// become stand-ins: the provider's documented request limit, else the
+    /// operator's setting.
     pub max_media_bytes: u64,
     /// Mime type patterns the stage sends as text whatever the model takes.
     pub as_text: Vec<String>,
+    /// What the provider documents about media for this model.
+    pub limits: leviath_providers::files::MediaLimits,
+    /// Where uploads go, when this provider stores files and uploading is
+    /// allowed; `None` sends every part inline.
+    pub files: Option<crate::provider_files::FileRoute>,
+    /// Why parts go inline for a provider that could store them, said beside
+    /// a part the inline limit holds back.
+    pub why_inline: &'static str,
 }
 
 impl JobHydration {
     /// Fill `request`'s mime blocks, logging what happened when anything
-    /// was left out.
-    fn apply(&self, request: &mut InferenceRequest) {
+    /// was left out: parts the provider already holds, or can be given, are
+    /// named by id; the rest carry their bytes.
+    async fn apply(&self, request: &mut InferenceRequest) {
         // The stage's own bypass: a part of a type it named reaches the
         // model as text unless the part itself said otherwise.
         if !self.as_text.is_empty() {
@@ -198,6 +208,22 @@ impl JobHydration {
                 }
             }
         }
+        if let Some(route) = &self.files {
+            crate::provider_files::attach(
+                request,
+                route,
+                &self.mime,
+                self.store.as_ref(),
+                &self.run_id,
+                false,
+            )
+            .await;
+        }
+        self.hydrate(request);
+    }
+
+    /// Put bytes (or stand-ins) in every mime block not already named by id.
+    fn hydrate(&self, request: &mut InferenceRequest) {
         let fetch =
             |blob: &leviath_core::mime::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
         let report = leviath_providers::mime::hydrate_request(
@@ -207,19 +233,47 @@ impl JobHydration {
                 registry: &self.registry,
                 max_media_bytes: self.max_media_bytes,
                 fetch: &fetch,
+                limits: self.limits,
+                why_inline: self.why_inline,
             },
         );
-        if report.stand_ins > 0 || report.capped > 0 || !report.missing.is_empty() {
+        if report.stand_ins > 0
+            || report.capped > 0
+            || report.too_large > 0
+            || !report.missing.is_empty()
+        {
             tracing::info!(
                 model = %request.model,
                 sent = report.sent,
+                by_file = report.by_file,
                 as_text = report.as_text,
                 stand_ins = report.stand_ins,
                 capped = report.capped,
+                too_large = report.too_large,
                 missing = report.missing.len(),
                 "[mime] stored parts the model did not receive as bytes"
             );
         }
+    }
+
+    /// Upload again every part `request` names by id, for a request the
+    /// vendor refused because a file it named is gone, then fill any part
+    /// whose upload failed with its bytes. Whether anything was uploaded.
+    async fn renew_files(&self, request: &mut InferenceRequest) -> bool {
+        let Some(route) = &self.files else {
+            return false;
+        };
+        let renewed = crate::provider_files::attach(
+            request,
+            route,
+            &self.mime,
+            self.store.as_ref(),
+            &self.run_id,
+            true,
+        )
+        .await;
+        self.hydrate(request);
+        renewed > 0
     }
 }
 
@@ -454,7 +508,7 @@ pub(crate) async fn run_inference_job(
     // Bytes go in here and nowhere earlier: the assembled request, the
     // journal and every snapshot carry references only.
     if let Some(hydration) = &hydration {
-        hydration.apply(&mut request);
+        hydration.apply(&mut request).await;
     }
     let started = std::time::Instant::now();
     // Retry transient failures (connection reset, timeout, 429, 5xx) with
@@ -477,6 +531,7 @@ pub(crate) async fn run_inference_job(
         guard_context_window(provider.as_ref(), &request, calibration.as_ref()).await?;
         let mut attempt = 1u32;
         let mut spent = Duration::ZERO;
+        let mut renewed_files = false;
         loop {
             // Both arms produce the same finished `InferenceResponse`; the
             // difference is entirely in how the bytes crossed the wire. A
@@ -494,6 +549,21 @@ pub(crate) async fn run_inference_job(
             };
             match call.await {
                 Ok(response) => break Ok(response),
+                // A file the request named is gone (expired, deleted, or held
+                // by another account): upload again and retry once, at once.
+                Err(e)
+                    if !renewed_files
+                        && leviath_providers::files::names_a_missing_file(&e)
+                        && crate::provider_files::names_files(&request)
+                        && hydration.as_ref().is_some() =>
+                {
+                    renewed_files = true;
+                    let renewed = match &hydration {
+                        Some(h) => h.renew_files(&mut request).await,
+                        None => false,
+                    };
+                    tracing::info!(renewed, error = %e, "a named file was gone; uploaded again and retrying");
+                }
                 Err(e) => match backoff_after(&retry, &e, attempt, spent) {
                     Some(delay) => {
                         tokio::time::sleep(delay).await;
@@ -1613,8 +1683,8 @@ mod tests {
         let _ = p.capabilities("m");
     }
 
-    #[test]
-    fn hydration_fills_mime_blocks_from_the_store_and_names_what_is_missing() {
+    #[tokio::test]
+    async fn hydration_fills_mime_blocks_from_the_store_and_names_what_is_missing() {
         use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
         use leviath_providers::{ContentBlock, Message, MessageContent, ModelMime};
         let registry = Arc::new(MimeRegistry::builtin());
@@ -1648,8 +1718,15 @@ mod tests {
             mime: ModelMime::new(&["text/*", "image/*"], &["text/*"]),
             max_media_bytes: 64 * 1024 * 1024,
             as_text: Vec::new(),
+            limits: leviath_providers::files::MediaLimits::NONE,
+            files: None,
+            why_inline: "",
         };
-        hydration.apply(&mut request);
+        hydration.apply(&mut request).await;
+        assert!(
+            !hydration.renew_files(&mut request.clone()).await,
+            "with nowhere to upload, nothing is renewed"
+        );
         // The stage's `as_text` sends a type the registry calls binary as
         // text, when its bytes read as text; a part that chose native keeps it.
         let scene = Blob::new(
@@ -1689,7 +1766,7 @@ mod tests {
             as_text: vec!["application/*".to_string(), "image/*".to_string()],
             ..hydration.clone()
         };
-        forced.apply(&mut as_text);
+        forced.apply(&mut as_text).await;
         let blocks_of = |content: &MessageContent| match content {
             MessageContent::Blocks(blocks) => blocks.clone(),
             MessageContent::Text(_) => Vec::new(),
@@ -1717,3 +1794,7 @@ mod tests {
         assert_eq!(leviath_providers::mime::mime_tokens(&request), 1600);
     }
 }
+
+#[cfg(test)]
+#[path = "inference_bridge/file_tests.rs"]
+mod file_tests;

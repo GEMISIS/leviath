@@ -969,7 +969,7 @@
         "max_part_bytes": {
           "type": "integer",
           "minimum": 1,
-          "description": "Bytes one part may be. Default 33554432 (32 MiB)."
+          "description": "Bytes one part may be. Unset, the largest part a configured provider takes by file upload or inline (1 GiB with Meta, 500 MiB with Anthropic), or 33554432 (32 MiB) when none documents one."
         },
         "inline_text_bytes": {
           "type": "integer",
@@ -979,7 +979,12 @@
         "max_media_bytes_per_request": {
           "type": "integer",
           "minimum": 1,
-          "description": "Bytes of stored media one model request carries before the oldest parts are sent as stand-ins; a backstop for vendor request-size limits a token budget cannot see. Default 20971520 (20 MiB)."
+          "description": "Bytes of stored media one model request carries before the oldest parts are sent as stand-ins, for a provider that documents no request limit of its own; a backstop for vendor request-size limits a token budget cannot see. Default 20971520 (20 MiB)."
+        },
+        "provider_file_ttl_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds a part uploaded to a provider's file storage lives there before the vendor deletes it, clamped to what each vendor takes (at least an hour). A run's uploads are also deleted when it finishes. Default 86400 (a day)."
         }
       }
     },

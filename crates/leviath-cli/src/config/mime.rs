@@ -144,7 +144,9 @@ const DAEMON_DEFAULTS: leviath_runtime::blob_store::MimeLimits =
 /// `[mime]` in `~/.leviath/config.toml`.
 ///
 /// Three ceilings on typed content. `max_part_bytes` is applied wherever a
-/// part arrives: an upload, a tool result, a `read_file`, a model reply.
+/// part arrives: an upload, a tool result, a `read_file`, a model reply. Left
+/// unset it is the largest part a configured provider takes (see
+/// [`super::Config::max_part_bytes`]).
 /// `inline_text_bytes` is applied to a model reply and to a tool result: past
 /// it the text is stored by hash like any other part and the entry carries
 /// its stand-in, so one enormous transcript cannot fill a region on its own.
@@ -155,9 +157,10 @@ const DAEMON_DEFAULTS: leviath_runtime::blob_store::MimeLimits =
 /// inside its context window and still be megabytes of media on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MimeConfig {
-    /// Bytes one part may be. Larger is refused where it arrives.
-    #[serde(default = "default_max_part_bytes")]
-    pub max_part_bytes: u64,
+    /// Bytes one part may be. Larger is refused where it arrives. Unset, the
+    /// largest part a configured provider takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_part_bytes: Option<u64>,
 
     /// Bytes of text kept inline in an entry before the part is stored.
     #[serde(default = "default_inline_text_bytes")]
@@ -167,10 +170,14 @@ pub struct MimeConfig {
     /// sent as their stand-ins with a warning.
     #[serde(default = "default_max_media_bytes_per_request")]
     pub max_media_bytes_per_request: u64,
+
+    /// Seconds a part uploaded to a provider's file storage lives there.
+    #[serde(default = "default_provider_file_ttl_secs")]
+    pub provider_file_ttl_secs: u64,
 }
 
-fn default_max_part_bytes() -> u64 {
-    DEFAULT_MAX_PART_BYTES
+fn default_provider_file_ttl_secs() -> u64 {
+    DAEMON_DEFAULTS.provider_file_ttl_secs
 }
 
 fn default_inline_text_bytes() -> u64 {
@@ -184,14 +191,37 @@ fn default_max_media_bytes_per_request() -> u64 {
 impl Default for MimeConfig {
     fn default() -> Self {
         Self {
-            max_part_bytes: DEFAULT_MAX_PART_BYTES,
+            max_part_bytes: None,
             inline_text_bytes: DEFAULT_INLINE_TEXT_BYTES,
             max_media_bytes_per_request: DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST,
+            provider_file_ttl_secs: DAEMON_DEFAULTS.provider_file_ttl_secs,
         }
     }
 }
 
 impl super::Config {
+    /// The largest part any ingress accepts: `[mime] max_part_bytes` when it
+    /// is set, else the largest part a configured provider documents taking
+    /// (by file upload or inline), else 32 MiB when none documents one.
+    pub fn max_part_bytes(&self) -> u64 {
+        self.mime
+            .max_part_bytes
+            .or_else(|| self.largest_provider_part().map(|(_, bytes)| bytes))
+            .unwrap_or(DEFAULT_MAX_PART_BYTES)
+    }
+
+    /// The configured provider documenting the largest part, and that size.
+    pub fn largest_provider_part(&self) -> Option<(&'static str, u64)> {
+        crate::commands::setup::catalog::configured(self)
+            .into_iter()
+            .filter_map(|id| {
+                leviath_providers::files::provider_limits(id)
+                    .largest_part()
+                    .map(|bytes| (id, bytes))
+            })
+            .max_by_key(|(_, bytes)| *bytes)
+    }
+
     /// The mime registry this install describes: the compiled defaults, the
     /// rows every configured Rhai provider ships (`@mime_type`), a
     /// `[mime_types]` table in the config, then `mime_types.toml` beside
@@ -604,15 +634,35 @@ mod tests {
     fn defaults_fill_an_empty_table() {
         let parsed: MimeConfig = toml::from_str("").unwrap();
         assert_eq!(parsed, MimeConfig::default());
-        assert_eq!(parsed.max_part_bytes, 32 * 1024 * 1024);
+        assert_eq!(parsed.max_part_bytes, None);
         assert_eq!(parsed.inline_text_bytes, 1024 * 1024);
         assert_eq!(parsed.max_media_bytes_per_request, 20 * 1024 * 1024);
+        assert_eq!(parsed.provider_file_ttl_secs, 86_400);
+    }
+
+    #[test]
+    fn the_part_ceiling_follows_the_configured_providers_unless_it_is_set() {
+        let mut config = super::super::Config::default();
+        config.providers.anthropic_api_key = None;
+        config.providers.openai_api_key = None;
+        config.providers.google_api_key = None;
+        assert_eq!(config.largest_provider_part(), None);
+        assert_eq!(config.max_part_bytes(), DEFAULT_MAX_PART_BYTES);
+        config.providers.anthropic_api_key = Some("sk-ant-x".into());
+        assert_eq!(
+            config.largest_provider_part(),
+            Some(("anthropic", 500 * 1024 * 1024))
+        );
+        config.providers.meta_api_key = Some("m".into());
+        assert_eq!(config.max_part_bytes(), 1024 * 1024 * 1024);
+        config.mime.max_part_bytes = Some(5);
+        assert_eq!(config.max_part_bytes(), 5, "a set value wins");
     }
 
     #[test]
     fn each_key_is_read_on_its_own() {
         let parsed: MimeConfig = toml::from_str("max_part_bytes = 5\n").unwrap();
-        assert_eq!(parsed.max_part_bytes, 5);
+        assert_eq!(parsed.max_part_bytes, Some(5));
         assert_eq!(parsed.inline_text_bytes, DEFAULT_INLINE_TEXT_BYTES);
         let parsed: MimeConfig =
             toml::from_str("inline_text_bytes = 7\nmax_media_bytes_per_request = 2\n").unwrap();

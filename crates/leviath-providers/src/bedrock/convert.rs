@@ -868,6 +868,7 @@ mod tests {
             data: data.to_string(),
             name: name.map(str::to_string),
             deliver: None,
+            remote: None,
         }
     }
 

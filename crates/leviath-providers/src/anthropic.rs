@@ -1,6 +1,7 @@
 //! Anthropic Claude provider implementation.
 
 mod catalog;
+mod files;
 mod stream;
 
 use crate::capabilities::{Match, Row};
@@ -935,6 +936,22 @@ impl Provider for AnthropicProvider {
 
     fn name(&self) -> &str {
         "anthropic"
+    }
+
+    fn media_limits(&self, _model: &str) -> crate::files::MediaLimits {
+        crate::files::provider_limits("anthropic")
+    }
+
+    async fn upload_file(
+        &self,
+        upload: &crate::files::FileUpload,
+    ) -> Result<crate::files::RemoteFile> {
+        self.upload(upload, &crate::files::provider_limits("anthropic"))
+            .await
+    }
+
+    async fn delete_file(&self, file: &crate::files::RemoteFile) -> Result<()> {
+        self.delete(file).await
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {

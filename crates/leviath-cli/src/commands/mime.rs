@@ -190,7 +190,14 @@ pub(crate) async fn execute(args: MimeArgs) -> anyhow::Result<()> {
     };
     let path = crate::config::mime_types_path();
     let out = match args.command {
-        MimeCommand::List(list) => render_list(&registry()?, list.json),
+        MimeCommand::List(list) => match list.json {
+            true => render_list(&registry()?, true),
+            false => format!(
+                "{}\n{}",
+                limits_lines(&crate::config::Config::load()?),
+                render_list(&registry()?, false)
+            ),
+        },
         MimeCommand::Show(show) => render_show(&registry()?, &show.mime_type, show.json)?,
         MimeCommand::Check(check) => render_check(
             &registry()?,
@@ -223,6 +230,75 @@ pub(crate) async fn execute(args: MimeArgs) -> anyhow::Result<()> {
     };
     print!("{out}");
     Ok(())
+}
+
+/// A byte count as a person reads one.
+fn mib(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    match bytes as f64 / MIB {
+        m if m >= 1024.0 => format!("{:.1} GiB", m / 1024.0),
+        m => format!("{m:.1} MiB"),
+    }
+}
+
+/// The limits in force before any row: the part ceiling and where it comes
+/// from, whether parts upload, and what each configured provider documents.
+fn limits_lines(config: &crate::config::Config) -> String {
+    let ceiling = config.max_part_bytes();
+    let from = match (config.mime.max_part_bytes, config.largest_provider_part()) {
+        (Some(_), _) => "set in [mime]".to_string(),
+        (None, Some((provider, _))) => format!("the largest part {provider} takes"),
+        (None, None) => "the default; no configured provider names a limit".to_string(),
+    };
+    let uploads = match (
+        config.providers.zero_retention,
+        config.providers.file_uploads,
+    ) {
+        (true, _) => "off (zero data retention is on)",
+        (false, false) => "off ([providers] file_uploads)",
+        (false, true) => "on",
+    };
+    let mut out = format!(
+        "max_part_bytes {} ({from})\nfile uploads {uploads}\n",
+        mib(ceiling)
+    );
+    let providers: Vec<(&str, leviath_providers::files::MediaLimits)> =
+        crate::commands::setup::catalog::configured(config)
+            .into_iter()
+            .map(|id| (id, leviath_providers::files::provider_limits(id)))
+            .filter(|(_, limits)| limits.largest_part().is_some())
+            .collect();
+    if providers.is_empty() {
+        return out;
+    }
+    let width = providers
+        .iter()
+        .map(|(id, _)| id.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    out.push_str(&format!(
+        "\n{:<width$}  {:<14}  {:<30}  FILE UPLOAD\n",
+        "PROVIDER", "INLINE REQUEST", "INLINE PART"
+    ));
+    for (id, limits) in providers {
+        let parts = limits
+            .inline_part_bytes
+            .iter()
+            .map(|(pattern, bytes)| format!("{pattern} {}", mib(*bytes)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "{id:<width$}  {:<14}  {:<30}  {}\n",
+            limits.inline_request_bytes.map_or("-".to_string(), mib),
+            match parts.as_str() {
+                "" => "-",
+                p => p,
+            },
+            limits.file_bytes.map_or("-".to_string(), mib),
+        ));
+    }
+    out
 }
 
 /// Write the example, refusing to replace a file that is there unless told.
@@ -481,6 +557,54 @@ mod tests {
             .expect("the layered row is listed");
         assert!(obj.text);
         assert_eq!(obj.source, "config");
+    }
+
+    #[test]
+    fn the_limits_say_where_the_ceiling_comes_from_and_what_each_provider_takes() {
+        let mut config = crate::config::Config::default();
+        config.providers.anthropic_api_key = None;
+        config.providers.openai_api_key = None;
+        config.providers.google_api_key = None;
+        let none = limits_lines(&config);
+        assert!(
+            none.contains("max_part_bytes 32.0 MiB (the default"),
+            "{none}"
+        );
+        assert!(none.contains("file uploads on"), "{none}");
+        assert!(!none.contains("PROVIDER"), "{none}");
+
+        config.providers.meta_api_key = Some("m".into());
+        config.providers.bedrock_api_key = Some("ABSK-x".into());
+        config.providers.file_uploads = false;
+        let some = limits_lines(&config);
+        assert!(
+            some.contains("max_part_bytes 1.0 GiB (the largest part meta takes)"),
+            "{some}"
+        );
+        assert!(
+            some.contains("file uploads off ([providers] file_uploads)"),
+            "{some}"
+        );
+        assert!(some.contains("PROVIDER"), "{some}");
+        assert!(
+            some.lines()
+                .any(|l| l.starts_with("meta") && l.contains("50.0 MiB") && l.contains("1.0 GiB")),
+            "{some}"
+        );
+        assert!(
+            some.lines()
+                .any(|l| l.starts_with("bedrock") && l.contains("image/* 3.6 MiB")),
+            "{some}"
+        );
+
+        config.providers.zero_retention = true;
+        config.mime.max_part_bytes = Some(5 * 1024 * 1024);
+        let set = limits_lines(&config);
+        assert!(
+            set.contains("max_part_bytes 5.0 MiB (set in [mime])"),
+            "{set}"
+        );
+        assert!(set.contains("off (zero data retention is on)"), "{set}");
     }
 
     /// The listing names each type's check, and `show` prints every field
@@ -810,6 +934,13 @@ mod tests {
             assert!(
                 execute(MimeArgs {
                     command: MimeCommand::List(ListArgs { json: true }),
+                })
+                .await
+                .is_ok()
+            );
+            assert!(
+                execute(MimeArgs {
+                    command: MimeCommand::List(ListArgs { json: false }),
                 })
                 .await
                 .is_ok()
