@@ -375,6 +375,12 @@ async fn priming_reads_all_four_listings_and_answers_for_aliases() {
             .mime("grok-4.3")
             .accepts(&leviath_core::mime::MimeType::parse("image/png").unwrap())
     );
+    assert!(
+        provider
+            .mime("grok-4.3")
+            .accepts(&leviath_core::mime::MimeType::parse("application/pdf").unwrap()),
+        "a listed chat model still reads PDFs"
+    );
     let video = provider.mime("grok-imagine-video");
     assert_eq!(video.output, ["video/*"]);
     assert!(provider.learned_models().is_some());
