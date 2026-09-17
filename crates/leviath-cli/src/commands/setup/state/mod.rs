@@ -2442,10 +2442,19 @@ pub(super) mod tests {
         assert_eq!(wizard.picker_purpose, PickerPurpose::Category);
         let picker = wizard.picker.as_ref().expect("open");
         assert_eq!(picker.title, "Add a provider");
-        let values: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
+        let values: Vec<&str> = picker
+            .matches()
+            .into_iter()
+            .map(|i| picker.options[i].value.as_str())
+            .collect();
         assert_eq!(
             values,
             ["API key", "Subscription logins", "Local and custom"]
+        );
+        assert_eq!(
+            picker.options.len(),
+            3 + wizard.providers.len(),
+            "every provider can be searched for"
         );
         assert!(picker.options[0].detail.contains("paste a key"));
         assert!(picker.options[1].detail.contains("browser"));
@@ -2462,13 +2471,23 @@ pub(super) mod tests {
         let picker = wizard.picker.as_ref().expect("open");
         assert_eq!(picker.title, "Add a provider: API key");
         let values: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
-        assert_eq!(values, ["Text and images", "3D models and textures"]);
+        assert_eq!(
+            values,
+            [
+                "Text and images",
+                "Video",
+                "Speech and audio",
+                "3D models and textures"
+            ]
+        );
         let detail = picker.options[0].detail.as_str();
         assert!(detail.starts_with("Anthropic, OpenAI"), "{detail}");
-        assert_eq!(picker.options[1].detail, "Meshy");
+        assert_eq!(picker.options[1].detail, "OpenAI, Google, xAI");
+        assert_eq!(picker.options[2].detail, "OpenAI, Google, xAI, Meta");
+        assert_eq!(picker.options[3].detail, "Meshy");
 
         // A kind: the providers themselves, one row of `providers` each.
-        wizard.settle_picker_choice(1);
+        wizard.settle_picker_choice(3);
         let meshy = wizard
             .providers
             .iter()
@@ -2508,7 +2527,7 @@ pub(super) mod tests {
         // Down to the provider: choosing it opens its modal and closes the
         // chooser.
         wizard.settle_picker_choice(0);
-        wizard.settle_picker_choice(1);
+        wizard.settle_picker_choice(3);
         wizard.settle_picker_choice(0);
         assert_eq!(wizard.modal_index(), Some(meshy));
         assert!(wizard.picker.is_none());
@@ -2518,7 +2537,7 @@ pub(super) mod tests {
         wizard.accept_modal();
         wizard.open_add_provider();
         wizard.settle_picker_choice(0);
-        wizard.settle_picker_choice(1);
+        wizard.settle_picker_choice(3);
         assert!(
             wizard.picker.as_ref().expect("open").options[0]
                 .detail
@@ -2545,7 +2564,8 @@ pub(super) mod tests {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                r.provider.auth_kind() == "API key" && r.provider.modality() == "Text and images"
+                r.provider.auth_kind() == "API key"
+                    && r.provider.kinds().contains(&"Text and images")
             })
             .map(|(index, _)| index)
             .collect();

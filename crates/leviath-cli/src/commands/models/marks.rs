@@ -54,6 +54,7 @@ pub(super) fn unit_line(pricing: &ModelPricing) -> Option<String> {
         leviath_providers::pricing::PriceUnit::VideoSecond => "second of video",
         leviath_providers::pricing::PriceUnit::AudioHour => "hour of audio",
         leviath_providers::pricing::PriceUnit::MillionChars => "million characters spoken",
+        leviath_providers::pricing::PriceUnit::Clip => "clip of music",
     };
     Some(format!("${:.4} per {what}", unit.usd))
 }
@@ -176,6 +177,7 @@ mod tests {
             (PriceUnit::VideoSecond, "second of video"),
             (PriceUnit::AudioHour, "hour of audio"),
             (PriceUnit::MillionChars, "million characters spoken"),
+            (PriceUnit::Clip, "clip of music"),
         ] {
             let line = unit_line(&ModelPricing::per_unit(UnitPrice { usd: 0.5, unit })).unwrap();
             assert!(line.ends_with(word), "{line}");

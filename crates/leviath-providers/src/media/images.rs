@@ -37,6 +37,12 @@ pub(crate) struct Route<'a> {
     pub(crate) reported_cost: bool,
     /// The per-image price, for a reply that quotes no cost.
     pub(crate) unit: Option<UnitPrice>,
+    /// The token rates, for a model billed by the tokens its reply's `usage`
+    /// counts (OpenAI's image models) rather than by the image.
+    pub(crate) tokens: Option<crate::ModelPricing>,
+    /// Whether the route takes `response_format`. OpenAI's image models
+    /// always answer base64 and refuse the key (400 "Unknown parameter").
+    pub(crate) response_format: bool,
 }
 
 /// Generate or edit images for `request`.
@@ -56,7 +62,9 @@ pub(crate) async fn run(
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(request.model));
     body.insert("prompt".into(), json!(prompt));
-    body.insert("response_format".into(), json!("b64_json"));
+    if route.response_format {
+        body.insert("response_format".into(), json!("b64_json"));
+    }
     if let Some(n) = super::extra_i64(request, "n") {
         body.insert("n".into(), json!(n));
     }
@@ -92,14 +100,21 @@ pub(crate) async fn run(
     let reply: Value = crate::provider::decode_json(response).await?;
 
     let mut parts: Vec<Blob> = Vec::new();
+    // OpenAI names the format once for the whole reply (`output_format:
+    // "png"`); xAI and Meta name a type on each image.
+    let reply_mime = reply
+        .get("output_format")
+        .and_then(Value::as_str)
+        .map(|format| format!("image/{format}"));
     let entries = reply.get("data").and_then(Value::as_array);
     for (index, entry) in entries.into_iter().flatten().enumerate() {
         let mime = entry
             .get("mime_type")
             .or_else(|| entry.get("mime"))
             .and_then(Value::as_str)
-            .unwrap_or(route.default_mime)
-            .to_string();
+            .map(str::to_string)
+            .or_else(|| reply_mime.clone())
+            .unwrap_or_else(|| route.default_mime.to_string());
         let bytes = match (
             entry.get("b64_json").and_then(Value::as_str),
             entry.get("url").and_then(Value::as_str),
@@ -127,9 +142,24 @@ pub(crate) async fn run(
         .and_then(Value::as_f64)
         .filter(|_| route.reported_cost)
         .map(|t| t / crate::responses::TICKS_PER_USD);
-    let cost = ticks.or_else(|| route.unit.map(|u| u.cost(parts.len() as f64)));
+    let cost = ticks
+        .or_else(|| route.unit.map(|u| u.cost(parts.len() as f64)))
+        .or_else(|| token_cost(route.tokens.as_ref(), &reply));
     let summary = super::summary(&format!("{}/{}", route.provider, request.model), &parts);
     Ok(super::response(summary, parts, cost))
+}
+
+/// What a reply's `usage` costs at `rates`: input and output tokens, as the
+/// route counts them (image tokens included).
+pub(crate) fn token_cost(rates: Option<&crate::ModelPricing>, reply: &Value) -> Option<f64> {
+    let rates = rates?;
+    let usage = reply.get("usage")?;
+    let count = |key: &str| usage.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    Some(
+        (count("input_tokens") * rates.input_per_mtok
+            + count("output_tokens") * rates.output_per_mtok)
+            / 1_000_000.0,
+    )
 }
 
 #[cfg(test)]
@@ -189,7 +219,34 @@ mod tests {
                 usd: 0.01,
                 unit: PriceUnit::Image,
             }),
+            tokens: None,
+            response_format: true,
         }
+    }
+
+    /// OpenAI's shape, as measured: no `response_format` sent, the format
+    /// named once for the reply, and the cost from the tokens `usage` counts.
+    #[tokio::test]
+    async fn an_openai_reply_is_typed_by_its_format_and_priced_by_its_tokens() {
+        let reply = json!({
+            "output_format": "png",
+            "data": [ { "b64_json": "UE5H" } ],
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 500_000 }
+        });
+        let (url, bodies) =
+            spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+        let mut openai = route(EditShape::Meta, false);
+        openai.unit = None;
+        openai.response_format = false;
+        openai.tokens = Some(crate::ModelPricing::flat(2.0, 8.0));
+        let response = run(&endpoint(&url), &openai, &request("draw", 0))
+            .await
+            .expect("an image");
+        assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
+        assert_eq!(response.tokens_used.reported_cost_usd, Some(6.0));
+        assert!(!bodies.lock().unwrap()[0].contains("response_format"));
+        assert_eq!(token_cost(None, &reply), None);
+        assert_eq!(token_cost(openai.tokens.as_ref(), &json!({})), None);
     }
 
     #[tokio::test]

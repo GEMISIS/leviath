@@ -83,12 +83,15 @@ pub(crate) const MODELS: &[Row] = &[
         output: 131_072,
     },
     Row {
-        // Media models: no chat window, no tools, no temperature.
+        // Media models: no chat window, no tools, no temperature. They answer
+        // with parts, not tokens, so the reply budget is small: one as large
+        // as the window left the prompt no room and the context guard refused
+        // every call.
         matches: &[Match::Prefix("muse-image"), Match::Prefix("muse-voice")],
         temperature: false,
         tools: false,
         context: 32_000,
-        output: 32_000,
+        output: 4_096,
     },
 ];
 

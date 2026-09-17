@@ -1515,7 +1515,7 @@ carries them, `released` (Unix seconds), `retires` (the date the provider publis
 `input_types` and `output_types`, mime type patterns such as `text/*`, `image/*` or
 `application/pdf`, from this build's table corrected by the provider's listing and by
 `[model_capabilities]`. A stage holding an image picks a model whose `input_types` cover it; see
-[typed mime](/docs/mime). Which providers can report what, and from where, is in
+[More than text](/docs/mime). Which providers can report what, and from where, is in
 [where a model's capabilities come from](/docs/configuration#where-a-models-capabilities-come-from).
 That is what lets a console show the catalog without fetching and re-parsing every script. No other
 kind carries the key at all.

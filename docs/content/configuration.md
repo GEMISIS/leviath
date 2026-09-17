@@ -872,7 +872,7 @@ everything else `lev providers retention` knows.
 
 `input_types` and `output_types` are mime type patterns, and they replace the provider's
 list rather than adding to it, so name `text/*` too. They are how a local vision model gets
-sent an image instead of a one-line stand-in for it. [Typed mime](/docs/mime) explains what a
+sent an image instead of a one-line stand-in for it. [More than text](/docs/mime) explains what a
 model does with each type.
 
 `supports_tools = false` is more than "do not offer tools": such a model's provider refuses any
@@ -946,8 +946,8 @@ the line that fixes it.
 
 ## `[mime]`
 
-Ceilings on typed mime parts: the images, audio, video, documents and models that
-[typed mime](/docs/mime) moves through regions, tools and outputs. Defaults shown.
+Ceilings on the parts [More than text](/docs/mime) describes: the images, audio, video,
+documents and 3D models that move through regions, tools and outputs. Defaults shown.
 
 ```toml
 [mime]

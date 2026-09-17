@@ -55,6 +55,8 @@ pub(crate) async fn run(
                     hints: &["size", "aspect_ratio", "quality"],
                     reported_cost: false,
                     unit,
+                    tokens: None,
+                    response_format: true,
                 },
                 request,
             )

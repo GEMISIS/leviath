@@ -3120,7 +3120,7 @@
         "summary": "Models this install can reach, from the server's catalogue",
         "responses": {
           "200": {
-            "description": "Success. The listing comes from a catalogue the server keeps; the providers are asked once per config and then behind the answer. A model's `pricing` may carry `long_context` (`threshold_tokens` and the rates a whole request is billed at once its prompt reaches it) and, for an image, video or speech model, `unit` (`usd` per `image`, `video_second`, `audio_hour` or `million_chars`).",
+            "description": "Success. The listing comes from a catalogue the server keeps; the providers are asked once per config and then behind the answer. A model's `pricing` may carry `long_context` (`threshold_tokens` and the rates a whole request is billed at once its prompt reaches it) and, for an image, video or speech model, `unit` (`usd` per `image`, `video_second`, `audio_hour`, `million_chars` or `clip`).",
             "headers": {
               "X-Leviath-Catalog-Age": {
                 "description": "Seconds since the listing was built.",

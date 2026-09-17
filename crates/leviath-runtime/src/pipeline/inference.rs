@@ -289,7 +289,13 @@ pub(crate) fn build_request(
     let (messages, filtered_tools) = if caps.supports_tools {
         (assembled.messages, filtered_tools)
     } else {
-        if !filtered_tools.is_empty() {
+        // `submit_output` alone is what an output stage is always granted, and
+        // a stage on an image or video model is exactly that: nothing the
+        // blueprint asked for is being withheld, so there is nothing to warn of.
+        if filtered_tools
+            .iter()
+            .any(|t| t.name != leviath_tools::SUBMIT_OUTPUT_TOOL)
+        {
             tracing::warn!(
                 model = %stage.model,
                 tools = filtered_tools.len(),
@@ -355,7 +361,7 @@ pub(crate) fn fold_system_into_user(
     match messages.iter_mut().find(|m| m.role == "user") {
         Some(first) => match &mut first.content {
             leviath_providers::MessageContent::Text(existing) => {
-                *existing = match existing.trim() == "Begin." {
+                *existing = match existing.trim() == leviath_providers::OPENING_TURN {
                     true => text,
                     false => format!("{text}\n\n{existing}"),
                 };

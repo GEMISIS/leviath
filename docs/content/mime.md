@@ -1,12 +1,12 @@
 ---
-title: Typed mime
-description: Put images, audio, video, documents and 3D models into regions, tools, stages and outputs, and let a text model still read them.
+title: More than text
+description: Agents that read, draw, speak and film. Images, audio, video, documents and 3D models move through regions, tools, stages and outputs.
 group: Concepts
 group_order: 2
 order: 9
 ---
 
-# Typed mime
+# More than text
 
 An agent that only moves text cannot look at the mockup you are asking it to edit, cannot hand
 back the video it rendered, and cannot pass an image from one stage to the next. Leviath moves
@@ -124,9 +124,11 @@ own count corrects the estimate after the first call.
 
 ## What a model hands back
 
-A model that draws or speaks answers with bytes as well as words. The image, video and speech
-models on [xAI](/docs/providers#xai) and [Meta](/docs/providers#meta) hand back images, MP4
-videos, audio and transcripts this way, as [Meshy](/docs/providers#meshy) hands back 3D models.
+A model that draws or speaks answers with bytes as well as words. The image, video, speech,
+transcription and music models on OpenAI, Google, AWS Bedrock, xAI and Meta hand back images, MP4
+videos, audio and transcripts this way (see
+[Image, video and audio models](/docs/providers#image-video-and-audio-models)), as
+[Meshy](/docs/providers#meshy) hands back 3D models.
 A stage whose output routing or format names an image, video or audio type, and whose model
 answers with words only, is told so and asked again, up to three times, since that is usually a
 generation the vendor refused. An OpenAI-shaped provider

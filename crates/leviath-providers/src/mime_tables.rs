@@ -51,8 +51,11 @@ pub(crate) fn anthropic(model: &str) -> ModelMime {
 /// lists when it names this one, and the vision-family default otherwise.
 pub(crate) fn openai(model: &str) -> ModelMime {
     let m = lower(model);
-    if m.starts_with("gpt-image") || m.starts_with("dall-e") {
+    if m.starts_with("gpt-image") || m.starts_with("chatgpt-image") || m.starts_with("dall-e") {
         return ModelMime::new(&["text/*", "image/*"], &["image/*"]);
+    }
+    if m.starts_with("sora") {
+        return ModelMime::new(&["text/*", "image/*"], &["video/*"]);
     }
     if m.contains("audio") || m.contains("realtime") {
         return ModelMime::new(&["text/*", "audio/*"], &["text/*", "audio/*"]);
@@ -86,11 +89,14 @@ pub(crate) fn gemini(model: &str) -> ModelMime {
     if m.starts_with("veo") {
         return ModelMime::new(&["text/*", "image/*"], &["video/*"]);
     }
-    if m.contains("-image") {
+    if m.contains("-image") || m.starts_with("nano-banana") {
         return ModelMime::new(&["text/*", "image/*"], &["text/*", "image/*"]);
     }
     if m.contains("-tts") {
         return ModelMime::new(TEXT, &["audio/*"]);
+    }
+    if m.starts_with("lyria") {
+        return ModelMime::new(TEXT, &["text/*", "audio/*"]);
     }
     if m.contains("embedding") {
         return ModelMime::text_only();
@@ -149,6 +155,9 @@ pub fn is_media_model(provider: &str, model: &str) -> bool {
             m.starts_with("grok-imagine") || m.starts_with("grok-tts") || m.starts_with("grok-stt")
         }
         "meta" => m.starts_with("muse-image") || m.starts_with("muse-voice"),
+        "openai" => crate::openai::media::kind(&m).is_some(),
+        "google" => crate::gemini::media::kind(&m).is_some(),
+        "bedrock" => crate::bedrock::media::is_image_model(model),
         _ => false,
     }
 }
@@ -366,6 +375,15 @@ mod tests {
     #[test]
     fn openai_by_family() {
         assert!(openai("gpt-5.5").accepts(&mt("image/png")));
+        assert!(openai("sora-2").produces(&mt("video/mp4")));
+        assert!(
+            is_media_model("openai", "sora-2")
+                && is_media_model("google", "veo-3.1-generate-preview")
+        );
+        assert!(is_media_model(
+            "bedrock",
+            "stability.stable-image-core-v1:1"
+        ));
         assert!(openai("o4-mini").accepts(&mt("image/jpeg")));
         assert!(!openai("gpt-3.5-turbo").accepts(&mt("image/png")));
         let audio = openai("gpt-4o-audio-preview");
@@ -389,6 +407,8 @@ mod tests {
         assert!(gemini("veo-3").produces(&mt("video/mp4")));
         assert!(gemini("gemini-2.5-flash-image").produces(&mt("image/png")));
         assert!(gemini("gemini-2.5-flash-preview-tts").produces(&mt("audio/wav")));
+        assert!(gemini("lyria-3.5").produces(&mt("audio/mpeg")));
+        assert!(gemini("nano-banana-pro-preview").produces(&mt("image/png")));
         assert!(!gemini("gemini-embedding-001").accepts(&mt("image/png")));
     }
 

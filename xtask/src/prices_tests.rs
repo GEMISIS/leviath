@@ -1018,3 +1018,156 @@ fn unit_rows_survive_a_refresh_and_an_old_one_is_reported() {
     assert!(stale[1].contains("'someday'"));
     assert!(stale_unit_rows(&existing, "not a day").is_empty());
 }
+
+/// Image, speech and transcription models priced by the token are read like
+/// chat models; an image model with no plain output rate is priced by its
+/// image tokens.
+#[test]
+fn litellm_reads_the_media_models_priced_by_the_token() {
+    let image =
+        "\"gpt-image-1\": {\"litellm_provider\": \"openai\", \"mode\": \"image_generation\", \
+                 \"input_cost_per_token\": 5e-06, \"output_cost_per_image_token\": 4e-05}"
+            .to_owned();
+    let body = litellm_body(&[
+        image,
+        ll_entry(
+            "gpt-4o-mini-tts",
+            "openai",
+            "audio_speech",
+            Some(6e-7),
+            Some(1e-5),
+            None,
+            None,
+        ),
+        ll_entry(
+            "sora-2",
+            "openai",
+            "video_generation",
+            Some(1e-6),
+            Some(1e-6),
+            None,
+            None,
+        ),
+    ]);
+    let prices = parse_litellm(&body).unwrap();
+    assert_eq!(prices[&key("openai", "gpt-image-1")].output, 40.0);
+    assert_eq!(prices[&key("openai", "gpt-4o-mini-tts")].input, 0.6);
+    assert!(
+        !prices.contains_key(&key("openai", "sora-2")),
+        "a video model is priced by the second, not the token"
+    );
+}
+
+#[test]
+fn litellm_unit_prices_are_read_per_second_character_hour_image_and_clip() {
+    let body = r#"{
+        "sora-2": {"litellm_provider": "openai", "mode": "video_generation", "output_cost_per_video_per_second": 0.1},
+        "openai/sora-2": {"litellm_provider": "openai", "mode": "video_generation", "output_cost_per_video_per_second": 0.1},
+        "gemini/veo-3.1-lite-generate-preview": {"litellm_provider": "gemini", "mode": "video_generation", "output_cost_per_second": 0.05},
+        "tts-1": {"litellm_provider": "openai", "mode": "audio_speech", "input_cost_per_character": 1.5e-05},
+        "whisper-1": {"litellm_provider": "openai", "mode": "audio_transcription", "input_cost_per_second": 0.0001},
+        "stability.sd3-5-large-v1:0": {"litellm_provider": "bedrock", "mode": "image_generation", "output_cost_per_image": 0.08},
+        "gemini/lyria-3-clip-preview": {"litellm_provider": "gemini", "mode": "chat", "output_cost_per_image": 0.04},
+        "gemini/gemini-3.1-flash-image": {"litellm_provider": "gemini", "mode": "image_generation", "input_cost_per_token": 5e-07, "output_cost_per_image": 0.045},
+        "gemini/veo-disagrees": {"litellm_provider": "gemini", "mode": "video_generation", "output_cost_per_second": 0.05},
+        "veo-disagrees": {"litellm_provider": "gemini", "mode": "video_generation", "output_cost_per_second": 0.5},
+        "ft:tts-1:x": {"litellm_provider": "openai", "mode": "audio_speech", "input_cost_per_character": 1e-05},
+        "1024-x-1024/max-steps/stability.x": {"litellm_provider": "bedrock", "mode": "image_generation", "output_cost_per_image": 0.1},
+        "mistral-image": {"litellm_provider": "mistral", "mode": "image_generation", "output_cost_per_image": 0.1},
+        "free-video": {"litellm_provider": "openai", "mode": "video_generation", "output_cost_per_second": 0},
+        "gpt-5.5": {"litellm_provider": "openai", "mode": "chat", "output_cost_per_image": 0.2},
+        "a-note": "not an object"
+    }"#;
+    let rows = parse_litellm_units(body, "2026-09-17").unwrap();
+    let found: Vec<(&str, &str, &str, f64)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.provider.as_str(),
+                r.prefix.as_str(),
+                r.unit.as_str(),
+                r.usd,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("bedrock", "stability.sd3-5-large-v1:0", "image", 0.08),
+            ("google", "lyria-3-clip-preview", "clip", 0.04),
+            (
+                "google",
+                "veo-3.1-lite-generate-preview",
+                "video_second",
+                0.05
+            ),
+            ("openai", "sora-2", "video_second", 0.1),
+            ("openai", "tts-1", "million_chars", 15.0),
+            ("openai", "whisper-1", "audio_hour", 0.36),
+        ]
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.source == LITELLM_UNIT_SOURCE && r.checked_on == "2026-09-17")
+    );
+    assert!(parse_litellm_units("[]", "2026-09-17").is_err());
+    assert!(parse_litellm_units("nope", "2026-09-17").is_err());
+}
+
+#[test]
+fn unit_rows_keep_a_persons_rows_and_refresh_litellms() {
+    let unit = |provider: &str, prefix: &str, usd: f64, source: &str, checked_on: &str| UnitRow {
+        provider: provider.into(),
+        prefix: prefix.into(),
+        unit: "image".into(),
+        usd,
+        source: source.into(),
+        checked_on: checked_on.into(),
+    };
+    let existing = vec![
+        unit("xai", "grok-imagine-image", 0.02, "manual", "2026-09-16"),
+        unit("openai", "same", 0.1, "litellm", "2026-01-01"),
+        unit("openai", "moved", 0.1, "litellm", "2026-01-01"),
+        unit("openai", "gone", 0.1, "litellm", "2026-01-01"),
+    ];
+    let fresh = vec![
+        unit("xai", "grok-imagine-image", 0.5, "litellm", "2026-09-17"),
+        unit("openai", "same", 0.1, "litellm", "2026-09-17"),
+        unit("openai", "moved", 0.2, "litellm", "2026-09-17"),
+        unit("openai", "new", 0.3, "litellm", "2026-09-17"),
+    ];
+    let (rows, changes) = merge_units(&existing, fresh);
+    assert_eq!(
+        rows[0], existing[0],
+        "a person's row wins and is kept as written"
+    );
+    let same = rows.iter().find(|r| r.prefix == "same").unwrap();
+    assert_eq!(
+        same.checked_on, "2026-01-01",
+        "an unmoved row keeps its day"
+    );
+    assert!(rows.iter().all(|r| r.prefix != "gone"));
+    assert_eq!(
+        changes,
+        vec![
+            "~ unit openai/moved: 0.1 per image -> 0.2 per image",
+            "+ unit openai/new: 0.3 per image",
+            "- unit openai/gone: LiteLLM no longer prices it",
+        ]
+    );
+    let (_, none) = merge_units(&rows, rows.clone());
+    assert!(
+        none.is_empty(),
+        "a refresh with nothing new changes nothing"
+    );
+
+    let table = Table {
+        read_on: "2026-09-17".into(),
+        rows: Rows::new(),
+        unit_rows: vec![unit("openai", "old-litellm", 0.1, "litellm", "2020-01-01")],
+    };
+    assert!(
+        stale_unit_rows(&table, "2026-09-17").is_empty(),
+        "LiteLLM's rows are read again"
+    );
+}

@@ -1779,7 +1779,8 @@ fn keyed_text_providers(w: &Wizard) -> PickerPurpose {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                r.provider.auth_kind() == "API key" && r.provider.modality() == "Text and images"
+                r.provider.auth_kind() == "API key"
+                    && r.provider.kinds().contains(&"Text and images")
             })
             .map(|(index, _)| index)
             .collect(),
@@ -1798,7 +1799,13 @@ fn the_add_flow_walks_category_kind_and_provider_then_opens_the_modal() {
     let picker = w.picker.as_ref().expect("the category chooser is open");
     assert_eq!(picker.title, "Add a provider");
     assert_eq!(w.picker_purpose, PickerPurpose::Category);
-    let categories: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
+    // The list is the categories; the providers after them are there for a
+    // search only.
+    let categories: Vec<&str> = picker
+        .matches()
+        .into_iter()
+        .map(|i| picker.options[i].value.as_str())
+        .collect();
     assert_eq!(
         categories,
         ["API key", "Subscription logins", "Local and custom"]
@@ -1806,7 +1813,7 @@ fn the_add_flow_walks_category_kind_and_provider_then_opens_the_modal() {
     assert_eq!(w.provider_categories(), categories);
     assert!(
         picker.options.iter().all(|o| !o.detail.is_empty()),
-        "each category says what it means"
+        "each category and provider says what it means"
     );
 
     // Choosing "API key" opens the kinds it offers.
@@ -1819,7 +1826,15 @@ fn the_add_flow_walks_category_kind_and_provider_then_opens_the_modal() {
         }
     );
     let kinds: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
-    assert_eq!(kinds, ["Text and images", "3D models and textures"]);
+    assert_eq!(
+        kinds,
+        [
+            "Text and images",
+            "Video",
+            "Speech and audio",
+            "3D models and textures"
+        ]
+    );
     assert!(
         picker.options[0].detail.contains("Anthropic"),
         "a kind names the providers under it: {}",
@@ -1855,6 +1870,46 @@ fn the_add_flow_walks_category_kind_and_provider_then_opens_the_modal() {
     assert!(w.picker.is_none());
     assert_eq!(w.modal_index(), Some(0));
     assert_eq!(w.step, Step::Providers);
+}
+
+/// Typing in the category chooser finds a provider by its name or what it
+/// does, and choosing it opens its modal without the levels between.
+#[test]
+fn typing_in_the_add_flow_finds_a_provider_by_name_or_description() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    w.handle_key(press(KeyCode::Char('a')));
+    for c in "anthropic".chars() {
+        w.handle_key(press(KeyCode::Char(c)));
+    }
+    let picker = w.picker.as_ref().expect("still choosing");
+    let found: Vec<&str> = picker
+        .matches()
+        .into_iter()
+        .map(|i| picker.options[i].value.as_str())
+        .collect();
+    assert_eq!(found, ["Anthropic"]);
+    w.handle_key(press(KeyCode::Enter));
+    assert!(w.picker.is_none());
+    let anthropic = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "anthropic")
+        .unwrap();
+    assert_eq!(w.modal_index(), Some(anthropic));
+
+    w.cancel_modal();
+    w.handle_key(press(KeyCode::Char('a')));
+    for c in "sora".chars() {
+        w.handle_key(press(KeyCode::Char(c)));
+    }
+    let picker = w.picker.as_ref().expect("still choosing");
+    let found: Vec<&str> = picker
+        .matches()
+        .into_iter()
+        .map(|i| picker.options[i].value.as_str())
+        .collect();
+    assert_eq!(found, ["OpenAI"], "found by its description");
 }
 
 /// Esc in the add flow steps back one level at a time, then closes.

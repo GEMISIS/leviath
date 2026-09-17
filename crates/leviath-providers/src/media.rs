@@ -108,7 +108,12 @@ pub(crate) fn request_text(request: &InferenceRequest) -> String {
         })
         .filter(|s| !s.is_empty())
         .collect();
-    let is_pointer = |text: &str| stand_ins.iter().any(|s| text.contains(s));
+    // The runtime's placeholder turn is not a prompt either: a stage whose
+    // prompt lives in a pinned region has no user turn but this one, and
+    // reading it sent the model "Begin." while the task sat unread below.
+    let is_pointer = |text: &str| {
+        text.trim() == crate::provider::OPENING_TURN || stand_ins.iter().any(|s| text.contains(s))
+    };
 
     let mut chunks = Vec::new();
     for message in &request.messages {
@@ -269,6 +274,38 @@ pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
         ))
     })?;
     Ok(Blob::new(mime_type, bytes).named(name))
+}
+
+/// A file of a type this code names itself (`video/mp4`), so it is known to
+/// parse.
+pub(crate) fn typed_blob(mime: &'static str, bytes: Vec<u8>, name: &str) -> Blob {
+    Blob::new(
+        MimeType::parse(mime).expect("a type named in code is a mime type"),
+        bytes,
+    )
+    .named(name)
+}
+
+/// A response's body, up to [`DOWNLOAD_CAP`].
+pub(crate) async fn body_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
+    Ok(
+        leviath_net::read_caps::read_body_capped(response, DOWNLOAD_CAP)
+            .await
+            .map_err(ProviderError::from)?
+            .to_vec(),
+    )
+}
+
+/// The audio type a response's `Content-Type` names, or `audio/mpeg` when it
+/// names none or something that is not audio.
+pub(crate) fn audio_type(response: &reqwest::Response) -> MimeType {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| MimeType::parse(v.split(';').next().unwrap_or(v).trim()).ok())
+        .filter(|m| m.as_str().starts_with("audio/"))
+        .unwrap_or_else(|| MimeType::parse("audio/mpeg").expect("audio/mpeg is a mime type"))
 }
 
 /// A JSON part the provider built itself, so its type is known good.
@@ -436,6 +473,16 @@ mod tests {
             reasoning: None,
         }];
         assert_eq!(request_text(&plain), "a dog");
+        // What the runtime actually sends a stage whose task is pinned: its
+        // placeholder turn, with the task in the system blocks.
+        let mut opening = request(vec![]);
+        opening.messages = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Text(crate::provider::OPENING_TURN.into()),
+            cache_breakpoint: false,
+            reasoning: None,
+        }];
+        assert_eq!(request_text(&opening), "draw a cat");
     }
 
     #[test]

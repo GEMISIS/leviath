@@ -178,8 +178,18 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::openai::table_capabilities,
     ))
     .chain(rows(
+        "openai",
+        crate::openai::media::CATALOG,
+        crate::openai::table_capabilities,
+    ))
+    .chain(rows(
         "google",
         crate::gemini::CATALOG,
+        crate::gemini::table_capabilities,
+    ))
+    .chain(rows(
+        "google",
+        crate::gemini::media::CATALOG,
         crate::gemini::table_capabilities,
     ))
     .chain(rows(

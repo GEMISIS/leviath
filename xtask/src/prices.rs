@@ -44,10 +44,11 @@
 //!   reaches a threshold) comes from LiteLLM's `*_above_<N>k_tokens` fields,
 //!   the only source that publishes one, and rides on the row whichever
 //!   source vouched for the base rates;
-//! * `[[unit_rate]]` rows (media models priced per image, second, hour or
-//!   character) are written by a person and kept as they are; neither source
-//!   publishes those prices, so a row checked more than 90 days ago is
-//!   reported for a person to look at again.
+//! * `[[unit_rate]]` rows price media models per image, second of video, hour
+//!   of audio, million characters or music clip. LiteLLM publishes most of
+//!   them (`source = "litellm"`, rewritten on every refresh); a row a person
+//!   wrote is kept as it is, wins over LiteLLM's for the same prefix, and is
+//!   reported once it was checked more than 90 days ago.
 //!
 //! And it refuses, leaving the file untouched, when any existing row would
 //! move by more than 3x, when the finished table has a row with no positive
@@ -104,8 +105,9 @@ const FILE_HEADER: &str = "\
 # tokens, from LiteLLM.
 #
 # `[[unit_rate]]` rows price media models per `image`, `video_second`,
-# `audio_hour` or `million_chars`. A person writes them from the vendor's
-# price page and sets `checked_on`; the refresh keeps them as they are.
+# `audio_hour`, `million_chars` or `clip`. Rows with `source = \"litellm\"` are
+# rewritten by the refresh; any other row a person wrote from the vendor's
+# price page, with `checked_on`, and the refresh keeps it as it is.
 ";
 
 // ── CLI argument parsing ─────────────────────────────────────────────────────
@@ -339,9 +341,11 @@ pub fn stale_unit_rows(table: &Table, today: &str) -> Vec<String> {
     let Some(now) = parse(today) else {
         return Vec::new();
     };
+    // LiteLLM's rows are read again every refresh; only a person's go stale.
     table
         .unit_rows
         .iter()
+        .filter(|row| row.source != LITELLM_UNIT_SOURCE)
         .filter_map(|row| {
             let old = match parse(&row.checked_on) {
                 Some(day) => (now - day).num_days() > UNIT_ROW_STALE_DAYS,
@@ -577,6 +581,158 @@ pub fn parse_openrouter(body: &str) -> Result<Prices> {
     Ok(out)
 }
 
+/// The LiteLLM modes whose models are priced by the token here: chat, and the
+/// image, speech and transcription models that bill by the token too.
+const TOKEN_MODES: &[&str] = &[
+    "chat",
+    "image_generation",
+    "audio_speech",
+    "audio_transcription",
+];
+
+/// The source name a LiteLLM unit row carries. Rows with any other source are
+/// a person's, and a refresh never touches them.
+pub const LITELLM_UNIT_SOURCE: &str = "litellm";
+
+/// LiteLLM's per-unit prices for the media models: video by the second,
+/// speech by the character, transcription by the second of audio, images and
+/// music clips by the item. `today` stamps each row.
+///
+/// A model LiteLLM also prices by the token (a Gemini image model) is priced
+/// that way and gets no unit row; so is a copy that disagrees with another
+/// copy of the same id. Bedrock's ids carry a `:` and are kept.
+pub fn parse_litellm_units(body: &str, today: &str) -> Result<Vec<UnitRow>> {
+    let doc: serde_json::Value = serde_json::from_str(body).context("LiteLLM: not JSON")?;
+    let entries = doc.as_object().context("LiteLLM: not an object")?;
+    let mut seen: BTreeMap<(String, String), Vec<(String, f64)>> = BTreeMap::new();
+    for (key, entry) in entries {
+        let provider = match entry
+            .get("litellm_provider")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("openai") => "openai",
+            Some("gemini") => "google",
+            Some("meta") => "meta",
+            Some("xai") => "xai",
+            Some("bedrock") => "bedrock",
+            _ => continue,
+        };
+        if key.contains(':') && provider != "bedrock" {
+            continue;
+        }
+        let id = match key.split_once('/') {
+            None => key.as_str(),
+            Some((_, rest)) if !rest.contains('/') => rest,
+            Some(_) => continue,
+        };
+        let number = |name: &str| {
+            entry
+                .get(name)
+                .and_then(serde_json::Value::as_f64)
+                .filter(|v| *v > 0.0)
+        };
+        let mode = entry
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let by_token = number("input_cost_per_token").is_some();
+        let unit = match mode {
+            "video_generation" => number("output_cost_per_video_per_second")
+                .or_else(|| number("output_cost_per_second"))
+                .map(|usd| ("video_second", usd)),
+            "audio_speech" => {
+                number("input_cost_per_character").map(|usd| ("million_chars", usd * 1e6))
+            }
+            "audio_transcription" => {
+                number("input_cost_per_second").map(|usd| ("audio_hour", usd * 3600.0))
+            }
+            "image_generation" | "image_edit" if !by_token => {
+                number("output_cost_per_image").map(|usd| ("image", usd))
+            }
+            "chat" if id.starts_with("lyria") => {
+                number("output_cost_per_image").map(|usd| ("clip", usd))
+            }
+            _ => None,
+        };
+        let Some((unit, usd)) = unit else {
+            continue;
+        };
+        seen.entry((provider.to_owned(), id.to_owned()))
+            .or_default()
+            .push((unit.to_owned(), round6(usd)));
+    }
+    let mut out = Vec::new();
+    for ((provider, prefix), copies) in seen {
+        let (unit, usd) = copies[0].clone();
+        if copies
+            .iter()
+            .all(|(u, v)| *u == unit && (v - usd).abs() <= usd * 0.05)
+        {
+            out.push(UnitRow {
+                provider,
+                prefix,
+                unit,
+                usd,
+                source: LITELLM_UNIT_SOURCE.to_owned(),
+                checked_on: today.to_owned(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The unit rows after a refresh: every row a person wrote, as written, then
+/// LiteLLM's rows for the models no person priced. A LiteLLM row that did not
+/// move keeps the day it was first read. Answers the rows and a line for each
+/// row added, moved or dropped.
+pub fn merge_units(existing: &[UnitRow], fresh: Vec<UnitRow>) -> (Vec<UnitRow>, Vec<String>) {
+    let manual: Vec<UnitRow> = existing
+        .iter()
+        .filter(|r| r.source != LITELLM_UNIT_SOURCE)
+        .cloned()
+        .collect();
+    let old: BTreeMap<(&str, &str), &UnitRow> = existing
+        .iter()
+        .filter(|r| r.source == LITELLM_UNIT_SOURCE)
+        .map(|r| ((r.provider.as_str(), r.prefix.as_str()), r))
+        .collect();
+    let mut changes = Vec::new();
+    let mut rows = manual.clone();
+    let mut kept = std::collections::BTreeSet::new();
+    for mut row in fresh {
+        let key = (row.provider.clone(), row.prefix.clone());
+        if manual
+            .iter()
+            .any(|m| m.provider == key.0 && m.prefix == key.1)
+        {
+            continue;
+        }
+        match old.get(&(key.0.as_str(), key.1.as_str())) {
+            Some(before) if before.unit == row.unit && before.usd == row.usd => {
+                row.checked_on = before.checked_on.clone();
+            }
+            Some(before) => changes.push(format!(
+                "~ unit {}/{}: {} per {} -> {} per {}",
+                row.provider, row.prefix, before.usd, before.unit, row.usd, row.unit
+            )),
+            None => changes.push(format!(
+                "+ unit {}/{}: {} per {}",
+                row.provider, row.prefix, row.usd, row.unit
+            )),
+        }
+        kept.insert(key);
+        rows.push(row);
+    }
+    for ((provider, prefix), _) in old {
+        if !kept.contains(&(provider.to_owned(), prefix.to_owned())) {
+            changes.push(format!(
+                "- unit {provider}/{prefix}: LiteLLM no longer prices it"
+            ));
+        }
+    }
+    (rows, changes)
+}
+
 /// Parse LiteLLM's price table into the vendors' prices.
 ///
 /// LiteLLM keys a model several ways (`gemini/gemini-2.5-pro` beside
@@ -598,9 +754,11 @@ pub fn parse_litellm(body: &str) -> Result<Prices> {
             Some("xai") => "xai",
             _ => continue,
         };
-        if entry.get("mode").and_then(serde_json::Value::as_str) != Some("chat")
-            || key.contains(':')
-        {
+        let mode = entry
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !TOKEN_MODES.contains(&mode) || key.contains(':') {
             continue;
         }
         let id = match key.split_once('/') {
@@ -612,9 +770,11 @@ pub fn parse_litellm(body: &str) -> Result<Prices> {
             continue;
         }
         let field = |name: &str| per_million(entry.get(name));
+        // An image model bills the images it makes as output tokens of their
+        // own, and some quote no plain output rate beside them.
         let (Some(input), Some(output)) = (
             field("input_cost_per_token"),
-            field("output_cost_per_token"),
+            field("output_cost_per_token").or_else(|| field("output_cost_per_image_token")),
         ) else {
             continue;
         };
@@ -850,9 +1010,20 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     // down come out of the same document.
     let litellm_body = fetch(LITELLM_URL)?;
     let litellm = parse_litellm(&litellm_body)?;
-    let merged = merge(&existing, &openrouter, &litellm, today)?;
+    let mut merged = merge(&existing, &openrouter, &litellm, today)?;
+    let (unit_rows, unit_changes) = merge_units(
+        &existing.unit_rows,
+        parse_litellm_units(&litellm_body, today)?,
+    );
+    if !unit_changes.is_empty() {
+        merged.table.unit_rows = unit_rows;
+        merged.table.read_on = today.to_owned();
+    }
 
     for change in &merged.changes {
+        println!("{change}");
+    }
+    for change in &unit_changes {
         println!("{change}");
     }
     for d in &merged.disagreements {
@@ -894,7 +1065,7 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
         litellm.len()
     );
 
-    if merged.changes.is_empty() {
+    if merged.changes.is_empty() && unit_changes.is_empty() {
         println!(
             "prices: {} is current as of {}",
             path.display(),
@@ -902,7 +1073,7 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
         );
         return Ok(Outcome::Unchanged);
     }
-    let count = merged.changes.len();
+    let count = merged.changes.len() + unit_changes.len();
     match mode {
         PricesMode::Check => anyhow::bail!(
             "{} would change ({count} rows); run `cargo xtask prices`",

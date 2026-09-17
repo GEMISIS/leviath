@@ -268,7 +268,13 @@ fn converse_messages(messages: &[Message], vendor: Vendor, caches: bool) -> Vec<
     // prompt opens on the model's first tool call: measured live as a 400,
     // "A conversation must start with a user message".
     if out.first().is_none_or(|(role, _)| role.as_str() != "user") {
-        out.insert(0, ("user".to_string(), vec![json!({ "text": "Begin." })]));
+        out.insert(
+            0,
+            (
+                "user".to_string(),
+                vec![json!({ "text": crate::provider::OPENING_TURN })],
+            ),
+        );
     }
     out.into_iter()
         .map(|(role, content)| json!({ "role": role, "content": content }))

@@ -123,6 +123,23 @@ same list.
   one reply can now be written in parts, and file tracking keeps the parts
   together under the one path.
 
+- OpenAI's image (`gpt-image-2` and the rest), video (`sora-2`,
+  `sora-2-pro`), speech (`gpt-4o-mini-tts`, `tts-1`) and transcription
+  (`whisper-1`, `gpt-4o-transcribe`) models run as stages that hand back
+  images, videos, audio and transcripts.
+- Google's image models (`gemini-3.1-flash-image`, `nano-banana-pro-preview`),
+  Veo 3.1 video, Gemini speech (as WAV) and Lyria music run the same way.
+- AWS Bedrock's Stability image models (Stable Image Core and Ultra, SD3.5
+  Large and the editing tools) and Nova Canvas run the same way.
+- Unit prices for media models (per image, second of video, hour of audio,
+  million characters or music clip) are read from LiteLLM by
+  `cargo xtask prices`; a hand-written row still wins.
+- `lev setup` files a provider under every kind it makes (text and images,
+  video, speech and audio, 3D models), and typing at "Add a provider" finds
+  one by its name or what it does.
+- A new tutorial, [Build an advanced agent](/docs/advanced-agent), builds an
+  agent that turns an idea into concept art and a short film on an OpenAI
+  key. The mime page is now called "More than text".
 - **xAI** as a provider (`XAI_API_KEY`), with its model list, windows,
   aliases and prices read live, the cost each call reports recorded as its
   cost, and the image (`grok-imagine-image`), video (`grok-imagine-video`),
@@ -244,7 +261,11 @@ same list.
   check with the error, not "lists no model to probe with".
 - A provider whose model list the daemon could not read is recorded as a
   failed check with the error, so `lev setup` opens on it.
-
+- A media stage whose prompt sits in a pinned region (the task) was sent
+  "Begin." as its prompt, so an image or 3D model made something unrelated.
+  The runtime's placeholder turn is no longer read as the prompt.
+- A stage on an image or video model no longer warns that its tools are not
+  advertised when the only tool is `submit_output`.
 - A streamed reply that reached Leviath in one read no longer ends as "the
   stream ended before the model said it had finished". The reader stopped at
   the first event it had nothing to pass on and waited for bytes that had

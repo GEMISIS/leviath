@@ -168,7 +168,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
 | `volatility` | `"rewritten"` | How much the region's contents move between requests, which decides where it sits in the prompt. See [what caching costs](#what-caching-costs) |
 | `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
-| `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. Unset takes anything. A write carrying another type is refused with this list. See [typed mime](/docs/mime) |
+| `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. Unset takes anything. A write carrying another type is refused with this list. See [More than text](/docs/mime) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage
@@ -395,7 +395,7 @@ filled yet.
 ### Stored parts in the prompt
 
 An entry can hold more than text: an image, a clip, a document, any
-[typed mime](/docs/mime) part. In a region that renders into the system prompt
+[stored part](/docs/mime). In a region that renders into the system prompt
 the part appears as its one-line stand-in, `[image/png 1024x768, 240 KB] hero.png`,
 and the bytes travel in one user message placed before the conversation, each
 after a pointer naming the region, the key and the part. In the conversation the

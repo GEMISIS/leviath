@@ -356,6 +356,9 @@ const VISION: &[&str] = &["text/*", "image/*"];
 /// no listing in hand. The listing's `inputModalities` corrects it.
 pub(crate) fn mime_for(model: &str) -> ModelMime {
     let name = vendor_model(model).to_ascii_lowercase();
+    if super::media::is_image_model(model) {
+        return ModelMime::new(VISION, &["image/*"]);
+    }
     match vendor_of(model) {
         Vendor::Anthropic => crate::mime_tables::anthropic(&name),
         Vendor::Nova if name.contains("nova-micro") => ModelMime::text_only(),
@@ -383,6 +386,8 @@ pub(super) struct FoundationModel {
     pub(super) name: Option<String>,
     /// Mime patterns for its `inputModalities`.
     pub(super) input_types: Vec<String>,
+    /// Mime patterns for its `outputModalities`: text, or images.
+    pub(super) output_types: Vec<String>,
     /// Whether the bare id can be called as it is. A model that is
     /// `INFERENCE_PROFILE` only has to be reached through a profile id.
     pub(super) on_demand: bool,
@@ -404,7 +409,18 @@ pub(super) fn parse_foundation_model(entry: &serde_json::Value) -> Option<Founda
             })
             .unwrap_or_default()
     };
-    if !words("outputModalities").iter().any(|w| w == "TEXT") {
+    // Text through Converse, or images through InvokeModel for the image
+    // models this provider runs; embeddings and video are neither.
+    let output_types: Vec<String> = words("outputModalities")
+        .iter()
+        .filter_map(|w| match w.as_str() {
+            "TEXT" => Some("text/*"),
+            "IMAGE" if super::media::is_image_model(&id) => Some("image/*"),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect();
+    if output_types.is_empty() {
         return None;
     }
     if entry
@@ -433,6 +449,7 @@ pub(super) fn parse_foundation_model(entry: &serde_json::Value) -> Option<Founda
             .and_then(|v| v.as_str())
             .map(str::to_string),
         input_types,
+        output_types,
         on_demand: words("inferenceTypesSupported")
             .iter()
             .any(|w| w == "ON_DEMAND"),
@@ -488,7 +505,7 @@ pub(super) fn merge_listing(
     models: &[FoundationModel],
     profiles: &[InferenceProfile],
 ) -> HashMap<String, LearnedModel> {
-    let record = |name: Option<String>, input_types: Option<Vec<String>>| LearnedModel {
+    let record = |name: Option<String>, model: Option<&FoundationModel>| LearnedModel {
         display_name: name,
         max_context_tokens: None,
         max_output_tokens: None,
@@ -498,15 +515,14 @@ pub(super) fn merge_listing(
         pricing: None,
         released: None,
         retires: None,
-        input_types,
-        output_types: Some(vec!["text/*".to_string()]),
+        input_types: model.map(|m| m.input_types.clone()),
+        output_types: Some(
+            model.map_or_else(|| vec!["text/*".to_string()], |m| m.output_types.clone()),
+        ),
     };
     let mut learned = HashMap::new();
     for model in models.iter().filter(|m| m.on_demand) {
-        learned.insert(
-            model.id.clone(),
-            record(model.name.clone(), Some(model.input_types.clone())),
-        );
+        learned.insert(model.id.clone(), record(model.name.clone(), Some(model)));
     }
     for profile in profiles {
         let model = profile
@@ -515,13 +531,12 @@ pub(super) fn merge_listing(
             .and_then(|id| models.iter().find(|m| m.id == id));
         learned.insert(
             profile.id.clone(),
-            match model {
-                Some(m) => record(
-                    m.name.clone().or_else(|| profile.name.clone()),
-                    Some(m.input_types.clone()),
-                ),
-                None => record(profile.name.clone(), None),
-            },
+            record(
+                model
+                    .and_then(|m| m.name.clone())
+                    .or_else(|| profile.name.clone()),
+                model,
+            ),
         );
     }
     learned
@@ -686,6 +701,25 @@ mod tests {
             vec!["text/*", "image/*", "video/*", "application/pdf"]
         );
         assert!(model.on_demand);
+        assert_eq!(model.output_types, vec!["text/*"]);
+
+        // An image model this provider runs is kept, answering in images; an
+        // image output it does not run is not.
+        let canvas = parse_foundation_model(&json!({
+            "modelId": "amazon.nova-canvas-v1:0",
+            "inputModalities": ["TEXT", "IMAGE"],
+            "outputModalities": ["IMAGE"],
+            "inferenceTypesSupported": ["ON_DEMAND"]
+        }))
+        .unwrap();
+        assert_eq!(canvas.output_types, vec!["image/*"]);
+        assert!(
+            parse_foundation_model(&json!({
+                "modelId": "amazon.nova-reel-v1:0",
+                "outputModalities": ["VIDEO", "IMAGE"]
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -762,18 +796,21 @@ mod tests {
                 id: "amazon.nova-pro-v1:0".to_string(),
                 name: Some("Nova Pro".to_string()),
                 input_types: vec!["text/*".to_string(), "image/*".to_string()],
+                output_types: vec!["text/*".to_string()],
                 on_demand: true,
             },
             FoundationModel {
                 id: "anthropic.claude-sonnet-5".to_string(),
                 name: Some("Claude Sonnet 5".to_string()),
                 input_types: vec!["text/*".to_string()],
+                output_types: vec!["text/*".to_string()],
                 on_demand: false,
             },
             FoundationModel {
                 id: "nameless.model-v1:0".to_string(),
                 name: None,
                 input_types: vec!["text/*".to_string()],
+                output_types: vec!["text/*".to_string()],
                 on_demand: false,
             },
         ];

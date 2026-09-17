@@ -475,16 +475,38 @@ async fn priming_learns_ids_and_dates_but_not_shape() {
     provider.prime_capabilities().await.expect("primes");
     let mut catalog = provider.served_catalog().expect("primed");
     catalog.sort();
-    assert_eq!(catalog, ["gpt-5.5", "o3"]);
+    // Chat models and the media models that run on their own routes; the
+    // embeddings and the realtime (websocket) models are neither.
+    assert_eq!(
+        catalog,
+        [
+            "gpt-4o-mini-tts",
+            "gpt-5.5",
+            "gpt-transcribe",
+            "o3",
+            "whisper-1"
+        ]
+    );
     assert_eq!(provider.capabilities("gpt-5.5"), before);
     let listed = provider.list_models().await.expect("from the store");
     let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, ["gpt-5.5", "o3"]);
-    assert_eq!(listed[0].released, Some(1_776_824_847));
-    assert_eq!(listed[0].provider, "openai");
-    assert_eq!(listed[1].retires.as_deref(), Some("2027-01-01"));
-    assert!(listed[1].learned);
-    assert_eq!(listed[1].display_name, None);
+    assert_eq!(
+        ids,
+        [
+            "gpt-4o-mini-tts",
+            "gpt-5.5",
+            "gpt-transcribe",
+            "o3",
+            "whisper-1"
+        ]
+    );
+    let gpt = &listed[1];
+    assert_eq!(gpt.released, Some(1_776_824_847));
+    assert_eq!(gpt.provider, "openai");
+    let o3 = &listed[3];
+    assert_eq!(o3.retires.as_deref(), Some("2027-01-01"));
+    assert!(o3.learned);
+    assert_eq!(o3.display_name, None);
 }
 
 #[tokio::test]
@@ -582,4 +604,46 @@ async fn a_named_host_uses_its_own_name_header_and_deployments() {
     let request = recorded.lock().unwrap()[0].to_ascii_lowercase();
     assert!(request.contains("api-key: azure-key"));
     assert!(!request.contains("authorization"));
+}
+
+/// A media model is run on its own route, buffered or streamed, priced from
+/// the shipped table, and takes what its route takes by value.
+#[tokio::test]
+async fn a_media_model_runs_on_its_own_route_through_the_provider() {
+    let reply = serde_json::json!({ "output_format": "png", "data": [{ "b64_json": "UE5H" }],
+        "usage": { "input_tokens": 10, "output_tokens": 10 } });
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", reply.to_string().into_bytes()),
+        (200, "OK", reply.to_string().into_bytes()),
+    ])
+    .await;
+    let provider = provider_with_url(url).with_poll_interval(std::time::Duration::from_millis(1));
+    let request = InferenceRequest {
+        model: "gpt-image-1".into(),
+        ..simple_request()
+    };
+    let made = provider.infer(&request).await.expect("an image");
+    assert_eq!(made.parts.len(), 1);
+    assert!(
+        made.tokens_used.reported_cost_usd.is_some(),
+        "the shipped table prices gpt-image-1 by its tokens"
+    );
+    let streamed = provider.infer_stream(&request).await.expect("a stream");
+    let collected = crate::provider::collect_stream(streamed).await.unwrap();
+    assert_eq!(collected.parts.len(), 1);
+    assert!(bodies.lock().unwrap()[0].contains("\"prompt\""));
+
+    assert_eq!(provider.mime("sora-2").output, ["video/*"]);
+    assert!(
+        provider
+            .mime("gpt-5.5")
+            .output
+            .iter()
+            .all(|t| t != "video/*"),
+        "a chat model is narrowed to what a Responses body carries"
+    );
+    assert_eq!(provider.media_limits("sora-2").file_bytes, None);
+    assert!(provider.media_limits("gpt-5.5").file_bytes.is_some());
+    assert_eq!(provider.serves_model("whisper-1"), Some("whisper-1".into()));
+    assert!(!provider.capabilities("tts-1").supports_tools);
 }
