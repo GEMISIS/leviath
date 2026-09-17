@@ -153,11 +153,13 @@ mod tests {
             let name = format!("ref{i}.png");
             let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2]).named(&name);
             let part = Part::stored(blob.describe(&MimeRegistry::builtin())).named(&name);
-            let mut block = ContentBlock::mime(&part).unwrap();
-            if let ContentBlock::Mime { data, .. } = &mut block {
-                *data = "AQI=".into();
-            }
-            blocks.push(block);
+            blocks.push(ContentBlock::Mime {
+                part: part.blob().unwrap().clone(),
+                data: "AQI=".into(),
+                name: part.name.clone(),
+                deliver: None,
+                remote: None,
+            });
         }
         InferenceRequest {
             system: vec![],
@@ -312,5 +314,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.to_string().contains("moderated"));
+    }
+
+    #[tokio::test]
+    async fn every_way_an_image_call_can_fail_is_an_error() {
+        let route = route(EditShape::Xai, false);
+        let req = request("x", 0);
+        // Nothing listening.
+        assert!(
+            run(&endpoint("http://127.0.0.1:9"), &route, &req)
+                .await
+                .is_err()
+        );
+        // A body that is not JSON.
+        let (garbled, _) = spawn_mock_sequence(vec![(200, "OK", b"not json".to_vec())]).await;
+        assert!(run(&endpoint(&garbled), &route, &req).await.is_err());
+        // An image at a URL nobody serves.
+        let unreachable = json!({ "data": [ { "url": "http://127.0.0.1:9/i.png" } ] });
+        let (url, _) =
+            spawn_mock_sequence(vec![(200, "OK", unreachable.to_string().into_bytes())]).await;
+        assert!(run(&endpoint(&url), &route, &req).await.is_err());
+        // An image whose type is no type.
+        let untyped = json!({ "data": [ { "b64_json": "SlBFRw==", "mime_type": "not a type" } ] });
+        let (url, _) =
+            spawn_mock_sequence(vec![(200, "OK", untyped.to_string().into_bytes())]).await;
+        let err = run(&endpoint(&url), &route, &req).await.unwrap_err();
+        assert!(err.to_string().contains("unreadable type"), "{err}");
     }
 }

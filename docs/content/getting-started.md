@@ -115,9 +115,9 @@ To embed the runtime in your own application instead of running the CLI, add the
 
 ## Configure a provider
 
-One provider is all you need: an API key from Anthropic, OpenAI, Google AI, or OpenRouter; a
-ChatGPT subscription you sign in to (OpenAI Codex, no key); or a local [Ollama](https://ollama.com)
-with no key at all.
+One provider is all you need: an API key from Anthropic, OpenAI, Google AI, xAI, Meta, or
+OpenRouter; a ChatGPT or Grok subscription you sign in to (OpenAI Codex or Grok, no key); or a
+local [Ollama](https://ollama.com) with no key at all.
 
 ```bash
 lev setup

@@ -539,6 +539,7 @@ pub(crate) fn lint_manifest(
     findings.extend(lint_compacted_deliverables(blueprint));
     findings.extend(lint_required_regions_enforceable(blueprint));
     findings.extend(lint_unbounded_percentage(blueprint, env));
+    findings.extend(lint_long_context_price(blueprint, env));
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
@@ -704,9 +705,11 @@ impl Declared {
 mod checks;
 mod fanout;
 mod mime;
+mod pricing;
 use checks::*;
 use fanout::*;
 use mime::*;
+use pricing::*;
 mod security;
 use security::*;
 

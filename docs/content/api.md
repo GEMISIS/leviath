@@ -1243,14 +1243,15 @@ POST /api/providers/{name}/check       prove the grant still works       (admin)
 ```
 
 `GET /api/providers` is open to any caller holding the bearer token. It reports the account
-address and the plan tier - the same facts `lev auth status` prints - and never a token:
+address and the plan tier - the same facts `lev auth status` prints - and never a token. Two
+providers sign in this way: `codex` (a ChatGPT plan) and `grok` (a SuperGrok or X Premium+ plan).
 
 ```json
 {
   "providers": [
     {
       "id": "codex",
-      "display": "OpenAI Codex (ChatGPT subscription)",
+      "display": "OpenAI Codex",
       "enabled": true,
       "signed_in": true,
       "account": "someone@example.com",
@@ -1260,6 +1261,28 @@ address and the plan tier - the same facts `lev auth status` prints - and never 
   ]
 }
 ```
+
+`GET /api/providers?quota=true` adds a `quota` object to each signed-in provider that is enabled:
+`{"report": {...}}` with what the subscription has used, or `{"error": "..."}` when the account
+could not be read. It is off by default because it reads each account over the network, and a
+console polls this route while a sign-in is waiting.
+
+```json
+"quota": {
+  "report": {
+    "plan": "plus",
+    "windows": [
+      { "label": "5h", "used_percent": 42.0, "resets_at": 1735700000 },
+      { "label": "week", "used_percent": 12.5, "resets_at": 1736200000 }
+    ],
+    "limit_reached": false
+  }
+}
+```
+
+A window carries `used_percent` when the provider reports a share (Codex), or `used`, `limit`
+and `unit` when it reports amounts (Grok, in credits). `balance` is a prepaid balance as the
+provider words it, when there is one. `lev providers quota --json` prints the same reports.
 
 `enabled` and `signed_in` are separate on purpose. Either can be true alone, they are set by
 different routes, and the combination that breaks runs - enabled, not signed in - is the one a
@@ -1440,8 +1463,8 @@ On `PUT /api/config` each key has three states, which the other fields in that b
 | `"override_model": null`      | the setting is written away                        |
 | `"override_model": "gpt-5"`   | the setting is pinned to `gpt-5`                   |
 
-`fallback_model` reads the same way, and so do the five provider keys (`anthropic_key`,
-`openai_key`, `google_key`, `openrouter_key`, `bedrock_key`): `null` clears a key, which takes
+`fallback_model` reads the same way, and so do the seven provider keys (`anthropic_key`,
+`openai_key`, `google_key`, `xai_key`, `meta_key`, `openrouter_key`, `bedrock_key`): `null` clears a key, which takes
 the provider out of this install the way the setup wizard's remove does, and an empty string is a
 400. Clearing `override_model` matters as much as setting it. A
 pinned model runs every stage of every blueprint on that one model, and the cheap stages then pay a

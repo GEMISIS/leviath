@@ -285,7 +285,7 @@ Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.i
 
 ## Providers
 
-Anthropic, OpenAI, Google (Gemini), OpenRouter, AWS Bedrock (Claude, Nova, Llama and more on an AWS account, with exact token counts and limits read from AWS), local [Ollama](https://ollama.com) with no key, the Claude Code subscription transport, and any OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM, an enterprise gateway) as a `kind = "openai-compatible"` entry in `[model_providers]`, with a [Rhai script](https://leviath.dev/docs/rhai-providers) for a wire format that is not OpenAI's. Per-stage model fallback and optional client-side rate limits enforced before each call. [Provider docs →](https://leviath.dev/docs/providers)
+Anthropic, OpenAI, Google (Gemini), xAI (Grok chat, image, video and speech models), Meta (Muse Spark, Muse Image and Muse Voice Transcribe), OpenRouter, AWS Bedrock (Claude, Nova, Llama and more on an AWS account, with exact token counts and limits read from AWS), local [Ollama](https://ollama.com) with no key, the OpenAI Codex, Grok and Claude Code subscription transports, and any OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM, an enterprise gateway) as a `kind = "openai-compatible"` entry in `[model_providers]`, with a [Rhai script](https://leviath.dev/docs/rhai-providers) for a wire format that is not OpenAI's. Per-stage model fallback, large files uploaded once to a provider's own file storage, and optional client-side rate limits enforced before each call. [Provider docs →](https://leviath.dev/docs/providers)
 
 ## Security
 
@@ -357,7 +357,7 @@ graph TD
 | `leviath-runtime` | ECS engine (bevy_ecs) and stage-run orchestration |
 | `leviath-core` | Regions, layouts, blueprints, manifest, run metadata |
 | `leviath-tools` | Built-in tool implementations |
-| `leviath-providers` | Anthropic, OpenAI, Google, OpenRouter, Bedrock, Ollama, Claude Code |
+| `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama, Claude Code |
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
 | `leviath-package` | Agent bundling and install |

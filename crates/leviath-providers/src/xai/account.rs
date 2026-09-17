@@ -40,7 +40,7 @@ fn unix_seconds(text: &str) -> Option<u64> {
     if !offset_ok {
         return None;
     }
-    let whole = stamp.split('.').next()?;
+    let whole = stamp.split('.').next().unwrap_or(stamp);
     crate::learned::unix_seconds_from_rfc3339(&format!("{whole}Z")).map(|s| s as u64)
 }
 

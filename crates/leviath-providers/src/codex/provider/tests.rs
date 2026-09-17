@@ -906,3 +906,17 @@ fn codex_takes_images_until_an_override_says_otherwise() {
     );
     assert!(!p.mime("gpt-5.5-codex").accepts(&png));
 }
+
+#[tokio::test]
+async fn the_quota_answers_through_the_provider_trait() {
+    let body = br#"{"plan_type":"plus","rate_limit":{"primary_window":
+        {"used_percent":10,"limit_window_seconds":18000,"reset_at":99}}}"#
+        .to_vec();
+    let url = spawn_mock_server(200, "OK", body).await;
+    let p = provider("http://x", Static::new("t")).with_usage_url(Some(url));
+    let report = Provider::quota(&p)
+        .await
+        .expect("a subscription")
+        .expect("read");
+    assert_eq!(report.plan.as_deref(), Some("plus"));
+}

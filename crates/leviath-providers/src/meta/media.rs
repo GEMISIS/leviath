@@ -179,11 +179,7 @@ async fn transcribe(
         .and_then(Value::as_f64)
         .map_or(header.seconds, |ms| ms / 1000.0);
     let transcript = serde_json::to_vec_pretty(&reply).expect("a JSON value serialises");
-    let parts = vec![media::blob(
-        "application/json",
-        transcript,
-        "transcript.json",
-    )?];
+    let parts = vec![media::json_blob(transcript, "transcript.json")];
     let cost = unit.map(|u| u.cost(seconds / 3600.0));
     Ok(media::response(text, parts, cost))
 }
@@ -230,11 +226,13 @@ mod tests {
             let blob =
                 Blob::new(MimeType::parse("audio/wav").unwrap(), bytes.clone()).named("clip.wav");
             let part = Part::stored(blob.describe(&MimeRegistry::builtin())).named("clip.wav");
-            let mut block = ContentBlock::mime(&part).unwrap();
-            if let ContentBlock::Mime { data, .. } = &mut block {
-                *data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            }
-            blocks.push(block);
+            blocks.push(ContentBlock::Mime {
+                part: part.blob().unwrap().clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                name: part.name.clone(),
+                deliver: None,
+                remote: None,
+            });
         }
         InferenceRequest {
             system: vec![],
@@ -393,5 +391,78 @@ mod tests {
         .unwrap();
         assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
         assert_eq!(response.tokens_used.reported_cost_usd, Some(0.01));
+    }
+
+    #[tokio::test]
+    async fn a_transcription_that_cannot_be_read_is_an_error_and_an_unnamed_clip_is_named() {
+        let clip = wav_bytes(1, 16_000, 16, 1, 16);
+        let mut req = request("muse-voice-transcribe-1.0", None);
+        req.extra = json!({ "language_bias": "English" });
+        let blob = Blob::new(MimeType::parse("audio/wav").unwrap(), clip.clone());
+        let part = Part::stored(blob.describe(&MimeRegistry::builtin()));
+        req.messages[0].content = MessageContent::Blocks(vec![ContentBlock::Mime {
+            part: part.blob().unwrap().clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&clip),
+            name: None,
+            deliver: None,
+            remote: None,
+        }]);
+        let (url, seen) = spawn_mock_recorder(200, "OK", br#"{"transcript":"ok"}"#.to_vec()).await;
+        run(&endpoint(&url), Kind::Transcribe, &req, None)
+            .await
+            .unwrap();
+        let raw = seen.lock().unwrap().join("");
+        assert!(raw.contains("filename=\"audio.wav\""), "{raw}");
+        assert!(
+            !raw.contains("languageBias"),
+            "a bias that is not a list is left out: {raw}"
+        );
+
+        assert!(
+            run(
+                &endpoint("http://127.0.0.1:9"),
+                Kind::Transcribe,
+                &req,
+                None
+            )
+            .await
+            .is_err()
+        );
+        let (refused, _) = spawn_mock_sequence(vec![(500, "Boom", b"{}".to_vec())]).await;
+        assert!(
+            run(&endpoint(&refused), Kind::Transcribe, &req, None)
+                .await
+                .is_err()
+        );
+        let (garbled, _) = spawn_mock_sequence(vec![(200, "OK", b"not json".to_vec())]).await;
+        assert!(
+            run(&endpoint(&garbled), Kind::Transcribe, &req, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_that_does_not_decode_is_no_audio() {
+        let mut req = request("muse-voice-transcribe-1.0", None);
+        let blob = Blob::new(MimeType::parse("audio/wav").unwrap(), vec![1]);
+        let part = Part::stored(blob.describe(&MimeRegistry::builtin()));
+        req.messages[0].content = MessageContent::Blocks(vec![ContentBlock::Mime {
+            part: part.blob().unwrap().clone(),
+            data: "not base64!".into(),
+            name: None,
+            deliver: None,
+            remote: None,
+        }]);
+        assert!(
+            run(
+                &endpoint("http://127.0.0.1:9"),
+                Kind::Transcribe,
+                &req,
+                None
+            )
+            .await
+            .is_err()
+        );
     }
 }

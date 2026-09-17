@@ -447,4 +447,23 @@ mod tests {
         assert_eq!(modality_pattern("video"), Some("video/*"));
         assert_eq!(modality_pattern("smell"), None);
     }
+
+    #[test]
+    fn xai_and_meta_media_models_take_and_make_what_their_routes_do() {
+        let image = |s: &str| leviath_core::mime::MimeType::parse(s).unwrap();
+        assert!(xai("grok-imagine-image").produces(&image("image/jpeg")));
+        assert!(xai("grok-imagine-video-1.5").accepts(&image("audio/wav")));
+        assert!(xai("grok-imagine-video").accepts(&image("video/mp4")));
+        assert!(xai("grok-tts").produces(&image("audio/mpeg")));
+        assert!(xai("grok-stt").accepts(&image("audio/wav")));
+        assert!(xai("grok-4.3").accepts(&image("application/pdf")));
+        assert!(meta("muse-image-1.0").produces(&image("image/png")));
+        assert!(meta("muse-voice-transcribe-1.0").accepts(&image("audio/wav")));
+        assert!(meta("muse-spark-1.3").accepts(&image("video/mp4")));
+        assert!(by_prefix("x-ai/grok-4.3").accepts(&image("image/png")));
+        assert!(by_prefix("meta/muse-spark-1.3").accepts(&image("video/mp4")));
+        assert!(xai("grok-unlisted").accepts(&image("application/pdf")));
+        assert!(meta("muse-unlisted").accepts(&image("video/mp4")));
+        assert!(builtin_mime("meta", "muse-spark-1.3").accepts(&image("video/mp4")));
+    }
 }

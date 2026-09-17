@@ -94,11 +94,15 @@ the file empty in CI.
 anthropic_api_key   = "sk-ant-..."   # env fallback: ANTHROPIC_API_KEY
 openai_api_key      = "sk-..."       # env fallback: OPENAI_API_KEY
 google_api_key      = "..."          # env fallback: GOOGLE_API_KEY
+xai_api_key         = "xai-..."      # env fallback: XAI_API_KEY
+meta_api_key        = "..."          # env fallback: META_AI_API_KEY
 bedrock_api_key     = "ABSK..."      # env fallback: AWS_BEARER_TOKEN_BEDROCK (a Bedrock API key)
 bedrock_region      = "us-east-1"    # env fallback: AWS_REGION, then AWS_DEFAULT_REGION
 anthropic_base_url  = "https://gw.corp/v1"   # env fallback: ANTHROPIC_BASE_URL
 openai_base_url     = "https://gw.corp/v1"   # env fallback: OPENAI_BASE_URL
-google_base_url     = "https://gw.corp/v1"   # env fallback: GOOGLE_BASE_URL
+google_base_url     = "https://gw.corp/v1beta"   # env fallback: GOOGLE_BASE_URL (the native API root)
+xai_base_url        = "https://gw.corp/v1"   # env fallback: XAI_BASE_URL
+meta_base_url       = "https://gw.corp/v1"   # env fallback: META_AI_BASE_URL
 openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 bedrock_base_url    = "https://gw.corp/bedrock"   # env fallback: BEDROCK_BASE_URL
 anthropic_headers   = { X-Gateway-Token = "..." }  # extra headers for that gateway (see below)
@@ -110,19 +114,26 @@ codex_enabled          = false      # bill inference to a ChatGPT subscription
 codex_reasoning_effort = "medium"   # low | medium | high | xhigh (see below)
 codex_verbosity        = "medium"   # low | medium | high
 codex_replay_reasoning = true       # replay each turn's reasoning on the next request
+grok_enabled           = false      # bill Grok to a SuperGrok or X Premium+ subscription
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 provider_order      = ["codex", "openrouter", "openai"]   # a bare name's route preference
 zero_retention      = false          # ask every provider for zero data retention (see below)
 zero_retention_agreements = []       # providers you hold a zero data retention contract with
+file_uploads        = true           # upload large parts to provider file storage (see below)
 ```
+
+`file_uploads` lets a provider with a Files API (Anthropic, OpenAI, Google, xAI, Grok and Meta)
+take a large image, PDF, video or recording once and have later requests name it by id. Set it
+to `false` to send every part inline instead. Zero data retention turns uploads off whatever this
+says. See [Files and size limits](/docs/mime#files-and-size-limits).
 
 `zero_retention` asks every provider for zero data retention and refuses, at spawn, a stage whose
 model cannot give it. What each provider keeps, how the request reaches it, and which models
 retain regardless is the subject of [data retention](/docs/providers#data-retention);
 `lev providers retention` prints it for this install and `lev providers retention set zero`
 writes the switch. `zero_retention_agreements` names the providers (`openai`, `anthropic`,
-`google`) your organisation holds a zero data retention contract with: no API can read such a
+`google`, `xai`) your organisation holds a zero data retention contract with: no API can read such a
 contract, so it is declared here, and a declared provider counts as keeping nothing.
 
 `ollama_enabled` turns Ollama on. It is opt-in like every other provider: it needs no key and
@@ -937,13 +948,17 @@ Ceilings on typed mime parts: the images, audio, video, documents and models tha
 
 ```toml
 [mime]
-max_part_bytes = 33554432               # one part, at every ingress (32 MiB)
+# max_part_bytes = 33554432             # one part, at every ingress; unset, see below
 inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
-max_media_bytes_per_request = 20971520  # bytes of stored media one model request carries (20 MiB)
+max_media_bytes_per_request = 20971520  # stored media one request carries, where a provider names no limit (20 MiB)
+provider_file_ttl_secs = 86400          # how long an upload lives in a provider's file storage (a day)
 ```
 
 A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
-result or a model reply. Text longer than `inline_text_bytes` is stored by hash like any other
+result or a model reply. Left unset, it is the largest part a configured provider takes, by
+upload or inline (1 GiB with Meta, 500 MiB with Anthropic), or 32 MiB when none names a limit.
+`lev mime list` prints the value in force and where it came from. `provider_file_ttl_secs` is
+the lifetime asked for on each upload, clamped to what the provider takes. Text longer than `inline_text_bytes` is stored by hash like any other
 part and read back as text when a request is built. `max_media_bytes_per_request` is a backstop
 for the vendor request-size limits a token budget cannot see: an image's token estimate is the
 same whatever its byte size, so a request can sit inside its context window and still be

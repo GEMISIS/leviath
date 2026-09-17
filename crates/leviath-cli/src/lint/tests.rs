@@ -3900,3 +3900,65 @@ available_tools = ["write_file"]
         "{clamped:?}"
     );
 }
+
+/// A manifest whose stage runs on `provider/model` with regions totalling
+/// `conversation_tokens` beside a small pinned one.
+fn manifest_on(provider: &str, model: &str, conversation_tokens: usize) -> String {
+    format!(
+        r#"
+[agent]
+name = "lint-fixture"
+version = "0.1.0"
+description = "a fixture"
+
+[stages.work]
+mode = "autonomous"
+model = {{ models = [{{ provider = "{provider}", model = "{model}" }}] }}
+max_iterations = 10
+allow_complete = true
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = {conversation_tokens} }}
+"#
+    )
+}
+
+#[test]
+fn a_stage_that_can_reach_a_long_context_tier_gets_a_note_and_nothing_more() {
+    let big = manifest_on("google", "gemini-2.5-pro", 300_000);
+    let findings = lint(&big, &LintEnv::default_with_windows());
+    let found = findings
+        .iter()
+        .find(|f| f.code == "long-context-price")
+        .expect("the tier is noted");
+    assert_eq!(found.severity, LintSeverity::Note);
+    assert!(
+        found.message.contains("google/gemini-2.5-pro"),
+        "{}",
+        found.message
+    );
+    assert!(found.message.contains("200000"), "{}", found.message);
+    assert!(found.message.contains("301000"), "{}", found.message);
+    assert!(
+        found.fix.as_deref().unwrap_or_default().contains("200000"),
+        "{found:?}"
+    );
+
+    let small = manifest_on("google", "gemini-2.5-pro", 100_000);
+    assert!(
+        !codes(&lint(&small, &LintEnv::default_with_windows())).contains(&"long-context-price")
+    );
+
+    // No tier in the price table, no window known, or no model priced: silent.
+    let untiered = manifest_on("anthropic", "claude-sonnet-5", 900_000);
+    assert!(
+        !codes(&lint(&untiered, &LintEnv::default_with_windows())).contains(&"long-context-price")
+    );
+    assert!(!codes(&lint(&big, &LintEnv::default())).contains(&"long-context-price"));
+    let unknown = manifest_on("google", "gemini-unlisted", 900_000);
+    let mut env = LintEnv::default_with_windows();
+    env.model_windows
+        .insert(("google".into(), "gemini-unlisted".into()), 1_000_000);
+    assert!(!codes(&lint(&unknown, &env)).contains(&"long-context-price"));
+}

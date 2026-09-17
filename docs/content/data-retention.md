@@ -100,9 +100,11 @@ zero`, the setup wizard's **Zero data retention** row, or `lev setup --zero-rete
 | Bedrock | Account mode set to `none`; a model never served under `none` is refused |
 | OpenAI | `store = false` on every request; the abuse log stays unless you declare an agreement |
 | OpenRouter | `provider.zdr = true` and `data_collection = "deny"`; a model with no ZDR endpoint is refused |
-| Anthropic, Google | Refused unless you declare an agreement |
+| Anthropic, Google, xAI | Refused unless you declare an agreement |
+| Meta | The standard models are refused (no retention window is published); a `-contributor` model is refused outright, since Meta trains on it |
 | local models | Nothing to do; nothing leaves the machine |
-| Meshy, Codex, Claude Code | Refused; the policy is fixed |
+| Meshy, Codex, Grok, Claude Code | Refused; the policy is fixed |
+| Every provider with a Files API | Nothing is uploaded; parts go inline, within each provider's inline limits |
 
 A stage is judged by the model it would start on. Its fallbacks are judged the same way, and one
 that keeps something is dropped from failover, with a line in the stage's log saying so. Nothing
@@ -112,6 +114,15 @@ is rerouted: an author who pinned a model would not see it swapped for one at an
 `retention-not-zero` error, and a fallback that would be dropped is a `retention-fallback-dropped`
 warning, each carrying the provider's reason. The
 [lint reference](/docs/cli#lev-validate-path) lists both.
+
+### Files uploaded to a provider
+
+With the switch off, a large image, PDF, video or recording is uploaded to the provider's file
+storage and named by id on later requests (see [Files and size limits](/docs/mime#files-and-size-limits)).
+That upload is kept at the provider until the run ends or the upload's lifetime passes, a day by
+default. It is data the provider keeps, so the switch turns uploads off, and
+`[providers] file_uploads = false` turns them off without the switch. Anthropic's Files API is not
+eligible for zero data retention in any case.
 
 ## Reading the answer
 

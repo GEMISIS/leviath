@@ -1195,6 +1195,35 @@ mod tests {
 
     use super::*;
 
+    /// A provider with no file storage and no subscription says so: nothing
+    /// uploads, a delete is nothing to do, and there is no quota to show.
+    #[tokio::test]
+    async fn the_file_and_quota_defaults_do_nothing_and_refuse_an_upload() {
+        let openrouter = crate::OpenRouterProvider::new(
+            build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            openrouter.media_limits("any/model"),
+            crate::files::MediaLimits::NONE
+        );
+        let upload = crate::files::FileUpload {
+            bytes: std::sync::Arc::from(&b"x"[..]),
+            mime_type: "text/plain".into(),
+            name: "a.txt".into(),
+            ttl_secs: 3_600,
+        };
+        let err = openrouter.upload_file(&upload).await.unwrap_err();
+        assert!(err.to_string().contains("no file storage"), "{err}");
+        let file = crate::files::RemoteFile {
+            id: "f".into(),
+            uri: None,
+            expires_at: None,
+        };
+        openrouter.delete_file(&file).await.unwrap();
+        assert!(openrouter.quota().await.is_none());
+    }
+
     /// Most providers have nothing to get ready, which is what the default is
     /// for. Exercised through a real one rather than a stub: a stub written for
     /// this would need four other methods nothing calls, and those would be the

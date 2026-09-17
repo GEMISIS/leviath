@@ -238,6 +238,30 @@ under model access, and AWS says to allow fifteen minutes after. A shell or Rhai
 `AWS_*` variables unless `[security] allow_env_vars` names them; that is deliberate and does not
 affect the provider.
 
+## Grok answers 401, 403 or 429
+
+A 401 that survives Leviath's automatic refresh means the sign-in was revoked or has lapsed:
+`lev auth login grok` signs in again. A 403 is an account the Grok route will not serve, usually a
+plan without SuperGrok or X Premium+; `lev auth status` shows the plan the sign-in carries. A 429
+with no wait time is the subscription's limit for the period: `lev providers quota` shows each
+window and when it resets, and the run waits for that reset rather than retrying blind.
+
+## Meta refuses a request with a 400
+
+Meta's Model API refuses several parameters other APIs take: a reasoning effort of `none`, `stop`,
+`logit_bias`, `n` and log probabilities. Leviath removes those from a stage's parameters, so a 400
+that still comes back names something else in the message. `muse-voice-transcribe-1.0` takes WAV
+audio only (mono, 16-bit, 16 or 24 kHz, at most 32 MB and ten minutes); any other audio is refused
+before it is sent, with the format it needs.
+
+## A large file reached the model as a line of text
+
+A part the model takes natively reaches it as a one-line stand-in when it is too large to send.
+The line says why: over the provider's inline limit and not uploaded (zero data retention is on,
+or `[providers] file_uploads = false`), or over `[mime] max_part_bytes` when it arrived. Upload is
+the usual fix for the first; raise `max_part_bytes` for the second. A generated video or a long
+speech file can be large too. See [Files and size limits](/docs/mime#files-and-size-limits).
+
 ## Windows quoting and environment variables
 
 `lev` itself is the same on every platform, and the commands in these docs work unchanged in

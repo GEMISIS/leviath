@@ -231,3 +231,17 @@ async fn a_delete_of_a_gone_file_is_done() {
     }
     assert!(provider("http://127.0.0.1:9").delete(&file).await.is_err());
 }
+
+#[tokio::test]
+async fn a_refused_finish_or_a_refused_check_is_an_error() {
+    let (target, _) = spawn_mock_sequence(vec![(500, "Boom", b"{}".to_vec())]).await;
+    let (start, _) = spawn_mock_recorder_with_upload_url(&target).await;
+    assert!(provider(&start).upload(&upload(), FAST).await.is_err());
+
+    let (checks, _) = spawn_mock_sequence(vec![(500, "Boom", b"{}".to_vec())]).await;
+    let processing = json!({ "file": { "name": "files/c", "uri": format!("{checks}/files/c"), "state": "PROCESSING" } });
+    let (target, _) =
+        spawn_mock_sequence(vec![(200, "OK", processing.to_string().into_bytes())]).await;
+    let (start, _) = spawn_mock_recorder_with_upload_url(&target).await;
+    assert!(provider(&start).upload(&upload(), FAST).await.is_err());
+}

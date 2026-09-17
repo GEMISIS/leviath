@@ -155,11 +155,14 @@ noticed before the bill arrives. Where a figure comes from decides how far to tr
 | provider | source | live or table | coverage |
 |---|---|---|---|
 | OpenRouter | its own catalogue, plus the real cost each call reports | live | every model it serves; `cost_is_exact` is true for these |
-| OpenAI, Anthropic, Google | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
+| OpenAI, Anthropic, Google, Meta | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
+| xAI | its own listings, plus the real cost each call reports | live, with the table as the fallback | every model it lists; `cost_is_exact` is true for a call that reported its cost |
+| image, video and speech models (xAI, Meta) | the vendor's price page, written into the table by hand | table, with each row's check date | priced per image, second of video, hour of audio or million characters |
 | Ollama | free by design | neither | every model; a self-hosted cost belongs in the override below |
 | Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unpriced unless one of those says otherwise |
 
-`lev models list` prints each model's input and output rate, or `n/a` where nothing prices it;
+`lev models list` prints each model's input and output rate, a unit price such as `0.05/s` for a
+media model, or `n/a` where nothing prices it;
 `lev models show` names the source of a table row and the day the table was read. The table is
 compiled into the build, so a build cannot notice a repricing between refreshes, and a refresh is
 the deterministic `cargo xtask prices`: it writes a row only where the two sources agree within 5%,
@@ -175,16 +178,30 @@ input_per_mtok = 3.0
 output_per_mtok = 15.0
 ```
 
+## A long prompt can cost more per token
+
+Some vendors bill a whole request at a higher rate once its prompt reaches a size: 200 000 tokens
+on Gemini 2.5 Pro, Claude Sonnet 4 and the current Grok models, 272 000 on several GPT-5 models.
+Leviath bills such a request at the higher rate. It does not let the higher rate decide which
+model a stage uses, but it tells you:
+
+- `lev models list` prints a `+` after the price of a model with a higher tier, with a footnote.
+- `lev models show <model>` prints both rates and the threshold.
+- `lev validate` adds a `long-context-price` note to a stage whose context can grow past the
+  threshold. It is a note, not a warning: nothing needs to change unless the cost matters.
+
 ## A subscription has no per-call price
 
-The Codex transport bills a ChatGPT plan, so a call's marginal cost really is
-zero and Leviath reports it as a known zero rather than as unknown. A run on it
-lands in the report at no cost, which is accurate and not very useful.
+The Codex and Grok transports bill a subscription (a ChatGPT plan, or SuperGrok or X Premium+),
+so a call's marginal cost really is zero and Leviath reports it as a known zero rather than as
+unknown. A run on either lands in the report at no cost, which is accurate and not very useful.
 
-The number that matters there is quota: a rolling five-hour window and a weekly
-one, each reported as a percentage. Leviath reads them when the route rate-limits
-without saying how long to wait, so a run sleeps until the window actually
-resets instead of backing off against a wall clock it cannot see.
+The number that matters there is quota. Codex reports a rolling five-hour window and a weekly one
+as percentages; Grok reports this week's on-demand credits and this month's use against the plan.
+`lev auth status` and `lev providers quota` show them (`--json` for scripts), `lev doctor` warns
+when a limit is reached, and `GET /api/providers` carries them for the Lair. Leviath also reads
+them when the route rate-limits without saying how long to wait, so a run sleeps until the window
+actually resets instead of backing off against a wall clock it cannot see.
 
 Two consequences worth knowing. Caching does not engage on short prefixes at
 all, so a small agent pays full price for every turn where a large one pays
