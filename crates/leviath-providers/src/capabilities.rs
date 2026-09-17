@@ -170,8 +170,18 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::xai::catalog::table_capabilities,
     ))
     .chain(rows(
+        "xai",
+        crate::xai::media::CATALOG,
+        crate::xai::catalog::table_capabilities,
+    ))
+    .chain(rows(
         "grok",
         crate::xai::catalog::CATALOG,
+        crate::xai::catalog::table_capabilities,
+    ))
+    .chain(rows(
+        "grok",
+        crate::xai::media::CATALOG,
         crate::xai::catalog::table_capabilities,
     ))
     .chain(rows(

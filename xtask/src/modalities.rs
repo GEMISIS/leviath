@@ -19,8 +19,9 @@
 //! * a row whose `source` is `manual` is never overwritten;
 //! * a row already in the file that the catalogue no longer lists is kept, so
 //!   a model dropped from the gateway is not silently forgotten;
-//! * a model id is kept as the vendor writes it, minus the `openai/`,
-//!   `anthropic/` or `google/` prefix; OpenRouter spells Anthropic's versions
+//! * a model id is kept as the vendor writes it, minus the vendor prefix, and
+//!   only for models the vendor's own API serves (see
+//!   [`crate::prices::openrouter_model`]); OpenRouter spells Anthropic's versions
 //!   with a dot (`claude-opus-4.8`) where the API id has a dash
 //!   (`claude-opus-4-8`), so those are normalised, and variants after a colon
 //!   (`:free`, `:thinking`) are routing options, not models, and are dropped;
@@ -48,8 +49,9 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The vendors whose direct APIs do not report modalities, and whose models
-/// the catalogue carries under these prefixes.
-const PROVIDERS: [&str; 3] = ["anthropic", "google", "openai"];
+/// the catalogue carries (xAI's under `x-ai/`). xAI's listing reports them,
+/// and its rows are the fallback for a listing that cannot be read.
+const PROVIDERS: [&str; 5] = ["anthropic", "google", "meta", "openai", "xai"];
 
 /// Every pattern a modality word maps to, in the order rows are written.
 const ORDER: [&str; 5] = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"];
@@ -199,16 +201,6 @@ fn modality_pattern(word: &str) -> Option<&'static str> {
     }
 }
 
-/// The vendor id as the table spells it. OpenRouter writes Anthropic's versions
-/// with a dot where the API id has a dash.
-fn vendor_id(provider: &str, id: &str) -> String {
-    if provider == "anthropic" {
-        id.replace('.', "-")
-    } else {
-        id.to_string()
-    }
-}
-
 /// The words under `architecture.<key>`, mapped to patterns in the fixed order.
 fn patterns(architecture: Option<&serde_json::Value>, key: &str) -> Vec<String> {
     let found: Vec<&'static str> = architecture
@@ -243,12 +235,9 @@ pub fn parse_catalogue(body: &str) -> Result<Rows> {
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let Some((vendor, rest)) = id.split_once('/') else {
+        let Some((provider, model_id)) = crate::prices::openrouter_model(id, &PROVIDERS) else {
             continue;
         };
-        if !PROVIDERS.contains(&vendor) || rest.contains(':') {
-            continue;
-        }
         let architecture = model.get("architecture");
         let input = patterns(architecture, "input_modalities");
         let output = patterns(architecture, "output_modalities");
@@ -256,10 +245,10 @@ pub fn parse_catalogue(body: &str) -> Result<Rows> {
             continue;
         }
         out.insert(
-            (vendor.to_owned(), vendor_id(vendor, rest)),
+            (provider.clone(), model_id.clone()),
             Row {
-                provider: vendor.to_owned(),
-                prefix: vendor_id(vendor, rest),
+                provider,
+                prefix: model_id,
                 input,
                 output,
                 source: "openrouter".to_owned(),

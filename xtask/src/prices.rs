@@ -1,7 +1,8 @@
 //! `cargo xtask prices` - refresh the vendor list prices without a person or
 //! an AI in the loop.
 //!
-//! Anthropic, OpenAI and Google quote no price through their APIs, so
+//! Anthropic, OpenAI, Google and Meta quote no price through their APIs (xAI
+//! does, and its rows are the fallback for a listing that cannot be read), so
 //! `crates/leviath-providers/pricing/rates.toml` carries their list prices and
 //! a cost computed from it is only as current as the file. Keeping it current
 //! by hand means transcription, and transcription is where a wrong digit gets
@@ -22,8 +23,10 @@
 //! * a model the two price more than 5% apart is not written; the existing
 //!   row, if any, is kept and the disagreement is printed;
 //! * a row whose `source` is `manual` is never overwritten;
-//! * a model id is kept as the vendor writes it, minus the `openai/`,
-//!   `anthropic/` or `google/` prefix. OpenRouter spells Anthropic's versions
+//! * a model id is kept as the vendor writes it, minus the vendor prefix
+//!   (`openai/`, `anthropic/`, `google/`, `meta/`, and OpenRouter's `x-ai/`
+//!   for xAI). Of Meta's models only Muse Spark is kept: the catalogues also
+//!   list open-weights models Meta's API does not serve. OpenRouter spells Anthropic's versions
 //!   with a dot (`claude-opus-4.8`) where the API id has a dash
 //!   (`claude-opus-4-8`), so those are normalised. Variants after a colon
 //!   (`:batch`, `:free`, `:thinking`) are routing options, not models, and
@@ -36,7 +39,15 @@
 //!   figure below input (OpenRouter lists Google's per-hour storage price in
 //!   that field) is not a per-token rate. Either defaults to the input rate;
 //! * a source entry with a zero or negative input or output price is not a
-//!   price (a free tier, or a model priced by the image) and is dropped.
+//!   price (a free tier, or a model priced by the image) and is dropped;
+//! * a long-context tier (a higher rate for a whole request once its prompt
+//!   reaches a threshold) comes from LiteLLM's `*_above_<N>k_tokens` fields,
+//!   the only source that publishes one, and rides on the row whichever
+//!   source vouched for the base rates;
+//! * `[[unit_rate]]` rows (media models priced per image, second, hour or
+//!   character) are written by a person and kept as they are; neither source
+//!   publishes those prices, so a row checked more than 90 days ago is
+//!   reported for a person to look at again.
 //!
 //! And it refuses, leaving the file untouched, when any existing row would
 //! move by more than 3x, when the finished table has a row with no positive
@@ -65,7 +76,10 @@ const LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /// The providers the table prices, in the order the file sorts them.
-const PROVIDERS: [&str; 3] = ["anthropic", "google", "openai"];
+pub const PROVIDERS: [&str; 5] = ["anthropic", "google", "meta", "openai", "xai"];
+
+/// A unit row checked longer ago than this is reported.
+const UNIT_ROW_STALE_DAYS: i64 = 90;
 
 /// Two figures within this fraction of each other agree.
 const AGREE_TOLERANCE: f64 = 0.05;
@@ -85,7 +99,13 @@ const FILE_HEADER: &str = "\
 #
 # `source` records where a row came from: `both` when the two sources agreed,
 # `openrouter` or `litellm` when only one listed it, and `manual` for a row a
-# person wrote, which the refresh never overwrites.
+# person wrote, which the refresh never overwrites. A `[rate.long_context]`
+# block is the rate for a whole request once its prompt reaches `threshold`
+# tokens, from LiteLLM.
+#
+# `[[unit_rate]]` rows price media models per `image`, `video_second`,
+# `audio_hour` or `million_chars`. A person writes them from the vendor's
+# price page and sets `checked_on`; the refresh keeps them as they are.
 ";
 
 // ── CLI argument parsing ─────────────────────────────────────────────────────
@@ -152,7 +172,7 @@ fn fetch_http(url: &str) -> Result<String> {
 /// One row of `rates.toml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Row {
-    /// `anthropic`, `google` or `openai`.
+    /// One of [`PROVIDERS`].
     pub provider: String,
     /// The model-id prefix the row covers.
     pub prefix: String,
@@ -166,13 +186,61 @@ pub struct Row {
     pub output: f64,
     /// `both`, `openrouter`, `litellm` or `manual`.
     pub source: String,
+    /// The higher rate once a prompt reaches a threshold, when published.
+    #[serde(default)]
+    pub long_context: Option<Tier>,
+}
+
+/// A long-context tier as the file writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct Tier {
+    /// The prompt size, in tokens, at which the tier applies.
+    pub threshold: u64,
+    /// Fresh input, USD per million tokens.
+    pub input: f64,
+    /// Cache read, USD per million tokens.
+    pub cache_read: f64,
+    /// Cache write, USD per million tokens.
+    pub cache_write: f64,
+    /// Output, USD per million tokens.
+    pub output: f64,
+}
+
+/// A hand-written unit-priced row, kept exactly as written.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct UnitRow {
+    /// The provider the row applies to.
+    pub provider: String,
+    /// The model-id prefix the row covers.
+    pub prefix: String,
+    /// `image`, `video_second`, `audio_hour` or `million_chars`.
+    pub unit: String,
+    /// USD per unit.
+    pub usd: f64,
+    /// Where the figure came from.
+    pub source: String,
+    /// `YYYY-MM-DD` a person last checked it.
+    pub checked_on: String,
 }
 
 impl Row {
     /// The four rates as a compact `in/read/write/out` string for the diff.
     fn rates(&self) -> String {
+        let tier = self
+            .long_context
+            .map(|t| {
+                format!(
+                    " +{}/{}/{}/{} from {}",
+                    fmt_num(t.input),
+                    fmt_num(t.cache_read),
+                    fmt_num(t.cache_write),
+                    fmt_num(t.output),
+                    t.threshold
+                )
+            })
+            .unwrap_or_default();
         format!(
-            "{}/{}/{}/{} ({})",
+            "{}/{}/{}/{}{tier} ({})",
             fmt_num(self.input),
             fmt_num(self.cache_read),
             fmt_num(self.cache_write),
@@ -190,6 +258,9 @@ struct RateFile {
     /// The rows, in file order.
     #[serde(default)]
     rate: Vec<Row>,
+    /// The hand-written unit rows, in file order.
+    #[serde(default)]
+    unit_rate: Vec<UnitRow>,
 }
 
 /// The rows keyed by `(provider, prefix)`, which is also the file's order.
@@ -202,6 +273,8 @@ pub struct Table {
     pub read_on: String,
     /// Every row.
     pub rows: Rows,
+    /// The unit rows, in file order.
+    pub unit_rows: Vec<UnitRow>,
 }
 
 /// Parse `rates.toml`.
@@ -215,6 +288,7 @@ pub fn parse_table(text: &str) -> Result<Table> {
     Ok(Table {
         read_on: file.read_on,
         rows,
+        unit_rows: file.unit_rate,
     })
 }
 
@@ -233,8 +307,54 @@ pub fn render_table(table: &Table) -> String {
             fmt_num(row.output),
             row.source
         ));
+        if let Some(t) = row.long_context {
+            out.push_str(&format!(
+                "\n[rate.long_context]\nthreshold = {}\ninput = {}\ncache_read = {}\ncache_write = {}\noutput = {}\n",
+                t.threshold,
+                fmt_num(t.input),
+                fmt_num(t.cache_read),
+                fmt_num(t.cache_write),
+                fmt_num(t.output)
+            ));
+        }
+    }
+    for unit in &table.unit_rows {
+        out.push_str(&format!(
+            "\n[[unit_rate]]\nprovider = \"{}\"\nprefix = \"{}\"\nunit = \"{}\"\nusd = {}\nsource = \"{}\"\nchecked_on = \"{}\"\n",
+            unit.provider,
+            unit.prefix,
+            unit.unit,
+            fmt_num(unit.usd),
+            unit.source,
+            unit.checked_on
+        ));
     }
     out
+}
+
+/// The unit rows a person last checked more than [`UNIT_ROW_STALE_DAYS`]
+/// before `today`, or on a day that does not parse.
+pub fn stale_unit_rows(table: &Table, today: &str) -> Vec<String> {
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+    let Some(now) = parse(today) else {
+        return Vec::new();
+    };
+    table
+        .unit_rows
+        .iter()
+        .filter_map(|row| {
+            let old = match parse(&row.checked_on) {
+                Some(day) => (now - day).num_days() > UNIT_ROW_STALE_DAYS,
+                None => true,
+            };
+            old.then(|| {
+                format!(
+                    "unit_rate {}/{} was checked on '{}'; check it against the vendor's price page and update checked_on",
+                    row.provider, row.prefix, row.checked_on
+                )
+            })
+        })
+        .collect()
 }
 
 /// A per-million figure as TOML: always a float (`5.0`, not `5`), and the
@@ -267,6 +387,45 @@ pub struct Rate {
     pub cache_write: Option<f64>,
     /// Output.
     pub output: f64,
+    /// The long-context tier, when the source publishes one.
+    pub long_context: Option<TierRate>,
+}
+
+/// A tier as a source publishes it, USD per million tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TierRate {
+    /// The prompt size, in tokens, at which it applies.
+    pub threshold: u64,
+    /// Fresh input.
+    pub input: f64,
+    /// Cache read, when published.
+    pub cache_read: Option<f64>,
+    /// Cache write, when published.
+    pub cache_write: Option<f64>,
+    /// Output.
+    pub output: f64,
+}
+
+impl TierRate {
+    /// The tier as the file writes it, with the cache sides defaulted the way
+    /// a row's are.
+    fn resolve(&self) -> Tier {
+        let (input, cache_read, cache_write, output) = Rate {
+            input: self.input,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            output: self.output,
+            long_context: None,
+        }
+        .resolve();
+        Tier {
+            threshold: self.threshold,
+            input,
+            cache_read,
+            cache_write,
+            output,
+        }
+    }
 }
 
 impl Rate {
@@ -323,6 +482,49 @@ fn vendor_id(provider: &str, id: &str) -> String {
     }
 }
 
+/// The provider and model id an OpenRouter id names, when it is one of
+/// `providers`' models: `x-ai/grok-4.3` is `xai`'s `grok-4.3`. A routing
+/// variant after a colon is no model, and of Meta's only Muse Spark is served
+/// by Meta's API.
+pub fn openrouter_model(id: &str, providers: &[&str]) -> Option<(String, String)> {
+    let (vendor, rest) = id.split_once('/')?;
+    let provider = match vendor {
+        "x-ai" => "xai",
+        other => other,
+    };
+    if !providers.contains(&provider) || rest.contains(':') || !serves(provider, rest) {
+        return None;
+    }
+    Some((provider.to_owned(), vendor_id(provider, rest)))
+}
+
+/// Whether the provider's own API serves `id`. Only Meta lists models it does
+/// not serve.
+fn serves(provider: &str, id: &str) -> bool {
+    provider != "meta" || id.starts_with("muse-spark")
+}
+
+/// LiteLLM's tier for an entry: the `*_above_<N>k_tokens` fields with the
+/// smallest threshold that carries both an input and an output price.
+fn litellm_tier(entry: &serde_json::Value) -> Option<TierRate> {
+    let fields = entry.as_object()?;
+    let threshold = fields
+        .keys()
+        .filter_map(|k| k.strip_prefix("input_cost_per_token_above_"))
+        .filter_map(|k| k.strip_suffix("k_tokens"))
+        .filter_map(|n| n.parse::<u64>().ok())
+        .min()?;
+    let field = |name: &str| per_million(entry.get(format!("{name}_above_{threshold}k_tokens")));
+    let tier = TierRate {
+        threshold: threshold * 1000,
+        input: field("input_cost_per_token")?,
+        cache_read: field("cache_read_input_token_cost"),
+        cache_write: field("cache_creation_input_token_cost"),
+        output: field("output_cost_per_token")?,
+    };
+    (tier.input > 0.0 && tier.output > 0.0).then_some(tier)
+}
+
 /// A per-token figure from a source, as per million, or `None` when absent or
 /// not a number.
 fn per_million(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -341,7 +543,7 @@ fn is_priced(rate: &Rate) -> bool {
     rate.input > 0.0 && rate.output > 0.0
 }
 
-/// Parse OpenRouter's `/api/v1/models` body into the three vendors' prices.
+/// Parse OpenRouter's `/api/v1/models` body into the vendors' prices.
 pub fn parse_openrouter(body: &str) -> Result<Prices> {
     let doc: serde_json::Value = serde_json::from_str(body).context("OpenRouter: not JSON")?;
     let models = doc
@@ -353,12 +555,9 @@ pub fn parse_openrouter(body: &str) -> Result<Prices> {
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let Some((vendor, rest)) = id.split_once('/') else {
+        let Some((provider, model_id)) = openrouter_model(id, &PROVIDERS) else {
             continue;
         };
-        if !PROVIDERS.contains(&vendor) || rest.contains(':') {
-            continue;
-        }
         let pricing = model.get("pricing");
         let field = |name: &str| per_million(pricing.and_then(|p| p.get(name)));
         let (Some(input), Some(output)) = (field("prompt"), field("completion")) else {
@@ -369,15 +568,16 @@ pub fn parse_openrouter(body: &str) -> Result<Prices> {
             cache_read: field("input_cache_read"),
             cache_write: field("input_cache_write"),
             output,
+            long_context: None,
         };
         if is_priced(&rate) {
-            out.insert((vendor.to_owned(), vendor_id(vendor, rest)), rate);
+            out.insert((provider, model_id), rate);
         }
     }
     Ok(out)
 }
 
-/// Parse LiteLLM's price table into the three vendors' prices.
+/// Parse LiteLLM's price table into the vendors' prices.
 ///
 /// LiteLLM keys a model several ways (`gemini/gemini-2.5-pro` beside
 /// `gemini-2.5-pro`); they collapse to one id, and when the copies disagree
@@ -394,6 +594,8 @@ pub fn parse_litellm(body: &str) -> Result<Prices> {
             Some("openai") => "openai",
             Some("anthropic") => "anthropic",
             Some("gemini") => "google",
+            Some("meta") => "meta",
+            Some("xai") => "xai",
             _ => continue,
         };
         if entry.get("mode").and_then(serde_json::Value::as_str) != Some("chat")
@@ -406,6 +608,9 @@ pub fn parse_litellm(body: &str) -> Result<Prices> {
             Some((_, rest)) if !rest.contains('/') => rest,
             Some(_) => continue,
         };
+        if !serves(provider, id) {
+            continue;
+        }
         let field = |name: &str| per_million(entry.get(name));
         let (Some(input), Some(output)) = (
             field("input_cost_per_token"),
@@ -418,6 +623,7 @@ pub fn parse_litellm(body: &str) -> Result<Prices> {
             cache_read: field("cache_read_input_token_cost"),
             cache_write: field("cache_creation_input_token_cost"),
             output,
+            long_context: litellm_tier(entry),
         };
         if is_priced(&rate) {
             seen.entry((provider.to_owned(), id.to_owned()))
@@ -503,7 +709,13 @@ pub fn merge(
         openrouter.keys().chain(litellm.keys()).collect();
     for key in keys {
         let candidate = match (openrouter.get(key), litellm.get(key)) {
-            (Some(a), Some(b)) if a.agrees(b) => (a.clone(), "both"),
+            (Some(a), Some(b)) if a.agrees(b) => (
+                Rate {
+                    long_context: b.long_context,
+                    ..a.clone()
+                },
+                "both",
+            ),
             (Some(a), Some(b)) => {
                 disagreements.push(format!(
                     "{}/{}: openrouter {} vs litellm {}",
@@ -550,6 +762,7 @@ pub fn merge(
             cache_write,
             output,
             source: source.to_owned(),
+            long_context: rate.long_context.map(|t| t.resolve()),
         };
         match rows.get(&(provider.clone(), prefix.clone())) {
             Some(old) if old.source == "manual" => {}
@@ -591,7 +804,11 @@ pub fn merge(
         today.to_owned()
     };
     Ok(Merged {
-        table: Table { read_on, rows },
+        table: Table {
+            read_on,
+            rows,
+            unit_rows: existing.unit_rows.clone(),
+        },
         changes,
         disagreements,
     })
@@ -653,11 +870,14 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     // And the context windows, which rot the same way and more quietly: a row
     // that is too small fails nothing, it just sizes every region for a
     // fraction of the window the run has.
-    let windows = model_windows::parse_litellm_windows(&litellm_body)?;
-    for (label, source) in WINDOW_TABLES {
+    for (label, vendor, source) in WINDOW_TABLES {
+        let windows = model_windows::parse_litellm_windows(&litellm_body, vendor)?;
         for line in model_windows::drift(label, &model_windows::parse_rows(source)?, &windows) {
             println!("? {line}");
         }
+    }
+    for line in stale_unit_rows(&existing, today) {
+        println!("? {line}");
     }
     let added = merged
         .changes
@@ -701,19 +921,33 @@ pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Res
     }
 }
 
-/// The provider tables whose windows are checked, as (label, source).
+/// The provider tables whose windows are checked, as (label, LiteLLM
+/// provider, source).
 ///
-/// The two that carry OpenAI's models. Another vendor's table is checked the
-/// same way the day somebody adds its published windows to the comparison;
-/// reporting on a vendor nothing is compared against would be noise.
-const WINDOW_TABLES: &[(&str, &str)] = &[
+/// The two that carry OpenAI's models, and xAI's and Meta's. Another vendor's
+/// table is checked the same way the day somebody adds its published windows
+/// to the comparison; reporting on a vendor nothing is compared against would
+/// be noise.
+const WINDOW_TABLES: &[(&str, &str, &str)] = &[
     (
+        "openai",
         "openai",
         include_str!("../../crates/leviath-providers/src/openai.rs"),
     ),
     (
         "codex",
+        "openai",
         include_str!("../../crates/leviath-providers/src/codex/catalog.rs"),
+    ),
+    (
+        "xai",
+        "xai",
+        include_str!("../../crates/leviath-providers/src/xai/catalog.rs"),
+    ),
+    (
+        "meta",
+        "meta",
+        include_str!("../../crates/leviath-providers/src/meta.rs"),
     ),
 ];
 

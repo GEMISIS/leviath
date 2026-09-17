@@ -58,6 +58,7 @@ fn rate(input: f64, read: Option<f64>, write: Option<f64>, output: f64) -> Rate 
         cache_read: read,
         cache_write: write,
         output,
+        long_context: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn row(provider: &str, prefix: &str, rates: [f64; 4], source: &str) -> Row {
         cache_write: rates[2],
         output: rates[3],
         source: source.to_owned(),
+        long_context: None,
     }
 }
 
@@ -84,6 +86,7 @@ fn table(read_on: &str, rows: Vec<Row>) -> Table {
             .into_iter()
             .map(|r| ((r.provider.clone(), r.prefix.clone()), r))
             .collect(),
+        unit_rows: Vec::new(),
     }
 }
 
@@ -95,7 +98,9 @@ fn baseline() -> (Prices, Prices) {
     for (p, id) in [
         ("anthropic", "claude-base"),
         ("google", "gemini-base"),
+        ("meta", "muse-spark-base"),
         ("openai", "gpt-base"),
+        ("xai", "grok-base"),
     ] {
         or.insert(key(p, id), rate(1.0, Some(0.1), None, 4.0));
         ll.insert(key(p, id), rate(1.0, Some(0.1), None, 4.0));
@@ -123,7 +128,7 @@ fn mode_parses_write_check_and_rejects_the_rest() {
 // ── OpenRouter parser ────────────────────────────────────────────────────────
 
 #[test]
-fn openrouter_keeps_the_three_vendors_per_million_and_normalises_anthropic() {
+fn openrouter_keeps_the_vendors_per_million_and_normalises_anthropic() {
     let body = openrouter_body(&[
         or_model("anthropic/claude-opus-4.8", "0.000005", "0.000025", Some("0.0000005"), Some("0.00000625")),
         or_model("openai/gpt-5.5", "0.000005", "0.00003", Some("0.0000005"), None),
@@ -144,6 +149,7 @@ fn openrouter_keeps_the_three_vendors_per_million_and_normalises_anthropic() {
             &key("anthropic", "claude-opus-4-8"),
             &key("google", "gemini-3.5-flash"),
             &key("openai", "gpt-5.5"),
+            &key("xai", "grok-4.6"),
         ]
     );
     let opus = &prices[&key("anthropic", "claude-opus-4-8")];
@@ -335,7 +341,7 @@ fn agreement_within_five_percent_writes_both_at_openrouters_figure() {
     assert_eq!(row.source, "both");
     assert_eq!(merged.table.read_on, "2026-08-29");
     assert!(merged.disagreements.is_empty());
-    assert_eq!(merged.changes.len(), 4, "three baseline rows plus this one");
+    assert_eq!(merged.changes.len(), 6, "five baseline rows plus this one");
 }
 
 #[test]
@@ -675,6 +681,14 @@ fn fixture_openrouter() -> String {
             Some("0.00000015"),
             Some("0.00000004"),
         ),
+        or_model(
+            "meta/muse-spark-1.3",
+            "0.00000125",
+            "0.00000425",
+            Some("0.00000015"),
+            None,
+        ),
+        or_model("x-ai/grok-4.3", "0.000002", "0.00001", None, None),
     ])
 }
 
@@ -705,6 +719,24 @@ fn fixture_litellm() -> String {
             Some(1.5e-6),
             Some(9e-6),
             Some(1.5e-7),
+            None,
+        ),
+        ll_entry(
+            "meta/muse-spark-1.3",
+            "meta",
+            "chat",
+            Some(1.25e-6),
+            Some(4.25e-6),
+            Some(1.5e-7),
+            None,
+        ),
+        ll_entry(
+            "xai/grok-4.3",
+            "xai",
+            "chat",
+            Some(2e-6),
+            Some(1e-5),
+            None,
             None,
         ),
     ])
@@ -739,10 +771,10 @@ const EMPTY_FILE: &str = "read_on = \"2026-01-01\"\n";
 fn write_mode_rewrites_the_file_and_stamps_today() {
     let (_dir, path) = scratch_file(EMPTY_FILE);
     let outcome = run_with(PricesMode::Write, fixture_fetch, &path, "2026-08-29").unwrap();
-    assert_eq!(outcome, Outcome::Changed(3));
+    assert_eq!(outcome, Outcome::Changed(5));
     let written = parse_table(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(written.read_on, "2026-08-29");
-    assert_eq!(written.rows.len(), 3);
+    assert_eq!(written.rows.len(), 5);
     let gemini = &written.rows[&key("google", "gemini-3.5-flash")];
     assert_eq!(gemini.cache_write, 1.5, "storage figure rejected");
     assert_eq!(gemini.source, "both");
@@ -762,7 +794,7 @@ fn write_mode_rewrites_the_file_and_stamps_today() {
 fn check_mode_fails_when_the_file_would_change_and_touches_nothing() {
     let (_dir, path) = scratch_file(EMPTY_FILE);
     let err = run_with(PricesMode::Check, fixture_fetch, &path, "2026-08-29").unwrap_err();
-    assert!(err.to_string().contains("would change (3 rows)"), "{err}");
+    assert!(err.to_string().contains("would change (5 rows)"), "{err}");
     assert!(!is_network_error(&err));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), EMPTY_FILE);
 }
@@ -827,4 +859,162 @@ fn the_network_error_reads_as_one() {
     let err = NetworkError("x".to_owned());
     assert_eq!(err.to_string(), "network: x");
     assert!(std::error::Error::source(&err).is_none());
+}
+
+// ── New vendors, tiers and unit rows ────────────────────────────────────────
+
+#[test]
+fn openrouter_ids_map_x_ai_to_xai_and_keep_only_metas_served_models() {
+    assert_eq!(
+        openrouter_model("x-ai/grok-4.3", &PROVIDERS),
+        Some(key("xai", "grok-4.3"))
+    );
+    assert_eq!(
+        openrouter_model("meta/muse-spark-1.3", &PROVIDERS),
+        Some(key("meta", "muse-spark-1.3"))
+    );
+    assert_eq!(openrouter_model("meta/muse-glimmer-30b", &PROVIDERS), None);
+    assert_eq!(openrouter_model("meta-llama/llama-4", &PROVIDERS), None);
+    assert_eq!(openrouter_model("x-ai/grok-4.3:batch", &PROVIDERS), None);
+    assert_eq!(openrouter_model("no-slash", &PROVIDERS), None);
+}
+
+#[test]
+fn litellm_reads_the_new_vendors_and_the_smallest_long_context_tier() {
+    let tiered = "\"xai/grok-4.3\": {\"litellm_provider\": \"xai\", \"mode\": \"chat\", \
+        \"input_cost_per_token\": 2e-6, \"output_cost_per_token\": 1e-5, \
+        \"input_cost_per_token_above_200k_tokens\": 4e-6, \"output_cost_per_token_above_200k_tokens\": 2e-5, \
+        \"cache_read_input_token_cost_above_200k_tokens\": 1e-6, \
+        \"input_cost_per_token_above_500k_tokens\": 8e-6, \"output_cost_per_token_above_500k_tokens\": 4e-5, \
+        \"input_cost_per_token_above_xk_tokens\": 1e-6}"
+        .to_owned();
+    let half = "\"meta/muse-spark-1.3\": {\"litellm_provider\": \"meta\", \"mode\": \"chat\", \
+        \"input_cost_per_token\": 1.25e-6, \"output_cost_per_token\": 4.25e-6, \
+        \"input_cost_per_token_above_128k_tokens\": 2e-6}"
+        .to_owned();
+    let glimmer = ll_entry(
+        "meta/muse-glimmer-30b",
+        "meta",
+        "chat",
+        Some(1e-7),
+        Some(2e-7),
+        None,
+        None,
+    );
+    let prices = parse_litellm(&litellm_body(&[tiered, half, glimmer])).unwrap();
+    assert_eq!(prices.len(), 2, "Glimmer is not served by Meta's API");
+    let grok = &prices[&key("xai", "grok-4.3")];
+    let tier = grok.long_context.expect("a tier");
+    assert_eq!(tier.threshold, 200_000);
+    assert_eq!(tier.input, 4.0);
+    assert_eq!(tier.cache_read, Some(1.0));
+    assert_eq!(tier.cache_write, None);
+    assert_eq!(tier.output, 20.0);
+    assert_eq!(
+        prices[&key("meta", "muse-spark-1.3")].long_context,
+        None,
+        "a tier with no output price is no tier"
+    );
+}
+
+#[test]
+fn a_tier_rides_on_the_row_whichever_source_vouched_and_renders_back() {
+    let (mut or, mut ll) = baseline();
+    let tier = TierRate {
+        threshold: 200_000,
+        input: 4.0,
+        cache_read: None,
+        cache_write: Some(1.0),
+        output: 20.0,
+    };
+    or.insert(key("xai", "grok-4.3"), rate(2.0, None, None, 10.0));
+    ll.insert(
+        key("xai", "grok-4.3"),
+        Rate {
+            long_context: Some(tier),
+            ..rate(2.0, None, None, 10.0)
+        },
+    );
+    let merged = merge(&empty_table(), &or, &ll, "2026-09-16").unwrap();
+    let row = &merged.table.rows[&key("xai", "grok-4.3")];
+    assert_eq!(row.source, "both");
+    assert_eq!(
+        row.long_context,
+        Some(Tier {
+            threshold: 200_000,
+            input: 4.0,
+            cache_read: 4.0,
+            cache_write: 4.0,
+            output: 20.0,
+        }),
+        "the cache sides default the way a row's do"
+    );
+    let change = merged
+        .changes
+        .iter()
+        .find(|c| matches!(c, Change::Added(r) if r.prefix == "grok-4.3"))
+        .unwrap();
+    assert!(
+        change.to_string().contains("+4.0/4.0/4.0/20.0 from 200000"),
+        "{change}"
+    );
+
+    let mut with_units = merged.table.clone();
+    with_units.unit_rows.push(UnitRow {
+        provider: "meta".into(),
+        prefix: "muse-image-1.0".into(),
+        unit: "image".into(),
+        usd: 0.01,
+        source: "manual".into(),
+        checked_on: "2026-09-16".into(),
+    });
+    let text = render_table(&with_units);
+    assert!(
+        text.contains("[rate.long_context]\nthreshold = 200000\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[[unit_rate]]\nprovider = \"meta\""),
+        "{text}"
+    );
+    assert_eq!(parse_table(&text).unwrap(), with_units);
+}
+
+#[test]
+fn unit_rows_survive_a_refresh_and_an_old_one_is_reported() {
+    let mut existing = empty_table();
+    existing.unit_rows = vec![
+        UnitRow {
+            provider: "xai".into(),
+            prefix: "grok-tts".into(),
+            unit: "million_chars".into(),
+            usd: 15.0,
+            source: "manual".into(),
+            checked_on: "2026-01-01".into(),
+        },
+        UnitRow {
+            provider: "meta".into(),
+            prefix: "muse-image-1.0".into(),
+            unit: "image".into(),
+            usd: 0.01,
+            source: "manual".into(),
+            checked_on: "2026-09-01".into(),
+        },
+        UnitRow {
+            provider: "meta".into(),
+            prefix: "muse-voice".into(),
+            unit: "audio_hour".into(),
+            usd: 0.18,
+            source: "manual".into(),
+            checked_on: "someday".into(),
+        },
+    ];
+    let (or, ll) = baseline();
+    let merged = merge(&existing, &or, &ll, "2026-09-16").unwrap();
+    assert_eq!(merged.table.unit_rows, existing.unit_rows);
+    let stale = stale_unit_rows(&existing, "2026-09-16");
+    assert_eq!(stale.len(), 2, "{stale:?}");
+    assert!(stale[0].contains("xai/grok-tts"));
+    assert!(stale[1].contains("'someday'"));
+    assert!(stale_unit_rows(&existing, "not a day").is_empty());
 }

@@ -7,10 +7,13 @@
 //! a finished task keeps its GLB. The provider around it is the thin HTTP
 //! orchestration (submit, poll, download) over these.
 
+use crate::media::{
+    data_uris as mime_data_uris, extra_bool, extra_f64, extra_i64, extra_str, request_text,
+};
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::ModelMime;
-use crate::provider::{ContentBlock, InferenceRequest, MessageContent, ProviderError, Result};
+use crate::provider::{InferenceRequest, ProviderError, Result};
 
 /// The most texture-prompt characters Meshy accepts.
 const MAX_TEXTURE_PROMPT: usize = 800;
@@ -357,106 +360,6 @@ fn input_model(request: &InferenceRequest) -> Option<String> {
         .next()
 }
 
-/// Every hydrated mime block whose type passes `want`, as a `data:` URI.
-fn mime_data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut uris = Vec::new();
-    for message in &request.messages {
-        let MessageContent::Blocks(blocks) = &message.content else {
-            continue;
-        };
-        for block in blocks {
-            if let ContentBlock::Mime { part, data, .. } = block
-                && !data.is_empty()
-                && want(part.mime_type.as_str())
-            {
-                uris.push(crate::mime::data_uri(&part.mime_type, data));
-            }
-        }
-    }
-    uris
-}
-
-/// The plain text of a request, across its text blocks and plain messages.
-///
-/// The texture prompt an upstream stage wrote lands here, as the text of the
-/// region it wrote it to; it is the dynamic hint the operation textures with.
-fn request_text(request: &InferenceRequest) -> String {
-    // Assembly emits a stored part as a pointer text block ("[region] [mime,
-    // size] name") beside its bytes block. That pointer is not the user's
-    // prompt, so exclude any text carrying a stored part's stand-in, or the
-    // texture prompt and the animation action would be the mesh's file line
-    // rather than "weathered bronze" or "walk".
-    let stand_ins: Vec<&str> = request
-        .messages
-        .iter()
-        .filter_map(|m| match &m.content {
-            MessageContent::Blocks(blocks) => Some(blocks),
-            MessageContent::Text(_) => None,
-        })
-        .flatten()
-        .filter_map(|b| match b {
-            ContentBlock::Mime { part, .. } => Some(part.stand_in.as_str()),
-            _ => None,
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    let is_pointer = |text: &str| stand_ins.iter().any(|s| text.contains(s));
-
-    let mut chunks = Vec::new();
-    for message in &request.messages {
-        match &message.content {
-            MessageContent::Text(text) => {
-                if !is_pointer(text) {
-                    chunks.push(text.clone());
-                }
-            }
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    if let ContentBlock::Text { text } = block
-                        && !is_pointer(text)
-                    {
-                        chunks.push(text.clone());
-                    }
-                }
-            }
-        }
-    }
-    // A pinned region renders into the system prompt, not a message, so a
-    // task or prompt that lives in one never reached here and every such
-    // stage ran on the default action or refused for want of a prompt. With
-    // no message text, read the system blocks instead: only the ones a region
-    // produced (a hint carries no region), never the runtime's own
-    // instruction blocks, and never a region whose text is a stored part's
-    // stand-in. Message text still wins when there is any, so a prompt an
-    // upstream stage wrote into a conversation is not diluted by the task.
-    if chunks.is_empty() {
-        for block in &request.system {
-            if block.region.is_empty() || RUNTIME_REGIONS.contains(&block.region.as_str()) {
-                continue;
-            }
-            let body = unlabelled(&block.text, &block.region);
-            if !is_pointer(body) && !body.trim().is_empty() {
-                chunks.push(body.to_string());
-            }
-        }
-    }
-    chunks.join("\n").trim().to_string()
-}
-
-/// Regions the runtime writes for its own purposes, whose text is never a
-/// prompt: the stage's standing instructions, and the mirrored final answer.
-const RUNTIME_REGIONS: &[&str] = &["stage_instructions", "final_output"];
-
-/// A region's system block without the `## <region>` heading assembly puts
-/// on it, so the prompt is the region's text and not its label. A block
-/// carrying no such heading is returned whole.
-fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
-    text.strip_prefix("## ")
-        .and_then(|rest| rest.strip_prefix(region))
-        .and_then(|rest| rest.strip_prefix('\n'))
-        .unwrap_or(text)
-}
-
 /// Add the texture prompt to a create body, from the explicit hint or, when
 /// that is unset, the request text, capped at Meshy's limit.
 fn apply_texture(body: &mut Map<String, Value>, request: &InferenceRequest) {
@@ -505,36 +408,10 @@ fn apply_texture_hints(body: &mut Map<String, Value>, request: &InferenceRequest
     }
 }
 
-/// A non-empty string hint from `request.extra`.
-fn extra_str(request: &InferenceRequest, key: &str) -> Option<String> {
-    request
-        .extra
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// An integer hint from `request.extra`.
-fn extra_i64(request: &InferenceRequest, key: &str) -> Option<i64> {
-    request.extra.get(key).and_then(Value::as_i64)
-}
-
-/// A floating-point hint from `request.extra`.
-fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
-    request.extra.get(key).and_then(Value::as_f64)
-}
-
-/// A boolean hint from `request.extra`.
-fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> {
-    request.extra.get(key).and_then(Value::as_bool)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{InferenceRequest, Message, MessageContent};
+    use crate::provider::{ContentBlock, InferenceRequest, Message, MessageContent};
     use leviath_core::mime::{BlobRef, MimeType};
 
     fn empty_request() -> InferenceRequest {

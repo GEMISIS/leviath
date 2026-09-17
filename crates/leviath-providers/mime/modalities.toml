@@ -8,7 +8,7 @@
 # overwrites. A model no row matches falls to the name heuristic in
 # `mime_tables`, which is the floor these rows lift.
 
-read_on = "2026-09-11"
+read_on = "2026-09-17"
 
 [[modality]]
 provider = "anthropic"
@@ -316,6 +316,41 @@ provider = "google"
 prefix = "lyria-3-pro-preview"
 input = ["text/*", "image/*"]
 output = ["text/*", "audio/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "meta"
+prefix = "muse-spark-1.1"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "meta"
+prefix = "muse-spark-1.2"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "meta"
+prefix = "muse-spark-1.2-contributor"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "meta"
+prefix = "muse-spark-1.3"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "meta"
+prefix = "muse-spark-1.3-contributor"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
 source = "openrouter"
 
 [[modality]]
@@ -738,3 +773,44 @@ input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
 source = "openrouter"
 
+[[modality]]
+provider = "xai"
+prefix = "grok-4.20"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-4.20-multi-agent"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-4.3"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-4.5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-4.6"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-build-0.1"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
