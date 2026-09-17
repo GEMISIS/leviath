@@ -174,6 +174,13 @@ pub struct MimeConfig {
     /// Seconds a part uploaded to a provider's file storage lives there.
     #[serde(default = "default_provider_file_ttl_secs")]
     pub provider_file_ttl_secs: u64,
+
+    /// Whether a part a run produced, handed back as an artifact, may replace
+    /// a different file already at the path it names. Off, the part is written
+    /// beside it under a name carrying its hash. A blueprint's
+    /// `overwrite_artifacts` wins over this.
+    #[serde(default)]
+    pub overwrite_artifacts: bool,
 }
 
 fn default_provider_file_ttl_secs() -> u64 {
@@ -195,6 +202,7 @@ impl Default for MimeConfig {
             inline_text_bytes: DEFAULT_INLINE_TEXT_BYTES,
             max_media_bytes_per_request: DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST,
             provider_file_ttl_secs: DAEMON_DEFAULTS.provider_file_ttl_secs,
+            overwrite_artifacts: DAEMON_DEFAULTS.overwrite_artifacts,
         }
     }
 }
@@ -638,6 +646,7 @@ mod tests {
         assert_eq!(parsed.inline_text_bytes, 1024 * 1024);
         assert_eq!(parsed.max_media_bytes_per_request, 20 * 1024 * 1024);
         assert_eq!(parsed.provider_file_ttl_secs, 86_400);
+        assert!(!parsed.overwrite_artifacts);
     }
 
     #[test]
@@ -670,5 +679,7 @@ mod tests {
         assert_eq!(parsed.max_media_bytes_per_request, 2);
         let back = toml::to_string(&parsed).unwrap();
         assert!(back.contains("max_media_bytes_per_request = 2"));
+        let parsed: MimeConfig = toml::from_str("overwrite_artifacts = true\n").unwrap();
+        assert!(parsed.overwrite_artifacts);
     }
 }

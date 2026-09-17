@@ -239,6 +239,7 @@ Authorization = "Bearer ${MY_MCP_TOKEN}"
 inline_text_bytes = 1048576        # text kept inside the entry before it is stored by hash
 max_media_bytes_per_request = 20971520  # stored media one request carries, where a provider names no limit
 provider_file_ttl_secs = 86400     # how long an upload lives in a provider's file storage
+overwrite_artifacts = false        # let a produced artifact replace a different file at its path
 
 # Rows added to the mime registry live in mime_types.toml beside this
 # file (`lev mime init` writes an example). A [mime_types] table here

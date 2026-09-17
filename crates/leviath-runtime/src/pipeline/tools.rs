@@ -638,6 +638,11 @@ pub(crate) fn dispatch_tools(
                         stage_names: &stage_names,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
                         sink: part_sink.as_ref(),
+                        overwrite_artifacts: stage_inf
+                            .output
+                            .as_ref()
+                            .and_then(|s| s.overwrite_artifacts)
+                            .unwrap_or_else(|| mime.overwrite_artifacts()),
                     },
                     chrono::Utc::now().timestamp(),
                     &mut window,

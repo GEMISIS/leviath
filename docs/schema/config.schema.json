@@ -995,6 +995,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Seconds a part uploaded to a provider's file storage lives there before the vendor deletes it, clamped to what each vendor takes (at least an hour). A run's uploads are also deleted when it finishes. Default 86400 (a day)."
+        },
+        "overwrite_artifacts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a part a run produced, handed back as an artifact, may replace a different file already at the path it names in the working directory. Off, that file is left alone and the part is written beside it as <stem>-<sha8>.<ext>, which is the path the answer records. A blueprint's output overwrite_artifacts wins over this."
         }
       }
     },

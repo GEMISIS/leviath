@@ -1,9 +1,10 @@
 //! The files a submission names, checked against what the stage declared.
 //!
-//! An artifact is named by path (the old shape) or by `{ name, path, type }`.
-//! Every path must resolve inside the workdir and name a file that exists;
-//! every declared `required` artifact must be present; an artifact that a
-//! declaration names must be of the declared type. What survives is typed
+//! An artifact is named by path or by `{ name, path, type }`. Every path must
+//! resolve inside the workdir and name either a part the run produced, which is
+//! written to disk, or a file that exists; every declared `required` artifact
+//! must be present; an artifact that a declaration names must be of the
+//! declared type. What survives is typed
 //! by the registry (a declared type wins), hashed, and stored as a part of
 //! the run when it fits the size ceiling, so a later stage and the API see
 //! the file the way they see any other part.
@@ -21,6 +22,9 @@ pub(super) struct Ingested {
     /// The stored parts, for the `final_output` region. One per record the
     /// store took; a file over the ceiling has a record and no part.
     pub parts: Vec<Part>,
+    /// One sentence per produced part written beside a different file rather
+    /// than over it, for the acknowledgement.
+    pub moved: Vec<String>,
 }
 
 /// One named entry of the `artifacts` argument, before it is checked.
@@ -81,40 +85,75 @@ fn listed(args: &serde_json::Value) -> Result<Vec<Named>, String> {
     Ok(out)
 }
 
-/// Resolve `name_or_sha` against the parts the run has already produced and,
-/// when it names one, write that part's bytes to `dest` so the submission has a
-/// real file to record. Named by the one rule every tool uses
-/// ([`Part::is_named`]), newest match first. Returns the bytes written, or the
-/// same shape of error the caller gives for a missing workdir file.
-fn materialize_produced(
+/// The bytes and hash of the part this run produced that `name_or_sha` names,
+/// by the one rule every tool uses ([`Part::is_named`]), newest match first.
+/// `None` when no part is named or there is no store to read one from.
+fn produced_part(
     name_or_sha: &str,
-    dest: &std::path::Path,
     produced: &[Part],
     sink: Option<&PartSink<'_>>,
-) -> Result<Vec<u8>, String> {
-    let missing = || {
-        format!(
-            "[error] artifact '{name_or_sha}' is neither a file in the working directory nor a \
-             part this run produced. Write the file before naming it, or name a produced part."
-        )
-    };
+) -> Result<Option<(Vec<u8>, String)>, String> {
     let blob = produced
         .iter()
         .rev()
         .find(|p| p.is_named(name_or_sha))
         .and_then(Part::blob);
     let (Some(blob), Some(sink)) = (blob, sink) else {
-        return Err(missing());
+        return Ok(None);
     };
     let bytes = sink.store.read(sink.run_id, &blob.sha256).map_err(|e| {
         format!("[error] artifact '{name_or_sha}' could not be read from the run's store: {e}")
     })?;
+    Ok(Some((bytes.to_vec(), blob.sha256.clone())))
+}
+
+/// Put a produced part on disk at the path the submission named, so the user
+/// and any later stage get a real file, and return the path to record.
+///
+/// A file already there that holds other bytes may be the user's own, or an
+/// earlier run's answer left in a shared working directory. It is replaced only
+/// when `overwrite` says so; otherwise the part is written beside it as
+/// `<stem>-<sha8>.<ext>` and that path is the one recorded, so the record's
+/// path and hash always describe the same bytes.
+fn place_produced(
+    path: &str,
+    full: &std::path::Path,
+    bytes: &[u8],
+    sha256: &str,
+    overwrite: bool,
+) -> Result<String, String> {
+    let (path, dest) = match std::fs::read(full) {
+        Ok(existing) if sha256_hex(&existing) == sha256 => return Ok(path.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (path.to_string(), full.to_path_buf())
+        }
+        _ if overwrite => (path.to_string(), full.to_path_buf()),
+        _ => {
+            let named = std::path::Path::new(path);
+            let stem = named
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let sha8: String = sha256.chars().take(8).collect();
+            let beside = match named.extension() {
+                Some(ext) => format!("{stem}-{sha8}.{}", ext.to_string_lossy()),
+                None => format!("{stem}-{sha8}"),
+            };
+            // Spelled with the separator the submission used, so the recorded
+            // path reads the way the model wrote it.
+            let dir_len = path.rfind(std::path::is_separator).map_or(0, |i| i + 1);
+            (
+                format!("{}{beside}", path.get(..dir_len).unwrap_or_default()),
+                full.with_file_name(&beside),
+            )
+        }
+    };
     // Written to the path as given, whose directory must exist - the same as a
     // regular artifact, which is a file already on disk. A name with a missing
     // parent fails here with the reason, rather than silently making the tree.
-    std::fs::write(dest, bytes.as_ref())
-        .map_err(|e| format!("[error] artifact '{name_or_sha}' could not be written: {e}"))?;
-    Ok(bytes.to_vec())
+    std::fs::write(&dest, bytes)
+        .map_err(|e| format!("[error] artifact '{path}' could not be written: {e}"))?;
+    Ok(path)
 }
 
 /// Check, type, hash and store the artifacts a submission names.
@@ -124,6 +163,7 @@ pub(super) fn resolve(
     declared: &[ArtifactSpec],
     produced: &[Part],
     sink: Option<&PartSink<'_>>,
+    overwrite: bool,
 ) -> Result<Ingested, String> {
     let named = listed(args)?;
     if named.is_empty() {
@@ -142,6 +182,7 @@ pub(super) fn resolve(
         return Ok(Ingested {
             records: Vec::new(),
             parts: Vec::new(),
+            moved: Vec::new(),
         });
     }
     // No workdir means nothing to resolve against, so nothing can be verified.
@@ -164,6 +205,7 @@ pub(super) fn resolve(
     };
     let mut records = Vec::new();
     let mut parts = Vec::new();
+    let mut moved = Vec::new();
     for item in named {
         let full = workdir.join(&item.path);
         if !leviath_core::resolves_within(&full, workdir) {
@@ -172,22 +214,41 @@ pub(super) fn resolve(
                 item.path
             ));
         }
-        let bytes = match std::fs::read(&full) {
-            Ok(b) => b,
-            // Not a file in the workdir. It may still be a part the run
-            // produced (an image a model drew) that never touched disk: name,
-            // then sha, resolves it, and it is written to the named path so
-            // the user and any later stage get a real file.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                materialize_produced(&item.path, &full, produced, sink)?
+        // A part the run produced (an image a model drew, a mesh a provider
+        // built) is looked for first, by name and then sha, because a file of
+        // the same name on disk may not be this run's at all. Only a name no
+        // part answers to is read from the workdir, as a file the run wrote.
+        let (bytes, path) = match produced_part(&item.path, produced, sink)? {
+            Some((bytes, sha256)) => {
+                let path = place_produced(&item.path, &full, &bytes, &sha256, overwrite)?;
+                if path != item.path {
+                    moved.push(format!(
+                        "'{}' already held a different file, so '{}' was written beside it \
+                         as '{path}'",
+                        item.path,
+                        item.name.as_deref().unwrap_or(&item.path)
+                    ));
+                }
+                (bytes, path)
             }
-            Err(e) => {
-                return Err(format!(
-                    "[error] artifact '{}' could not be read: {e}. Write the file before \
-                     naming it.",
-                    item.path
-                ));
-            }
+            None => match std::fs::read(&full) {
+                Ok(bytes) => (bytes, item.path.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(format!(
+                        "[error] artifact '{}' is neither a file in the working directory nor \
+                         a part this run produced. Write the file before naming it, or name a \
+                         produced part.",
+                        item.path
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "[error] artifact '{}' could not be read: {e}. Write the file before \
+                         naming it.",
+                        item.path
+                    ));
+                }
+            },
         };
         // A path that read as a file has a final component.
         let file_name = full
@@ -218,7 +279,7 @@ pub(super) fn resolve(
         records.retain(|r: &Artifact| r.name != name);
         records.push(Artifact {
             name,
-            path: item.path,
+            path,
             mime_type,
             size,
             sha256,
@@ -235,7 +296,11 @@ pub(super) fn resolve(
             missing.join(", ")
         ));
     }
-    Ok(Ingested { records, parts })
+    Ok(Ingested {
+        records,
+        parts,
+        moved,
+    })
 }
 
 #[cfg(test)]
@@ -283,7 +348,7 @@ mod tests {
             "big.bin",
             "",
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink)).unwrap();
+        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink), false).unwrap();
         let names: Vec<&str> = out.records.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["final", "notes.md", "notes", "big.bin"]);
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
@@ -304,10 +369,10 @@ mod tests {
         let args = json!({"artifacts": [
             {"name": "final", "path": "cut.mp4"}, {"name": "final", "path": "cut.mp4"}
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink)).unwrap();
+        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink), false).unwrap();
         assert_eq!(out.records.len(), 1);
         // Without a sink: typed by the built-in registry, nothing stored.
-        let out = resolve(&args, Some(dir.path()), &[], &[], None).unwrap();
+        let out = resolve(&args, Some(dir.path()), &[], &[], None, false).unwrap();
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert!(out.parts.is_empty());
     }
@@ -344,14 +409,22 @@ mod tests {
             (json!({"artifacts": ["missing.mp4"]}), "neither a file"),
         ];
         for (args, expect) in cases {
-            let err = resolve(&args, Some(dir.path()), &specs(), &[], None).unwrap_err();
+            let err = resolve(&args, Some(dir.path()), &specs(), &[], None, false).unwrap_err();
             assert!(err.contains(expect), "{args}: {err}");
         }
-        let err = resolve(&json!({"artifacts": ["notes.md"]}), None, &[], &[], None).unwrap_err();
+        let err = resolve(
+            &json!({"artifacts": ["notes.md"]}),
+            None,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("working directory"), "{err}");
         // Nothing declared, nothing named: nothing to check.
         assert!(
-            resolve(&json!({}), None, &[], &[], None)
+            resolve(&json!({}), None, &[], &[], None, false)
                 .unwrap()
                 .records
                 .is_empty()
@@ -394,6 +467,7 @@ mod tests {
             &[],
             &[],
             Some(&sink),
+            false,
         )
         .unwrap();
         assert_eq!(out.records.len(), 1);

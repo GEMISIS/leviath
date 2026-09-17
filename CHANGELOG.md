@@ -214,6 +214,13 @@ same list.
 
 ### Fixed
 
+- A run that hands back a file a model or provider made (a mesh, an image)
+  hands back its own file, not one an earlier run of the same agent left in
+  the working directory under the same name. The run's part is looked for
+  before the disk, and a different file already at that path is left alone:
+  the part is written beside it as `<stem>-<sha8>.<ext>`, and that is the path
+  the answer records. Set `overwrite_artifacts = true` in the blueprint's
+  output table, or in `[mime]` in `config.toml`, to replace the file instead.
 - An OpenAI-compatible endpoint can talk to OpenAI's reasoning models. They
   refuse `max_tokens` with `400 unsupported_parameter`; the request is sent
   again with the cap as `max_completion_tokens`, and the model is remembered.

@@ -194,6 +194,16 @@ impl MimeParams<'_, '_> {
                 l.inline_text_bytes
             })
     }
+
+    /// Whether a produced part may replace a different file an artifact names,
+    /// when the blueprint leaves it to the operator.
+    pub fn overwrite_artifacts(&self) -> bool {
+        self.limits
+            .as_deref()
+            .map_or(MimeLimits::default().overwrite_artifacts, |l| {
+                l.overwrite_artifacts
+            })
+    }
 }
 
 /// The operator's ceilings on typed parts, from `[mime]` in the config.
@@ -209,6 +219,9 @@ pub struct MimeLimits {
     /// Seconds a part uploaded to a provider's file storage lives there
     /// before the vendor deletes it, clamped to what each vendor takes.
     pub provider_file_ttl_secs: u64,
+    /// Whether a produced part handed back as an artifact may replace a
+    /// different file at the path it names, for a blueprint that does not say.
+    pub overwrite_artifacts: bool,
 }
 
 impl MimeLimits {
@@ -227,6 +240,9 @@ impl MimeLimits {
         // vendor's range, and short enough that a daemon that died before
         // deleting leaves nothing for long.
         provider_file_ttl_secs: 86_400,
+        // A file already in the working directory may be the user's, or a
+        // previous run's answer: leave it be.
+        overwrite_artifacts: false,
     };
 }
 
@@ -667,5 +683,20 @@ mod tests {
         });
         let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
         assert_eq!(state.get(&world).unwrap().provider_file_ttl_secs(), 7);
+    }
+
+    #[test]
+    fn the_overwrite_policy_is_off_until_the_operator_turns_it_on() {
+        let mut world = World::new();
+        {
+            let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+            assert!(!state.get(&world).unwrap().overwrite_artifacts());
+        }
+        world.insert_resource(MimeLimits {
+            overwrite_artifacts: true,
+            ..MimeLimits::DEFAULT
+        });
+        let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
+        assert!(state.get(&world).unwrap().overwrite_artifacts());
     }
 }

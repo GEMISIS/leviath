@@ -954,6 +954,7 @@ Ceilings on typed mime parts: the images, audio, video, documents and models tha
 inline_text_bytes = 1048576             # text kept inside the entry before it is stored by hash
 max_media_bytes_per_request = 20971520  # stored media one request carries, where a provider names no limit (20 MiB)
 provider_file_ttl_secs = 86400          # how long an upload lives in a provider's file storage (a day)
+overwrite_artifacts = false             # let a produced artifact replace a different file at its path
 ```
 
 A part over `max_part_bytes` is refused where it arrives, whether that is an upload, a tool
@@ -966,6 +967,14 @@ for the vendor request-size limits a token budget cannot see: an image's token e
 same whatever its byte size, so a request can sit inside its context window and still be
 megabytes of media on the wire. Past it, the oldest stored parts are sent as their stand-ins
 instead, with a warning in the run's log.
+
+`overwrite_artifacts` is about a file a run made that never touched disk, like an image a model
+drew or a mesh a provider built. When the run hands it back as an artifact, it is written into
+the working directory under the name it was given. If a different file is already there, maybe
+yours or a previous run's answer, it is left alone by default and the new one is written beside
+it as `<stem>-<sha8>.<ext>`. The answer records that path. Set this to `true` to replace the
+file instead. A blueprint can decide for itself with
+[`overwrite_artifacts`](/docs/outputs#large-results) in its output table, and that wins over this.
 
 <a id="mime_typestypesubtype"></a>
 

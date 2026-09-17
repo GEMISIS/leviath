@@ -331,6 +331,10 @@
           "default": "reject",
           "description": "What happens to a submission when the validator itself cannot run: it threw, ran out of operations, or returned the wrong type. reject (the default) refuses the submission and sends the script's error back to the model as retry feedback; accept records the answer unchecked. The broken script is flagged on the run either way."
         },
+        "overwrite_artifacts": {
+          "type": "boolean",
+          "description": "Whether an artifact named after a part the run produced (an image a model drew, a mesh a provider built) may replace a different file already at that path in the working directory. Unset defers to [mime] overwrite_artifacts in the user's config, which defaults to false: the existing file is left alone and the part is written beside it as <stem>-<sha8>.<ext>, which is the path the answer records."
+        },
         "artifacts": {
           "type": "array",
           "description": "Files the stage hands back beside its answer, by name and type. A submission is checked against them: a required one must be present, and one that is present must be of the declared type. Accepted files are stored as parts of the run and served by the API.",

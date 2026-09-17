@@ -6281,6 +6281,100 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
     assert!(store.has(&agent_state().agent_id, &recorded.0.artifacts[0].sha256));
 }
 
+/// Whether a produced part may replace a different file at the path it is
+/// submitted under: the stage's `overwrite_artifacts` when it says, else the
+/// operator's `[mime]` value, else no.
+#[tokio::test]
+async fn the_blueprint_overwrite_policy_wins_over_the_operators() {
+    use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeRegistryHandle};
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let cases = [
+        (None, None, false),
+        (None, Some(true), true),
+        (Some(false), Some(true), false),
+        (Some(true), Some(false), true),
+    ];
+    for (blueprint, operator, replaced) in cases {
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("mesh.glb"), "a previous run's mesh").expect("write");
+        let store = Arc::new(MemoryBlobStore::new());
+        let blob = Blob::new(
+            MimeType::parse("model/gltf-binary").unwrap(),
+            b"glTF new".to_vec(),
+        )
+        .named("mesh.glb");
+        let reference = store
+            .put(&agent_state().agent_id, &blob, &MimeRegistry::builtin())
+            .expect("stored");
+        let mut window = output_window();
+        let content = leviath_core::region::EntryContent::from_parts(vec![
+            Part::stored(reference).named("mesh.glb"),
+        ]);
+        let tokens = content.tokens(None);
+        window
+            .add_assistant_turn_content(
+                "conversation",
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+                None,
+            )
+            .expect("the part lands");
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage::detached(jtx));
+        world.insert_resource(BlobStoreHandle(store));
+        world.insert_resource(MimeRegistryHandle::default());
+        if let Some(overwrite_artifacts) = operator {
+            world.insert_resource(MimeLimits {
+                overwrite_artifacts,
+                ..MimeLimits::DEFAULT
+            });
+        }
+        let (mut offers, result) = infer_with(vec![crate::components::ToolCall {
+            tool_id: "o1".to_string(),
+            name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
+            arguments: serde_json::json!({"content": "done", "artifacts": ["mesh.glb"]}),
+            thought_signature: None,
+        }]);
+        offers.output = Some(leviath_core::output::OutputSpec {
+            overwrite_artifacts: blueprint,
+            ..leviath_core::output::OutputSpec::default()
+        });
+        let e = world
+            .spawn((
+                agent_state(),
+                RunMetadata {
+                    workdir: dir.path().to_string_lossy().to_string(),
+                    ..run_metadata()
+                },
+                offers,
+                result,
+                window,
+                ReadyForTools,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        let recorded = world
+            .get::<crate::persistence::FinalOutput>(e)
+            .expect("recorded");
+        let case = format!("blueprint {blueprint:?}, operator {operator:?}");
+        assert_eq!(
+            recorded.0.artifacts[0].path == "mesh.glb",
+            replaced,
+            "{case}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("mesh.glb")).unwrap() == b"glTF new",
+            replaced,
+            "{case}"
+        );
+    }
+}
+
 /// Artifacts are resolved against the run's working directory, so a submission
 /// naming one only means something when the agent has a workdir to resolve it
 /// in. A path that escapes it is refused, because the answer is handed to a
@@ -14951,6 +15045,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
         schema: None,
         validator: None,
         on_validator_error: None,
+        overwrite_artifacts: None,
         artifacts: Vec::new(),
     };
     let mut s = stage_named("summary", None, false, None);
