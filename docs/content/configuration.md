@@ -1410,7 +1410,7 @@ tool             = "http_post"
 to               = ["https://hooks.internal/*"]
 max_sensitivity  = "internal"   # public | internal | private
 
-[mcp_overrides."github.create_issue"]
+[mcp_overrides."tracker__create_issue"]
 sensitivity = "internal"
 direction   = "outbound"
 clearance   = "internal"
