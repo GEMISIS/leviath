@@ -1,6 +1,6 @@
-//! The Defaults screen's data retention rows: the zero data retention switch
-//! and one agreement toggle per chosen contract provider, and reading them
-//! back out of the form.
+//! The Defaults screen's data retention rows: the zero data retention switch,
+//! one agreement toggle per chosen contract provider, and the file upload
+//! switch, and reading them back out of the form.
 //!
 //! The rows are found by label rather than index: the switch sits after the
 //! Bedrock region row, which comes and goes with the Bedrock selection, so
@@ -11,6 +11,9 @@ use super::{Field, FieldValue, Wizard};
 impl Wizard {
     /// The zero data retention row's label, which is how the row is found.
     pub(super) const ZERO_RETENTION_LABEL: &'static str = "Zero data retention (ZDR)";
+
+    /// The file upload row's label.
+    pub(super) const FILE_UPLOADS_LABEL: &'static str = "Upload media to provider file storage";
 
     /// The providers that settle retention by contract, with the label and
     /// help of the agreement row each gets on the Defaults screen when it
@@ -46,7 +49,12 @@ impl Wizard {
     /// Append the switch and the agreement rows to the Defaults form, with
     /// the values read off the previous form (or the config) by the caller
     /// before it replaced the form.
-    pub(super) fn push_retention_fields(&mut self, zero: bool, agreements: &[String]) {
+    pub(super) fn push_retention_fields(
+        &mut self,
+        zero: bool,
+        agreements: &[String],
+        uploads: bool,
+    ) {
         self.defaults.push(Field {
             label: Self::ZERO_RETENTION_LABEL,
             help: "Ask every provider to keep nothing of your prompts and replies once a \
@@ -69,6 +77,16 @@ impl Wizard {
                 value: FieldValue::Bool(agreements.iter().any(|a| a == id)),
             });
         }
+        self.defaults.push(Field {
+            label: Self::FILE_UPLOADS_LABEL,
+            help: "Put a large image, PDF, clip or recording in the provider's own file \
+                   storage once and name it by id on every later request, rather than \
+                   sending its bytes each turn (Anthropic, xAI, Grok and Meta). A run's \
+                   uploads are deleted when it finishes, and each expires at the provider \
+                   after a day in any case. Zero data retention turns uploads off whatever \
+                   this says, since an upload is data the provider keeps.",
+            value: FieldValue::Bool(uploads),
+        });
     }
 
     /// Whether the row with `id` is selected.
@@ -92,6 +110,13 @@ impl Wizard {
     pub(super) fn current_zero_retention(&self) -> bool {
         self.field_bool(Self::ZERO_RETENTION_LABEL)
             .unwrap_or(self.base.providers.zero_retention)
+    }
+
+    /// Whether parts are uploaded to provider file storage: the switch while
+    /// the form holds it, else what the config says.
+    pub(super) fn current_file_uploads(&self) -> bool {
+        self.field_bool(Self::FILE_UPLOADS_LABEL)
+            .unwrap_or(self.base.providers.file_uploads)
     }
 
     /// The providers an agreement is declared with: each offered row's

@@ -655,6 +655,7 @@ impl Wizard {
         // Read off the form before it is replaced, like the two above.
         let zero = self.current_zero_retention();
         let agreements = self.current_agreements();
+        let uploads = self.current_file_uploads();
         self.defaults = vec![
             Field {
                 label: "Provider priority",
@@ -700,7 +701,7 @@ impl Wizard {
         // The zero data retention switch and the agreement rows, read off
         // the previous form above (their rows move when Bedrock is picked
         // or dropped, so they are found by label; see `retention`).
-        self.push_retention_fields(zero, &agreements);
+        self.push_retention_fields(zero, &agreements, uploads);
         // Re-pick the concurrency default now that the provider choice is
         // settled. Doing this only on an arrow press missed the commonest
         // Ollama case entirely: when it is the *only* provider selected it is
@@ -986,6 +987,7 @@ impl Wizard {
         };
         config.providers.zero_retention = self.current_zero_retention();
         config.providers.zero_retention_agreements = self.current_agreements();
+        config.providers.file_uploads = self.current_file_uploads();
 
         apply_limits_fields(&mut config, &self.limits);
 
@@ -1128,15 +1130,15 @@ pub(super) mod tests {
         let mut wizard = test_wizard(dir.path());
         wizard.providers[0].selected = true;
         wizard.enter(Step::Defaults);
-        // Three fixed rows, the retention switch, and the first provider's
-        // agreement row.
-        assert_eq!(wizard.defaults.len(), 5);
+        // Three fixed rows, the retention switch, the first provider's
+        // agreement row, and the upload switch.
+        assert_eq!(wizard.defaults.len(), 6);
         assert_eq!(wizard.current_bedrock_region(), None);
 
         let bedrock = bedrock_row(&wizard);
         wizard.providers[bedrock].selected = true;
         wizard.enter(Step::Defaults);
-        assert_eq!(wizard.defaults.len(), 6);
+        assert_eq!(wizard.defaults.len(), 7);
         let field = &wizard.defaults[Wizard::REGION_FIELD];
         assert_eq!(field.label, "AWS Bedrock region");
         assert_eq!(field.value.display(), "us-east-1");
@@ -1163,7 +1165,7 @@ pub(super) mod tests {
         );
         wizard.providers[bedrock].selected = false;
         wizard.rebuild_defaults();
-        assert_eq!(wizard.defaults.len(), 5);
+        assert_eq!(wizard.defaults.len(), 6);
         assert_eq!(wizard.build_config().providers.bedrock_region, None);
     }
 
@@ -1200,9 +1202,16 @@ pub(super) mod tests {
             "ZDR agreement with Anthropic"
         );
         assert_eq!(
-            wizard.defaults.len(),
-            zero + 2,
-            "OpenAI is not chosen, so no row"
+            wizard.defaults[zero + 2].label,
+            Wizard::FILE_UPLOADS_LABEL,
+            "OpenAI is not chosen, so no row before the upload switch"
+        );
+        assert_eq!(wizard.defaults.len(), zero + 3);
+        assert!(wizard.current_file_uploads(), "uploads are on by default");
+        assert!(
+            wizard.defaults[zero + 2]
+                .help
+                .contains("Zero data retention turns uploads off")
         );
         assert!(!wizard.current_zero_retention());
         assert_eq!(
@@ -1213,7 +1222,9 @@ pub(super) mod tests {
 
         wizard.defaults[zero].value = FieldValue::Bool(true);
         wizard.defaults[zero + 1].value = FieldValue::Bool(true);
+        wizard.defaults[zero + 2].value = FieldValue::Bool(false);
         let config = wizard.build_config();
+        assert!(!config.providers.file_uploads);
         assert!(config.providers.zero_retention);
         assert_eq!(
             config.providers.zero_retention_agreements,

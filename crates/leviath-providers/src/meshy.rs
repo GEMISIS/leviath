@@ -584,6 +584,7 @@ mod tests {
             data: data.into(),
             name: Some("front.png".into()),
             deliver: None,
+            remote: None,
         }
     }
 

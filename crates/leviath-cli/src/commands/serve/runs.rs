@@ -710,6 +710,7 @@ fn deletable(id: &str, force: bool) -> Result<(), (StatusCode, String)> {
 
 /// Remove a run's directory, having already decided it may go.
 fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
+    runstate::forget_provider_files(id);
     std::fs::remove_dir_all(runstate::run_dir(id)).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

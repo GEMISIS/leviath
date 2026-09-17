@@ -481,6 +481,7 @@ pub(crate) fn retention_settings(
             .collect(),
         provider_declarations,
         request_knob_aliases,
+        file_uploads: config.providers.file_uploads,
     }
 }
 

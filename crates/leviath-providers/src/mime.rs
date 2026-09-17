@@ -182,6 +182,13 @@ pub struct Hydration<'a> {
     pub max_media_bytes: u64,
     /// The bytes for a reference, or `None` when they are missing.
     pub fetch: &'a dyn Fn(&BlobRef) -> Option<Arc<[u8]>>,
+    /// What the provider documents. A part over its inline limit for its type
+    /// becomes its stand-in with the reason, rather than a refused request.
+    pub limits: crate::files::MediaLimits,
+    /// Why a part went inline rather than by file id, said beside a part the
+    /// inline limit held back: zero data retention, or uploads switched off.
+    /// Empty when the provider has no file storage to name.
+    pub why_inline: &'a str,
 }
 
 /// What hydration did, for the run's log.
@@ -198,32 +205,63 @@ pub struct HydrationReport {
     pub capped: usize,
     /// Hashes whose bytes could not be read.
     pub missing: Vec<String>,
+    /// Blocks sent by the id of the vendor's copy.
+    pub by_file: usize,
+    /// Blocks sent as their stand-in because they were over the provider's
+    /// inline limit for their type.
+    pub too_large: usize,
 }
 
 /// What one block should become.
 enum Fate {
     Bytes,
+    Remote,
+    TooLarge(u64),
     Text,
     StandIn,
 }
 
-fn fate(block: &ContentBlock, h: &Hydration<'_>) -> Fate {
+/// Whether the model is sent `block`'s bytes natively (inline or by file id),
+/// as opposed to text or its stand-in. What the runtime asks before it
+/// uploads anything.
+pub fn sends_natively(block: &ContentBlock, mime: &ModelMime) -> bool {
     let ContentBlock::Mime { part, deliver, .. } = block else {
-        return Fate::StandIn;
+        return false;
     };
     match deliver {
-        Some(Delivery::Text) => Fate::Text,
-        Some(Delivery::StandIn) => Fate::StandIn,
-        Some(Delivery::Native) | None => {
-            if h.mime.accepts(&part.mime_type) {
-                Fate::Bytes
-            } else if h.registry.info(&part.mime_type).text {
-                Fate::Text
-            } else {
-                Fate::StandIn
-            }
-        }
+        Some(Delivery::Text) | Some(Delivery::StandIn) => false,
+        Some(Delivery::Native) | None => mime.accepts(&part.mime_type),
     }
+}
+
+fn fate(block: &ContentBlock, h: &Hydration<'_>) -> Fate {
+    let ContentBlock::Mime {
+        part,
+        deliver,
+        remote,
+        ..
+    } = block
+    else {
+        return Fate::StandIn;
+    };
+    if sends_natively(block, h.mime) {
+        return match (remote, h.limits.inline_part_limit(&part.mime_type)) {
+            (Some(_), _) => Fate::Remote,
+            (None, Some(max)) if part.size > max => Fate::TooLarge(max),
+            (None, _) => Fate::Bytes,
+        };
+    }
+    match deliver {
+        Some(Delivery::StandIn) => Fate::StandIn,
+        _ if h.registry.info(&part.mime_type).text => Fate::Text,
+        Some(Delivery::Text) => Fate::Text,
+        _ => Fate::StandIn,
+    }
+}
+
+/// A byte count the way a person reads one: `5.0 MiB`.
+fn human_bytes(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / crate::files::MIB as f64)
 }
 
 /// Fill every mime block in `request` with what the model should get.
@@ -270,6 +308,22 @@ pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> Hyd
                 other => other,
             };
             match outcome {
+                Fate::Remote => report.by_file += 1,
+                Fate::TooLarge(max) => {
+                    report.too_large += 1;
+                    let why = match h.why_inline {
+                        "" => String::new(),
+                        why => format!("; {why}"),
+                    };
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "{} [not sent: {} is over the {} this provider takes inline{why}]",
+                            part.stand_in,
+                            human_bytes(part.size),
+                            human_bytes(max)
+                        ),
+                    };
+                }
                 Fate::Bytes => match (h.fetch)(&part) {
                     Some(bytes) => {
                         *block = ContentBlock::Mime {
@@ -277,6 +331,7 @@ pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> Hyd
                             part,
                             name,
                             deliver,
+                            remote: None,
                         };
                         report.sent += 1;
                     }
@@ -348,7 +403,9 @@ pub fn mime_tokens(request: &InferenceRequest) -> usize {
         })
         .flatten()
         .filter_map(|b| match b {
-            ContentBlock::Mime { part, data, .. } if !data.is_empty() => Some(part.tokens),
+            ContentBlock::Mime {
+                part, data, remote, ..
+            } if !data.is_empty() || remote.is_some() => Some(part.tokens),
             _ => None,
         })
         .sum()
@@ -358,11 +415,18 @@ pub fn mime_tokens(request: &InferenceRequest) -> usize {
 /// carrying the stand-in for a family that shape has no slot for.
 pub fn openai_part(block: &ContentBlock) -> Option<serde_json::Value> {
     let ContentBlock::Mime {
-        part, data, name, ..
+        part,
+        data,
+        name,
+        remote,
+        ..
     } = block
     else {
         return None;
     };
+    if let (Some(file), Family::Document) = (remote, family_of(&part.mime_type)) {
+        return Some(serde_json::json!({ "type": "file", "file": { "file_id": file.id } }));
+    }
     if data.is_empty() {
         return Some(serde_json::json!({ "type": "text", "text": part.stand_in }));
     }
@@ -391,17 +455,23 @@ pub fn openai_part(block: &ContentBlock) -> Option<serde_json::Value> {
 /// A mime block as an Anthropic content block: `image` or `document`, or a
 /// `text` block carrying the stand-in for a family it has no block for.
 pub fn anthropic_block(block: &ContentBlock) -> Option<serde_json::Value> {
-    let ContentBlock::Mime { part, data, .. } = block else {
+    let ContentBlock::Mime {
+        part, data, remote, ..
+    } = block
+    else {
         return None;
     };
-    if data.is_empty() {
-        return Some(serde_json::json!({ "type": "text", "text": part.stand_in }));
-    }
-    let source = serde_json::json!({
-        "type": "base64",
-        "media_type": part.mime_type,
-        "data": data,
-    });
+    let source = match remote {
+        Some(file) => serde_json::json!({ "type": "file", "file_id": file.id }),
+        None if data.is_empty() => {
+            return Some(serde_json::json!({ "type": "text", "text": part.stand_in }));
+        }
+        None => serde_json::json!({
+            "type": "base64",
+            "media_type": part.mime_type,
+            "data": data,
+        }),
+    };
     Some(match family_of(&part.mime_type) {
         Family::Image => serde_json::json!({ "type": "image", "source": source }),
         Family::Document => serde_json::json!({ "type": "document", "source": source }),
@@ -415,11 +485,24 @@ pub fn anthropic_block(block: &ContentBlock) -> Option<serde_json::Value> {
 /// `input_file`, or `input_text` carrying the stand-in.
 pub fn responses_part(block: &ContentBlock) -> Option<serde_json::Value> {
     let ContentBlock::Mime {
-        part, data, name, ..
+        part,
+        data,
+        name,
+        remote,
+        ..
     } = block
     else {
         return None;
     };
+    if let Some(file) = remote {
+        let kind = match family_of(&part.mime_type) {
+            Family::Image => "input_image",
+            Family::Audio => "input_audio",
+            Family::Video => "input_video",
+            Family::Document | Family::Other => "input_file",
+        };
+        return Some(serde_json::json!({ "type": kind, "file_id": file.id }));
+    }
     if data.is_empty() {
         return Some(serde_json::json!({ "type": "input_text", "text": part.stand_in }));
     }
@@ -529,6 +612,7 @@ mod tests {
                 data: data.to_string(),
                 name,
                 deliver,
+                remote: None,
             },
             other => other,
         }
@@ -622,6 +706,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -641,6 +727,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &text_only,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -665,6 +753,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &text_only,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -680,6 +770,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &text_only,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -695,6 +787,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -709,6 +803,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -730,6 +826,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 1024,
@@ -748,6 +846,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 12,
@@ -787,6 +887,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 500,
@@ -805,6 +907,8 @@ mod tests {
         let report = hydrate_request(
             &mut req,
             &Hydration {
+                limits: crate::files::MediaLimits::NONE,
+                why_inline: "",
                 mime: &vision,
                 registry: &reg(),
                 max_media_bytes: 1000,
@@ -894,3 +998,7 @@ mod tests {
         assert!(ContentBlock::mime(&Part::text("t")).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "mime/remote_tests.rs"]
+mod remote_tests;

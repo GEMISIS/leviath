@@ -249,6 +249,8 @@ fn make_reaper(
             let run_id = md.run_id.clone();
             mcp_pool.release_run(&run_id);
         }
+        // A finished run deletes what it put in providers' file storage.
+        leviath_runtime::provider_files::forget_finished(world.world(), entity);
         tool_service.reap(entity)
     })
 }

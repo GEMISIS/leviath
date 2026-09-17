@@ -367,9 +367,30 @@ pub struct RetentionSettings {
     /// or an Azure OpenAI deployment names `openai` here and is sent
     /// `store = false` with the switch on.
     pub request_knob_aliases: HashMap<String, String>,
+    /// `[providers] file_uploads`: put a large part in the vendor's file
+    /// storage once and name it by id after. Never done under zero retention,
+    /// whatever this says; see [`Self::uploads_allowed`].
+    pub file_uploads: bool,
 }
 
 impl RetentionSettings {
+    /// Whether a part may be uploaded to a vendor's file storage: the switch
+    /// is on and zero retention is not asked for. An upload is data the
+    /// vendor keeps, which zero retention rules out.
+    pub fn uploads_allowed(&self) -> bool {
+        self.file_uploads && !self.zero_requested
+    }
+
+    /// Why nothing is uploaded, in words for a stand-in, or empty when uploads
+    /// are allowed.
+    pub fn why_inline(&self) -> &'static str {
+        match (self.zero_requested, self.file_uploads) {
+            (true, _) => "zero data retention is on, so nothing is uploaded",
+            (false, false) => "[providers] file_uploads is off",
+            (false, true) => "",
+        }
+    }
+
     /// The provider whose request fields `provider` is sent: its alias when
     /// one is declared, else itself.
     pub fn knob_provider<'a>(&'a self, provider: &'a str) -> &'a str {
@@ -686,5 +707,27 @@ mod tests {
         );
         assert_eq!(extra["seed"], serde_json::json!(7));
         assert!(request_knobs("bedrock").is_none());
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    #[test]
+    fn uploads_need_the_switch_and_no_zero_retention_and_say_why_not() {
+        let mut settings = RetentionSettings {
+            file_uploads: true,
+            ..Default::default()
+        };
+        assert!(settings.uploads_allowed());
+        assert_eq!(settings.why_inline(), "");
+        settings.zero_requested = true;
+        assert!(!settings.uploads_allowed());
+        assert!(settings.why_inline().contains("zero data retention"));
+        settings.zero_requested = false;
+        settings.file_uploads = false;
+        assert!(!settings.uploads_allowed());
+        assert!(settings.why_inline().contains("file_uploads"));
     }
 }

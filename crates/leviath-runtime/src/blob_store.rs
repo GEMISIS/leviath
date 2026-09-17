@@ -170,6 +170,15 @@ impl MimeParams<'_, '_> {
         (both, max_media_bytes)
     }
 
+    /// Seconds an uploaded part lives at the vendor.
+    pub fn provider_file_ttl_secs(&self) -> u64 {
+        self.limits
+            .as_deref()
+            .map_or(MimeLimits::default().provider_file_ttl_secs, |l| {
+                l.provider_file_ttl_secs
+            })
+    }
+
     /// The largest part any ingress accepts.
     pub fn max_part_bytes(&self) -> u64 {
         self.limits
@@ -195,8 +204,11 @@ pub struct MimeLimits {
     /// Bytes of text kept inline in an entry before the part is stored.
     pub inline_text_bytes: u64,
     /// Bytes of stored media one request carries before the oldest are sent as
-    /// stand-ins.
+    /// stand-ins, for a provider that documents no limit of its own.
     pub max_media_bytes_per_request: u64,
+    /// Seconds a part uploaded to a provider's file storage lives there
+    /// before the vendor deletes it, clamped to what each vendor takes.
+    pub provider_file_ttl_secs: u64,
 }
 
 impl MimeLimits {
@@ -211,6 +223,10 @@ impl MimeLimits {
         // base64 inflates by roughly a third, so 20 MiB raw (about 27 MB
         // encoded) stays under that with margin.
         max_media_bytes_per_request: 20 * 1024 * 1024,
+        // A day: past any single run's working session, well inside every
+        // vendor's range, and short enough that a daemon that died before
+        // deleting leaves nothing for long.
+        provider_file_ttl_secs: 86_400,
     };
 }
 
@@ -280,6 +296,12 @@ impl FsBlobStore {
 }
 
 impl BlobStore for FsBlobStore {
+    fn run_dir(&self, run_id: &str) -> Option<PathBuf> {
+        self.dir_for(run_id)
+            .ok()
+            .and_then(|blobs| blobs.parent().map(Path::to_path_buf))
+    }
+
     fn put(&self, run_id: &str, blob: &Blob, reg: &MimeRegistry) -> io::Result<BlobRef> {
         leviath_core::mime::verify_blob(reg, blob)?;
         let r = blob.describe(reg);

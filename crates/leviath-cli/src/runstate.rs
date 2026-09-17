@@ -341,6 +341,40 @@ pub(crate) fn run_dir(run_id: &str) -> PathBuf {
     runs_dir().join(run_id)
 }
 
+/// Delete what the run `run_id` put in providers' file storage, reading its
+/// ledger now, before the caller removes the run's directory. The deletes run
+/// in the background on a runtime that is already going, or here, bounded,
+/// when there is none. Best effort: the vendor's expiry is the backstop.
+pub(crate) fn forget_provider_files(run_id: &str) {
+    let entries = leviath_runtime::provider_files::take_ledger(&run_dir(run_id));
+    if entries.is_empty() {
+        return;
+    }
+    // Built where the deletes run: a provider's client wants a runtime to
+    // stand in. One that cannot be built is one whose files are left to
+    // expire, which the delete says per file.
+    let work = async move {
+        let config = crate::config::Config::load().unwrap_or_default();
+        let registry = crate::commands::run::session::build_provider_registry_from_config(&config)
+            .unwrap_or_default();
+        leviath_runtime::provider_files::delete_entries(&entries, &registry).await
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn(work);
+        }
+        Err(_) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime builds");
+            let _ = runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(30), work).await
+            });
+        }
+    }
+}
+
 /// How many random bits go in a run ID's suffix, rendered as 12 hex digits.
 /// Collisions only matter within one wall-clock second for one agent name, so 48
 /// bits is many orders of magnitude more than needed while staying short enough
@@ -3481,5 +3515,42 @@ mod tests {
             assert!(descendant_run_ids("lonely").is_empty());
             assert!(descendant_run_ids("no-such-run").is_empty());
         });
+    }
+
+    /// A deleted run's uploads are read from its ledger before its directory
+    /// goes; with no provider configured to delete them they are left to
+    /// expire, and a run with no ledger does nothing at all.
+    #[test]
+    fn a_deleted_runs_uploads_are_taken_from_its_ledger_first() {
+        with_isolated_runs_dir("forget-files", |_d| {
+            let dir = run_dir("uploaded");
+            std::fs::create_dir_all(&dir).unwrap();
+            let ledger = dir.join(leviath_runtime::provider_files::LEDGER_FILE);
+            std::fs::write(
+                &ledger,
+                r#"{"files":[{"provider":"nobody","sha256":"a","file":{"id":"f"}}]}"#,
+            )
+            .unwrap();
+            forget_provider_files("uploaded");
+            assert!(!ledger.exists(), "the ledger is taken");
+            forget_provider_files("uploaded");
+        });
+    }
+
+    #[tokio::test]
+    async fn a_deleted_runs_uploads_are_deleted_in_the_background_on_a_running_runtime() {
+        with_isolated_runs_dir_async("forget-files-async", |_d| async move {
+            let dir = run_dir("uploaded");
+            std::fs::create_dir_all(&dir).unwrap();
+            let ledger = dir.join(leviath_runtime::provider_files::LEDGER_FILE);
+            std::fs::write(
+                &ledger,
+                r#"{"files":[{"provider":"nobody","sha256":"a","file":{"id":"f"}}]}"#,
+            )
+            .unwrap();
+            forget_provider_files("uploaded");
+            assert!(!ledger.exists());
+        })
+        .await;
     }
 }

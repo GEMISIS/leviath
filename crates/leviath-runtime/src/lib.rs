@@ -89,6 +89,7 @@ pub mod persistence;
 pub(crate) mod persistence_bridge;
 pub mod pipeline;
 pub mod provider_creds;
+pub mod provider_files;
 pub(crate) mod providers;
 pub(crate) mod repetition;
 pub mod restore;

@@ -2383,6 +2383,7 @@ fn native_media_tokens_counts_only_the_bytes_the_model_takes() {
         data: String::new(),
         name: None,
         deliver,
+        remote: None,
     };
     let request = InferenceRequest {
         system: Vec::new(),

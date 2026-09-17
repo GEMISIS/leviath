@@ -649,15 +649,35 @@ pub(crate) fn dispatch_inference(
                 // store; a world assembled by hand in a test may not, and
                 // then stored parts go out as their stand-ins.
                 let (mime_resources, max_media_bytes) = mime.hydration_inputs(entity);
-                let hydration =
-                    mime_resources.map(|(store, registry)| crate::inference_bridge::JobHydration {
+                let limits = provider.media_limits(&si.model);
+                let settings = providers.0.retention_settings();
+                let hydration = mime_resources.map(|(store, registry)| {
+                    // Uploads need somewhere to record them, so the run can
+                    // delete them when it ends.
+                    let files = (settings.uploads_allowed() && limits.file_bytes.is_some())
+                        .then(|| store.run_dir(&state.agent_id))
+                        .flatten()
+                        .map(|dir| crate::provider_files::FileRoute {
+                            provider: provider.clone(),
+                            provider_name: si.provider_name.clone(),
+                            ledger: dir.join(crate::provider_files::LEDGER_FILE),
+                            ttl_secs: mime.provider_file_ttl_secs(),
+                        });
+                    crate::inference_bridge::JobHydration {
                         store,
                         run_id: state.agent_id.clone(),
                         registry,
                         mime: provider.mime(&si.model),
-                        max_media_bytes,
+                        max_media_bytes: limits.inline_request_bytes.unwrap_or(max_media_bytes),
                         as_text: config.map(|c| c.as_text.clone()).unwrap_or_default(),
-                    });
+                        limits,
+                        files,
+                        why_inline: match limits.file_bytes {
+                            Some(_) => settings.why_inline(),
+                            None => "",
+                        },
+                    }
+                });
                 let job = InferenceJob {
                     entity,
                     provider,

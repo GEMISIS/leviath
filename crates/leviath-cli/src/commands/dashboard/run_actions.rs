@@ -227,7 +227,9 @@ impl Dashboard {
                 run_id: id.to_string(),
             });
         }
-        // Remove run directory
+        // Delete its uploads while the ledger that names them exists, then
+        // remove the run directory.
+        runstate::forget_provider_files(id);
         let run_dir = runstate::run_dir(id);
         if let Err(e) = std::fs::remove_dir_all(&run_dir) {
             self.add_log(format!("Delete failed: {}", e));
