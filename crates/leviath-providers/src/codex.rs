@@ -96,7 +96,7 @@ pub const DEFAULT_ORIGINATOR: &str = "leviath";
 /// the Codex CLI's simplified consent page.
 pub const PROFILE: crate::oauth::OAuthProfile = crate::oauth::OAuthProfile {
     provider: PROVIDER_NAME,
-    account_name: "ChatGPT",
+    brand: "ChatGPT",
     issuer: ISSUER,
     authorize_path: "/oauth/authorize",
     token_path: "/oauth/token",

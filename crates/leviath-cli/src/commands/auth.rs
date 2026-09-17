@@ -219,10 +219,7 @@ async fn login_with(
     let grant = oauth::login(&login_env).await?;
     let who = grant.email.as_deref().unwrap_or("this account");
     match grant.plan_type.as_deref() {
-        Some(plan) => println!(
-            "Signed in as {who} on the {} {plan} plan.",
-            profile.account_name
-        ),
+        Some(plan) => println!("Signed in as {who} on the {} {plan} plan.", profile.brand),
         None => println!("Signed in as {who}."),
     }
     if !crate::commands::setup::catalog::signin_enabled(config, provider) {

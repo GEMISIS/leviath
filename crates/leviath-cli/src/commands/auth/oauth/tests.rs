@@ -520,8 +520,8 @@ fn the_production_environment_uses_the_registered_ports_and_issuer() {
 }
 
 /// An id token carrying `nonce`, the way xAI's issuer answers.
-fn id_token_with_nonce(nonce: &str) -> String {
-    let claims = serde_json::json!({ "email": "grok@example.com", "nonce": nonce }).to_string();
+fn id_token_with_nonce(echoed: &str) -> String {
+    let claims = serde_json::json!({ "email": "grok@example.com", "nonce": echoed }).to_string();
     format!("aGVhZGVy.{}.c2ln", base64url(claims.as_bytes()))
 }
 

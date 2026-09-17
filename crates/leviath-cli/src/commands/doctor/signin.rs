@@ -49,7 +49,7 @@ pub(super) fn signin_check(id: &'static str) -> Check {
     let grant = leviath_providers::oauth::ProviderAuthStore::default_path()
         .and_then(|path| leviath_providers::oauth::ProviderAuthStore::load(&path).ok())
         .and_then(|store| store.get(id).cloned());
-    let account = leviath_providers::oauth::profile(id).map_or(id, |p| p.account_name);
+    let account = leviath_providers::oauth::profile(id).map_or(id, |p| p.brand);
     match grant {
         None => Check::warn(
             id,

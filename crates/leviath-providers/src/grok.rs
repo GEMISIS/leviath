@@ -37,7 +37,7 @@ pub const ACCOUNT_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 /// nonce, and access tokens last six hours.
 pub const PROFILE: crate::oauth::OAuthProfile = crate::oauth::OAuthProfile {
     provider: PROVIDER_NAME,
-    account_name: "Grok",
+    brand: "Grok",
     issuer: ISSUER,
     authorize_path: "/oauth2/authorize",
     token_path: "/oauth2/token",
