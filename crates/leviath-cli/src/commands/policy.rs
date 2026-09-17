@@ -386,6 +386,54 @@ fn execute_test_with(
 mod tests {
     use super::*;
 
+    /// The configuration guide, so the `policy.toml` example in it can be held
+    /// to what this command actually reads.
+    const CONFIG_GUIDE: &str = include_str!("../../../../docs/content/configuration.md");
+
+    /// Every `policy.toml` example in the guide parses, and every
+    /// `[mcp_overrides]` one actually produces an override.
+    ///
+    /// The guide documented a spelling the parser ignored, so an operator who
+    /// copied it got a file that loaded cleanly and classified nothing. Nothing
+    /// caught it, because the parser was tested against its own idea of the
+    /// format and the guide was proofread against nobody's.
+    ///
+    /// Parsing is not enough to assert here: the old wrong spelling parsed
+    /// fine, it just produced an empty map. The count is the test.
+    #[test]
+    fn the_guide_policy_examples_are_read_the_way_the_guide_says() {
+        let blocks: Vec<&str> = CONFIG_GUIDE
+            .split("```toml")
+            .skip(1)
+            .filter_map(|block| block.split("```").next())
+            .filter(|block| block.contains("[mcp_overrides"))
+            .collect();
+
+        assert!(
+            !blocks.is_empty(),
+            "the guide no longer shows an [mcp_overrides] example; drop this test or update it"
+        );
+
+        for block in blocks {
+            let config = leviath_core::PolicyConfig::from_toml(block)
+                .expect("the guide's policy.toml example parses");
+            assert!(
+                !config.mcp_overrides.is_empty(),
+                "the guide shows an [mcp_overrides] spelling that parses to nothing:\n{block}"
+            );
+            for key in config.mcp_overrides.keys() {
+                // A dispatched name is sanitize-stable: it is what
+                // `advertised_name` already put through the provider character
+                // rule. Any other spelling comes back changed.
+                assert_eq!(
+                    *key,
+                    leviath_core::mcp_names::sanitize_tool_name(key),
+                    "an override key must be spelled the way a tool is dispatched"
+                );
+            }
+        }
+    }
+
     #[test]
     fn policy_path_returns_valid_path() {
         let path = policy_path();

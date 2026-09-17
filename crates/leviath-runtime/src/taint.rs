@@ -504,6 +504,43 @@ mod tests {
         assert!(decision.is_allowed());
     }
 
+    /// An override written in `policy.toml` has to reach the tool the model
+    /// actually called, and nothing in between may respell the name.
+    ///
+    /// This is the end of the chain the loader starts: `policy.toml` is parsed
+    /// into a key, the key is applied to the gate here, and the gate is asked
+    /// about a tool by the name dispatch used. It is deliberately written as
+    /// the whole chain rather than as three tests of the parts, because every
+    /// part agreed with itself while the chain was broken. The override was
+    /// parsed, stored under `server.tool`, and then looked up under
+    /// `server__tool`, so it never applied and nothing said so.
+    #[test]
+    fn an_override_from_policy_toml_reaches_the_dispatched_tool() {
+        let policy = leviath_core::PolicyConfig::from_toml(
+            r#"
+[mcp_overrides.tracker.tools.create_issue]
+sensitivity = "private"
+direction = "outbound"
+clearance = "public"
+"#,
+        )
+        .expect("the policy parses");
+
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        gate.apply_mcp_overrides(&policy.mcp_overrides);
+
+        // The name the executor advertises, which is the name the model calls
+        // and therefore the name the gate is asked about.
+        let dispatched = leviath_core::mcp_names::advertised_name("tracker", "create_issue");
+        let classification = gate.tool_classification(&dispatched);
+        assert_eq!(classification.sensitivity, TaintLevel::Private);
+        assert_eq!(classification.clearance, TaintLevel::Public);
+        assert!(
+            classification.is_outbound(),
+            "an override that says outbound must make the gate treat it as outbound"
+        );
+    }
+
     #[test]
     fn apply_mcp_overrides_replaces_only_the_set_fields() {
         let mut gate = TaintGate::new(SecurityConfig::default());

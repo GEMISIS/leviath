@@ -92,7 +92,12 @@ pub struct PolicyConfig {
     /// Static allowlist rules.
     #[serde(default)]
     pub allowlist: Vec<AllowlistRule>,
-    /// MCP tool overrides keyed by "server_name.tool_name".
+    /// MCP tool overrides, keyed by the name the tool is dispatched under.
+    ///
+    /// That is the advertised name, `<server>__<tool>` sanitized by
+    /// [`crate::mcp_names::advertised_name`], because the gate looks this map
+    /// up with whatever name the model called. Any other spelling is a key
+    /// that matches nothing.
     #[serde(default)]
     pub mcp_overrides: std::collections::HashMap<String, McpToolOverride>,
 }
@@ -150,39 +155,81 @@ impl PolicyConfig {
             }
         }
 
-        // Parse [mcp_overrides] section
+        // Parse [mcp_overrides] section.
+        //
+        // Two shapes, both keyed in memory by the name the tool is *dispatched*
+        // under, because that is the only string the gate ever looks up:
+        //
+        //   [mcp_overrides.<server>.tools.<tool>]   the nested form, written by
+        //                                           hand; the halves are
+        //                                           separate TOML keys, so
+        //                                           `my.tools` needs no escaping
+        //   [mcp_overrides.<server>__<tool>]        the flat form, which is what
+        //                                           `lev policy add` serializes
+        //
+        // The nested form used to build a `<server>.<tool>` key, which matches
+        // no dispatched tool, so every override written in it was stored and
+        // never read. The flat form was not parsed at all, so `lev policy add`
+        // wrote a file this function could not read back.
         if let Some(overrides_table) = parsed.get("mcp_overrides").and_then(|v| v.as_table()) {
-            for (server_name, server_val) in overrides_table {
-                if let Some(tools_table) = server_val.get("tools").and_then(|v| v.as_table()) {
-                    for (tool_name, tool_val) in tools_table {
-                        let key = format!("{}.{}", server_name, tool_name);
-                        let sensitivity = tool_val
-                            .get("sensitivity")
-                            .and_then(|v| v.as_str())
-                            .and_then(TaintLevel::from_str_loose);
-                        let direction = tool_val
-                            .get("direction")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let clearance = tool_val
-                            .get("clearance")
-                            .and_then(|v| v.as_str())
-                            .and_then(TaintLevel::from_str_loose);
-
-                        config.mcp_overrides.insert(
-                            key,
-                            McpToolOverride {
-                                sensitivity,
-                                direction,
-                                clearance,
-                            },
-                        );
+            for (entry_name, entry_val) in overrides_table {
+                match entry_val.get("tools").and_then(|v| v.as_table()) {
+                    Some(tools_table) => {
+                        for (tool_name, tool_val) in tools_table {
+                            let key = crate::mcp_names::advertised_name(entry_name, tool_name);
+                            config
+                                .mcp_overrides
+                                .insert(key, Self::read_override(tool_val));
+                        }
+                    }
+                    // No `tools` sub-table: either the flat form, whose name is
+                    // already a dispatched name, or an entry that classifies
+                    // nothing and is left alone.
+                    None => {
+                        if Self::classifies_something(entry_val) {
+                            config
+                                .mcp_overrides
+                                .insert(entry_name.clone(), Self::read_override(entry_val));
+                        }
                     }
                 }
             }
         }
 
         Ok(config)
+    }
+
+    /// Whether an `[mcp_overrides]` entry sets any classification field.
+    ///
+    /// This is what separates the flat form from an entry that carries only a
+    /// note or a typo. An entry that classifies nothing would override nothing,
+    /// so storing it under a tool's name could only shadow a real rule.
+    fn classifies_something(value: &toml::Value) -> bool {
+        ["sensitivity", "direction", "clearance"]
+            .iter()
+            .any(|field| value.get(field).and_then(|v| v.as_str()).is_some())
+    }
+
+    /// Read one override's three optional fields.
+    ///
+    /// An unreadable level is left unset rather than defaulted: a `sensitivity`
+    /// nobody can parse must not silently become `public`, which is the most
+    /// permissive thing it could have meant.
+    fn read_override(value: &toml::Value) -> McpToolOverride {
+        McpToolOverride {
+            sensitivity: value
+                .get("sensitivity")
+                .and_then(|v| v.as_str())
+                .and_then(TaintLevel::from_str_loose),
+            direction: value
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            clearance: value
+                .get("clearance")
+                .and_then(|v| v.as_str())
+                .and_then(TaintLevel::from_str_loose),
+        }
     }
 
     /// Check whether any allowlist rule matches the given invocation.
@@ -326,12 +373,12 @@ search_public_docs = { sensitivity = "public" }
         assert_eq!(config.mcp_overrides.len(), 2);
         let cust = config
             .mcp_overrides
-            .get("my-server.read_customer_data")
+            .get("my-server__read_customer_data")
             .unwrap();
         assert_eq!(cust.sensitivity, Some(TaintLevel::Private));
         let docs = config
             .mcp_overrides
-            .get("my-server.search_public_docs")
+            .get("my-server__search_public_docs")
             .unwrap();
         assert_eq!(docs.sensitivity, Some(TaintLevel::Public));
     }
@@ -345,7 +392,7 @@ search_public_docs = { sensitivity = "public" }
 send_email = { sensitivity = "private", direction = "egress", clearance = "public" }
 "#;
         let config = PolicyConfig::from_toml(toml).unwrap();
-        let ov = config.mcp_overrides.get("srv.send_email").unwrap();
+        let ov = config.mcp_overrides.get("srv__send_email").unwrap();
         assert_eq!(ov.sensitivity, Some(TaintLevel::Private));
         assert_eq!(ov.direction.as_deref(), Some("egress"));
         assert_eq!(ov.clearance, Some(TaintLevel::Public));
@@ -454,13 +501,114 @@ send_email = { sensitivity = "private", direction = "egress", clearance = "publi
 
     #[test]
     fn test_from_toml_mcp_override_server_without_tools_table() {
-        // A server entry that has no `tools` sub-table exercises the
-        // `if let Some(tools_table)` None branch - nothing is inserted.
+        // A server entry with no `tools` sub-table and no classification field
+        // is not the flat form either, so nothing is inserted.
         let toml = r#"
 [mcp_overrides.emptyserver]
 note = "no tools declared here"
 "#;
         let config = PolicyConfig::from_toml(toml).unwrap();
         assert!(config.mcp_overrides.is_empty());
+    }
+
+    // ─── the key an override is stored under ──────────────────────────────
+    //
+    // An `[mcp_overrides]` entry sets a tool's sensitivity, direction and
+    // clearance, which is what the taint gate consults before letting a
+    // tainted outbound call through. The gate looks the map up by the name
+    // the model called the tool, so a key in any other spelling is read,
+    // stored, and then never matched. That failure is silent, and it fails
+    // open: the tool keeps its default classification and the operator
+    // believes they tightened it.
+    //
+    // The three tests below are the three ways that happened.
+
+    /// The nested form built `<server>.<tool>`, which is not a name any tool
+    /// is ever dispatched under.
+    #[test]
+    fn a_nested_override_is_keyed_by_the_name_the_tool_dispatches_under() {
+        let toml = r#"
+[mcp_overrides.tracker.tools.create_issue]
+sensitivity = "internal"
+direction = "outbound"
+clearance = "internal"
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config.mcp_overrides.keys().collect::<Vec<_>>(),
+            vec!["tracker__create_issue"],
+            "the key must be the advertised name, not a dotted one"
+        );
+        let over = &config.mcp_overrides["tracker__create_issue"];
+        assert_eq!(over.sensitivity, Some(TaintLevel::Internal));
+        assert_eq!(over.direction.as_deref(), Some("outbound"));
+        assert_eq!(over.clearance, Some(TaintLevel::Internal));
+    }
+
+    /// The nested form is the one that can carry a server or tool whose own
+    /// name has a dot in it, because the halves are separate TOML keys. Both
+    /// are sanitized the same way the advertised name is.
+    #[test]
+    fn a_nested_override_sanitizes_a_dotted_server_and_tool() {
+        let toml = r#"
+[mcp_overrides."my.tools".tools."find.all"]
+sensitivity = "private"
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        let keys: Vec<&String> = config.mcp_overrides.keys().collect();
+        assert!(
+            config.mcp_overrides.contains_key("my_tools__find_all"),
+            "keys: {keys:?}"
+        );
+    }
+
+    /// `lev policy add` serializes the map straight back out, which produces
+    /// the flat form. Reading it has to give back what was written, or a
+    /// command that edits this file silently drops every override in it.
+    #[test]
+    fn a_policy_file_round_trips_through_serialization() {
+        let mut config = PolicyConfig::default();
+        config.mcp_overrides.insert(
+            "tracker__create_issue".to_string(),
+            McpToolOverride {
+                sensitivity: Some(TaintLevel::Internal),
+                direction: Some("outbound".to_string()),
+                clearance: Some(TaintLevel::Internal),
+            },
+        );
+        let written = toml::to_string_pretty(&config).expect("serializes");
+        let read_back = PolicyConfig::from_toml(&written).expect("parses");
+        assert_eq!(read_back, config, "written as:\n{written}");
+    }
+
+    /// An entry with no `tools` table but a classification field is the flat
+    /// form, and its name is already a dispatched name.
+    #[test]
+    fn a_flat_override_keeps_its_name_verbatim() {
+        let toml = r#"
+[mcp_overrides.tracker__create_issue]
+sensitivity = "private"
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config.mcp_overrides["tracker__create_issue"].sensitivity,
+            Some(TaintLevel::Private)
+        );
+    }
+
+    /// A level nobody can parse stays unset. Defaulting it would pick
+    /// `public`, the most permissive reading of a security field.
+    #[test]
+    fn an_unreadable_level_is_left_unset_rather_than_defaulted() {
+        let toml = r#"
+[mcp_overrides.tracker__create_issue]
+sensitivity = "banana"
+direction = "outbound"
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        let over = &config.mcp_overrides["tracker__create_issue"];
+        assert_eq!(over.sensitivity, None);
+        assert_eq!(over.clearance, None);
+        assert_eq!(over.direction.as_deref(), Some("outbound"));
     }
 }

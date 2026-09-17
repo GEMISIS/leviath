@@ -7,35 +7,10 @@ use std::sync::Arc;
 use crate::client::{MCPClient, ToolResult, ToolResultContent};
 use crate::discovery::ToolMetadata;
 
-/// Provider tool-name limit: the name advertised to the LLM must match
-/// `^[A-Za-z0-9_-]{1,64}$` (the Anthropic/OpenAI rule). MCP names are laxer
-/// (they allow dots), so any MCP name that violates this would make the
-/// provider reject the *entire* request.
-const MAX_TOOL_NAME_LEN: usize = 64;
-
-/// Sanitize an MCP tool name into the provider-accepted character set.
-///
-/// Every character outside `[A-Za-z0-9_-]` (notably `.`, which MCP allows and
-/// real servers use) becomes `_`, and the result is truncated to 64 bytes. An
-/// empty result (a name of only illegal characters) falls back to `tool`.
-pub fn sanitize_tool_name(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    out.truncate(MAX_TOOL_NAME_LEN);
-    if out.is_empty() {
-        "tool".to_string()
-    } else {
-        out
-    }
-}
+/// The advertised-name rule, which the taint gate and the dashboard's tool
+/// chooser need to reach the same answer as this module. It lives in
+/// `leviath-core` so there is one of it; see [`leviath_core::mcp_names`].
+pub use leviath_core::mcp_names::sanitize_tool_name;
 
 /// Result of a tool execution, with convenience fields.
 #[derive(Debug, Clone)]
@@ -178,7 +153,7 @@ impl ToolExecutor {
     ) -> String {
         let free = |name: &str| !reserved.contains(name) && !self.aliases.contains_key(name);
 
-        let qualified = sanitize_tool_name(&format!("{server}__{original}"));
+        let qualified = leviath_core::mcp_names::advertised_name(server, original);
         if free(&qualified) {
             return qualified;
         }
@@ -1034,34 +1009,6 @@ mod tests {
             result.blobs[1].mime_type.as_str(),
             "application/octet-stream"
         );
-    }
-
-    // ─── tool-name sanitization ───────────────────────────────────────────
-
-    #[test]
-    fn sanitize_passes_a_clean_name_through() {
-        assert_eq!(sanitize_tool_name("get_weather-2"), "get_weather-2");
-    }
-
-    #[test]
-    fn sanitize_replaces_dots_and_other_illegal_chars() {
-        // Dots are legal in MCP but rejected by the provider name rule.
-        assert_eq!(sanitize_tool_name("admin.tools.list"), "admin_tools_list");
-        assert_eq!(sanitize_tool_name("weird name!/#"), "weird_name___");
-    }
-
-    #[test]
-    fn sanitize_truncates_to_the_limit() {
-        let long = "a".repeat(200);
-        assert_eq!(sanitize_tool_name(&long).len(), MAX_TOOL_NAME_LEN);
-    }
-
-    #[test]
-    fn sanitize_of_illegal_chars_becomes_underscores_and_empty_falls_back() {
-        // Illegal chars each become `_` (still a valid name); only a fully
-        // empty result falls back to a placeholder.
-        assert_eq!(sanitize_tool_name("...."), "____");
-        assert_eq!(sanitize_tool_name(""), "tool");
     }
 
     // ─── unique_advertised_name ───────────────────────────────────────────
