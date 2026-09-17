@@ -89,7 +89,7 @@ impl TaintGate {
     /// Apply the `[mcp_overrides]` section of policy.toml to this gate.
     ///
     /// Each override starts from the tool's current classification and
-    /// replaces only the fields it sets, keyed the same `server.tool` way MCP
+    /// replaces only the fields it sets, keyed the same `server__tool` way MCP
     /// tools are named at dispatch. An unrecognized `direction` string keeps
     /// the existing direction and warns, rather than silently reclassifying
     /// a security property.
