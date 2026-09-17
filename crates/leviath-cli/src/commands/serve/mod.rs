@@ -24,6 +24,8 @@ mod mime;
 mod model_catalog;
 mod polling;
 mod providers;
+mod quota_cache;
+mod refreshing;
 mod request_limits;
 mod run_index;
 mod runs;
@@ -747,7 +749,12 @@ fn cors_layer(origin: impl Into<AllowOrigin>) -> CorsLayer {
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
         ])
-        .expose_headers([model_catalog::CATALOG_AGE, model_catalog::CATALOG_COMPLETE])
+        .expose_headers([
+            model_catalog::CATALOG_AGE,
+            model_catalog::CATALOG_COMPLETE,
+            quota_cache::QUOTA_AGE,
+            quota_cache::QUOTA_COMPLETE,
+        ])
         .max_age(std::time::Duration::from_secs(3600))
         .allow_private_network(true)
 }
@@ -2242,8 +2249,9 @@ system_prompt = "Run"
                 let lower = String::from_utf8_lossy(&resp).to_lowercase();
                 assert!(
                     lower.contains("access-control-expose-headers")
-                        && lower.contains("x-leviath-catalog-age"),
-                    "the catalogue headers must be exposed, got:\n{lower}"
+                        && lower.contains("x-leviath-catalog-age")
+                        && lower.contains("x-leviath-quota-age"),
+                    "the catalogue and quota headers must be exposed, got:\n{lower}"
                 );
 
                 handle.abort();

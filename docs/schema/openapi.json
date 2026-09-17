@@ -1677,11 +1677,41 @@
               "type": "boolean"
             },
             "description": "Read each signed-in subscription's usage too, into its `quota` field."
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Read the accounts again and wait for them, rather than answering from the reading the server keeps. For a console's \"check again\"; means nothing without `quota=true`."
           }
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "description": "Success. With `quota=true` the reports come from a reading the server keeps: the accounts are asked once, side by side, each given five seconds, and the answer is served for a minute (fifteen seconds when an account could not be read). An account that does not answer carries `{\"error\": ...}` and never holds the response.",
+            "headers": {
+              "X-Leviath-Quota-Age": {
+                "description": "Seconds since the accounts were read. Only with `quota=true`.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Leviath-Quota-Complete": {
+                "description": "Whether every account answered when they were read. `false` names no provider; the per-provider `quota.error` does. Only with `quota=true`.",
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1696,7 +1726,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Reports `enabled` (what `config.toml` says) and `signed_in` (whether a grant is stored) separately, because either can be true alone and a provider that is enabled without a sign-in fails every run. While a sign-in is in flight `signin` carries `{\"state\": \"waiting\", \"authorize_url\": ...}`; after one fails it carries `{\"state\": \"failed\", \"message\": ...}` until the next attempt, and it is absent when there is neither. Open to any caller: it discloses the account address and plan tier, the same facts `lev auth status` prints, and no token. With `?quota=true`, each enabled, signed-in provider also carries `quota`: `{\"report\": {\"plan\", \"windows\": [{\"label\", \"used_percent\" or \"used\", \"limit\", \"unit\", \"resets_at\"}], \"balance\", \"limit_reached\"}}`, or `{\"error\": ...}` when the account could not be read. Off by default: it reads each account over the network."
+        "description": "Reports `enabled` (what `config.toml` says) and `signed_in` (whether a grant is stored) separately, because either can be true alone and a provider that is enabled without a sign-in fails every run. While a sign-in is in flight `signin` carries `{\"state\": \"waiting\", \"authorize_url\": ...}`; after one fails it carries `{\"state\": \"failed\", \"message\": ...}` until the next attempt, and it is absent when there is neither. Open to any caller: it discloses the account address and plan tier, the same facts `lev auth status` prints, and no token. With `?quota=true`, each enabled, signed-in provider also carries `quota`: `{\"report\": {\"plan\", \"windows\": [{\"label\", \"used_percent\" or \"used\", \"limit\", \"unit\", \"resets_at\"}], \"balance\", \"limit_reached\"}}`, or `{\"error\": ...}` when the account could not be read. Off by default: it is a reading of the accounts rather than of this machine. The reading is kept, so a providers page can ask every time it opens; `X-Leviath-Quota-Age` and `X-Leviath-Quota-Complete` say how old it is and whether every account answered, and `?refresh=1` reads them again. Announced as the `providers.quota` capability."
       }
     },
     "/api/providers/{name}/login": {

@@ -495,14 +495,14 @@ pub(super) async fn models_with(
     let (listing, _) = state
         .caches
         .model_catalog
-        .models(state.current_config(), query.refresh.unwrap_or(false))
+        .models(state.current_config(), query.refresh)
         .await;
     // Filtered here rather than left to the caller because the interesting
     // case is two providers serving the *same* model ids: `openai` and
     // `codex` both answer to `gpt-5.5`, and they bill to different places.
     // A client that wants one of them should be able to ask for it rather
     // than fetch both and match on a string it had to know.
-    let mut models = listing.models.clone();
+    let mut models = listing.value.clone();
     if let Some(provider) = query.provider.as_deref() {
         models.retain(|m| m.provider == provider);
     }
@@ -692,7 +692,7 @@ mod tests {
             &state,
             &super::ModelsQuery {
                 provider: Some("zeta".to_string()),
-                refresh: None,
+                refresh: false,
             },
         )
         .await;
@@ -710,7 +710,7 @@ mod tests {
             &state,
             &super::ModelsQuery {
                 provider: Some("not-a-provider".to_string()),
-                refresh: None,
+                refresh: false,
             },
         )
         .await;
@@ -1096,7 +1096,7 @@ mod tests {
             let (listing, _) = crate::commands::serve::model_catalog::ModelCatalog::default()
                 .models(Arc::new(Config::default()), false)
                 .await;
-            listing.models.clone()
+            listing.value.clone()
         })
         .await;
 

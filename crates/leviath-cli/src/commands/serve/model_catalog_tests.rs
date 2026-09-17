@@ -119,9 +119,9 @@ fn config() -> Arc<Config> {
     Arc::new(Config::default())
 }
 
-fn ids(snapshot: &Snapshot) -> Vec<String> {
+fn ids(snapshot: &Listing) -> Vec<String> {
     snapshot
-        .models
+        .value
         .iter()
         .map(|m| format!("{}/{}", m.provider, m.id))
         .collect()
@@ -239,7 +239,7 @@ async fn a_request_with_nothing_to_hand_answers_empty_when_the_providers_are_too
     let mut listings = catalog.subscribe();
     let (empty, how) = catalog.models(Arc::clone(&config), false).await;
     assert_eq!(how, Freshness::Cold);
-    assert!(empty.models.is_empty());
+    assert!(empty.value.is_empty());
     assert!(!empty.complete);
 
     // The refresh it started still lands, and the next request has it.
@@ -258,7 +258,7 @@ async fn a_registry_that_cannot_be_built_lists_nothing_and_says_so() {
     }));
     let (listing, how) = catalog.models(config(), false).await;
     assert_eq!(how, Freshness::Fresh);
-    assert!(listing.models.is_empty());
+    assert!(listing.value.is_empty());
     assert!(!listing.complete);
 }
 
@@ -378,7 +378,7 @@ async fn a_listing_is_seeded_from_the_capability_cache_the_daemon_wrote() {
         });
         let (listing, _) = ModelCatalog::default().models(config, false).await;
         let seeded = listing
-            .models
+            .value
             .iter()
             .find(|m| m.provider == "anthropic" && m.id == "claude-seeded")
             .expect("the seeded model is listed");
@@ -420,7 +420,7 @@ async fn the_route_says_how_old_and_how_complete_its_answer_is() {
         &state,
         &super::super::types::ModelsQuery {
             provider: None,
-            refresh: Some(true),
+            refresh: true,
         },
     )
     .await;

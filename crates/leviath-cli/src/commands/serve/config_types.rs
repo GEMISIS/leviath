@@ -396,11 +396,6 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // 404s. The `GET` half is deliberately not announced: it shipped
     // unannounced, so its absence from this list proves nothing.
     "fs.mkdir",
-    // `feedback` on `POST /api/agents/{id}/interaction` beside
-    // `approved: false`, and the "Deny with feedback" option on a tool
-    // approval request. Announced because an older daemon drops the field
-    // without a word: a console that offered the box against one would send
-    // the person's redirect nowhere.
     // `GET /api/providers` and the three admin routes under it: the browser
     // sign-in for a provider that has no API key. Announced because a console
     // that cannot tell whether they exist has to offer a Codex row that either
@@ -410,6 +405,22 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // and a client finds that out the way it does for the MCP admin routes,
     // by calling one and reading the status.
     "providers.signin",
+    // `?quota=true` on that listing, the `quota` object it adds to each
+    // signed-in subscription, the `X-Leviath-Quota-Age` and
+    // `X-Leviath-Quota-Complete` headers on the answer, and `?refresh=1` to
+    // read the accounts again. Announced because the absence of a `quota`
+    // object says two different things at once - a daemon that ignored the
+    // parameter, and a subscription with nothing to report - and a console
+    // that cannot tell them apart has to choose between showing "usage
+    // unavailable" everywhere and dropping the feature everywhere. It also
+    // says the call is cheap: the reading is kept, so a providers page can ask
+    // every time it opens.
+    "providers.quota",
+    // `feedback` on `POST /api/agents/{id}/interaction` beside
+    // `approved: false`, and the "Deny with feedback" option on a tool
+    // approval request. Announced because an older daemon drops the field
+    // without a word: a console that offered the box against one would send
+    // the person's redirect nowhere.
     "interaction.feedback",
     // `config_error` and `config_mtime` on `GET /api/config`, and the
     // `config_health` websocket frame. Announced because the absence of
@@ -489,7 +500,8 @@ pub(super) struct ModelsQuery {
     pub(super) provider: Option<String>,
     /// Ask the providers again and wait for them, rather than answering from
     /// the catalogue. For a settings page that just changed something.
-    pub(super) refresh: Option<bool>,
+    #[serde(default, deserialize_with = "super::types::flag")]
+    pub(super) refresh: bool,
 }
 
 /// Body of `PUT /api/config` (admin-only). Every field is optional; a present

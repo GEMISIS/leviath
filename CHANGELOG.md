@@ -163,7 +163,13 @@ same list.
 - Subscription quota: `lev auth status` and `lev providers quota` show how
   much of a Codex or Grok plan is used and when each window resets, `lev
   doctor` warns when a limit is reached, and `GET /api/providers?quota=true`
-  carries the reports.
+  carries the reports. The accounts are asked side by side and each is given
+  its own bound, so one that will not answer costs one wait rather than one
+  per subscription. The daemon keeps the reading for a minute, fifteen
+  seconds when an account could not be read, so a providers page can ask
+  every time it opens: `X-Leviath-Quota-Age` and `X-Leviath-Quota-Complete`
+  say what you got, and `?refresh=1` reads the accounts again. Announced as
+  the `providers.quota` capability.
 - A model that bills long prompts at a higher rate is billed that way, and
   shown: a `+` beside its price in `lev models list`, both rates in `lev
   models show`, and a `long-context-price` note from `lev validate`. Model

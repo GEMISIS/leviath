@@ -13,6 +13,24 @@ use super::events::ServerEvent;
 use crate::config::Config;
 use crate::daemon::config_reload::ConfigReloader;
 
+/// A query parameter that is on when it is there and says so: `?flag=1`,
+/// `?flag=true`, `?flag=yes` or `?flag=on`, and off otherwise.
+///
+/// `axum`'s `Query` parses a `bool` through `str::parse`, which accepts
+/// `true` and `false` and refuses everything else with a 400. That made
+/// `?refresh=1` - which is what the API guide documents, what the OpenAPI
+/// spec describes as a boolean, and what a console writes without thinking -
+/// a rejected request rather than a refresh. Anything unrecognised reads as
+/// off, because a mistyped flag should leave the cheap default in place
+/// rather than fail the whole request.
+pub(super) fn flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(matches!(raw.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 /// Arguments for `lev serve`.
@@ -1223,6 +1241,32 @@ mod status_matches_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A flag is on when it says so, off when it says anything else, and an
+    /// error only when the value is not text at all.
+    #[test]
+    fn a_query_flag_is_on_when_it_says_so_and_off_otherwise() {
+        #[derive(Deserialize)]
+        struct Q {
+            #[serde(default, deserialize_with = "super::flag")]
+            on: bool,
+        }
+        for (value, expected) in [
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("on", true),
+            ("0", false),
+            ("false", false),
+            ("maybe", false),
+        ] {
+            let parsed: Q =
+                serde_json::from_str(&format!(r#"{{"on": "{value}"}}"#)).expect("a string");
+            assert_eq!(parsed.on, expected, "{value}");
+        }
+        assert!(!serde_json::from_str::<Q>("{}").expect("absent is off").on);
+        assert!(serde_json::from_str::<Q>(r#"{"on": 1}"#).is_err());
+    }
+
     use super::*;
 
     /// A daemon that is not there is a 503 (try later, or restart it); a
