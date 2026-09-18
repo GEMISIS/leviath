@@ -157,7 +157,7 @@ brew install codeql                                                    # the CLI
 codeql database create target/codeql-db --language=rust --overwrite    # builds the workspace through cargo
 codeql database analyze target/codeql-db codeql/rust-queries:codeql-suites/rust-code-scanning.qls \
   --format=sarif-latest --output=target/codeql.sarif --download
-python3 perf-tools/codeql_summary.py target/codeql.sarif                # rule, sink, and every flow's source
+python3 scripts/codeql_summary.py target/codeql.sarif                  # rule, sink, and every flow's source
 ```
 
 The summary's exit status is the number of findings, so a shell can gate on it. Two things worth knowing before reading a result: the Rust model treats every parameter of an axum handler as request data, `State` included (see `SECURITY.md`, "What the scanners say"), and the sensitive-data queries go by variable *name*, so a loop variable called `secret` that holds env-var names reads as a leak.
@@ -169,18 +169,23 @@ A green test suite and a 100% coverage number are not the same thing as
 running daemon ignored. Anything that changes what the daemon does on a tool
 call, a spawn or an HTTP request gets driven through a real daemon as well.
 
-`perf-tools/` holds the harness. `perf-tools/harness.sh CMD...` runs `CMD`
-in an isolated environment (`LEVIATH_HOME=/tmp/lv`, the repo `.env` skipped,
-the native OpenAI provider pointed at `perf-tools/mock.py`) and installs a
-one-stage `probe` blueprint. `mock.py` is a stateless OpenAI-compatible server
-that asks for a tool call of your choosing on the first turn; `daemon_drive.py`
-starts everything, spawns runs over `lev serve`, and waits for them to finish:
+The harness lives in
+[leviath-benchmarks](https://github.com/GEMISIS/leviath-benchmarks), under
+`perf/`. `perf/harness.sh CMD...` runs `CMD` in an isolated environment
+(`LEVIATH_HOME=/tmp/lv`, any `.env` skipped, the native OpenAI provider
+pointed at `perf/mock.py`) and installs a one-stage `probe` blueprint.
+`mock.py` is a stateless OpenAI-compatible server that asks for a tool call of
+your choosing on the first turn; `daemon_drive.py` starts everything, spawns
+runs over `lev serve`, and waits for them to finish. `LV_BIN` names the build
+under test:
 
 ```sh
 cargo build --release -p leviath-cli
-perf-tools/harness.sh python3 perf-tools/daemon_drive.py \
+git clone https://github.com/GEMISIS/leviath-benchmarks ../leviath-benchmarks   # once
+export LV_BIN="$PWD/target/release/lev"
+../leviath-benchmarks/perf/harness.sh python3 ../leviath-benchmarks/perf/daemon_drive.py \
     --runs 2 --tool shell --args '{"command":"echo hi > note.txt"}' --yolo --keep
-perf-tools/harness.sh target/release/lev timeline <run-id>
+../leviath-benchmarks/perf/harness.sh "$LV_BIN" timeline <run-id>
 ```
 
 Every "the bad thing did not happen" probe needs a control in the same script
@@ -190,7 +195,8 @@ exists so "no provider call was made" can be asserted rather than assumed.
 
 The same directory holds the measuring sticks a performance change is gated
 on (`dash_pty.py`, `serve_latency.py`, `binsize.sh`) and the baseline numbers
-under `perf-tools/baselines/`; see `perf-tools/README.md`.
+under `perf/baselines/`; see its `perf/README.md`. A performance PR here adds
+its before-and-after numbers there.
 
 ## Dependencies
 
