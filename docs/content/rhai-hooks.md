@@ -22,8 +22,8 @@ on_tool_call     = "hooks/guard.rhai"
 on_completion    = "hooks/notify.rhai"
 ```
 
-Each field names a `.rhai` file beside the agent, and the file must define a function of the same
-name taking one argument:
+Each field names a `.rhai` file beside the agent. The file must define a function of the same
+name, taking one argument:
 
 ```rhai
 fn on_stage_enter(ctx) {
@@ -60,9 +60,9 @@ flowchart TD
 | `on_completion` | run finished successfully | the final output | the final output |
 | `on_error` | run finished in error | the error message | the message |
 
-The three region hooks see each region's text under `regions` and, under `parts`, the stored
+The three region hooks see each region's text under `regions`. Under `parts`, they see the stored
 [parts](/docs/mime) each region holds, as maps with `mime_type`, `name`, `sha256`, `size` and
-`tokens`, keyed by region name; a region holding none is absent from `parts`. A hook can refuse to
+`tokens`, keyed by region name. A region holding none is absent from `parts`. A hook can refuse to
 start a stage whose `storyboard` is empty, or note in `regions` that six frames arrived.
 
 A **cancelled** run fires neither terminal hook. It was stopped from outside, and a hook narrating

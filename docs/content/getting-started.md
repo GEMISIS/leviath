@@ -46,8 +46,8 @@ refuses on managed machines. It answered "Access is denied." before anything ran
 
 If Windows Defender or another antivirus quarantines `lev.exe`, that is a false positive on a new,
 unsigned binary, not something it found. You can check the file is exactly what this repo's CI
-built with `gh attestation verify "$env:LOCALAPPDATA\Leviath\bin\lev.exe" --repo GEMISIS/leviath`,
-then restore it from quarantine or add the folder to the exclusions; reporting it as a false
+built with `gh attestation verify "$env:LOCALAPPDATA\Leviath\bin\lev.exe" --repo GEMISIS/leviath`.
+Then restore it from quarantine, or add the folder to the exclusions. Reporting it as a false
 positive to your vendor helps every later install.
 
 Check it worked:
@@ -82,7 +82,7 @@ scoop install leviath
 <details>
 <summary>Switch to the beta or alpha channel</summary>
 
-`stable` is the default and is what you want unless you have a reason to be ahead of it. To ride a
+`stable` is the default. It is what you want unless you have a reason to be ahead of it. To ride a
 faster channel, pass it to the installer:
 
 ```bash
@@ -115,9 +115,9 @@ To embed the runtime in your own application instead of running the CLI, add the
 
 ## Configure a provider
 
-One provider is all you need: an API key from Anthropic, OpenAI, Google AI, xAI, Meta, or
-OpenRouter; a ChatGPT or Grok subscription you sign in to (OpenAI Codex or Grok, no key); or a
-local [Ollama](https://ollama.com) with no key at all.
+One provider is all you need. That can be an API key from Anthropic, OpenAI, Google AI, xAI, Meta,
+or OpenRouter. It can be a ChatGPT or Grok subscription you sign in to (OpenAI Codex or Grok, no
+key). It can also be a local [Ollama](https://ollama.com) with no key at all.
 
 ```bash
 lev setup

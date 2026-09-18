@@ -36,19 +36,19 @@ panel and answer. `lev respond` does the same from the shell.
 - **Agent run table**: title and run id, blueprint, stage, status, tokens, and start time, with
   sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
   and context-window occupancy live in the detail view.
-- **Detail view**: the run's path as a band under the header (the flat stage tabs
-  on a short terminal), a context-window visualization, and content panes for **Output**,
-  **Logs**, **Context** (JSON) and, once the run has submitted an answer, **Final**: the
-  answer exactly as `GET /api/agents/{id}/result` serves it. Markdown is rendered. `t` swaps
-  the band to the whole blueprint, and `g` opens the blueprint full screen.
+- **Detail view**: the run's path as a band under the header, or the flat stage tabs
+  on a short terminal. Under it sit a context-window visualization and the content panes:
+  **Output**, **Logs**, **Context** (JSON), and **Final** once the run has submitted an answer.
+  Final is the answer exactly as `GET /api/agents/{id}/result` serves it. Markdown is rendered.
+  `t` swaps the band to the whole blueprint, and `g` opens the blueprint full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
 - **Agents**: the catalog of agents this machine can run (`a`), and an editor that builds one on
   the same graph canvas: stages as boxes, paths drawn between them, an inspector for whatever is
   selected. The same editor The Lair has, in the terminal.
-- **Mouse support**: click a run to select it and again to open it, click the `▸`/`▾` arrow to fold
-  a run's sub-agents, click a stage tab or a content-pane chip (`[l]`, `[o]`, `[c]`) to switch to
-  it, click a Context row to fold or unfold it, click the log panel to move the keys there. Wheel
+- **Mouse support**: click a run to select it and again to open it, or click the `▸`/`▾` arrow to
+  fold a run's sub-agents. Click a stage tab or a content-pane chip (`[l]`, `[o]`, `[c]`) to switch
+  to it. Click a Context row to fold or unfold it, or the log panel to move the keys there. Wheel
   scroll, click-drag select with copy-on-release, OSC52 copy over SSH, `y` to yank a pane,
   Shift+drag for native selection.
 - **`m`** opens the MCP management screen without leaving the dashboard.
@@ -61,7 +61,7 @@ panel and answer. `lev respond` does the same from the shell.
   every screen and stays there. It names the file and where in it the problem is: a line and
   column for a syntax error, the key for a value that was refused. It also says that runs are on
   the last config that loaded, which is the part a broken file otherwise hides. It is a banner rather than a
-  toast because the condition lasts until somebody edits the file, and a message that faded three
+  toast because the condition lasts until somebody edits the file. A message that faded three
   seconds after the save cannot explain the run you start two minutes later. Fix the file and it
   clears itself, with nothing restarted. On a narrow terminal the path gives way first, then the
   reassurance; the error itself is the last thing cut.
@@ -72,9 +72,9 @@ Most keys work on one screen only. Press `?` for the list that applies to where 
 where `?` would be typed as text: on the new-run screen every printable character goes into the
 filter or the task.
 
-Besides the main list and the detail view below, there is a screen for starting a run (`n`), one for
-your agents and the agent editor (`a`), one for MCP servers (`m`), and the stage explorer (`g`, from
-the detail view).
+Besides the main list and the detail view below, there are four more screens. One starts a run
+(`n`), one holds your agents and the agent editor (`a`), and one lists MCP servers (`m`). The stage
+explorer (`g`) opens from the detail view.
 
 ### Main list
 
@@ -83,7 +83,7 @@ the detail view).
 | `↑` / `↓` (or `k` / `j`) | Select a run |
 | `Home` / `End` (or `g` / `G`) | Jump to the first / last run |
 | `Enter` | Open detail view |
-| `←` / `→` | Fold / unfold the selected run's sub-agents. On a run that has none, `←` moves up to its parent and `→` down to its first worker |
+| `←` / `→` | Fold / unfold the selected run's sub-agents |
 | `n` | Start a run: pick an agent, write the task, press Enter |
 | `a` | Your agents: the catalog and the editor |
 | `Tab` / `Shift-Tab` | Focus the log panel (keys below) |
@@ -101,11 +101,14 @@ the detail view).
 By default runs are listed newest first and keep their row for their whole life, so nothing jumps
 around when a run finishes. The sort indicator sits in the table's top-right corner.
 
-A run that spawned sub-agents (a fan-out, or the sub-agent tool) shows them nested under it, each
-row wearing a `▾` while its workers are showing and a `▸` once they are folded, with `+N` for how
-many the fold is hiding. `←` and `→` work the tree, and clicking the arrow does the same. A fold is
-remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
-the run you were inside moves the highlight onto the fold rather than back to the top.
+A run that spawned sub-agents (a fan-out, or the sub-agent tool) shows them nested under it. Each
+row wears a `▾` while its workers are showing and a `▸` once they are folded, with `+N` for how
+many the fold is hiding. `←` and `→` work the tree, and clicking the arrow does the same. On a run
+with no sub-agents of its own, `←` moves the selection up to its parent and `→` down to its first
+worker.
+
+A fold is remembered by run, so it survives sorting, filtering and new rows arriving above it.
+Folding the run you were inside moves the highlight onto the fold rather than back to the top.
 
 `d` on such a run deletes the whole tree, and the confirmation says how many sub-agent runs that
 is before you answer. Nothing goes the other way: deleting one worker leaves the run that started
@@ -119,7 +122,7 @@ deleted is forgotten the next time the dashboard can see the run list.
 Three other choices live in that same file: the sort order `s` cycles, the agent the new-run
 screen opens on (whichever one you last launched), and how each run's [Context view](#context-view)
 was left folded. Nothing transient joins them. A filter, a search and the marks are all gone when
-you come back, and unattended (`Ctrl-Y`) is deliberately off every time the new-run screen opens,
+you come back. Unattended (`Ctrl-Y`) is deliberately off every time the new-run screen opens,
 because a setting that runs tools without asking is not one to inherit out of sight.
 
 Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
@@ -144,12 +147,12 @@ skips marked runs that have already finished.
 ### Starting a run (`n`)
 
 Agent blueprints on the left, the task on the right, and above the task the selected blueprint's
-stage graph, so you can see what an agent will do before you give it a task: how many stages, in
+stage graph. The graph shows what an agent will do before you give it a task: how many stages, in
 what order, where it loops back. Between the graph and the task, when the blueprint takes
 [inputs from the caller](/docs/context#seeding-a-region) beyond the task (a `pictures` region with
 `seed = "input"`, a `--diff`), an **Inputs** box with one slot per region. A slot for a region
 that takes files opens a picker of the working directory, filtered to the types the region
-accepts, so you choose a file from a list rather than typing its name (and never with an `@`); a
+accepts. You choose a file from a list rather than typing its name, and never with an `@`. A
 slot for a text region takes a line of text. A file region takes as many files as its token
 budget allows, added and removed in the same picker; the number is bound by the budget, never a
 fixed count. The slot names what the region takes, its token budget (`≤117k tok`, the region's
@@ -165,26 +168,48 @@ rather than back into the form.
 |---|---|
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
 | `Tab` / `Enter` | Move from the agent list to the inputs, when the agent has any, else to the task |
-| `↑` / `↓` (in the inputs) | Choose a slot. A file slot opens the picker on `Enter` (or `Ctrl+O`); a text slot takes what you type, and `Enter` moves to the next slot and, after the last, to the task. `Tab` to the task; `Shift+Tab` or `Esc` back to the agent list |
-| picker (in a file slot) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file, `Enter` confirms. `Enter` never selects on its own, so a slot can be left empty; `Esc` cancels. The list is the working directory only, so it never offers a file the run could not read, and each file shows its own token cost. The title shows the tokens the choice costs against the region's budget (its share of the model's context window); a file that would overflow the budget is refused with the reason, and a run that would not fit is stopped before it starts |
-| `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` also starts it, but only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and `Ctrl+S` or the Start button is the way to submit |
+| `↑` / `↓` (in the inputs) | Choose a slot |
+| picker (in a file slot) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file, `Enter` confirms |
+| `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` does the same on terminals that can tell it from `Enter` |
 | `Enter` / `Alt+Enter` | Newline |
-| `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |
-| `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed. A path that names a file is attached to the task as a typed part when the run starts, and the task box's title counts them as you type; one that names nothing stays text, with a warning |
+| `Tab` (in the task) | Move to the Start button under the editor |
+| `@` | Reference a file from the working directory |
 | `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
 | `F1` | Help. `?` types a question mark here |
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
 | `Esc` (in the task) | Back to the agent list; `Shift+Tab` back to the inputs, when there are any |
 
+In the **Inputs** box, a file slot opens its picker on `Enter` or `Ctrl+O`. A text slot takes what
+you type, and `Enter` moves to the next slot, then to the task after the last one. `Tab` goes
+straight to the task; `Shift+Tab` or `Esc` goes back to the agent list.
+
+Inside the picker, `Enter` never selects on its own, so a slot can be left empty, and `Esc`
+cancels. The list is the working directory only, so it never offers a file the run could not read.
+Each file shows its own token cost.
+
+The picker's title shows the tokens the choice costs against the region's budget, which is the
+region's share of the model's context window. A file that would overflow the budget is refused
+with the reason. A run that would not fit is stopped before it starts.
+
+`Ctrl+Enter` starts the run too, but only on a terminal with the kitty keyboard protocol: kitty,
+WezTerm, Ghostty, foot, recent Alacritty. Telling `Ctrl+Enter` from `Enter` takes that protocol.
+Elsewhere it inserts a newline, so `Ctrl+S` or the Start button is the way to submit. On the Start
+button, `Enter` or `Space` starts the run, as does a click on it, while `Tab` or `Esc` returns to
+the agent list and `Shift+Tab` to the task.
+
+An `@` reference works from a list: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it,
+`Backspace` over the `@` ends the reference, and `Esc` dismisses the list and keeps what you typed.
+A path that names a file is attached to the task as a typed part when the run starts. The task
+box's title counts them as you type. One that names nothing stays text, with a warning.
 
 The task box wraps: a task longer than the pane is wide folds onto the next
-row rather than scrolling sideways, so the beginning of what you wrote is
+row rather than scrolling sideways. The beginning of what you wrote is
 still on screen when the cursor is at the end. See
 [Formatting a long-form box](#formatting-a-long-form-box) for what the toolbar
 along its top does.
 
-`Ctrl-Y` warns every time you turn it on (turning it off never asks), and the warning is worth
-reading: an unattended run approves its own file edits and shell commands, but it does **not** skip
+`Ctrl-Y` warns every time you turn it on, and turning it off never asks. The warning is worth
+reading: an unattended run approves its own file edits and shell commands. It does **not** skip
 a checkpoint the blueprint asks a person for. Those still stop, and by default one nobody answers
 waits for as long as it takes. `[limits] interaction_timeout_secs` is how you bound that wait. The
 setting is off again every time the screen opens.
@@ -192,28 +217,29 @@ setting is off again every time the screen opens.
 ### Detail view
 
 On a terminal at least 36 rows tall the stage row is the blueprint's graph, drawn by the same
-canvas as the explorer: the path the run took and the options from where it is, boxes on layers,
-the stage the run is in in the run's colour, visited stages with their visit count. The selected
-box is the open stage tab, in a thick bright frame: `←` / `→` move it through the graph, `1`-`9`
-jump to a stage by number, and a click on a box picks it. Drag a box to move it, drag empty canvas
+canvas as the explorer. It shows the path the run took and the options from where it is, boxes on
+layers. The stage the run is in wears the run's colour, and visited stages carry their visit count.
+
+The selected box is the open stage tab, in a thick bright frame. `←` / `→` move it through the
+graph, `1`-`9` jump to a stage by number, and a click on a box picks it. Drag a box to move it, drag empty canvas
 to pan, `g` opens the same graph full screen with the rest of its keys. On a shorter terminal, and
 for a run whose blueprint could not be read, the flat tab strip stays.
 
 | Key | Action |
 |---|---|
-| `←` / `→` | Switch stage tab, through the graph when it is on screen (`h` / `l` are not aliases here: `l` is Logs) |
+| `←` / `→` | Switch stage tab, through the graph when it is on screen |
 | `1`–`9` | Jump to that stage tab |
 | `↑` / `↓` (or `k` / `j`) | Scroll the pane; in the Context view, move the tree cursor |
 | `PgUp` / `PgDn` | Scroll ten lines |
 | `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
 | `l` / `o` / `c` | Switch the pane to Logs / Output / Context |
-| `f` | Switch the pane to Final: the answer the run submitted, the same bytes `lev result` and the HTTP API return. The `[f] final` chip and the key are there only while the run has one; Output shows what the stage wrote along the way, which can differ |
+| `f` | Switch the pane to Final: the answer the run submitted |
 | `g` | Open the stage graph explorer |
 | `t` | Swap the band between the run's path and the whole blueprint |
 | `R` | Re-snake the path, undoing boxes you moved by hand |
 | `Enter` / Space | Fold or unfold the row under the Context tree's cursor |
 | `[` / `]` | Jump to the previous / next region in the Context view |
-| `v` / `w` | On a stored part's row in the Context view: open the file with whatever the OS opens it with, or write it into the run's working directory under its own name |
+| `v` / `w` | On a stored part's row in the Context view: open the file, or write it out |
 | `,` / `.` | Step back and forward through context history |
 | `/` , then `n` / `N` | Search, then next / previous match |
 | `y` | Copy the pane to the clipboard |
@@ -224,13 +250,21 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `?` / `F1` | Help |
 | `Ctrl-C` | Quit. `q` is unbound here, so a stray keystroke cannot close the dashboard mid-run |
 
+`h` and `l` are not aliases for `←` / `→` in the detail view: `l` switches the pane to Logs. The
+Final pane is the same bytes `lev result` and the HTTP API return. Its `[f] final` chip and the key
+are there only while the run has one, and Output shows what the stage wrote along the way, which
+can differ.
+
+`v` on a stored part's row hands a copy to whatever the operating system opens that kind of file
+with. `w` writes it into the run's working directory under its own name.
+
 A `@path` in a typed response or message attaches that file from the run's working directory,
-the way it does on `lev respond --attach` and `lev msg`: the words keep the token, the file lands
-beside them as a typed part, and a token that names no file stays text with a warning toast.
+the way it does on `lev respond --attach` and `lev msg`. The words keep the token, and the file
+lands beside them as a typed part. A token that names no file stays text, with a warning toast.
 
 While you are typing a response, `Enter` inserts a newline, the way it does in the new-run task
 box, and `Ctrl+S` sends. `Ctrl+Enter` sends too on a terminal with the kitty keyboard protocol,
-which is what it takes to tell `Ctrl+Enter` from `Enter`; `Tab` moves to the Send button under
+which is what it takes to tell `Ctrl+Enter` from `Enter`. `Tab` moves to the Send button under
 the box, where `Enter` or `Space` sends, as does a click on it. `PgUp` / `PgDn` scroll the document above the prompt, and
 `Esc` cancels. `/quit` or `/exit` on its own line ends the conversation when sent. An in-place
 document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
@@ -265,17 +299,17 @@ regions and entries as you left them, while a different run opens at the default
 `conversation` on one run says nothing about another, and an entry index certainly does not. A run
 you put back to its defaults keeps no record at all, and a run you delete takes its record with it.
 The one caveat is a *live* run whose region evicts from the front: entry numbers shift under an
-expansion, which is already true within a single session and is why this is a convenience rather
+expansion. That is already true within a single session, and it is why this is a convenience rather
 than a promise.
 
 ### The path band
 
 The rows under the detail view's header draw the run's path: one box per stage **visit**, in the
-order the run walked them, snaking across rows so it stays compact and grows a row at a time while
-the run is still going. A stage entered three times is three boxes, `implement`, `implement (2)` and
+order the run walked them. The path snakes across rows, so it stays compact and grows a row at a
+time while the run is still going. A stage entered three times is three boxes, `implement`, `implement (2)` and
 `implement (3)`, because the order is the story. Each says when it was entered and how many
 iterations it took. The rows alternate direction, so the last box of a row sits directly above the
-first box of the next and the hand-off between them is a short vertical hop rather than a jump back
+first box of the next. The hand-off between them is a short vertical hop rather than a jump back
 across the canvas. The band grows a row taller when the path wraps; past that it pans, keeping the
 stage the run is in on screen. This is the same picture The Lair's run view draws on the web.
 
@@ -291,23 +325,22 @@ chain; a graph blueprint is a graph). Where the band is what the run did, the ex
 of everything it could do:
 
 - **Graph** draws the blueprint on a canvas: stages are boxes on layers, transitions are routed
-  edges. The layers run left to right when that fits the terminal and top to bottom when only that
-  does (`r` turns it by hand); boxes are never shrunk to make a graph fit, the canvas pans instead,
-  with a minimap in the corner when there is more graph than screen. The stage the run is in
-  spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
-  their last visit, the last transition it took is animated while the run is still going, and
-  revisit loops run along a lane
-  beside the boxes. The whole blueprint is on show, so you can see what the run has not done as
+  edges. The layers run left to right when that fits the terminal, and top to bottom when only
+  that does (`r` turns it by hand). Boxes are never shrunk to make a graph fit; the canvas pans
+  instead, with a minimap in the corner when there is more graph than screen. The stage the run is
+  in spins in the run's colour. Stages it has been through show a visit count (`×2`) and the time
+  of their last visit. The last transition it took is animated while the run is still going, and
+  revisit loops run along a lane beside the boxes. The whole blueprint is on show, so you can see what the run has not done as
   well as what it has. `t` narrows it to the path and the options: the stages the run has been
-  through and the one it is in, the transitions between them, and the transitions it can take from
-  where it is with the stages they lead to. Everything else waits off screen, so a stage never
+  through and the one it is in, plus the transitions between them. It also keeps the transitions it
+  can take from where it is, with the stages they lead to. Everything else waits off screen, so a stage never
   sits there without a line to it.
   The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
-  them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the
+  them, because nearly every stage has one to the same hub. With the path in focus, `e` shows the
   escapes from the current stage. A fan-out stage that is running shows its worker counts.
   A stage that takes [files](/docs/mime) beyond text wears what it takes (`◧ image/* audio/wav`,
-  from its regions' `accepts` or its `[input] accepts`), and one that declares files it hands back
-  wears their types (`▤ video/mp4`); a path whose file the next stage's regions cannot take
+  from its regions' `accepts` or its `[input] accepts`). One that declares files it hands back
+  wears their types (`▤ video/mp4`). A path whose file the next stage's regions cannot take
   carries `!` on its label, and selecting it says which type would cross as a stand-in.
   Selecting a stage or an edge describes it on the line under the canvas. Boxes can be dragged
   into an arrangement you prefer; the explorer remembers it, and the view, for as long as the
@@ -346,16 +379,22 @@ An installed bundled agent that has been edited says `edited`, and `r` puts the 
 | Key | Action |
 |---|---|
 | `↑` / `↓` (or `k` / `j`), `Home` / `End`, `PgUp` / `PgDn` | Move |
-| `Enter` / `e` | Open the agent in the editor. A bundled agent not installed yet opens from its embedded copy and is installed when saved |
+| `Enter` / `e` | Open the agent in the editor |
 | `n` | New agent: start from the two-stage starter, or clone any agent in the catalog, under a name you type |
 | `l` | Launch it: the new-run screen with this agent picked |
-| `r` | Rename an installed agent: type the new name, `Enter` renames its directory and the `name` in its manifest (its saved arrangement comes along), `Esc` keeps it. A bundled agent not installed keeps its name (clone it with `n`); agents that live elsewhere are renamed where they are |
-| `d` | Delete an installed agent and its directory. Asks first. Agents that live elsewhere are edited in place but deleted where they are |
+| `r` | Rename an installed agent: type the new name, `Enter` renames it, `Esc` keeps it |
+| `d` | Delete an installed agent and its directory. Asks first |
 | `R` | Reset an edited bundled agent to the copy bundled in the binary. Asks first |
 | `/` | Filter by name or description; `Enter` keeps the filter, `Esc` clears it |
 | `?` / `F1` | Help |
 | `Esc` / `q` | Back to the run list |
 | mouse | Wheel over the list to move; wheel and drag on the preview to zoom and pan |
+
+A bundled agent that is not installed yet opens in the editor from its embedded copy, and is
+installed when you save it. It keeps its name under `r`, so clone it with `n` to give it another.
+
+`r` renames the agent's directory and the `name` in its manifest, and its saved arrangement comes
+along. Agents that live elsewhere are edited in place, but renamed and deleted where they are.
 
 ### Agent editor
 
@@ -369,54 +408,61 @@ hidden, so the panel never reflows under the cursor:
 - **A stage**, on four tabs (`1` to `4`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
   has one, the prompts, delete. The worker a fan-out runs as is picked
-  from the agent's other stages or from every agent installed here (with an *another…* row for
-  one that is not), and typed only when it is a query. *Inputs & outputs*: the input types (what
-  the stage takes as files beyond text; left empty it is whatever its regions take, and each
-  region is listed under it with the [mime](/docs/mime) it takes, `Enter` opening it), what is
-  sent to the model as text whatever it takes, the output type (picked from the plain shapes,
-  `markdown`, `json`, `text`, or any mime type), and the output files it declares it hands back
-  (`Enter` opens one, `x` drops it, the last row declares another and asks its name). *Models & tools*: the model chain (the first is tried first; `Enter` swaps an entry, `x`
-  drops it, `h` `l` or a drag on its `⠿` grip move it, the last row adds a fallback), the tools it may
-  use, picked from every tool this install has (`Space` toggles, `Enter` keeps): the groups, each
+  from the agent's other stages or from every agent installed here, with an *another…* row for
+  one that is not. It is typed only when it is a query.
+  *Inputs & outputs*: the input types, which are what the stage takes as files beyond text. Left
+  empty, that is whatever its regions take, and each region is listed under it with the
+  [mime](/docs/mime) it takes (`Enter` opens it). The tab also holds what is sent to the model as
+  text whatever it takes, and the output type, picked from the plain shapes `markdown`, `json`,
+  `text`, or any mime type. Last come the output files it declares it hands back: `Enter` opens
+  one, `x` drops it, and the last row declares another and asks its name.
+  *Models & tools*: the model chain, where the first entry is tried first. `Enter` swaps an entry,
+  `x` drops it, `h` `l` or a drag on its `⠿` grip move it, and the last row adds a fallback. Under
+  the chain are the tools it may use, picked from every tool this install has (`Space` toggles,
+  `Enter` keeps). That list holds the groups, then each
   [MCP server](/docs/mcp) from your config and the agent's own manifest as a connector that grants
-  every tool it advertises, and, once the server has answered (it is asked when the screen opens),
-  its tools one by one under their `server__tool` names; and under them what
-  each tool may be handed at this stage (`Enter` picks the types, `x` lifts the limit): call another
-  agent with images only, or hand a tool that takes text and images only text here.
-  *Context & tools*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
-  it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
-  tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
-  routing the tool).
+  every tool it advertises. Once the server has answered, which it is asked to do when the screen
+  opens, its tools follow one by one under their `server__tool` names. Under them sits what
+  each tool may be handed at this stage: `Enter` picks the types, `x` lifts the limit. You can call
+  another agent with images only, or hand a tool that takes text and images only text here.
+  *Context & tools*: whether the stage sees the agent's shared regions or has a layout of its own,
+  and the regions it sees (`Enter` opens one). There is a button to give it its own layout or go
+  back to the shared one. Then comes where tool results land by default, and per-tool routing:
+  `Enter` on a row changes the region, `x` stops routing the tool.
 - **A path**: when it is taken, the hint the model routes on, whether it needs your approval, what
-  context is carried across (everything, only pinned regions, everything summarized, or per-region
-  rules: carry, summarize or drop each one, with the instructions the summary follows), delete.
+  context is carried across, and delete. Context carried across is everything, only pinned regions,
+  everything summarized, or per-region rules: carry, summarize or drop each one, with the
+  instructions the summary follows.
 
 A region, a declared file and a stage's loop back to itself open in a window over the editor rather
-than in the inspector's place, so the panel they came from stays in view; `Esc` closes the window.
+than in the inspector's place, so the panel they came from stays in view. `Esc` closes the window.
 
 - **A context region**: name, kind (each kind says what it does), share of the context window and
-  token cap, the sliding-window knobs when it is one, the mime types it takes and how many stored
-  parts it keeps, whether it must be filled before the run goes on and what to say if it is not, what
-  seeds it, description, delete.
+  token cap, and the sliding-window knobs when it is one. Then the mime types it takes and how many
+  stored parts it keeps. After those, whether it must be filled before the run goes on and what to
+  say if it is not, what seeds it, description, delete.
 - **A declared file**: name, type or pattern, whether it is required, description, and a button to
   drop the declaration.
 
-Every mime type field is one chooser: the families (`image/*`, `audio/*`, and so on), every type
-the registry knows (the built-in table, then your [`mime_types.toml`](/docs/configuration#mime_typestoml)),
-and an *another…* row that takes a `type/subtype` or `type/*` the list does not have. `Space`
+Every mime type field is one chooser. It offers the families (`image/*`, `audio/*`, and so on) and
+every type the registry knows: the built-in table, then your
+[`mime_types.toml`](/docs/configuration#mime_typestoml). An *another…* row takes a `type/subtype`
+or `type/*` the list does not have. `Space`
 picks as many as the field takes, `Enter` keeps them, `x` on the field clears it.
 
-The models the chooser offers come from every provider in your config (asked when the screen
-opens, so the list fills in a moment later) on top of the built-in catalog, marked with the context
-window when it is known. The prompts open full screen: the system prompt (what the stage is told)
-and the transition prompt (how it picks the next path; only read when there is more than one), with
-`Tab` between them, `Ctrl-S` or `Esc` to apply, `Ctrl-Q` to discard, and `F2` to hand the
-focused prompt to `$EDITOR` (`$VISUAL` first): the dashboard steps aside while the editor runs and
-the text comes back into the box when it closes.
+The models the chooser offers come from every provider in your config, on top of the built-in
+catalog. Each provider is asked when the screen opens, so the list fills in a moment later. A model
+is marked with the context window when it is known.
 
-Every edit is checked as you make it, the way `lev validate` checks a file: the line under the graph
-says how many errors and warnings there are (`p` opens the list), a stage an error names carries a
-`!` on its box, and saving is refused while there are errors. `Ctrl-Z` undoes the last edit, `Ctrl-Y`
+The prompts open full screen: the system prompt, which is what the stage is told, and the
+transition prompt, which is how it picks the next path. The transition prompt is only read when
+there is more than one path. `Tab` moves between them, `Ctrl-S` or `Esc` applies, and `Ctrl-Q`
+discards. `F2` hands the focused prompt to `$EDITOR` (`$VISUAL` first): the dashboard steps aside
+while the editor runs, and the text comes back into the box when it closes.
+
+Every edit is checked as you make it, the way `lev validate` checks a file. The line under the
+graph says how many errors and warnings there are, and `p` opens the list. A stage an error names
+carries a `!` on its box, and saving is refused while there are errors. `Ctrl-Z` undoes the last edit, `Ctrl-Y`
 (or `Ctrl-Shift-Z`) redoes it. `v` shows the exact `agent.leviath` that will be saved, comments and all: the editor keeps
 your file's comments, key order and formatting, and only writes the keys it knows.
 
@@ -426,12 +472,14 @@ directory), so a graph opens the way you left it; it is never part of the manife
 | Key | Action |
 |---|---|
 | `Ctrl-S` | Save (checks first; errors block it and open the problems list) |
-| `Tab` | From the graph: move the keys to the inspector. On a stage's inspector: the next tab (`Shift-Tab` the one before). On any other panel: back to the graph |
+| `Tab` | From the graph, move the keys to the inspector; from any other panel, back to the graph |
 | `Ctrl-Z` / `Ctrl-Y` | Undo / redo (`Ctrl-Shift-Z` redoes too) |
 | `v` | The definition; `y` copies it, `Esc` closes it |
 | `p` | Open or close the problems list under the graph |
 | `?` / `F1` | Help |
 | `Esc` | On the graph: close the editor (asks when there are unsaved edits). On the inspector: back to the graph |
+
+On a stage's inspector, `Tab` moves to the next tab and `Shift-Tab` to the one before.
 
 On the graph:
 
@@ -443,8 +491,16 @@ On the graph:
 | `c` | Connect the selected stage to another, picked from a list (or to itself: a loop) |
 | `x` / `Delete` | Delete the selected stage (asks first) or path |
 | `+` / `-` , `0`, `f`, `r` | Zoom, fit, turn the graph |
-| mouse | Click a box or a path to select it; click empty canvas to select nothing (back to **This agent**); drag a box to move it, drag a `●` handle onto another box to connect them, drag empty canvas to pan, wheel to zoom |
-| right-click | A menu for what is under the pointer: a stage (edit, connect to, add a stage after it, rename, edit prompts, delete), a path (edit, delete), or the empty canvas (add a stage there, fit, turn, show the definition). `↑` `↓` and `Enter` work it, `Esc` or a click elsewhere closes it |
+| mouse | Click a box or a path to select it; drag to move, connect or pan; wheel to zoom |
+| right-click | A menu for what is under the pointer. `↑` `↓` and `Enter` work it, `Esc` closes it |
+
+Clicking empty canvas selects nothing, which puts the inspector back on **This agent**. Drag a box
+to move it, drag a `●` handle onto another box to connect them, and drag empty canvas to pan.
+
+The right-click menu depends on what is under the pointer. On a stage it offers edit, connect to,
+add a stage after it, rename, edit prompts, and delete. On a path it offers edit and delete. On the
+empty canvas it offers add a stage there, fit, turn, and show the definition. A click elsewhere
+closes it too.
 
 On the inspector:
 
@@ -452,16 +508,17 @@ On the inspector:
 |---|---|
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
 | `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
-| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
+| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle |
 | `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing, a file declaration, a list of types |
 | `1` `2` `3` `4` | A stage's tabs: behaviour, inputs & outputs, models & tools, context & tools |
 | `Esc` | Close the window a region, a file or a loop is open in; otherwise back to the graph |
-| mouse | Click a row to pick it (again to open it); click a tab to switch to it; drag a model's `⠿` grip to move it in the chain |
+| mouse | Click a row to pick it, again to open it; click a tab to switch to it |
 
-A stage's model chain is a priority order, and the `⠿` grip at the start of each model row is how
-the mouse changes it: press the grip, drag it up or down the chain, and let go. The rows reorder as
-you drag, so where you drop it is what you saw, and nothing is written until the button comes up --
-one undo entry for the whole move, and a drop back where it started costs not even that.
+A stage's model chain is a priority order, and `←` / `→` (or `h` / `l`) move a model along it. The
+`⠿` grip at the start of each model row is how the mouse does the same: press the grip, drag it up
+or down the chain, and let go. The rows reorder as you drag, so where you drop it is what you saw.
+Nothing is written until the button comes up: one undo entry for the whole move, and a drop back
+where it started costs not even that.
 
 The grip is deliberately a small target rather than the whole row. Dragging anywhere else on a row
 still selects text the way it does everywhere else in the dashboard, so a model id stays something
@@ -499,11 +556,11 @@ inspector and `Esc` back to the graph.
 
 ### Formatting a long-form box
 
-Four boxes in the dashboard take prose rather than a word: the task on the
-new-run screen, the box you answer a waiting run in, the document you edit in
-place when a run asks you to revise one, and a stage's system and transition
-prompts in the agent editor. All four are the same editor. They wrap, and each
-one draws a toolbar along its top:
+Four boxes in the dashboard take prose rather than a word. Three belong to a
+run: the task on the new-run screen, the box you answer a waiting run in, and
+the document you edit in place when a run asks you to revise one. The fourth
+holds a stage's system and transition prompts in the agent editor. All four are
+the same editor. They wrap, and each one draws a toolbar along its top:
 
 ```
    Edit ⇄    │ B  i  S  U │ <>  ```  [] │ ▦  ◇ │ H  •  1.  >

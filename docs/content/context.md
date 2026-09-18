@@ -164,12 +164,18 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
 | `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
-| `description` | unset | One line on what the region is for. Documentation by default: it reaches `lev dash` and the API, not the model |
+| `description` | unset | One line on what the region is for. See below |
 | `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
-| `volatility` | `"rewritten"` | How much the region's contents move between requests, which decides where it sits in the prompt. See [what caching costs](#what-caching-costs) |
-| `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
-| `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. Unset takes anything. A write carrying another type is refused with this list. See [More than text](/docs/mime) |
+| `volatility` | `"rewritten"` | How much the region's contents move between requests. See [what caching costs](#what-caching-costs) |
+| `admission` | `"evict"` | What happens when a write does not fit. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
+| `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. See [More than text](/docs/mime) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
+
+Four of those keys carry more than a table cell holds. A `description` is documentation by
+default: it reaches `lev dash` and the API, not the model. `volatility` decides where the region
+sits in the prompt, and `admission = "reject"` refuses a write that does not fit instead of dropping
+something to make room. An unset `accepts` takes anything, and a write carrying a type the list does
+not cover is refused with that list.
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage
 has been worked out against the model in front of it. A `budget = "20%"` region on a 200k-token
@@ -180,12 +186,12 @@ ceiling. Alongside `budget`, it caps the resolved percentage, so the region gets
 smaller.
 
 That last part is worth dwelling on, because it is easy to write a cap that quietly cancels the
-percentage. `budget = "30%", max_tokens = 40000` is 30% only below a 133k window; above that it is
-a flat 40,000 however large the model, and every bundled agent shipped that way until a 1M-context
-run held its findings to 40k while its own blueprint asked for 314k. If you mean the percentage,
-write the percentage on its own. Reach for `max_tokens` when a region genuinely must not grow, and
-`min_tokens` when a small one must not shrink on a narrow window - and check what the pair resolves
-to at the largest model you expect to run.
+percentage. `budget = "30%", max_tokens = 40000` is 30% only below a 133k window. Above that it is
+a flat 40,000 however large the model. Every bundled agent shipped that way until a 1M-context run
+held its findings to 40k while its own blueprint asked for 314k. If you mean the percentage, write
+the percentage on its own. Reach for `max_tokens` when a region genuinely must not grow, and
+`min_tokens` when a small one must not shrink on a narrow window. Check what the pair resolves to at
+the largest model you expect to run.
 
 A malformed `budget` or `compact_at` string is a hard error at load, so `lev validate` catches it
 instead of a run failing later.
@@ -335,8 +341,8 @@ should date the second stage from when it started, not from when the run did. Th
 the refreshed region before its first request, so the values are in place for the turn that reads
 them.
 
-It costs a tool call per stage entry for the life of the run, and rewrites a region that would
-otherwise sit still in the cached prefix, so leave it at the default for anything that does not
+It costs a tool call per stage entry for the life of the run, and it rewrites a region that would
+otherwise sit still in the cached prefix. Leave it at the default for anything that does not
 actually change. A call that fails leaves the region as it was rather than blanking it: the
 previous value is stale, and stale beats absent. `lev validate` marks a refreshing seed
 "on every stage entry".
@@ -356,7 +362,7 @@ research what meta's most recent earnings call was about
 ```
 
 The name is the part that earns its tokens. An agent writes to a region *by
-name* - `context_write { region: "sources_index", … }` - and without the heading
+name*, as in `context_write { region: "sources_index", … }`. Without the heading
 it reads a region's contents with nothing saying which region they came from. It
 could read `sources_index` and write to `sources_index` and have no way to know
 they were the same place. A heading costs three tokens, once per region, however
@@ -385,27 +391,27 @@ One bibliography line per source actually used.
 The split is deliberate. Describing every region for the people who maintain the
 blueprint should not quietly cost tokens on every turn, and most region names
 are already the explanation. Turn it on where the region has a convention the
-agent has to follow - a format, an ordering, a rule about what belongs - rather
-than a purpose it can infer from the name.
+agent has to follow: a format, an ordering, a rule about what belongs. Leave it
+off for a purpose the agent can infer from the name.
 
-Empty regions contribute nothing - no heading, no blank block - so a blueprint
-can declare the regions it might need without paying for the ones it has not
-filled yet.
+Empty regions contribute nothing, not a heading and not a blank block. A
+blueprint can declare the regions it might need without paying for the ones it
+has not filled yet.
 
 ### Stored parts in the prompt
 
 An entry can hold more than text: an image, a clip, a document, any
 [stored part](/docs/mime). In a region that renders into the system prompt
-the part appears as its one-line stand-in, `[image/png 1024x768, 240 KB] hero.png`,
-and the bytes travel in one user message placed before the conversation, each
-after a pointer naming the region, the key and the part. In the conversation the
+the part appears as its one-line stand-in, `[image/png 1024x768, 240 KB] hero.png`.
+The bytes travel in one user message placed before the conversation, each after
+a pointer naming the region, the key and the part. In the conversation the
 part sits in its own turn, after the text it came with. A tool result's parts
 follow the result in the same turn.
 
 Whether the model gets the bytes is decided when the request is built, not
 when the entry is written. A model whose input types cover the part gets it as
-that provider's native block; a part whose bytes are text reaches any model as
-text; anything else is the stand-in alone, which still names the part so the
+that provider's native block. A part whose bytes are text reaches any model as
+text. Anything else is the stand-in alone, which still names the part so the
 model can hand it to a tool. The journal and `context.json` carry references,
 never the bytes.
 
@@ -444,16 +450,16 @@ biggest region in a blueprint is usually the append-only one tool results land i
 
 > [!NOTE]
 > The region's **kind** does not answer this, which is why the setting exists. A `pinned`
-> region sounds immutable and is written constantly - `context_write` into a findings region
+> region sounds immutable and is written constantly. `context_write` into a findings region
 > is an ordinary move, and [tool routing](#routing-tool-output) sends read results straight
 > into one. Only the blueprint knows which of yours is which.
 
 `temporary` and `clearable` are worth declaring for the same reason, and the payoff is larger.
-Both names describe when the region is *thrown away* - one at stage exit, the other on demand -
-and say nothing about whether the contents hold still in between. Undeclared they are treated as
-uncacheable, which is right at the boundary and wrong everywhere else: a stage that reads a corpus
-into a `temporary` region and then works through it for forty calls re-sends the whole corpus at
-full rate on every one of them. Measured on one such stage: 5.36M tokens across 46 calls, the
+Both names describe when the region is *thrown away*, one at stage exit and the other on demand.
+Neither says anything about whether the contents hold still in between. Undeclared they are treated
+as uncacheable, which is right at the boundary and wrong everywhere else. A stage that reads a
+corpus into a `temporary` region and then works through it for forty calls re-sends the whole corpus
+at full rate on every one of them. Measured on one such stage: 5.36M tokens across 46 calls, the
 largest single cost line in the run. Declaring it `grows` splits it the same way any other growing
 region is split, so the part already read caches and only the newest excerpt is re-sent.
 
@@ -463,15 +469,15 @@ silently paying for it: the declaration is a hint it checks, not a promise it tr
 ### A region that stops growing caches itself
 
 Declare a region by what it does across the whole run, not per stage. A `grows` region is split
-into chunks that freeze once full, so when the appending stops - a gathering stage ends and a
-planning stage only reads what it collected - every chunk is already frozen and the whole region
-caches. Measured on that shape: 99% of the prompt cacheable in the planning stage, with only the
-plan itself, rewritten each turn, outside it.
+into chunks that freeze once full. When the appending stops, every chunk is already frozen and the
+whole region caches. That is the shape of a gathering stage that ends, with a planning stage only
+reading what it collected. Measured on that shape: 99% of the prompt cacheable in the planning
+stage, with only the plan itself, rewritten each turn, outside it.
 
 Re-declaring such a region `stable` for the later stage changes nothing worth having. The same
-bytes are cached either way; `stable` renders as one block where `grows` renders as several, so
-there are fewer places to put a marker and one fewer *fallback* - and a fallback only pays if the
-region turns out to change, which in that stage it does not. Declare a region by what it does
+bytes are cached either way. `stable` renders as one block where `grows` renders as several, so
+there are fewer places to put a marker and one fewer *fallback*. A fallback only pays if the region
+turns out to change, which in that stage it does not. Declare a region by what it does
 across the run and leave it alone.
 
 Caching is also per model, so a stage that switches model starts cold whatever the blocks look
@@ -479,7 +485,7 @@ like. The benefit concentrates inside a stage rather than across a model change,
 avoids that.
 
 A stage can still override the layout, volatility included, with
-`[stages.<name>.context.regions]` - see [per-stage layouts](/docs/agents#context-regions). That is
+`[stages.<name>.context.regions]`. See [per-stage layouts](/docs/agents#context-regions). That is
 for a stage whose memory is genuinely shaped differently, not for this.
 
 ## Where a stage's own instructions live
@@ -526,14 +532,14 @@ A provider matches one prefix running from the start of the request. The system 
 and the conversation second, so a stage's new instructions sit in front of every message. Change
 them and nothing behind them matches, however byte-identical the transcript is. Measured on a run
 whose closing stage rewrote its prompt: the final call read 2,376 tokens of stable system head and
-paid full price for 246,812 tokens of conversation, which was about 40% of what the whole run cost
+paid full price for 246,812 tokens of conversation. That was about 40% of what the whole run cost
 after caching.
 
 The remedy is to not change the system prompt on the last hop. A closing instruction delivered as a
 [nudge](/docs/stages) goes into the conversation instead, which leaves the prefix in front of it
 untouched, so the transcript still matches and only the nudge itself is new.
 
-Worth the trouble only where the conversation is large and the stage is short - a wind-down stage
+Worth the trouble only where the conversation is large and the stage is short. A wind-down stage
 that makes one expensive call is exactly that shape. A stage that makes twenty calls amortizes its
 transition over all of them and this is not worth restructuring for.
 
@@ -564,8 +570,9 @@ a later stage needs, or have the stage put them somewhere pinned with `context_a
 Everything above is reactive: a region crosses a threshold and the runtime makes room. That is the
 right default, and it has a blind spot. The runtime knows sizes; only the agent knows when it is
 *done* with something. A gather stage that fetches a spec, pulls out the three paragraphs that
-matter and writes them to a curated region has no further use for the raw text - but the raw text
-sits there until pressure happens to push it out, or, with a generous budget, until the run ends.
+matter and writes them to a curated region has no further use for the raw text. The raw text sits
+there anyway, until pressure happens to push it out, or, with a generous budget, until the run
+ends.
 
 An agent can release an entry the moment it is spent:
 
@@ -599,13 +606,13 @@ sources = { kind = "temporary", budget = "30%", admission = "reject" }
 
 Now a write that does not fit fails, and the agent is told the region is full and to release
 something first. Nothing already in the region is lost to a write the agent did not know would
-displace it. A region set this way is also exempt from the window-level eviction cascade - otherwise
+displace it. A region set this way is also exempt from the window-level eviction cascade. Otherwise
 `reject` would only change which code did the silent dropping.
 
 This turns memory management into an explicit decision: *you must choose what to forget before you
-can read more*. It is a better failure mode than a silent omission the agent never learns about, and
-it is a genuinely different memory discipline from mechanical eviction - worth reaching for when the
-region holds findings rather than transcript.
+can read more*. It is a better failure mode than a silent omission the agent never learns about. It
+is also a genuinely different memory discipline from mechanical eviction, worth reaching for when
+the region holds findings rather than transcript.
 
 ## Routing tool output
 
@@ -635,13 +642,13 @@ valid targets: `conversation`, `tool_results`, `final_output` and `stage_instruc
 
 ### What the model is told about a routed result
 
-A routed result cannot sit in the message stream - a `tool_result` has to follow its `tool_use`
-immediately - so the full output goes to the region and a short pointer stays in the conversation in
-its place. The pointer names the region, and says the contents are already in the prompt under that
+A routed result cannot sit in the message stream, because a `tool_result` has to follow its
+`tool_use` immediately. The full output goes to the region instead, and a short pointer stays in the
+conversation in its place. The pointer names the region, and says the contents are already in the prompt under that
 heading, because they are: a region the stage carries is rendered into the system prompt every turn.
 
 That wording matters more than it looks. The pointer used to end "read that region for the full
-result", which is an instruction with no tool behind it - and the model, holding `read_file` and no
+result", which is an instruction with no tool behind it. The model, holding `read_file` and no
 `context_read`, would aim `read_file` at the region name and keep trying spellings. Grant
 `context_read` on a stage that routes and reads files; `lev validate` warns
 (`routing-without-region-read`) when one does not, and a path tool pointed at a region name now says
@@ -672,8 +679,8 @@ cliff rather than a limit.
 
 ## Routing produced parts
 
-`tool_routing` moves *tool results*. A model can also **produce parts of its own** - a picture from
-an image model, audio from a speech model, a document a generator returns - and those default to the
+`tool_routing` moves *tool results*. A model can also **produce parts of its own**: a picture from
+an image model, audio from a speech model, a document a generator returns. Those default to the
 conversation, riding the assistant turn like its text. `output_routing` sends them somewhere else,
 **by mime type**, so a produced file lands in a region a later stage reads instead of in the running
 transcript:
@@ -689,59 +696,60 @@ conversation = { kind = "sliding_window", budget = "50%" }
 ```
 
 Each key is a mime pattern (`image/png`, `image/*`, `*/*`) and each value a region. A reply that
-mixes text and other parts is split part by part: every part goes to the region of the **most
-specific** matching pattern (`image/png` beats `image/*` beats `*/*`), and the reply's text, plus
-any part no rule matched, stays in `conversation` as before. Nothing here names a family in code -
-it is mime types all the way down, so the same table routes audio, video, 3D models or any type you
+mixes text and other parts is split part by part. Every part goes to the region of the **most
+specific** matching pattern (`image/png` beats `image/*` beats `*/*`). The reply's text stays in
+`conversation` as before, along with any part no rule matched. Nothing here names a family in code.
+It is mime types all the way down, so the same table routes audio, video, 3D models or any type you
 register the same way it routes images.
 
-Unlike `tool_routing`, the target need not be a region *this* stage reads back - the whole point is
-usually to hand a produced file forward - so it is checked against every region the blueprint
-declares, not just the ones the producing stage can see. A target no layout declares is refused by
-`lev validate`.
+Unlike `tool_routing`, the target need not be a region *this* stage reads back, since the whole
+point is usually to hand a produced file forward. So it is checked against every region the
+blueprint declares, not only the ones the producing stage can see. A target no layout declares is
+refused by `lev validate`.
 
 A pinned target lifts its stored parts into the leading user turn, and a sliding window renders them
-as a user message, so the next stage's model sees the bytes either way (subject to that model taking
-the type; otherwise it sees the stand-in, as anywhere else).
+as a user message. The next stage's model sees the bytes either way, subject to that model taking
+the type. If it does not, it sees the stand-in, as anywhere else.
 
 ### A clean slate for the next stage
 
 Routing the produced part out of the conversation is half of handing it on; the other half is the
-receiving stage not inheriting the producing stage's transcript. `conversation` cannot be hidden -
-the model's own turns live there - but a stage can **empty** a region as it is entered:
+receiving stage not inheriting the producing stage's transcript. `conversation` cannot be hidden,
+because the model's own turns live there. A stage can still **empty** a region as it is entered:
 
 ```toml
 [stages.describe.context]
 reset = ["conversation"]
 ```
 
-`reset` clears the named regions on entry (the content is gone, not merely hidden from this stage),
-so the stage starts on a clean conversation with only what its visible regions hold - the routed
-image in `artwork`, say. A re-entered stage clears them again each visit. Unlike `hide`, `reset` may
+`reset` clears the named regions on entry, and the content is gone rather than hidden from this
+stage alone. The stage then starts on a clean conversation with only what its visible regions hold,
+such as the routed image in `artwork`. A re-entered stage clears them again each visit. Unlike `hide`, `reset` may
 name `conversation`; like `hide`, a name no layout declares is refused.
 
 ## Requests are measured before they are sent
 
 The window sizes what it holds with a byte estimate, corrected by what earlier calls in the run
-were charged. That is cheap and it is usually close, but a provider whose window is a hard ceiling
-rejects a request that is over by one token, and the rejection is not transient: the retry resends
-the same request and the stage dies.
+were charged. That is cheap and it is usually close. A provider whose window is a hard ceiling
+rejects a request that is over by one token. That rejection is not transient: the retry resends the
+same request and the stage dies.
 
 So a request that could be near the window is measured before it goes out. When the corrected
 estimate plus the reply budget reaches half the model's window, the runtime asks the provider's own
-tokenizer what the request costs (`/messages/count_tokens` on Anthropic, `:countTokens` on Gemini,
-tiktoken locally on OpenAI, a script's `count_tokens` on a [Rhai provider](/docs/rhai-providers))
-and refuses to send one that would not fit. The refusal names all three numbers it was computed
-from - the prompt count, the `max_output_tokens` reply budget, and the window - because the reply
-budget is usually the one that tipped the sum, and an error that only showed the prompt against the
-window pointed at the wrong number. A request under that line is sent as it is, so a short turn
+tokenizer what the request costs. It refuses to send one that would not fit. The tokenizer is
+`/messages/count_tokens` on Anthropic, `:countTokens` on Gemini, tiktoken locally on OpenAI, and a
+script's `count_tokens` on a [Rhai provider](/docs/rhai-providers). The refusal names all three
+numbers it was computed from: the prompt count, the `max_output_tokens` reply budget, and the
+window. The reply budget is usually the one that tipped the sum. An error that only showed the
+prompt against the window pointed at the wrong number. A request under that line is sent as it is,
+so a short turn
 pays nothing. Every lane is guarded the same way: the stage's own call, the routing call at a
 stage boundary, compaction and titling.
 
 The window in that refusal is whatever the provider declares for the model, and a declared window
 that is too small refuses everything a real one would have carried. The common case is a
 [Rhai provider](/docs/rhai-providers#the-script-contract) left on its 8192-token
-`@max_context_tokens` default: a stage asking for an 8192-token reply can then never send anything,
+`@max_context_tokens` default. A stage asking for an 8192-token reply can then never send anything,
 and the fix is the script's annotation (or a `[model_capabilities]` entry), not the stage.
 
 The count is also fed back into the correction, so a refused request tightens the estimate for the
@@ -756,8 +764,8 @@ token counts would need rewriting every time.
 > [!NOTE]
 > Percentages are ceilings, and they may add up to more than 100%. That is deliberate: regions
 > rarely fill at the same time, so reserving exact shares would waste most of the window. A ceiling
-> also costs nothing until it is reached - a region is charged for what is stored in it, not for its
-> budget - which is why raising one is cheap and capping one is not. Use `max_tokens` and
+> also costs nothing until it is reached, because a region is charged for what is stored in it, not
+> for its budget. That is why raising one is cheap and capping one is not. Use `max_tokens` and
 > `threshold_tokens` when you need a limit that really is hard, and remember they override the
 > percentage rather than sitting beside it.
 

@@ -28,7 +28,7 @@ a test, so a client generator or an agent can consume the contract directly.
   (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
   to allow a browser to call it cross-origin. The server does not check the `Host` header, so the
-  bearer token is what stands between a DNS-rebinding page and your local API: never embed the
+  bearer token is what stands between a DNS-rebinding page and your local API. Never embed the
   token in a page served from somewhere else, and avoid `--cors "*"` on a machine that browses.
 - **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network. Without
   `--tls-cert`, that puts the bearer token on the wire in cleartext for anyone on that network to read.
@@ -52,7 +52,7 @@ a test, so a client generator or an agent can consume the contract directly.
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
   | `POST /api/update` | 405, because `GET /api/update` is mounted |
   | `POST /api/models/probe` | 404, because nothing else is mounted on that path |
-- **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` and
+- **`--workdir-root`** confines agent workdirs. **`--no-remote-yolo`** forbids `"yolo": true` and
   `"allow": [...]` on spawn, which are one lever rather than two.
 - **`--no-remote-seed-commands`** runs every spawn as if it carried `"no_seed_commands": true`, so
   a blueprint's `seed = { command = ... }` regions, which execute at spawn before any approval
@@ -76,21 +76,22 @@ off. A flag wins over the config file, and the config file over the default.
 | Bytes per request body | 32 MiB | none | `[serve] max_upload_bytes` | 413; this is what bounds a multipart upload |
 
 Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws` and
-`/ws/agents/{id}`) are outside both: a subscription is meant to stay open, and it is the only
+`/ws/agents/{id}`) are outside both: a subscription is meant to stay open. They are the only
 place the API streams, so every other route has built its whole body before the deadline could
 cut it. An unauthenticated request takes a slot while it is being refused, so a flood without a
 token is refused at the cap like any other.
 
 Three routes take a slot but have no deadline, because each waits on something slower than the
-default by design and dropping it partway does damage a late answer would not:
+default by design. Dropping one partway does damage a late answer would not:
 
 | Route | What it waits on |
 |---|---|
-| `POST /api/mcp/servers/{name}/login` | The operator at the consent page, up to 300 s. Dropping it closes the loopback listener the browser redirects to. |
+| `POST /api/mcp/servers/{name}/login` | The operator at the consent page, up to 300 s |
 | `POST /api/mcp/servers/{name}/test` | The MCP server's handshake and tool listing, under the MCP client's own 30 s and 120 s deadlines. |
 | `POST /api/doctor/live` | Two billed provider calls and a throwaway run, up to the doctor's own 90 s. |
 
-Each is bounded by the deadline named in the table, so none can hold its slot forever.
+Each is bounded by the deadline named in the table, so none can hold its slot forever. Dropping
+the login request closes the loopback listener the browser redirects to.
 
 Neither limit is a ceiling on the runs behind the API. A spawn whose daemon takes a minute still
 spawns; the route answers as soon as the daemon has accepted it. `GET /api/config` reports the
@@ -136,7 +137,7 @@ lev serve --host 0.0.0.0 --port 3000 \
 
 The `TRUST_STORES=system,nss` prefix limits mkcert to the OS and browser stores, which are the
 only ones The Lair needs. Without it, mkcert 1.4.4 also looks at the Java trust store whenever
-`JAVA_HOME` is set, on both commands, and stops with `failed to execute "keytool -list"` and
+`JAVA_HOME` is set, on both commands. It then stops with `failed to execute "keytool -list"` and
 `Keystore file does not exist` when that directory has a `keytool` but no `lib/security/cacerts`.
 That is the layout `brew --prefix openjdk` has
 ([mkcert issue #472](https://github.com/FiloSottile/mkcert/issues/472)). If the install command
@@ -170,7 +171,7 @@ lev serve --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem --cors https://le
 ```
 
 Then **open `https://192.168.1.50:3000/` in a browser tab and accept the warning.** That is what the
-unauthenticated `GET /` page is for: The Lair's requests are subresource `fetch` calls, which get
+unauthenticated `GET /` page is for. The Lair's requests are subresource `fetch` calls, which get
 no interstitial to click through, so the exception has to be established in a tab first. Afterwards
 The Lair works.
 
@@ -229,7 +230,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
-| `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage spent in tokens and dollars, per visit as well as in total, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
+| `GET /api/agents/{id}/stages` | The per-stage ledger: tokens, dollars and regions per stage. See [below](#where-a-runs-cost-went) |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
 | `GET /api/agents/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
@@ -238,22 +239,62 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent. Takes files too; see [attaching files](#attaching-files) |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
-| `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
-| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key. A `PUT` that changes a provider key, a gateway, `default_provider`, [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run spawned, with no daemon restart |
-| `GET /api/models?provider=&refresh=` | Enumerate models, with each one's token limits and where they came from, from a catalogue the server keeps. An OpenAI-compatible gateway's detected models are listed under the gateway's name. `provider` narrows the listing to one - see [below](#two-providers-one-model-id); `refresh=1` asks the providers again - see [the model catalogue](#the-model-catalogue) |
-| `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
-| `GET /api/providers?quota=&refresh=` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. `quota=true` adds what each subscription has used - see [subscription usage](#subscription-usage) - and `refresh=1` reads the accounts again. See [below](#signing-in-to-a-subscription-provider) |
+| `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation, paginated and searchable with `q` |
+| `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key |
+| `GET /api/models?provider=&refresh=` | Enumerate models with their token limits and where they came from. See [the model catalogue](#the-model-catalogue) |
+| `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves, before writing a gateway for it. See [below](#gateways) |
+| `GET /api/providers?quota=&refresh=` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
-| `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it: `PUT` adds or updates a row in `mime_types.toml` (`{"mime_type", "family"?, "text"?, "tokens"?, "extensions"?, "magic"?, "stand_in"?, "check"?}`, only the fields sent are changed, a bad type or rule is a 400), `DELETE ?mime_type=` takes one out (404 if there is no such row). The writes need admin. See [below](#writing-a-mime-row) |
-| `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks, validators and mime checks, and the global model providers and mime checks. `include=candidates` also lists the files nothing declares yet. Writes need admin. See [below](#tools-and-scripts) |
-| `GET /api/mcp/servers` · `POST …` *(admin)* · `DELETE …/{name}` *(admin)* · `GET …/{name}/status` · `POST …/{name}/login` *(admin)* · `POST …/{name}/test` *(admin)* | List, add, remove, check, log in, test. The writes need admin. A server added or removed here reaches the next run, with no daemon restart |
-| `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. `GET` is `lev doctor --offline`: config, search and resolve, nothing billed. `POST .../live` runs the whole chain (two billed calls and a throwaway run) and answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP error |
-| `GET /api/yolo` · `GET /api/yolo/{name}` · `POST /api/yolo/test` · `PUT /api/yolo` *(admin)* | The profiles behind `--yolo=<name>`: list them, read one, ask what one would decide for a call, replace the file. See [below](#yolo-profiles) |
+| `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it. The writes need admin. See [below](#writing-a-mime-row) |
+| `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai. Writes need admin. See [below](#tools-and-scripts) |
+| `GET /api/mcp/servers` · `POST …` · `DELETE …/{name}` · `GET …/{name}/status` · `POST …/{name}/login` · `POST …/{name}/test` | List, add, remove, check, log in, test. All but the two `GET`s need admin |
+| `GET /api/doctor` · `POST /api/doctor/live` *(admin)* | The checks `lev doctor` runs, as data. See [below](#the-doctor-routes) |
+| `GET /api/yolo` · `GET /api/yolo/{name}` · `POST /api/yolo/test` · `PUT /api/yolo` *(admin)* | The profiles behind `--yolo=<name>`. See [below](#yolo-profiles) |
 | `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
 | `POST /api/update` *(admin)* · `GET /api/update/jobs/{id}` | Carry that plan out, and read where it got to. See [below](#pressing-the-button) |
-| `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
-| `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
+| `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker |
+| `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+
+Several routes in that table take more explaining than a cell allows.
+
+`GET /api/agents/{id}/stages` reports what each stage spent per visit as well as in total, and
+whether the stage ran at all. The blueprint detail route carries the manifest, the regions and the
+[fan-out limits](#fan-out-limits).
+
+A `PUT /api/config` that changes a provider key, a gateway, `default_provider`,
+[`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run
+spawned, with no daemon restart. An MCP server added or removed through `/api/mcp/servers` reaches
+the next run the same way.
+
+`GET /api/models` answers from a catalogue the server keeps. An OpenAI-compatible gateway's
+detected models are listed under the gateway's name. `provider` narrows the listing to one; see
+[two providers, one model id](#two-providers-one-model-id). `refresh=1` asks the providers again;
+see [the model catalogue](#the-model-catalogue). `POST /api/models/probe` takes
+`{"base_url", "api_key"?, "headers"?}` and answers `{"models": [ids]}`, or a 502 carrying the
+server's own error text.
+
+On `GET /api/providers`, `quota=true` adds what each subscription has used; see
+[subscription usage](#subscription-usage). `refresh=1` reads the accounts again.
+
+`PUT /api/mime` adds or updates a row in `mime_types.toml`. It takes
+`{"mime_type", "family"?, "text"?, "tokens"?, "extensions"?, "magic"?, "stand_in"?, "check"?}`.
+Only the fields you send are changed, and a bad type or rule is a 400.
+`DELETE /api/mime?mime_type=` takes a row out, and answers 404 when there is no such row.
+
+`GET /api/scripts` covers the agent's tools, hooks, validators and mime checks, and the global
+model providers and mime checks. `include=candidates` also lists the files nothing declares yet.
+
+`GET /api/fs/dirs` takes absolute paths only, fenced by `--workdir-root`, and `hidden=true`
+includes dot-prefixed names. `POST /api/fs/dirs` uses the same fence, answers `409` when the
+directory already exists, and is announced as `fs.mkdir`.
+
+### The doctor routes
+
+`GET /api/doctor` is `lev doctor --offline`: config, search and resolve, nothing billed.
+`POST /api/doctor/live` runs the whole chain, which is two billed calls and a throwaway run. It
+answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP
+error.
 
 ### Spawning under a yolo profile
 
@@ -271,10 +312,10 @@ unattended outright.
 
 `GET /api/agents/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
 and `options`, plus `tool_name` and `tool_arguments` on a tool approval. `POST` the answer with
-the request's id as `request_id` and one of `value` (free text, an edited document), `choice_index`
-(a multiple choice, zero-based), or `approved` with an optional `scope` (`once`, `stage` or
-`session`) for a tool approval or a confirm. It answers `202` once the daemon has it and `404`
-when nothing with that id is open.
+the request's id as `request_id` and one of three fields. `value` is free text or an edited
+document. `choice_index` is a multiple choice, zero-based. `approved` carries an optional `scope`
+(`once`, `stage` or `session`) for a tool approval or a confirm. It answers `202` once the daemon
+has it and `404` when nothing with that id is open.
 
 A deny may carry `feedback`, a string the model reads as part of the tool result for the refused
 call, so its next turn is a redirect rather than a guess:
@@ -306,30 +347,32 @@ A run object carries a `flags` object: post-hoc diagnostics that tell an empty o
 from a healthy one without parsing its logs. Counters like `modified_file_count`, `searches_run`
 beside `searches_empty`, and `gates_forced` say whether the run actually did anything, and
 `empty_output` sums up the verdict. `flags.broken_scripts` names each Rhai script the run needed
-but could not use - an [output validator](/docs/rhai-validators#when-the-validator-itself-fails)
-that threw, say - and is the same list `lev ps` renders as `(broken script)`; the key is omitted
+but could not use, such as an [output validator](/docs/rhai-validators#when-the-validator-itself-fails)
+that threw. It is the same list `lev ps` renders as `(broken script)`, and the key is omitted
 while the list is empty. The flags live in the run's `meta.json`, so they come back wherever a
 run object does.
 
 ### How long a run has taken
 
 Three spans, and they answer different questions. A run paused overnight is hours old and spent
-almost none of them working, so reporting one where the reader wanted the other is how a healthy
-run comes to look stuck and a stuck one healthy.
+almost none of them working. Report one where the reader wanted the other, and a healthy run looks
+stuck while a stuck one looks healthy.
 
 | span | key | what it means |
 | --- | --- | --- |
 | **age** | `age_secs` | How long since the run was launched. Says nothing about whether it has done anything |
 | **working** | `working_secs` | How long it actually spent working. Call this the run's duration |
-| **last moved** | `last_progress_at` | When it last actually moved. A health signal, not a duration: it is how a wedged run is told from a slow one |
+| **last moved** | `last_progress_at` | When it last actually moved. A health signal, not a duration |
+
+`last_progress_at` is how you tell a wedged run from a slow one.
 
 `age_secs` and `working_secs` are computed server-side and appear on every run object this API
-serves - `GET /api/runs`, `GET /api/agents`, `GET /api/agents/{id}`, `GET /api/agents/{id}/children`
-- alongside the raw stamps they come from. `?fields=` selects them like any other key. The same two
-keys, on the same definitions, come back from `lev ps --json`.
+serves: `GET /api/runs`, `GET /api/agents`, `GET /api/agents/{id}` and
+`GET /api/agents/{id}/children`, alongside the raw stamps they come from. `?fields=` selects them
+like any other key. The same two keys, on the same definitions, come back from `lev ps --json`.
 
-The working clock stops for everything that is not the run's doing - paused, blocked on a person,
-parked until the machine is fixed, finished - and keeps running while the run is inferring, calling
+The working clock stops for everything that is not the run's doing: paused, blocked on a person,
+parked until the machine is fixed, finished. It keeps running while the run is inferring, calling
 tools, or held for its own fan-out workers and sub-agents. Each stage in `stages.json` keeps one of
 its own on the same rule.
 
@@ -341,11 +384,11 @@ figure, which was true at `server_time`:
 ```
 
 `banked_secs` is the time from spans that have already ended. `since` is when the span in progress
-began, or `null` when the clock is stopped - so the working total is `banked_secs`, plus
-`now - since` when `since` is set.
+began, or `null` when the clock is stopped. The working total is `banked_secs`, plus `now` minus
+`since` whenever `since` is set.
 
 `active` is `null` on runs written before this existed, and `working_secs` then falls back to
-`updated_at - started_at`. A finished run has `since: null`, so its total never moves again.
+`updated_at` minus `started_at`. A finished run has `since: null`, so its total never moves again.
 
 ## Statuses
 
@@ -357,11 +400,14 @@ on `GET /api/agents/{id}/result`, and on the `agent_status` frames coming off th
 | `starting` | Accepted and being set up. No inference has been issued yet |
 | `running` | Working: inferring, calling tools, or moving between stages |
 | `waiting_input` | Parked. `wait_reason` says on what, and only some of those want a person |
-| `paused` | Paused, by somebody or by Leviath when something outside the run has to change first (then `wait_reason` is `needs_setup`, below). Resumes on request, and comes back paused after a daemon restart |
+| `paused` | Paused, by somebody or by Leviath. Resumes on request |
 | `complete` | Finished, with nothing further to accept |
 | `complete_interactive` | Every required stage is done and the run still takes follow-up input |
 | `error` | Stopped by a failure. The run's `error` carries what went wrong |
 | `cancelled` | Stopped from outside. Nothing went wrong, somebody decided |
+
+Leviath pauses a run itself when something outside the run has to change first, and `wait_reason`
+is then `needs_setup`. A paused run comes back paused after a daemon restart.
 
 The engine keeps its own vocabulary inside the daemon, where a run that is going is `idle` or
 `active` and a parked one is `waiting`. Those words used to reach the socket untranslated, so a
@@ -405,7 +451,7 @@ finished underneath you.
 Paging is keyset rather than offset, because an offset into a list that is changing skips and
 repeats items, and does it most often at the head. **`sort=started_at` is the default because it is
 the only sort key that never changes.** `updated_at` moves on the daemon's 30-second heartbeat, so
-every live run shifts under a walk; a run whose sort value changes mid-walk can be missed or
+every live run shifts under a walk. A run whose sort value changes mid-walk can be missed or
 repeated. To poll for what changed, use `since=` with no cursor rather than deep-paginating.
 
 `since=` filters whichever field `sort` names, and is inclusive. Pass the previous response's
@@ -497,14 +543,14 @@ A fan-out worker and a `sub_agent` spawn are runs of their own, but they exist b
 started them, and they are drawn nested under it. Deleting the parent deletes them too.
 
 Leaving them behind was not a matter of a few stale rows. A client that nests runs under their
-parent has nowhere to draw a run whose parent is missing except the top level, so deleting a
+parent has nowhere to draw a run whose parent is missing, except the top level. Deleting a
 research run with nine workers under it emptied one row and promoted nine.
 
 The walk only goes downwards. Deleting one worker out of a fan-out is an ordinary thing to do and
 leaves the run that started it, and the workers beside it, exactly where they were.
 
-A live sub-agent is a **409** on the parent's delete, and the reason names the run to cancel --
-half a tree is not a state anything downstream knows how to read.
+A live sub-agent is a **409** on the parent's delete, and the reason names the run to cancel.
+Half a tree is not a state anything downstream knows how to read.
 
 A run whose `meta.json` will not parse is a **409** too, overridden with `?force=true`:
 
@@ -513,7 +559,7 @@ DELETE /api/runs/{id}?force=true
 ```
 
 A record that cannot be read says nothing about whether the run finished, and "cannot read it" must
-not quietly read as "finished" -- that is exactly what a live run looks like to a binary whose
+not quietly read as "finished". That is exactly what a live run looks like to a binary whose
 `RunMeta` has moved on. Such a run is also skipped by the listing, which would leave it both
 invisible and permanent, so the escape hatch stays; it is something you type rather than
 something that happens to you. The bulk route never forces.
@@ -530,7 +576,7 @@ DELETE /api/runs?ids=run-a,run-b,run-c
 
 `before` is a unix timestamp and matches `updated_at`; only finished runs are considered. `ids` is
 capped at `max_ids` from `GET /api/config`, the same cap as the batch fetch. Sending neither is a
-400 rather than "every run" -- a bulk delete with no predicate is far more likely to be a client
+400 rather than "every run". A bulk delete with no predicate is far more likely to be a client
 that failed to build its query than somebody asking to erase the machine's history.
 
 Partial success is the normal outcome, not an error. A sweep that runs into one live run has still
@@ -547,7 +593,7 @@ want a status code per outcome instead.
 
 `deleted` can hold ids you never named: every run named takes its sub-agent tree with it here too,
 and those are runs that are now gone. Naming a parent and one of its own children in the same
-request is fine -- each is deleted once, and the child is reported as deleted rather than skipped as
+request is fine. Each is deleted once, and the child is reported as deleted rather than skipped as
 missing.
 
 ## Where a run's cost went
@@ -602,7 +648,7 @@ prefix nothing reuses without `cache_write_tokens`.
   model with no reported cost and no rates the daemon knows, so any total would
   understate by an unknown amount. `unpriced_calls` says how many.
 - **`cost_is_exact` says which number you have.** `true` means every priced call
-  carried the provider's own figure - the invoice. `false` means at least one was
+  carried the provider's own figure: the invoice. `false` means at least one was
   reconstructed from published rates, which is arithmetic on numbers that drift
   for reasons outside the daemon: negotiated pricing, a gateway's margin, a
   request rerouted to another backend.
@@ -612,27 +658,27 @@ prefix nothing reuses without `cache_write_tokens`.
   partial total that looks authoritative and is not.
 
 Do not multiply the tokens by a rate card of your own. Pricing is the daemon's
-job, deliberately: a rate card in a console produces a fourth answer that
+job, deliberately. A rate card in a console produces a fourth answer that
 disagrees with the run's figure, the stage's, and the provider's, and none of the
 four says which is wrong.
 
-Every call a run bills is counted against the stage it was made in - the stage's
-own turns, the compaction calls that summarize its context when the window fills,
-and the routing call it makes at its own boundary to choose where to go next. The
-one exception is the run's title call, which happens once at spawn beside the run
-rather than inside any stage of it, so the stage costs can sum to slightly less
-than the run's own `cost_usd`.
+Every call a run bills is counted against the stage it was made in. That covers
+the stage's own turns, the compaction calls that summarize its context when the
+window fills, and the routing call it makes at its own boundary to choose where
+to go next. The one exception is the run's title call, which happens once at
+spawn beside the run rather than inside any stage of it. The stage costs can
+therefore sum to slightly less than the run's own `cost_usd`.
 
 **`visits` splits a stage by each stay in it.** The record above accumulates
-across revisits, which is the right total for the stage and the wrong shape for a
+across revisits. That is the right total for the stage and the wrong shape for a
 graph of the path a run took, where a stage entered twice is two nodes. Each
 entry covers one entry into the stage: `entered_at`, `left_at` (`null` on the
 visit in progress), the same four token counts, the same four cost fields, and an
-`active` working clock of its own, on the rule described under
+`active` working clock of its own. That clock follows the rule described under
 [how long a run has taken](#how-long-a-run-has-taken).
 
 A stage that loops back to itself starts a new visit; iterations within one stay
-do not. `visit_count` counts every entry, and the list stops at 128 - so
+do not. `visit_count` counts every entry, and the list stops at 128. So
 `visit_count > visits.length` means the per-visit split is partial and the
 accumulated figures on the record are the complete ones. `visits` is empty on a
 stage the run never entered, and on records written by a daemon older than this
@@ -664,9 +710,9 @@ A run takes files three ways, and all three end as typed [parts](/docs/mime) on 
 were aimed at, exactly as `lev run --attach` sends them.
 
 `multipart/form-data` on `POST /api/agents` and `POST /api/agents/{id}/message` carries the bytes
-themselves. A `request` field holds the JSON the route takes as a plain body, then any number of
-file fields named `part` (bound for the task region, or the message's region) or `part:<region>`,
-each with a `filename` and a `Content-Type`:
+themselves. A `request` field holds the JSON the route takes as a plain body. After it come any
+number of file fields named `part` (bound for the task region, or the message's region) or
+`part:<region>`, each with a `filename` and a `Content-Type`:
 
 ```bash
 curl -X POST http://localhost:3000/api/agents -H "Authorization: Bearer $TOKEN" \
@@ -710,10 +756,11 @@ directory does not hold but the answer lists as an artifact is served from the b
 so a file a model made and nothing wrote to disk answers here too.
 
 `GET /api/agents/{id}/artifacts/{name}` is the route that follows an artifact the way the runtime
-does: by the name the answer's `artifacts` list it under, from the blob store by hash first and the
-working directory second, under the artifact's own mime type. It is the one to use when a client has
-the answer in hand; the answer's `artifacts` carry each file's `path` and, when the run could store
-it, its `sha256`, so the other two routes reach the same bytes.
+does: by the name the answer's `artifacts` list it under. It looks in the blob store by hash first
+and the working directory second, and serves the bytes under the artifact's own mime type. It is
+the one to use when a client has the answer in hand. The answer's `artifacts` carry each file's
+`path` and, when the run could store it, its `sha256`, so the other two routes reach the same
+bytes.
 
 ## A run's files
 
@@ -733,7 +780,7 @@ enumerated in one response, so walk it the way a file tree does.
 > that number is meaningless. Use `modified_files_truncated`, or `source=workdir` for ground truth.
 
 Every listing entry carries `name`, `path`, `is_dir`, `size`, `exists`, `outside_workdir`, and
-`mime_type`. The last is what the run's registry makes of the file from its name, so a client can
+`mime_type`. The last is what the run's registry makes of the file from its name. A client can then
 decide whether to render an image, or offer a file to a region that `accepts` a type, without a
 request per row or a guess of its own. It is typed by extension only, not sniffed, and is empty for
 a directory. `GET .../files/raw` types the same bytes, sniffing them, when an exact answer is
@@ -804,7 +851,7 @@ rather than running away.
 
 `GET /api/blueprints/{name}` also carries `stage_routing`: one entry per stage that routes the
 model's produced parts to a region by mime type (`output_routing`), or empties a region when it is
-entered (`context.reset`), so a console shows or checks them without parsing the manifest.
+entered (`context.reset`). A console shows or checks them without parsing the manifest.
 
 ```json
 {
@@ -828,11 +875,11 @@ does neither has an empty list. Changing either is a manifest write through `PUT
 says the daemon reports this.
 
 `dependencies` on the same detail route lists what the agent declares it needs before it runs (see
-[dependencies](/docs/agents#dependencies)): each entry has a `name`, a `kind` (`mcp_server`, `env`,
-`binary` or `script`), whether it is `required`, an optional `remedy` and `description`, the
-kind-specific field (`server` and `env`, `var`, `command`, or `check`), and `installable` for
-whether the blueprint says how to set it up. A console can show these and warn before a spawn that
-would fail the dependency gate. `blueprints.dependencies` in the `capabilities` list says the daemon
+[dependencies](/docs/agents#dependencies)). Each entry has a `name`, a `kind` (`mcp_server`,
+`env`, `binary` or `script`), whether it is `required`, and an optional `remedy` and `description`.
+It also carries the kind-specific field (`server` and `env`, `var`, `command`, or `check`), and
+`installable` for whether the blueprint says how to set it up. A console can show these and warn
+before a spawn that would fail the dependency gate. `blueprints.dependencies` in the `capabilities` list says the daemon
 reports this.
 
 ## Yolo profiles
@@ -866,9 +913,9 @@ spawn does, so what they report is what the next run gets.
 back with `exists: true`, an `error` naming the line, and no profiles, because that is what a
 spawn naming one would be refused with. A missing file is `exists: false` with no error.
 
-`GET /api/yolo/{name}` is one profile in full: `{"name", "spec", "holds"}`, where `spec` is the
-profile as parsed (the same keys the file has) and `holds` is the list of things this profile
-still puts to a person, as `lev run` prints before a run starts. `404` for a name the file does
+`GET /api/yolo/{name}` is one profile in full: `{"name", "spec", "holds"}`. `spec` is the profile
+as parsed, with the same keys the file has. `holds` is the list of things this profile still puts
+to a person, as `lev run` prints before a run starts. `404` for a name the file does
 not have, and for no file at all; `422` when the file does not load.
 
 `POST /api/yolo/test` asks what a profile would decide for one call, without running anything:
@@ -884,10 +931,10 @@ not have, and for no file at all; `422` when the file does not load.
 
 `command` is for the shell; any other tool takes its `arguments` as an object. `workdir` is where
 relative paths in the command resolve, defaulting to the server's own. `configured` (`allow`,
-`ask` or `deny`) stands in for what the config layers resolve the tool to, otherwise that is read
-from the config in force; `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool
-comes from for `@group` rules, otherwise it is guessed from the name; `allowed: true` decides as
-if `--allow <tool>` had been passed. The answer:
+`ask` or `deny`) stands in for what the config layers resolve the tool to. Without it, that comes
+from the config in force. `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool
+comes from for `@group` rules. Without it, the kind is guessed from the name. `allowed: true`
+decides as if `--allow <tool>` had been passed. The answer:
 
 ```json
 {
@@ -949,12 +996,12 @@ a client that hard-codes one package manager's command is right for the users wh
 share its author's machine and wrong for everyone else. Where a daemon does not announce
 `update.plan`, send people to the install page rather than picking a package manager for them.
 
-`latest` is the newest version on this copy's own channel, `update_available` whether that is
-newer than the version it is running, and `checked_at` when the daemon last found out, in unix
-seconds, so you can say how fresh the answer is rather than presenting an hour-old one as
+`latest` is the newest version on this copy's own channel, and `update_available` says whether
+that is newer than the version it is running. `checked_at` is when the daemon last found out, in
+unix seconds, so you can say how fresh the answer is rather than presenting an hour-old one as
 current. All three are `null` together when the check has not run yet, could not reach the
-network, or had no channel to ask about - one state, "cannot tell", which is the honest thing to
-render. Treat a missing key as an older daemon and a `null` key as an answer.
+network, or had no channel to ask about. That is one state, "cannot tell", which is the honest
+thing to render. Treat a missing key as an older daemon and a `null` key as an answer.
 
 The daemon looks this up on its own schedule and the route reports whatever the last lookup
 found, so asking on every page load costs nothing and never waits. The lookup runs the same code
@@ -973,7 +1020,7 @@ if asked.
 
 `POST /api/update` carries out the plan the `GET` prints: it runs `binary.commands` in order,
 installs the blueprints the plan marks `preselected`, and applies the migrations. It needs
-`lev serve --allow-admin`, which is the line it crosses and the read half does not - it runs a
+`lev serve --allow-admin`, which is the line it crosses and the read half does not. It runs a
 package manager, replaces the blueprints in your agents directory and rewrites your config.
 
 The body names which parts to do. Every field defaults to `true`, so an empty body is the whole
@@ -994,7 +1041,7 @@ It answers `202` straight away, with the id to watch:
 }
 ```
 
-An upgrade is a download and an install - a minute on a good day, and it can fail halfway - so the
+An upgrade is a download and an install: a minute on a good day, and it can fail halfway. The
 request does not stay open for it. Watch `/ws`, where each step change arrives as it happens:
 
 ```json
@@ -1033,32 +1080,31 @@ running, not a second package manager over the same binary.
 ### What it will not do
 
 `binary.action == "advise"` stays advice. A `cargo install` copy is a full rebuild of the
-workspace, and a binary somewhere no installer writes is not something to guess at - both are
+workspace, and a binary somewhere no installer writes is not something to guess at. Both are
 yours to do, so the step is recorded as `advised` with the plan's own sentence and no compile is
 started. That is neither a success nor a failure: the job carries on to the other two steps and
 still finishes `complete`.
 
 A blueprint you edited locally is never installed. Installing removes the destination directory
-first, so it would take your edits and any file you added with them; `lev update` asks about each
+first, so it would take your edits and any file you added with them. `lev update` asks about each
 one on its own and no flag covers it, and there is nobody to ask over HTTP. The `agents` step says
 how many it left alone and why.
 
 A binary step that *fails* stops the two after it, the same way `lev update` stops there: the
 blueprints and the config worth having are the ones the new binary ships. A failed blueprint
-install does not - it is named in the step's detail and the run carries on, because most of the
-blueprints plus a named failure is a better place to be left than a step that gave up in the
-middle.
+install does not. It is named in the step's detail and the run carries on. Most of the blueprints
+plus a named failure is a better place to be left than a step that gave up in the middle.
 
 ### The restart
 
 Upgrading replaces the binary on disk. The daemon answering the request is the old one and stays
-the old one, and so does `lev serve`, until each restarts - so a console that updates and then
+the old one, and so does `lev serve`, until each restarts. A console that updates and then
 reports the version it can see has told the truth in the least useful way possible.
 
 `restart_required` is `true` when the binary step actually ran and succeeded, and `restart_hint`
 carries the sentence to show. Say it; do not report the running version as the result of the
 update. Restarting `lev serve` picks up the new binary, and `lev daemon restart` does the same for
-the daemon - which any `lev` command also does on its own, since the daemon's build marker is
+the daemon. Any `lev` command also does that on its own, since the daemon's build marker is
 checked before a run is spawned.
 
 ## Tools and scripts
@@ -1075,21 +1121,21 @@ client can answer for itself. Every entry carries a `source`:
 
 Pass `?agent=<name>` to include the fourth. Script-backed entries also carry the `path` they came
 from. A separate `skipped` list carries the `.rhai` files that were found and cannot be offered,
-with the reason each was passed over, so a file with a syntax error is told apart from a file
+with the reason each was passed over. A file with a syntax error is then told apart from a file
 nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
 anything installed, and `/api/mcp/servers/{name}` already answers for them.
 
 `GET /api/scripts` is the same ground from the editor's side, over the six kinds of Rhai a machine
 can carry: `tool`, `region_hook`, `stage_hook`, `output_validator`, `mime_check` and `provider`.
-Only tools have a directory an agent owns (`<agent>/tools/`, plus the global one); the hooks and the
-validator are named by path in the manifest and resolved against the agent's own directory, so the
-listing derives them from what the manifest declares and the read and write routes address them at
-`<agent>/<name>.rhai`.
+Only tools have a directory an agent owns: `<agent>/tools/`, plus the global one. The hooks and
+the validator are named by path in the manifest and resolved against the agent's own directory.
+The listing derives them from what the manifest declares, and the read and write routes address
+them at `<agent>/<name>.rhai`.
 
 A [mime check](/docs/rhai-mime-checks) is named by a mime row's `check`, and rows live in two
-places, so the kind is listed from both: the operator's rows (`mime_types.toml` and
+places, so the kind is listed from both. The operator's rows (`mime_types.toml` and
 `[mime_types]` in the config) put their checks in the global half, resolved against the config's
-directory, and a blueprint's own `[mime_types]` puts its checks beside the agent's hooks. Address
+directory. A blueprint's own `[mime_types]` puts its checks beside the agent's hooks. Address
 one with `?agent=<name>` for the blueprint's, or without for the operator's. Check
 `scripts.mime_checks` in the `capabilities` list before offering the kind.
 
@@ -1103,12 +1149,12 @@ since that is the spelling that goes into the row. A global tool or a provider h
 with no `agent`, the machine's own directory for that kind. `{name}` is the file without its `.rhai`
 extension, and it may be a relative path when the manifest declared one: percent-encode the
 separator, so `validators/a2ui.rhai` is `output_validator/validators%2Fa2ui`. Every part of it may
-hold only letters, digits, `.`, `_` and `-`, and the result has to land inside the directory the
-route is fenced to once symlinks are followed, so a declaration that climbs out of the agent's
-directory or names something that is not a `.rhai` file is left out of the listing rather than
-reported under a name that would fetch a different file. `POST /api/scripts/validate` takes `kind`
-and `content` and compiles without writing, so an editor can check before saving instead of saving
-and waiting for a run to fail.
+hold only letters, digits, `.`, `_` and `-`. The result has to land inside the directory the route
+is fenced to, once symlinks are followed. A declaration that climbs out of the agent's directory
+is left out of the listing, as is one that names something that is not a `.rhai` file. The
+alternative would be reporting it under a name that would fetch a different file.
+`POST /api/scripts/validate` takes `kind` and `content` and compiles without writing, so an editor
+can check before saving instead of saving and waiting for a run to fail.
 
 ### Offering a file nobody has named yet
 
@@ -1131,7 +1177,7 @@ agent's directory that nothing declares:
 
 `kind` is `unknown` because nothing about the file says which of the four agent-owned kinds it is;
 the declaration says that, and it has not happened yet. `unknown` is not a `{kind}` the read and
-write routes accept, so a client picks a real one to open the file with, and `compiles` is absent
+write routes accept, so a client picks a real one to open the file with. `compiles` is absent
 for the same reason: which compiler would have to accept it is not yet decided. Write
 `relative_path` into `validator = "..."` or a `[stages.<name>.hooks]` entry and the next listing
 reports the same file as declared.
@@ -1170,15 +1216,15 @@ Each listed provider carries a `provider` object with what its leading `// @` co
 ## The model catalogue
 
 `GET /api/models` answers from a listing the server keeps, not from the providers on each
-request. The providers are asked once per config, side by side, each given five seconds; a
-complete listing is served for fifteen minutes and one missing a provider's answer for one
-minute, after which the next request gets the list in hand and starts a refresh behind it.
+request. The providers are asked once per config, side by side, each given five seconds. A
+complete listing is served for fifteen minutes, and one missing a provider's answer for one
+minute. After that, the next request gets the list in hand and starts a refresh behind it.
 Only the very first request for a config waits for the providers, and that wait is bounded.
 A `PUT /api/config` starts the refresh for the new config as it returns.
 
 Two headers say what you got. `X-Leviath-Catalog-Age` is how many seconds ago the listing
-was built; `X-Leviath-Catalog-Complete` is `true` when every provider answered when it was,
-`false` when one timed out, errored, or could not be built, in which case its models are
+was built. `X-Leviath-Catalog-Complete` is `true` when every provider answered when it was, and
+`false` when one timed out, errored, or could not be built. That provider's models are then
 absent. `?refresh=1` asks the providers again and waits for them, for a settings page that
 has just changed a key and wants to show the result rather than the memory of the old one.
 Announced as the `models.cached` capability.
@@ -1187,8 +1233,8 @@ Announced as the `models.cached` capability.
 
 `GET /api/models` returns a flat list, and each entry carries the `provider`
 that serves it. That matters more than it looks: **`openai` and `codex` serve
-the same model ids.** Both answer to `gpt-5.5`, and they bill to entirely
-different places - one to an API balance, one to a ChatGPT subscription.
+the same model ids.** Both answer to `gpt-5.5`. They bill to entirely
+different places: one to an API balance, one to a ChatGPT subscription.
 
 So `id` is not a key. `provider` + `id` is:
 
@@ -1204,7 +1250,7 @@ twice: `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`.
 
 A client keying a picker on `id` alone silently collapses those two into one
 row, and whichever it kept decides what the user pays. Build the key the way a
-blueprint names a model - `provider/id`, the same `codex/gpt-5.5` that goes in
+blueprint names a model: `provider/id`, the same `codex/gpt-5.5` that goes in
 `models = [...]`.
 
 `?provider=` asks the server instead:
@@ -1214,15 +1260,15 @@ GET /api/models?provider=codex     only the subscription's models
 GET /api/models?provider=openai    only the keyed ones
 ```
 
-A provider this machine has not configured lists nothing rather than 404ing:
-the set of providers is whatever the config has, so "no models" is the honest
+A provider this machine has not configured lists nothing rather than 404ing.
+The set of providers is whatever the config has, so "no models" is the honest
 answer to asking about one it does not have.
 
 `pricing` is `null` on a Codex entry, and on any other model whose provider
 did not quote a rate in its listing. It reports what the *listing* said, not
 what a run would be billed at, so a console should not read `null` as free.
-For Codex it happens to be free - a subscription has no per-call price, and a
-run on it reports `cost_usd: 0` - but the two facts arrive by different routes.
+For Codex it happens to be free, because a subscription has no per-call price
+and a run on it reports `cost_usd: 0`. The two facts arrive by different routes.
 See [where a run's cost went](#where-a-runs-cost-went) for the figure that is
 actually charged.
 
@@ -1243,7 +1289,7 @@ POST /api/providers/{name}/check       prove the grant still works       (admin)
 ```
 
 `GET /api/providers` is open to any caller holding the bearer token. It reports the account
-address and the plan tier - the same facts `lev auth status` prints - and never a token. Two
+address and the plan tier, the same facts `lev auth status` prints, and never a token. Two
 providers sign in this way: `codex` (a ChatGPT plan) and `grok` (a SuperGrok or X Premium+ plan).
 
 ```json
@@ -1305,9 +1351,9 @@ Announced as the `providers.quota` capability. Safe to ask for whenever the prov
 opens.
 
 `enabled` and `signed_in` are separate on purpose. Either can be true alone, they are set by
-different routes, and the combination that breaks runs - enabled, not signed in - is the one a
-console has to be able to see. `expires_at` is when the *access* token lapses; it is refreshed
-automatically well before that, and it is here so a UI can show that the session is live rather
+different routes, and the combination that breaks runs, enabled but not signed in, is the one a
+console has to be able to see. `expires_at` is when the *access* token lapses, and it is refreshed
+automatically well before that. It is here so a UI can show that the session is live, rather
 than implying anybody has to act on it.
 
 ### The flow
@@ -1338,7 +1384,7 @@ sequenceDiagram
 ```
 
 The MCP login route does hold its request open, for up to five minutes. That is fine for a CLI
-and wrong for a browser: the tab has nothing to draw while it waits, no way to show the URL, and
+and wrong for a browser. The tab has nothing to draw while it waits, no way to show the URL, and
 no way to give up without losing the flow. One extra poll buys a UI that can render the whole
 thing.
 
@@ -1355,7 +1401,7 @@ and if it does not finish:
 { "state": "failed", "message": "could not listen on port 1455 or 1457 (…)", "at": 1735689100 }
 ```
 
-A success leaves no `signin` at all - the grant store is the answer, and a second copy of "signed
+A success leaves no `signin` at all. The grant store is the answer, and a second copy of "signed
 in" is how two answers come to disagree. A failure stays until the next attempt, so a console
 that was not watching still finds out what happened.
 
@@ -1372,7 +1418,7 @@ a different one.
 For a console driving a daemon on the same machine, this is invisible: the browser opens and the
 callback lands. For a remote daemon, the flow still starts and `authorize_url` still comes back,
 but somebody has to open that URL on the daemon's host. Show it rather than relying on the
-opener - it silently does nothing over SSH and in a bare console.
+opener, which silently does nothing over SSH and in a bare console.
 
 ### Checking, and why the check is real
 
@@ -1392,8 +1438,8 @@ rarely-used sign-in alive.
 
 ### Turning it on
 
-Signing in and enabling are two separate acts, and `logout` deliberately does not do both -
-signing out is not the same as turning the provider off. `PUT /api/config` carries the setting:
+Signing in and enabling are two separate acts, and `logout` deliberately does not do both.
+Signing out is not the same as turning the provider off. `PUT /api/config` carries the setting:
 
 ```json
 { "codex_enabled": true, "codex_reasoning_effort": "medium", "codex_verbosity": "medium" }
@@ -1401,13 +1447,13 @@ signing out is not the same as turning the provider off. `PUT /api/config` carri
 
 `codex_reasoning_effort` takes `none`, `minimal`, `low`, `medium`, `high` or `xhigh`;
 `codex_verbosity` takes `low`, `medium` or `high`. Both are validated before anything is written,
-because the provider silently ignores a value it does not recognise - a typo would otherwise be
+because the provider silently ignores a value it does not recognise. A typo would otherwise be
 saved, read back by `GET /api/config`, and quietly do nothing.
 
 `ollama_enabled` turns Ollama on, and `GET /api/config` reports it. It is
 opt-in like everything else: off, no run registers it. Setting
 `ollama_base_url` counts as choosing it too, and the `GET` reports `true` for
-either - a console asking "is Ollama on" wants one answer, not two fields to
+either. A console asking "is Ollama on" wants one answer, not two fields to
 reconcile.
 
 `codex_replay_reasoning` is on by default and worth leaving on. It is writable so it can be
@@ -1445,8 +1491,8 @@ whole story while it does not:
 }
 ```
 
-`kind` is `parse` for a syntax error or a value of the wrong type, `validation` for a value that
-parsed and was then refused, and `read` for a file that could not be read at all. A parse failure
+`kind` is `parse` for a syntax error or a value of the wrong type. It is `validation` for a value
+that parsed and was then refused, and `read` for a file that could not be read at all. A parse failure
 carries `line` and `column`, both 1-based; a validation failure carries `key` instead, the dotted
 config key it is about, such as `model_providers.local`. `message` is one line with no caret art in
 it, ready to put in a banner. `since` is when this server first saw the file in this state, in unix
@@ -1461,13 +1507,13 @@ the new values. Announced as the `config.health` capability; a server that does 
 omits the field whether or not the file loads, so its absence proves nothing there.
 
 `PUT /api/config` is checked before it writes, with the same rules the loader applies, so this API
-cannot be the thing that breaks the file: a body that would produce a config this build refuses to
-read back answers **400** and the file is left byte for byte as it was.
+cannot be the thing that breaks the file. A body that would produce a config this build refuses to
+read back answers **400**, and the file is left byte for byte as it was.
 
 ## Override and fallback models
 
 `override_model` on `GET /api/config` is the model every stage that allows a user default starts on
-while it is set, ahead of what its blueprint names; `fallback_model` is the model a stage falls back
+while it is set, ahead of what its blueprint names. `fallback_model` is the model a stage falls back
 to when none of the models it names is configured on that machine, never ahead of them. Both are
 bare model ids on `default_provider`. Both are always sent, `null` included, and that is the point:
 a server that omits a key predates the field, which is a different answer from "nothing is set".
@@ -1484,11 +1530,11 @@ On `PUT /api/config` each key has three states, which the other fields in that b
 | `"override_model": "gpt-5"`   | the setting is pinned to `gpt-5`                   |
 
 `fallback_model` reads the same way, and so do the seven provider keys (`anthropic_key`,
-`openai_key`, `google_key`, `xai_key`, `meta_key`, `openrouter_key`, `bedrock_key`): `null` clears a key, which takes
-the provider out of this install the way the setup wizard's remove does, and an empty string is a
-400. Clearing `override_model` matters as much as setting it. A
-pinned model runs every stage of every blueprint on that one model, and the cheap stages then pay a
-top-tier price, so unset is the state most machines want: see
+`openai_key`, `google_key`, `xai_key`, `meta_key`, `openrouter_key`, `bedrock_key`). `null` clears
+a key, which takes the provider out of this install the way the setup wizard's remove does. An
+empty string is a 400. Clearing `override_model` matters as much as setting it. A pinned model
+runs every stage of every blueprint on that one model, and the cheap stages then pay a top-tier
+price. Unset is the state most machines want: see
 [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on). Sending `null` is
 the only way to get back there through this API, in the same way `remove_gateways` is the only way
 to delete a gateway.
@@ -1497,18 +1543,19 @@ to delete a gateway.
 a model id, and a form that posts its empty box should be told rather than quietly lose the
 setting. Nothing is written when it is refused.
 
-`default_provider` takes no `null`. It is not optional in `config.toml` - a machine always has one,
-defaulting to `anthropic` - so there is no unset state to write, and sending a different name is the
-whole vocabulary.
+`default_provider` takes no `null`. It is not optional in `config.toml`, because a machine always
+has one, defaulting to `anthropic`. There is no unset state to write, and sending a different name
+is the whole vocabulary.
 
 ## Gateways
 
 `gateways` on `GET /api/config` lists every `[model_providers.<name>]` entry, name-sorted, and
 each one says what backs it: `kind` is `script` for a Rhai provider or `openai-compatible` for a
 server that speaks OpenAI's chat API. Beside `name`, `base_url`, `has_api_key` and `script`, an
-endpoint reports `header_names` (the names of its extra headers, never their values, because a
-header is where a second credential goes) and `models`, the ids it falls back to when its server
-will not list them. `extra_keys` names a script's forwarded keys the same way.
+endpoint reports `header_names` and `models`. `header_names` holds the names of its extra headers,
+never their values, because a header is where a second credential goes. `models` holds the ids it
+falls back to when its server will not list them. `extra_keys` names a script's forwarded keys
+the same way.
 
 `PUT /api/config` takes the same fields on each gateway in `gateways`: `kind`, `base_url`,
 `api_key`, `script`, `headers` (a name-to-value map) and `models`. Every field is optional and an
@@ -1525,13 +1572,13 @@ address the caller names.
 
 Each entry from `GET /api/models` also carries `limits_source`: `api` when the provider reported the
 token limits itself, `builtin` when this build matched them off the model's name, and `override`
-when a `[model_capabilities]` entry set them. Read it before treating a window as a fact - a
+when a `[model_capabilities]` entry set them. Read it before treating a window as a fact. A
 `builtin` figure for a model the table does not know is a guess, and region budgets resolve against
-it. Beside it: `supports_temperature` and `supports_tools`; `learned`, true when the provider's own
-listing described the model and false for a row from this build's table; and, when the listing
+it. Beside it: `supports_temperature` and `supports_tools`. `learned` is true when the provider's
+own listing described the model, and false for a row from this build's table. When the listing
 carries them, `released` (Unix seconds), `retires` (the date the provider published) and `pricing`
 (USD per million tokens: `input_per_mtok`, `cached_input_per_mtok`, `cache_write_per_mtok`,
-`output_per_mtok`), each `null` otherwise. Two lists say what the model takes and hands back:
+`output_per_mtok`) come too, each `null` otherwise. Two lists say what the model takes and hands back:
 `input_types` and `output_types`, mime type patterns such as `text/*`, `image/*` or
 `application/pdf`, from this build's table corrected by the provider's listing and by
 `[model_capabilities]`. A stage holding an image picks a model whose `input_types` cover it; see
@@ -1588,8 +1635,8 @@ than that feature, not broken.
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
 | `runs.files.mime_type` | `mime_type` on every file-listing entry, typed by the run's registry from the file's name |
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
-| `models.cached` | `GET /api/models` answers from a catalogue the server keeps, with `X-Leviath-Catalog-Age` and `X-Leviath-Catalog-Complete` on the response and `?refresh=1` to ask the providers again. Safe to call when a page opens. See [the model catalogue](#the-model-catalogue) |
-| `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`, and `@path` tokens in `task` and region text resolved inside the working directory. See [attaching files](#attaching-files) |
+| `models.cached` | `GET /api/models` answers from a catalogue the server keeps. See [the model catalogue](#the-model-catalogue) |
+| `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`. See [attaching files](#attaching-files) |
 | `messages.parts` | The same on `POST /api/agents/{id}/message` |
 | `runs.blobs` | `GET /api/agents/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
 | `runs.files.raw` | `GET /api/agents/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
@@ -1598,7 +1645,7 @@ than that feature, not broken.
 | `mime.registry` | `GET /api/mime`, the effective mime registry with each row's source |
 | `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
-| `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them. Without it a stage record carries tokens and no price, and the missing field is not a zero |
+| `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
 | `runs.delete` | `DELETE /api/runs/{id}`, which removes the record rather than cancelling the run |
 | `runs.delete.bulk` | `DELETE /api/runs` with `before` or `ids`, bounded by `max_ids` |
@@ -1621,26 +1668,55 @@ than that feature, not broken.
 | `blueprints.stage_routing` | `stage_routing` on the detail route: `output_routing` and `context.reset` per stage. See [stage routing](#stage-routing) |
 | `tools.list` | `GET /api/tools?agent=`, what an agent here can actually call |
 | `update.plan` | `GET /api/update`, how this copy was installed and the command that upgrades it. See [asking how to upgrade](#asking-how-to-upgrade) |
-| `update.apply` | `POST /api/update` and `GET /api/update/jobs/{id}`, carrying that plan out. Says this build serves them; whether *this* daemon mounts them is `--allow-admin`, which you find out by calling one. See [pressing the button](#pressing-the-button) |
+| `update.apply` | `POST /api/update` and `GET /api/update/jobs/{id}`, carrying that plan out. See [pressing the button](#pressing-the-button) |
 | `scripts.read` | The `GET` half of the scripts routes |
-| `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
+| `scripts.write` | That this build serves the write half |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
 | `scripts.candidates` | `?include=candidates` on the script listing, plus `relative_path` and `declared` on every entry |
-| `scripts.mime_checks` | `mime_check` as a sixth script `kind`: the byte checks mime rows name, beside the config for the operator's rows and beside the agent for a blueprint's |
+| `scripts.mime_checks` | `mime_check` as a sixth script `kind`: the byte checks mime rows name |
 | `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
-| `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config`: a gateway can be an OpenAI-compatible endpoint rather than a script |
+| `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config` |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
-| `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
-| `providers.signin` | `GET /api/providers` and the three admin routes under it: the browser sign-in for a provider that has no API key. Without it a console can write `codex_enabled` and has no way to complete the sign-in, which leaves the user enabled and unable to run anything. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
-| `providers.quota` | `?quota=true` on `GET /api/providers`, the `quota` object it adds, `X-Leviath-Quota-Age` and `X-Leviath-Quota-Complete` on the answer, and `?refresh=1` to read the accounts again. Without it a missing `quota` says two things at once: a daemon that ignored the parameter, or a subscription with nothing to report. See [subscription usage](#subscription-usage) |
-| `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. Without it a missing `config_error` means nothing, so a console cannot tell a file that loads from a daemon that would not say. See [when the config file will not load](#when-the-config-file-will-not-load) |
+| `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`. See [answering a question](#answering-a-question) |
+| `providers.signin` | `GET /api/providers` and the three admin routes under it. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
+| `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
+| `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
+
+A few of those promises carry a consequence worth spelling out.
+
+`models.cached` also covers `X-Leviath-Catalog-Age` and `X-Leviath-Catalog-Complete` on the
+response, and `?refresh=1` to ask the providers again. It is safe to call when a page opens.
+`spawn.parts` also covers `@path` tokens in `task` and region text, resolved inside the working
+directory.
+
+Without `runs.stages.cost`, a stage record carries tokens and no price, and the missing field is
+not a zero. `scripts.mime_checks` puts the byte checks beside the config for the operator's rows,
+and beside the agent for a blueprint's. `config.gateways.kinds` is how you tell that a gateway can
+be an OpenAI-compatible endpoint rather than a script.
+
+`update.apply` and `scripts.write` say what this build serves, not what *this* daemon mounts. That
+is `--allow-admin`, which you find out by calling one of the routes and reading the status.
+
+`interaction.feedback` also covers the "Deny with feedback" option on a tool approval. An older
+daemon drops the field without a word, so offer the box only where this is announced.
+
+`providers.signin` is the browser sign-in for a provider that has no API key. Without it a console
+can write `codex_enabled` and has no way to complete the sign-in. That leaves the user enabled and
+unable to run anything.
+
+`providers.quota` also covers `X-Leviath-Quota-Age` and `X-Leviath-Quota-Complete` on the answer,
+and `?refresh=1` to read the accounts again. Without it a missing `quota` says two things at once:
+a daemon that ignored the parameter, or a subscription with nothing to report.
+
+Without `config.health`, a missing `config_error` means nothing, so a console cannot tell a file
+that loads from a daemon that would not say.
 
 ## Writing a mime row
 
-A [custom mime type](/docs/mime#the-registry) is where the registry earns its keep: a family, a
+A [custom mime type](/docs/mime#the-registry) is where the registry earns its keep. A family, a
 token rule, extensions, a magic prefix and a byte check turn a format Leviath has never heard of
-into one it types, sizes and validates rather than one that behaves like
+into one it types, sizes and validates, rather than one that behaves like
 `application/octet-stream`. `GET /api/mime` shows what is there; these two writes change it,
 without leaving the browser for the config file.
 
@@ -1666,9 +1742,9 @@ that carries just `{"mime_type": "...", "extensions": [...]}` adds an extension 
 rest. `tokens` is one of `{ per_byte }`, `{ per_pixel, max? }`, `{ per_second }`, `{ per_page }` or
 `{ fixed }`.
 The answer is `{"mime_type", "created"}`, where `created` is false when the row was already there.
-The row is validated the way `lev mime add` validates it before anything is written: a type that
-is not `type/subtype`, a token rule that names none or more than one rate, a `magic` that is not
-hex, or a `check` script that will not compile is a 400, and the file is untouched.
+The row is validated the way `lev mime add` validates it, before anything is written. A 400 comes
+back for a type that is not `type/subtype`, a token rule naming none or more than one rate, a
+`magic` that is not hex, or a `check` script that will not compile. The file is untouched.
 
 `DELETE /api/mime?mime_type=<type>` takes a row out; a type with no row of its own there is a 404.
 Both need `--allow-admin`, and both are announced as `mime.write`, so a console offers "New
@@ -1726,8 +1802,8 @@ has not listed any figures.
 
 `complete` says whether every call behind `total_usd` could be priced. When it is false the run has
 spent at least that much and more by an unknown amount. It is a different question from whether the
-priced part came from the provider's own figures or was reconstructed from published rate cards,
-which is what `cost_is_exact` on the run record answers, so a total can be complete and still be a
+priced part came from the provider's own figures or was reconstructed from published rate cards.
+That is what `cost_is_exact` on the run record answers, so a total can be complete and still be a
 reconstruction.
 
 A run is created untitled and named a moment later, once a model has shortened its prompt into a
@@ -1775,10 +1851,10 @@ events stop, and one when they resume:
 `daemon` is absent until the daemon has introduced itself, which every current daemon does on
 connect.
 
-If the daemon came back on a different build than the running `lev serve` (the usual cause is a
-`lev update` with the server left running), the frame also carries `restart_advised`, a sentence
-that names both builds and says to restart `lev serve`. Every subscriber that connects while that
-is true, or while the daemon is unreachable, gets a `daemon_link` frame first thing. A healthy
+The daemon can come back on a different build than the running `lev serve`. The usual cause is a
+`lev update` with the server left running. The frame then also carries `restart_advised`, a
+sentence that names both builds and says to restart `lev serve`. Every subscriber that connects
+while that is true, or while the daemon is unreachable, gets a `daemon_link` frame first thing. A healthy
 stream sends none, so a client that ignores the type sees exactly what it always saw.
 
 Requests keep working across a version gap as long as the two ends still understand each other. A

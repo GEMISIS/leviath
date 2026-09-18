@@ -40,7 +40,7 @@ A region hook, a stage hook and an output validator are all named by path in the
 sitting beside the agent is invisible until something names it. If you are building an editor rather
 than writing the manifest by hand,
 [`GET /api/scripts?agent=<name>&include=candidates`](/docs/api#offering-a-file-nobody-has-named-yet)
-lists the `.rhai` files under an agent's directory that nothing declares yet, each with the
+lists the `.rhai` files under an agent's directory that nothing declares yet. Each comes with the
 manifest-relative path to write into `validator = "..."` or `[stages.<name>.hooks]`.
 
 ## The sandbox they all share
@@ -48,8 +48,8 @@ manifest-relative path to write into `validator = "..."` or `[stages.<name>.hook
 Every script runs in a hardened engine: no `eval`, no `import`, no ambient filesystem or
 network access, bounded operations and expression depth, a capped call depth, and `print`/`debug`
 muted. The operation budget scales with the job: 500k operations for tool scripts and providers,
-100k for hooks, regions, and validators, five million for a mime check scanning a file. The host functions each extension point offers are the only way out of it, and they differ
-by point:
+100k for hooks, regions, and validators, five million for a mime check scanning a file. The host
+functions each extension point offers are the only way out of it. They differ by point:
 
 - Provider scripts get HTTP, JSON, SSE parsing, and encoding helpers, because mapping an API is
   their whole job.
@@ -61,7 +61,7 @@ by point:
 ### What every script can call
 
 Available at every extension point, including the ones that get no host access at all. None of
-these reach outside the process; they only transform values the script already holds:
+these reach outside the process. They only transform values the script already holds:
 
 | Group | Functions |
 |---|---|
@@ -96,7 +96,7 @@ Policy rules reload as well. The daemon stats `policy.toml` and every `rules/*.r
 rule you add, edit, or delete gates the next run. Nothing is restarted for that either.
 
 A mime check named by the operator's rows is recompiled whenever `mime_types.toml` or the
-config changes, and that reaches the runs already under way as well as the next one; one named
+config changes. That reaches the runs already under way as well as the next one. One named
 by a blueprint is compiled at spawn, like the agent's other scripts.
 
 Neither is scanned or executed until something actually references it, so dropping a file into a

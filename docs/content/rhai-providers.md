@@ -11,8 +11,8 @@ order: 8
 Leviath ships support for the big providers, but there are always more. A `.rhai` script in
 `~/.leviath/providers/` teaches it any HTTP LLM API, without waiting for anyone to add it.
 
-Your script does one job: translate. Leviath hands it a request in Leviath's own shape, the script
-turns that into whatever body the API wants, and then turns the reply back:
+Your script does one job: translate. Leviath hands it a request in Leviath's own shape. The script
+turns that into whatever body the API wants, and turns the reply back:
 
 ```mermaid
 flowchart LR
@@ -22,10 +22,10 @@ flowchart LR
   S -->|"a normal response"| L
 ```
 
-Everything hard stays on Leviath's side: HTTP transport, rate limiting, per-stage timeouts, retry
-with backoff, working out which errors are worth retrying, and token counting. You write the mapping
-and nothing else: name the file after the provider, write an `inference` function, and reference it
-from a stage.
+Everything hard stays on Leviath's side: HTTP transport, rate limiting and per-stage timeouts. So do
+retry with backoff, working out which errors are worth retrying, and token counting. You write the
+mapping and nothing else: name the file after the provider, write an `inference` function, and
+reference it from a stage.
 
 Four things about the lifecycle:
 
@@ -77,7 +77,7 @@ tokens_per_minute   = 100000
 
 A provider defines `initialize` and `inference` (required) and may add `stream`, `count_tokens`, and
 `list_models`. Metadata comes from leading `// @key value` comments. Both required functions are
-checked when the script loads, so one that is missing or takes the wrong number of parameters is
+checked when the script loads. One that is missing or takes the wrong number of parameters is
 skipped with a warning, the same as a syntax error, rather than failing part-way into a run.
 
 The metadata directives, all optional:
@@ -99,7 +99,7 @@ The metadata directives, all optional:
 > [pre-flight guard](/docs/context#requests-are-measured-before-they-are-sent) holds every request
 > against: one whose prompt plus its `max_tokens` reply budget would overflow it is refused before
 > it is sent. Left at the 8192 default, a stage that asks for an 8192-token reply can never run,
-> whatever its prompt - the refusal reads
+> whatever its prompt. The refusal reads
 > `Token limit exceeded: the prompt's N tokens plus the 8192-token reply budget (max_output_tokens)
 > exceed the model's 8192-token context window`, and the number to fix is this annotation, not the
 > stage's `max_output_tokens`. Declare the backing model's real window here, or override it
@@ -108,8 +108,8 @@ The metadata directives, all optional:
 
 ### A provider ships the types its models are built for
 
-A model built for a type the registry does not know can still be reached, but nothing downstream
-knows what that type *is*: what family a provider encodes it as, whether its bytes are text, what a
+A model built for a type the registry does not know can still be reached. Nothing downstream knows
+what that type *is*: what family a provider encodes it as, whether its bytes are text, what a
 stand-in for it should say. A provider declares that with `@mime_type`, one row per line:
 
 ```rhai
@@ -118,15 +118,15 @@ stand-in for it should say. A provider declares that with `@mime_type`, one row 
 // @mime_type application/x-acme-scene family=model extensions=scene magic=41434D45
 ```
 
-Each row names a `type/subtype` (or `type/*`) and then the fields it sets: `family=` (what a
-provider keys its encoder on), `text=<bool>` (whether the bytes are UTF-8), `extensions=` (a
-comma-separated list, no spaces) and `magic=` (a hex prefix for sniffing). A key it does not
+Each row names a `type/subtype` (or `type/*`) and then the fields it sets. `family=` is what a
+provider keys its encoder on, `text=<bool>` says whether the bytes are UTF-8, `extensions=` is a
+comma-separated list with no spaces, and `magic=` is a hex prefix for sniffing. A key it does not
 recognize is ignored, and a line with no type is dropped, so a typo never fails a load. A provider
-declares a type's *shape*, not a byte [check](/docs/rhai-mime-checks) - a check lives beside the
+declares a type's *shape*, not a byte [check](/docs/rhai-mime-checks). A check lives beside the
 config or blueprint that names it, not in a provider.
 
 The rows layer into every run's [mime registry](/docs/mime#the-registry) under the built-in table,
-so a run that resolves onto the provider knows the type, and the operator's `mime_types.toml` and a
+so a run that resolves onto the provider knows the type. The operator's `mime_types.toml` and a
 blueprint's own rows still win over it. `lev mime list` shows each provider row with its source
 (`provider:<name>`), and editing the script reaches live runs on the daemon's next config pass, the
 same way an edited `mime_types.toml` does.
@@ -154,17 +154,17 @@ message carries no such key.
 
 ### Building your own prompt cache
 
-Each system block says which region it came from and how much that region moves, so a provider
-can arrange the prompt for whatever cache its API has:
+Each system block says which region it came from and how much that region moves. A provider can
+arrange the prompt for whatever cache its API has:
 
 | field | meaning |
 |---|---|
 | `region` | the region it was rendered from, or `""` for a block that is not one (a hint, a preamble) |
-| `volatility` | `"stable"`, `"grows"` or `"rewritten"` - what the blueprint declared. See [context regions](/docs/context#what-caching-costs) |
+| `volatility` | `"stable"`, `"grows"` or `"rewritten"`, as the blueprint declared. See [context regions](/docs/context#what-caching-costs) |
 
 These are facts about the content, deliberately not instructions. Leviath does **not** decide your
-cache policy for you, because every API's differs: Anthropic caches by prefix with four markers
-and a minimum length, and yours may have a different count, a different floor, or no cache at all.
+cache policy for you, because every API's differs. Anthropic caches by prefix with four markers
+and a minimum length. Yours may have a different count, a different floor, or no cache at all.
 The built-in Anthropic provider turns these same fields into its own policy and is worth reading as
 one worked example.
 
@@ -267,8 +267,8 @@ the error classed exactly.
 
 ### Saying what actually went wrong
 
-`kind` says how the runtime should *treat* a failure - retry it, fail over, give up. `failure_kind`
-says what it *was*, which is the half nobody downstream can work out for itself:
+`kind` says how the runtime should *treat* a failure: retry it, fail over, give up. `failure_kind`
+says what it *was*. That is the half nobody downstream can work out for itself:
 
 ```rhai
 throw #{
@@ -282,7 +282,7 @@ It reaches the daemon log as a `failure_kind` field, and the run's error text ca
 for that kind. Without it a script could only fold a refused connection, an expired certificate and
 a request that timed out into one word, which is the state the built-in providers were in.
 
-The names are the ones the built-in providers use, so a script and a native provider describing the
+The names are the ones the built-in providers use. A script and a native provider describing the
 same failure describe it the same way:
 
 | | |
@@ -294,12 +294,12 @@ same failure describe it the same way:
 | `connection-dropped` | the answer stopped arriving |
 | `transport` | could not be reached, more precisely unknown |
 | `bad-request` | the provider rejected the request itself |
-| `not-found` | 404 - usually a `base_url` path or a model that is not there |
-| `server-error` | 5xx - their end, and may pass on a retry |
+| `not-found` | 404, usually a `base_url` path or a model that is not there |
+| `server-error` | 5xx, their end, and may pass on a retry |
 | `malformed-response` | an answer this build could not parse |
 
-A name this build does not know is ignored rather than refused, so a script written against a later
-version still runs here. Omitting `failure_kind` entirely is fine - it is extra detail, not a
+A name this build does not know is ignored rather than refused. A script written against a later
+version still runs here. Omitting `failure_kind` entirely is fine. It is extra detail, not a
 requirement.
 
 ## A complete provider
@@ -453,19 +453,19 @@ The three optional functions each carry their own shape. `stream(state, request,
 `count_tokens(state, text, model)` returns an int (Leviath falls back to a local heuristic without
 it). `list_models(state)` returns an array of
 `{ id, display_name, max_context_tokens, max_output_tokens }`. What it answers is treated as a
-real provider listing: `lev models list` counts the rows toward its "from the providers' own
+real provider listing. `lev models list` counts the rows toward its "from the providers' own
 listings" line and marks them `"learned": true` under `--json`, exactly as it does a native
-provider's catalog. A `serves = [...]` or `[model_capabilities]` claim in the config is not - those
+provider's catalog. A `serves = [...]` or `[model_capabilities]` claim in the config is not. Those
 feed validation and never become listing rows.
 
 ### Counting tokens remotely
 
 `count_tokens` is what the [context-window guard](/docs/context#requests-are-measured-before-they-are-sent)
-calls before a large request goes out: once the runtime's estimate of a request plus its reply
-budget reaches half the model's window, it asks the script for the real figure and refuses a
+calls before a large request goes out. Once the runtime's estimate of a request plus its reply
+budget reaches half the model's window, it asks the script for the real figure, and refuses a
 request that would not fit. Small turns never reach it. The example above answers with the byte
 heuristic, which is the right answer for an API with no counting endpoint. For one that has such an
-endpoint, ask it, and fall back to the heuristic if the call fails - the count is guarding a
+endpoint, ask it, and fall back to the heuristic if the call fails. The count is guarding a
 request, and a failed count must not become a failed request:
 
 ```rhai
@@ -485,8 +485,8 @@ fn count_tokens(state, text, model) {
 }
 ```
 
-`lev validate` says whether each script provider on the machine defines `count_tokens`, so you can
-tell a provider the guard measures exactly from one it measures with the estimate.
+`lev validate` says whether each script provider on the machine defines `count_tokens`. You can
+then tell a provider the guard measures exactly from one it measures with the estimate.
 
 ## Testing it
 
@@ -504,7 +504,7 @@ lev run <agent> --task "..."      # a live run through a stage that references t
 `lev models list --provider <name>` loads the script by name whether or not `--remote` is passed,
 since a script provider has no row in the built-in model table. It **exits non-zero** when the
 script does not compile, when there is no script of that name, and when `list_models` itself
-raises - so it works as a CI gate, and a passing run means the script compiled, `initialize` ran,
+raises. So it works as a CI gate: a passing run means the script compiled, `initialize` ran,
 and the provider answered.
 
 > [!TIP]
@@ -515,9 +515,9 @@ and the provider answered.
 > non-zero on failure.
 
 Once the script is wired in, `lev validate` checks the model ids against it. A script that answers
-`list_models` has named everything it takes, so a stage pinning `<name>/<model>` for a model outside
-that list is an `unserved-model` error and a refused spawn rather than a run on some other model. A
-script with no `list_models` can be checked the same way by writing the list down:
+`list_models` has named everything it takes. A stage pinning `<name>/<model>` for a model outside
+that list is an `unserved-model` error and a refused spawn, rather than a run on some other model.
+A script with no `list_models` can be checked the same way by writing the list down:
 
 ```toml
 [model_providers.groq]
@@ -525,7 +525,7 @@ script = "groq"
 serves = ["llama-4-scout", "llama-4-maverick"]
 ```
 
-`serves` is read straight from the file, so this works with no network and no key, which is what
+`serves` is read straight from the file, so this works with no network and no key. That is what
 makes it usable in CI. A script that offers neither is reported as `catalog-unchecked`: it loaded,
 but it has never said what it takes, so nothing can tell a good model id from a bad one. A script
 that will not compile is a provider that is not there at all, and that stays
@@ -555,8 +555,8 @@ the body could not carry. Two causes account for almost all of it:
 | Invalid escape, run had been fine for turns | A string joined by hand instead of passed through `to_json` |
 | Parse error that moves with the prompt size | Same, at a different offset |
 
-Leviath serializes with `to_json` for exactly this reason, including for an object map, where Rhai's
-own `to_json` would otherwise take over and write strings in Rust's debug spelling. That spelling
+Leviath serializes with `to_json` for exactly this reason, object maps included. Rhai's own
+`to_json` would otherwise take over there and write strings in Rust's debug spelling. That spelling
 renders an invisible character such as a narrow no-break space as `\u{202f}`, which JSON has no
 escape for, so one such character anywhere in the prompt invalidates the whole request. Passing your
 map to `to_json` is enough; nothing extra is needed.

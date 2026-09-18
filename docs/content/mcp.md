@@ -41,7 +41,7 @@ lev mcp remove <name>
 `Name: value` form an HTTP header is usually written in, so `Authorization: Bearer ...` is rejected
 with `--header must be KEY=VALUE`.
 
-`--arg` passes its value through to the server's own command line, so an argument of its own that
+`--arg` passes its value through to the server's own command line. An argument of its own that
 starts with `-` is fine: `--arg -y` is the `-y` that `npx` wants, not a flag of ours.
 
 There are two ways an HTTP server authenticates you, and Leviath picks between them by asking the
@@ -126,8 +126,8 @@ silently renamed.
 
 A result's text blocks reach the model as text. Its `image` and `audio` blocks, and an embedded
 `resource` carrying a `blob`, are decoded and stored as typed [parts](/docs/mime) on the same
-result, typed by the server's `mimeType` (corrected by the registry when that does not parse) and
-named after the resource URI or, for a bare block, after the tool. A `resource_link` is described
+result. Each part takes its type from the server's `mimeType`, corrected by the registry when that
+does not parse. Each is named after the resource URI, or after the tool for a bare block. A `resource_link` is described
 in the text with its URI and type, since its bytes were never sent. A part the run cannot hold
 (over `[mime] max_part_bytes`) is described in the text instead of dropped.
 

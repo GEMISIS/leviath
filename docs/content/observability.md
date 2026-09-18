@@ -76,14 +76,15 @@ Per run, labelled by agent, stage, provider, and model:
 | `leviath.inference_latency` | histogram | How long model calls take |
 | `leviath.runs.total` | counter | One per finished run, attributed by `leviath.status` and `leviath.empty_output` |
 
-`leviath.cost.total` carries the same figure the run's own record does: the provider's own cost
-when it reported one, and arithmetic from published rates when it did not. A call nothing can price
-contributes nothing rather than a zero, so the counter is a floor when some model has no known rate.
+`leviath.cost.total` carries the same figure the run's own record does. That is the provider's own
+cost when it reported one, and arithmetic from published rates when it did not. A call nothing can
+price contributes nothing rather than a zero, so the counter is a floor when some model has no
+known rate.
 Compare it against `unpriced_calls` on the run to know whether it is the whole story, and see
 [managing your costs](/docs/costs).
 
-Emitting it rather than leaving a dashboard to multiply tokens by rates is deliberate: rates differ
-per input class and change when a vendor reprices, and a dashboard carrying its own copy of the
+Emitting it rather than leaving a dashboard to multiply tokens by rates is deliberate. Rates differ
+per input class, and they change when a vendor reprices. A dashboard carrying its own copy of the
 table is how a monitoring figure comes to disagree with the invoice.
 
 Per daemon, sampled every 30 seconds:
@@ -127,7 +128,7 @@ Log records carry the run's trace ID. A collector that joins all three signals c
 from a log line straight to the span that produced it.
 
 They carry the line as it was written. Every output and runtime log line of every run is exported,
-and nothing redacts a credential a tool happened to print on its way out, so point the exporter only
+and nothing redacts a credential a tool happened to print on its way out. Point the exporter only
 at a collector you would trust with the run's transcript.
 
 ## Trying it locally
@@ -145,11 +146,12 @@ lifecycle.
 The metrics above answer "is the fleet healthy". For "what did this one run spend, and on which
 stage", read its stage ledger instead: [`lev stages <run-id>`](/docs/cli#lev-stages-run-id) at a terminal,
 or [`GET /api/agents/{id}/stages`](/docs/api#where-a-runs-cost-went) over HTTP. Both carry the
-per-stage token split, the cache read and write halves, what each stage spent in dollars, the split
-of that by each stay in the stage, and the largest each context region reached while that stage was
-active, which is the number to look at before trimming a layout.
+per-stage token split, the cache read and write halves, what each stage spent in dollars, and the
+split of that by each stay in the stage. They also carry the largest each context region reached
+while that stage was active, which is the number to look at before trimming a layout.
 
 Pricing is the daemon's job on purpose. A dashboard that multiplied the token counts by a rate card
-of its own would produce a fourth answer, disagreeing with the run's figure, the stage's, and the
-provider's invoice, with nothing to say which of the four was wrong. Where the daemon cannot price a
-call it reports the cost as unknown rather than as zero, and says how many calls it could not price.
+of its own would produce a fourth answer. It would disagree with the run's figure, the stage's, and
+the provider's invoice, with nothing to say which of the four was wrong. Where the daemon cannot
+price a call it reports the cost as unknown rather than as zero, and says how many calls it could
+not price.

@@ -157,20 +157,25 @@ noticed before the bill arrives. Where a figure comes from decides how far to tr
 | OpenRouter | its own catalogue, plus the real cost each call reports | live | every model it serves; `cost_is_exact` is true for these |
 | OpenAI, Anthropic, Google, Meta | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
 | xAI | its own listings, plus the real cost each call reports | live, with the table as the fallback | every model it lists; `cost_is_exact` is true for a call that reported its cost |
-| image, video, speech and music models (OpenAI, Google, Bedrock, xAI, Meta) | LiteLLM's table, or the vendor's price page written in by hand where LiteLLM has none (a hand-written row wins) | table, refreshed with the rest; a hand-written row carries its check date | priced per image, second of video, hour of audio, million characters or music clip; a model billed by the token (OpenAI's image models, Gemini's image and speech models) is priced by its tokens |
+| image, video, speech and music models (OpenAI, Google, Bedrock, xAI, Meta) | LiteLLM's table, or the vendor's price page written in by hand where LiteLLM has none (a hand-written row wins) | table, refreshed with the rest; a hand-written row carries its check date | priced per image, second of video, hour of audio, million characters or music clip. See below |
 | Ollama | free by design | neither | every model; a self-hosted cost belongs in the override below |
 | Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unpriced unless one of those says otherwise |
 
+Some media models are billed by the token rather than by the unit, and those are priced by their
+tokens. OpenAI's image models and Gemini's image and speech models work that way.
+
 `lev models list` prints each model's input and output rate, a unit price such as `0.05/s` for a
-media model, or `n/a` where nothing prices it;
-`lev models show` names the source of a table row and the day the table was read. The table is
-compiled into the build, so a build cannot notice a repricing between refreshes, and a refresh is
-the deterministic `cargo xtask prices`: it writes a row only where the two sources agree within 5%,
-keeps a disagreement as it was and prints it, and refuses a move it does not believe.
+media model, or `n/a` where nothing prices it. `lev models show` names the source of a table row
+and the day the table was read.
+
+The table is compiled into the build, so a build cannot notice a repricing between refreshes.
+A refresh is the deterministic `cargo xtask prices`. It writes a row only where the two sources
+agree within 5%. It keeps a disagreement as it was and prints it, and it refuses a move it does
+not believe.
 
 A negotiated rate never appears on a public page, so it belongs in the per-model override in your
-config, which wins over every table row and is also the only place a self-hosted model's cost can
-live:
+config. That override wins over every table row. It is also the only place a self-hosted model's
+cost can live.
 
 ```toml
 [model_capabilities."my-model"]
@@ -180,8 +185,9 @@ output_per_mtok = 15.0
 
 ## A long prompt can cost more per token
 
-Some vendors bill a whole request at a higher rate once its prompt reaches a size: 200 000 tokens
-on Gemini 2.5 Pro, Claude Sonnet 4 and the current Grok models, 272 000 on several GPT-5 models.
+Some vendors bill a whole request at a higher rate once its prompt reaches a size. That size is
+200 000 tokens on Gemini 2.5 Pro, Claude Sonnet 4 and the current Grok models, and 272 000 on
+several GPT-5 models.
 Leviath bills such a request at the higher rate. It does not let the higher rate decide which
 model a stage uses, but it tells you:
 
@@ -192,8 +198,8 @@ model a stage uses, but it tells you:
 
 ## A subscription has no per-call price
 
-The Codex and Grok transports bill a subscription (a ChatGPT plan, or SuperGrok or X Premium+),
-so a call's marginal cost really is zero and Leviath reports it as a known zero rather than as
+The Codex and Grok transports bill a subscription: a ChatGPT plan, or SuperGrok or X Premium+.
+A call's marginal cost really is zero, so Leviath reports it as a known zero rather than as
 unknown. A run on either lands in the report at no cost, which is accurate and not very useful.
 
 The number that matters there is quota. Codex reports a rolling five-hour window and a weekly one
@@ -222,8 +228,8 @@ model shares one pool between all of them:
 
 Measured on a 67-agent run where 65 agents resolved to one model: 9.9 inference turns a minute
 against the default pool of 8. Widening the pool for the model a fan-out piles onto is the
-throughput knob; see [the engine](/docs/engine) for how the pools work, and note that a provider
-rate limit is a different mechanism configured under `[model_providers.<name>.rate_limit]`.
+throughput knob. See [the engine](/docs/engine) for how the pools work. A provider rate limit is a
+different mechanism, configured under `[model_providers.<name>.rate_limit]`.
 
 The bare name covers every route to that model, so the line above also sets the pool when the
 same model is reached through a gateway that prefixes the vendor, as
@@ -248,12 +254,12 @@ of fetched pages. On a measured run, a 280,000-token findings region left at the
 latency as much as cost. Declared `grows`, the settled head caches and only the tail is new.
 
 Size the region with the percentage and leave it there. A percentage is the mechanism for
-scaling to the model in front of you: 30% is 60,000 tokens on a 200K-token model and 300,000 on
+scaling to the model in front of you. 30% is 60,000 tokens on a 200K-token model and 300,000 on
 a 1M-token one, and both are 30% of what that model can hold.
 
 It is tempting to add an absolute `max_tokens` alongside it as insurance. Resist it unless you
-mean the cap to be the real limit, because that is what it becomes: a ceiling low enough to
-matter binds on every model above the window it was chosen for, and from there up the percentage
+mean the cap to be the real limit, because that is what it becomes. A ceiling low enough to
+matter binds on every model above the window it was chosen for. From there up, the percentage
 decides nothing. A region that resolves to the same number on a 200K model and a 1M one is not
 percentage-sized at all. If your region is too big, the percentage is the number to change.
 

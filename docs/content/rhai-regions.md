@@ -120,7 +120,10 @@ one). Return:
 | `true` or `()` | Accept unchanged |
 | `false` | Reject, with no reason given |
 | `#{ action: "reject", reason: "..." }` | Reject, and tell the writer why |
-| `#{ content: "...", key: "..." }` | Accept; both fields optional (`action: "accept"` implied). `content` replaces the text, `key` stores the entry under a different key than the write named |
+| `#{ content: "...", key: "..." }` | Accept; both fields optional (`action: "accept"` implied) |
+
+In that last map, `content` replaces the entry's text. `key` stores the entry under a different key
+than the write named.
 
 The map vocabulary here is `accept` and `reject`, nothing else. It is deliberately narrower than
 the [stage hook](/docs/rhai-hooks) one: a region hook has no `allow`, `retry`, `cancel`, or
@@ -203,9 +206,13 @@ Load-time problems fail fast. Runtime problems never break an inference:
 | `render` errors or returns an invalid shape | Warning, and the region renders as a plain `[name]:` block |
 | `on_write` errors, or returns an invalid type or a malformed map | Warning, and the entry is accepted unchanged. A typo'd map must not read as a different instruction |
 | `on_write` rejects an agent write | The tool result carries the refusal and the reason; nothing is stored |
-| `on_write` rejects a framework write | Warning, and the entry is stored unchanged. Earlier releases treated `false` as a silent drop that still reported success; that no longer happens |
+| `on_write` rejects a framework write | Warning, and the entry is stored unchanged |
 | `on_overflow` errors or returns invalid indices | Warning, and oldest-first eviction runs |
-| Rendered output exceeds the region's budget | Warning only, and it is sent anyway. The [context-window guard](/docs/context#requests-are-measured-before-they-are-sent) refuses it only if the whole request would overflow the model |
+| Rendered output exceeds the region's budget | Warning only, and it is sent anyway |
+
+When `on_write` returns `false` on a framework write, earlier releases dropped the entry silently
+and still reported success. That no longer happens. Rendered output over a region's budget is sent anyway, and the [context-window guard](/docs/context#requests-are-measured-before-they-are-sent)
+refuses it only if the whole request would overflow the model.
 
 > [!NOTE]
 > Region hooks run in the pure-data sandbox: no filesystem, no network, no host I/O functions. They
@@ -222,9 +229,9 @@ The point of the escape hatch is that you could write the built-ins yourself, an
 - **compacting**: approximable with deterministic condensing in `on_overflow`. The LLM
   summarization lane is not script-accessible.
 - **hashmap**: close. Keyed writes plus last-wins rendering give the model the same upserted view,
-  and `on_write` can normalize keys on the way in. The difference is in the store: a real `hashmap`
-  region replaces the old entry and frees its tokens immediately, while a custom region only
-  shadows it at render time until eviction or an explicit release catches up.
+  and `on_write` can normalize keys on the way in. The difference is in the store. A real `hashmap`
+  region replaces the old entry and frees its tokens immediately. A custom region only shadows it
+  at render time, until eviction or an explicit release catches up.
 
 ## Previewing
 

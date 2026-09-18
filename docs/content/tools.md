@@ -23,12 +23,20 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. A file that is not text (an image, a PDF, a model) is stored as a typed [part](/docs/mime) on the result instead, so a model that takes the type sees the bytes and one that does not sees a one-line stand-in. | `path` |
+| `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. | `path` |
 | `read_files` | Read several files in one call, separated by path headers. | `paths` (array) |
-| `write_file` | Write content to a file, creating parent directories as needed. With `append`, add to the end instead of replacing, so a file too large for one reply can be written in parts. | `path`, `content`, `append` (optional) |
+| `write_file` | Write content to a file, creating parent directories as needed. With `append`, add to the end instead of replacing. | `path`, `content`, `append` (optional) |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
-| `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, where every future run on the machine can call it. Refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run). | `name`, `source`, `overwrite` (optional, default false) |
+| `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, for every future run on the machine. | `name`, `source`, `overwrite` (optional, default false) |
+
+`read_file` stores a file that is not text (an image, a PDF, a model) as a typed
+[part](/docs/mime) on the result rather than inlining it. A model that takes the type sees the
+bytes, and one that does not sees a one-line stand-in.
+
+`write_file` with `append` lets a file too large for one reply be written in parts. `install_tool`
+refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing
+tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run).
 
 > [!TIP]
 > `read_files` is cheaper than repeated `read_file` calls; reach for it after `list_dir` when you
@@ -45,7 +53,7 @@ resolve to the same tool advertised to the model.
 
 ### Which shell you get
 
-Leviath resolves the shell per platform, and tells the model which one it resolved instead of
+Leviath resolves the shell per platform. It tells the model which one it resolved, instead of
 leaving it to guess:
 
 | Platform | Shell |
@@ -53,7 +61,7 @@ leaving it to guess:
 | Windows | `cmd.exe /C` |
 | Unix | `$SHELL` when it exists and is a `sh`/`bash`/`zsh`, else the first of `/bin/bash`, `/usr/bin/bash`, `/bin/zsh`, `/usr/bin/zsh`, `/bin/sh` |
 
-The resolved shell is named in the `shell` tool's own description, so a model on Windows reads
+The resolved shell is named in the `shell` tool's own description. A model on Windows reads
 `cmd.exe` rather than a list of every platform's shell. On top of that, a stage that advertises the
 shell tool carries a short system block when the platform warrants one. Today only Windows does:
 it says commands run through `cmd.exe` rather than a POSIX shell, and gives the PowerShell stand-ins
@@ -77,7 +85,7 @@ policy rather than the shell's alone. A denied `write_file` denies the redirect 
 `[safe_commands]` entry can pre-approve one.
 
 It also answers to the same **workspace confinement**. A redirect whose target resolves outside the
-working directory is refused, exactly as `write_file` refuses that path, and no flag lifts it -
+working directory is refused, exactly as `write_file` refuses that path, and no flag lifts it,
 `--yolo` included. That is deliberate: `--yolo` grants permission, and this is not a permission
 question.
 
@@ -93,14 +101,24 @@ quote or an unbalanced `$(` could put a redirect anywhere, so a line carrying on
 outright the moment it also carries a `>`. Guessing where it writes is exactly what the fence
 exists not to do. Rewrite the line without the construct, or use the `write_file` tool.
 
-A **heredoc is read**, not refused: its body is standard input, so `python3 - <<'EOF' ... EOF`
-runs with the whole script on stdin, and a `>` or a `->` inside that body is text rather than a
-redirect. A real redirect beside the operator still counts: `cat <<EOF > report.md` writes
-`report.md` and is confined to the workspace like any other. The two heredoc shapes that could
-still hide a command keep the old refusal: a body that never reaches its delimiter, and an
-**unquoted** heredoc (`<<EOF`, not `<<'EOF'`) whose body contains a `$(...)` or backtick the shell
-would expand and run. Quoting the delimiter makes the body pure data. On Windows there are no
-heredocs, so the construct stays unreadable there and is refused.
+A **heredoc is read**, not refused. Its body is standard input, so this runs with the whole script
+on stdin:
+
+```bash
+python3 - <<'EOF'
+print("the whole script arrives on stdin")
+EOF
+```
+
+A `>` or a `->` inside that body is text rather than a redirect. A real redirect beside the
+operator still counts: `cat <<EOF > report.md` writes `report.md` and is confined to the workspace
+like any other.
+
+Two heredoc shapes could still hide a command, and both keep the old refusal. One is a body that
+never reaches its delimiter. The other is an **unquoted** heredoc (`<<EOF`, not `<<'EOF'`) whose
+body contains a `$(...)` or backtick the shell would expand and run. Quoting the delimiter makes
+the body pure data. On Windows there are no heredocs, so the construct stays unreadable there and
+is refused.
 
 ### How much output comes back
 
@@ -124,14 +142,18 @@ back into the system prompt on later turns.
 | --- | --- | --- |
 | `context_write` | Store or replace a keyed entry in a named section. | `region`, `content`, `key` (optional) |
 | `context_append` | Add to a section without replacing existing content. | `region`, `content`, `key` (optional) |
-| `context_read` | Read a section, or one entry of it: by `key` on any region kind, or by the `index` `context_list` shows. | `region`, `key` (optional), `index` (optional) |
+| `context_read` | Read a section, or one entry of it by `key` or by the `index` `context_list` shows. | `region`, `key` (optional), `index` (optional) |
 | `context_delete` | Release an entry the agent is finished with, freeing its tokens. See [letting the agent decide what to forget](/docs/context#letting-the-agent-decide-what-to-forget). | `region`, and one of `key` / `index` / `oldest` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
-| `context_attach` | Put a file from the working directory into a section as a typed [part](/docs/mime): an image, a recording, a document. A `key` makes a newer version replace the older one; a `caption` is stored beside it. | `region`, `path`, `key`, `caption`, `type`, `deliver` (all but the first two optional) |
-| `context_export` | Write a stored part back into the working directory, by its file name or the start of its sha256, so a shell tool or a script can work on the bytes. | `name`, `path` (optional) |
+| `context_attach` | Put a file from the working directory into a section as a typed [part](/docs/mime). | `region`, `path`, `key`, `caption`, `type`, `deliver` (all but the first two optional) |
+| `context_export` | Write a stored part back into the working directory, by its file name or the start of its sha256. | `name`, `path` (optional) |
 | `todo_add` | Add an open item to a [checklist region](/docs/context#tracking-work-with-a-checklist), returning its id. | `region`, `item` |
 | `todo_done` | Tick a checklist item off. | `region`, `id` |
 | `todo_note` | Record a note against an item without closing it. | `region`, `id`, `note` |
+
+`context_read` takes a `key` on any region kind. `context_attach` takes an image, a recording or a
+document; a `key` makes a newer version replace the older one, and a `caption` is stored beside it.
+`context_export` puts the bytes back where a shell tool or a script can work on them.
 
 ## Final output
 
@@ -164,7 +186,9 @@ Present work to the user for approval or direct editing.
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
 | `present_for_review` | Pause and display a markdown document (plan, design, report) for the user to read and approve. | `title`, `markdown` |
-| `edit_document` | Show a document in an editable field pre-filled with its current text; the returned text is the user's authoritative edit. | `content`, `prompt` (optional) |
+| `edit_document` | Show a document in an editable field, pre-filled with its current text. | `content`, `prompt` (optional) |
+
+The text `edit_document` returns is the user's authoritative edit.
 
 ### These tools need someone there
 
@@ -204,11 +228,13 @@ model but executed by the engine's tool registry, since they act on the shared a
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `parts` (optional: stored parts of this run to hand the child, by name or sha256 prefix), `max_child_depth` (optional), `output_format` (optional), `output_instructions` (optional) |
+| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `parts` (optional), `max_child_depth` (optional), `output_format` (optional), `output_instructions` (optional) |
 | `check_agent` | Non-blocking status check; returns the child's answer once it is done. | `agent_id` |
 | `wait_for_agent` | Block until a sub-agent completes, then return its answer. | `agent_id` |
 | `send_to_agent` | Send a message into a running sub-agent's context. | `agent_id`, `message`, `target_region` (optional; defaults to the conversation) |
 | `kill_agent` | Kill a sub-agent and all its descendants. | `agent_id` |
+
+`parts` names stored parts of this run to hand the child, by name or sha256 prefix.
 
 A child reports whatever it submitted through [`submit_output`](/docs/outputs). A child that
 submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
@@ -218,17 +244,23 @@ child's declared validator and schema, and the warning appears only in the daemo
 ## Environment
 
 What time it is, what machine this is, and what the run itself is doing. A model has no way to
-know any of it: its training data has a cutoff and your run does not, so an agent asked about
+know any of it. Its training data has a cutoff and your run does not, so an agent asked about
 anything current will otherwise reason from whenever it was trained.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `current_time` | The date and time now, in UTC and local, with the IANA timezone, UTC offset, weekday, ISO week and unix epoch. | none |
-| `system_info` | Operating system and version, architecture, CPU count, hostname, path separator, line ending, and free disk space in the working directory. | none |
+| `current_time` | The date and time now, in UTC and local. | none |
+| `system_info` | Operating system and version, architecture, CPU count, hostname, path separator, line ending, and free disk space. | none |
 | `locale_info` | The user's language and region as a BCP-47 tag, such as `en-US`. | none |
-| `environment_info` | The working directory, the home, temporary, config and data directories, the entries on `PATH`, and the environment variables this agent may see. | none |
-| `which_command` | Whether a program is installed and where, the way `which` or `where` would. Looks the name up on `PATH` without running it. | `command` |
-| `runtime_info` | This run reporting on itself: agent, stage, iteration and limit, model and provider, context tokens spent, and whether anyone is available to answer a question. | none |
+| `environment_info` | The working directory, the home, temporary, config and data directories, and the entries on `PATH`. | none |
+| `which_command` | Whether a program is installed and where, the way `which` or `where` would. | `command` |
+| `runtime_info` | This run reporting on itself: agent, stage, iteration and limit, model and provider. | none |
+
+`current_time` carries the IANA timezone, UTC offset, weekday, ISO week and unix epoch alongside
+the two clocks. `system_info` measures free disk space in the working directory, and
+`environment_info` also lists the environment variables this agent may see. `which_command` looks
+the name up on `PATH` without running it. `runtime_info` adds the context tokens spent, and whether
+anyone is available to answer a question.
 
 All six are read-only, take no action, and default to `allow`, so grounding a run in the present
 costs no approval prompt.
@@ -274,16 +306,17 @@ network at all.
 
 `web_search` uses Brave Search when `BRAVE_API_KEY` is readable. Otherwise there is no search
 engine, and the call falls back to a keyless Wikipedia lookup. Pass `freshness` to bound results by
-age, as `pd` / `pw` / `pm` / `py` (past day, week, month, year) or `YYYY-MM-DDtoYYYY-MM-DD`; each
-result carries the page's `date` when Brave knows it, which is what lets an agent judge "latest"
+age, as `pd` / `pw` / `pm` / `py` (past day, week, month, year) or `YYYY-MM-DDtoYYYY-MM-DD`. Each
+result carries the page's `date` when Brave knows it. That is what lets an agent judge "latest"
 against the run's own clock rather than its training cutoff.
 
 `web_fetch` truncates large pages, and a blocked or oversized request comes back as a diagnostic
 rather than failing the run. A URL that answers with a file rather than a page (an image, a
-sound, a PDF) is stored as a [part](/docs/mime) of the run and attached to the tool result, so a
-model that takes the type sees the file itself and any other sees the usual stand-in line. So does a page whose text is rendered client-side: fetching a Reddit
-thread returns HTML that strips to the single word "Reddit", so the tool names that instead of
-handing back the husk as if it were the discussion.
+sound, a PDF) is stored as a [part](/docs/mime) of the run and attached to the tool result. A
+model that takes the type sees the file itself, and any other sees the usual stand-in line. So does
+a page whose text is rendered client-side. Fetching a Reddit thread returns HTML that strips to the
+single word "Reddit", so the tool names that instead of handing back the husk as if it were the
+discussion.
 
 Both ship with `data-analyst`, `researcher`, `deep-researcher`, and `wide-researcher`. To give
 another agent web access, copy them into that agent's `tools/`
@@ -371,7 +404,7 @@ kind of tool instead of one:
 | `@mcp` | every tool every connected [MCP server](/docs/mcp) advertises |
 | `@all` | all of the above |
 
-Groups and names mix freely, so the four shapes people actually want are each one line:
+Groups and names mix freely. The four shapes people actually want are each one line:
 
 ```toml
 available_tools = ["read_file", "edit_file", "shell"]          # a hand-picked set
@@ -380,18 +413,18 @@ available_tools = ["@builtin", "@scripts", "tracker__search"]  # every built-in 
 available_tools = ["@all"]                                     # everything this install has
 ```
 
-A group is resolved when the stage runs, not when the blueprint is written: a script dropped into
+A group is resolved when the stage runs, not when the blueprint is written. A script dropped into
 `~/.leviath/tools/` or a server added with `lev mcp add` is offered to a stage granting `@scripts`
 or `@mcp` without touching the manifest. Two things a group never grants: `submit_output` and
 `fan_out`, which decide what a stage *is* rather than what it can do. Name those, or use the mode
 that carries them.
 
 A group is a grant of visibility and nothing more. Every tool it reaches still goes through
-`tool_permissions`, the taint gate, and the approval prompts exactly as a tool you named would, and
-the `@` prefix can never collide with a real tool, since tool names are limited to `[A-Za-z0-9_-]`.
-`lev validate` knows the groups: an entry like `@builtins` is refused as naming no group, a
-`required_tools` entry no group reaches is an error, and an autonomous stage granting `@builtin`
-gets one `blocking-tool-in-autonomous-stage` warning for the group rather than five for its
+`tool_permissions`, the taint gate, and the approval prompts, exactly as a tool you named would.
+The `@` prefix can never collide with a real tool, since tool names are limited to `[A-Za-z0-9_-]`.
+`lev validate` knows the groups. An entry like `@builtins` is refused as naming no group, and a
+`required_tools` entry no group reaches is an error. An autonomous stage granting `@builtin`
+gets one `blocking-tool-in-autonomous-stage` warning for the group, rather than five for its
 members.
 
 ## Default permissions
@@ -460,7 +493,7 @@ Each gate answers a different question:
 | 3. Approval | Is this call allowed, and does a person need to say so? | `tool_permissions` |
 | 4. Data flow | Would this carry sensitive data off the machine? | The [taint gate](/docs/security#taint-tracking-experimental) |
 
-There is a fifth for script tools specifically: `[tool_script_permissions]` limits what a Rhai tool
+There is a fifth for script tools specifically. `[tool_script_permissions]` limits what a Rhai tool
 may do internally, such as whether it can run a shell command or read a file. See
 [Rhai tools](/docs/rhai-tools).
 

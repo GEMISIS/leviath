@@ -78,9 +78,9 @@ two need no key.
 `lev doctor` says which provider your defaults actually resolve to. With no provider configured
 its `resolve` line fails and names the one your config asked for, `default_provider` or the first
 entry of `provider_order`, and lists what is registered. A config that names a provider but no
-`override_model` or `fallback_model` is fine: the line passes on that provider, and the inference
-check picks a model from its catalogue to probe with, since each stage of a real run uses the
-model its blueprint names. When your configured `default_provider` is being passed over for one
+`override_model` or `fallback_model` is fine. The line passes on that provider, and the inference
+check picks a model from its catalogue to probe with. Each stage of a real run uses the model its
+blueprint names. When your configured `default_provider` is being passed over for one
 that is configured, the `resolve` line says that too.
 
 ## Every run dies immediately with a payment or auth error
@@ -159,10 +159,10 @@ uses it: the daemon rebuilds its providers from the file, so there is nothing to
 that parked because its provider ran out of credits moves to whatever the file names now when you
 `lev resume` it.
 
-A run that gets past that and still can't dispatch (say you removed a provider key after it
-started, or every provider it can use is out of service) is paused after
-`[limits] stall_timeout_secs`, 60 seconds by default, so nothing it did is lost. Set the limit to
-`0` to wait indefinitely instead.
+A run that gets past that and still can't dispatch is paused after `[limits] stall_timeout_secs`,
+60 seconds by default, so nothing it did is lost. That covers removing a provider key after the
+run started, and every provider it can use going out of service. Set the limit to `0` to wait
+indefinitely instead.
 
 ## A run says `paused` and I did not pause it
 
@@ -252,15 +252,15 @@ table while still working, so absence there is not proof of a bad name. See
 
 A 403 from Bedrock says one of two things, and the message names which. `UnrecognizedClientException`
 or `ExpiredTokenException` is the key itself: it was mistyped, deactivated in the Bedrock console,
-or has expired. `AccessDeniedException` is a key that works but is not allowed this call, and that
-is nearly always a model the account has not enabled in the region the request went to, or a
-region that is not the one the key was made for. `lev models list --provider bedrock` lists what
-the key can reach where it is pointed; the region comes from `bedrock_region`, then `AWS_REGION`,
-then `us-east-1`. A 404 `ResourceNotFoundException` saying model use case details have not been
-submitted is AWS's Anthropic use case form: the account fills it in once, in the Bedrock console
-under model access, and AWS says to allow fifteen minutes after. A shell or Rhai tool does not see
-`AWS_*` variables unless `[security] allow_env_vars` names them; that is deliberate and does not
-affect the provider.
+or has expired. `AccessDeniedException` is a key that works but is not allowed this call. That
+is nearly always a model the account has not enabled in the region the request went to. It can
+also be a region that is not the one the key was made for. `lev models list --provider bedrock`
+lists what the key can reach where it is pointed; the region comes from `bedrock_region`, then
+`AWS_REGION`, then `us-east-1`. A 404 `ResourceNotFoundException` saying model use case details
+have not been submitted is AWS's Anthropic use case form. The account fills it in once, in the
+Bedrock console under model access, and AWS says to allow fifteen minutes after. A shell or Rhai
+tool does not see `AWS_*` variables unless `[security] allow_env_vars` names them; that is
+deliberate and does not affect the provider.
 
 ## Grok answers 401, 403 or 429
 
@@ -305,7 +305,7 @@ lev run coder --task "Fix the failing test"
 ```
 
 Quoting. PowerShell strips the outer quotes before `lev` sees the argument, so a task containing a
-literal quote needs escaping, and single quotes are safest when the text contains `$`:
+literal quote needs escaping. Single quotes are safest when the text contains `$`:
 
 ```powershell
 lev run coder --task 'Handle the $HOME case'
@@ -422,8 +422,8 @@ keytool error: java.lang.Exception: Keystore file does not exist: /Users/you/.ke
 Both `mkcert -install` and the command that makes a certificate can stop like this. It is a bug in
 mkcert 1.4.4: when `JAVA_HOME` points at a directory with a `keytool` but no
 `lib/security/cacerts`, which is what `brew --prefix openjdk` gives you, mkcert runs keytool with
-an empty keystore path. The Lair never needs the Java trust store, so put `TRUST_STORES=system,nss`
-in front of both commands:
+an empty keystore path. The Lair never needs the Java trust store. Put `TRUST_STORES=system,nss` in
+front of both commands:
 
 ```bash
 TRUST_STORES=system,nss mkcert -install
@@ -431,7 +431,7 @@ TRUST_STORES=system,nss mkcert 127.0.0.1 localhost
 ```
 
 If the install printed "now installed in the system trust store" before it stopped, the CA is in
-place and only the certificate command needs running again. Setting `JAVA_HOME` to
+place. Only the certificate command needs running again. Setting `JAVA_HOME` to
 `$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home` fixes it for good. The full recipe is
 on [the API page](/docs/api#mkcert-if-the-browser-and-leviath-are-on-machines-you-control).
 

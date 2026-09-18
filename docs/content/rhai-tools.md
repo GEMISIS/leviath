@@ -68,18 +68,32 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 
 | Function | Does |
 |---|---|
-| `http_get(url [, headers])` | An HTTP GET, as text. A body that is not text (an image, a sound, a PDF) is refused with a message naming its type, rather than decoded into noise |
-| `http_get_bytes(url [, headers])` | The same GET, as bytes: a map with `mime_type` (as the server declared it) and `bytes` (a Rhai blob), ready for `write_part`. Bodies up to 32 MiB; larger ones are refused before they are read. Gated like `http_get` |
+| `http_get(url [, headers])` | An HTTP GET, as text. A body that is not text is refused, not decoded. See below |
+| `http_get_bytes(url [, headers])` | The same GET, as bytes: a map with `mime_type` and `bytes`, ready for `write_part`. See below |
 | `http_post(url, body [, headers])` | An HTTP POST |
 | `shell(cmd)` | Runs a shell command |
 | `read_file(path)` | Reads a file, always confined to the workdir |
-| `read_file_bytes(path)` | The same file, as bytes: a Rhai blob, exact, ready for `write_part`. For a file that is not text, like an image your shell command rendered or a design someone handed you. Files up to `[mime] max_part_bytes`; larger ones are refused before they are read. Gated and confined like `read_file` |
+| `read_file_bytes(path)` | The same file, as bytes: an exact Rhai blob, ready for `write_part`. See below |
 | `write_file(path, content)` | Writes a file |
 | `env_var(name)` | Reads an environment variable. Credential-shaped names need [`allow_env_vars`](/docs/configuration#security) |
-| `read_part(name)` | The bytes of a stored [part](/docs/mime) the run holds, as a Rhai blob, by file name or by the first six or more characters of its sha256. Reading needs no permission: the part is already the run's |
-| `write_part(bytes [, type [, name]])` | Stores bytes as a part of the run and returns its map. The type is sniffed when left off, the name made up (`part-3.png`). Gated like `write_file`, and charged to the run's write budget |
+| `read_part(name)` | The bytes of a stored [part](/docs/mime) the run holds, as a Rhai blob. See below |
+| `write_part(bytes [, type [, name]])` | Stores bytes as a part of the run and returns its map. See below |
 | `list_parts()` | Every stored part the run holds, as maps |
 | `find_part(name)` | One part's map by name or hash prefix, or `()` |
+
+`http_get` refuses a body that is not text, such as an image, a sound or a PDF, and the message
+names its type. It does not decode those bytes into noise. `http_get_bytes` is how you fetch them.
+Its `mime_type` is the one the server declared, its `bytes` are a Rhai blob, and bodies over 32 MiB
+are refused before they are read. It is gated like `http_get`.
+
+`read_file_bytes` is for a file that is not text, like an image your shell command rendered or a
+design someone handed you. The blob is exact. Files up to `[mime] max_part_bytes` are read, and
+larger ones are refused before they are read. It is gated and confined like `read_file`.
+
+`read_part` takes a file name, or the first six or more characters of a part's sha256. Reading
+needs no permission, because the part is already the run's. `write_part` sniffs the type when you
+leave it off and makes up a name, such as `part-3.png`. It is gated like `write_file`, and charged
+to the run's write budget.
 
 A part map carries `mime_type`, `name`, `sha256`, `size`, `width`, `height`, `duration_ms`,
 `tokens` and `stand_in`. The parts a tool can name are the ones in the agent's context window when
@@ -124,9 +138,9 @@ let body = http_get(params.url);
 html_to_text(body)
 ```
 
-A tool that makes a part. It renders a diagram with a command-line tool, reads the picture the
-command wrote as bytes, and hands it back typed, so a model that sees images sees the diagram and
-one that does not sees a line naming it:
+A tool that makes a part. It renders a diagram with a command-line tool, then reads the picture the
+command wrote as bytes and hands it back typed. A model that sees images sees the diagram. One that
+does not sees a line naming it:
 
 ```rhai
 // @tool render_diagram
@@ -165,13 +179,19 @@ schema   = { type = "string", enum = ["json", "yaml"], description = "output for
 A running agent can add to the global inventory itself with the `install_tool` built-in. It takes
 the tool's `name`, the complete `.rhai` `source`, and an optional `overwrite` flag, compiles the
 script, and writes it to `~/.leviath/tools/<name>.rhai`. This is the persist path for mechanical
-learnings: a step an agent worked out by hand once (a parsing routine, a repeated lookup, a fixed
-transformation) becomes a tool every later run can call instead of rediscovering it.
+learnings. A step an agent worked out by hand once, such as a parsing routine, a repeated lookup or
+a fixed transformation, becomes a tool. Every later run can call it instead of rediscovering it.
 
-The install is refused, and nothing is written, when the script does not compile, has no
-`// @tool` or `// @description`, declares a `// @tool` name that differs from `name`, takes the
-name of a built-in, sub-agent or MCP tool (a script under one of those is dropped at discovery, so
-it would never run), exceeds 256 KiB, or would replace an existing script without `overwrite`.
+The install is refused, and nothing is written, when the script:
+
+- Does not compile.
+- Has no `// @tool` or `// @description`.
+- Declares a `// @tool` name that differs from `name`.
+- Takes the name of a built-in, sub-agent or MCP tool.
+- Exceeds 256 KiB.
+- Would replace an existing script without `overwrite`.
+
+A script that takes one of those reserved names is dropped at discovery, so it would never run.
 A sibling `<name>.toml` that declares a different `[tool] name` is refused too, since the TOML
 would win and the tool would appear under the other name. The result the model reads back names
 the file, the description, the parameters and the required capabilities.
@@ -197,9 +217,9 @@ set is put together.
 
 ## Inspecting the inventory
 
-`lev tools` lists the global inventory without starting the daemon. Compiled tools are marked,
-files that failed to compile are shown with their reason (they are not advertised at all), and a tool
-whose `@requires` capability the platform cannot satisfy is flagged unavailable:
+`lev tools` lists the global inventory without starting the daemon. Compiled tools are marked. A
+file that failed to compile is shown with its reason, and is not advertised at all. A tool whose
+`@requires` capability the platform cannot satisfy is flagged unavailable:
 
 ```bash
 lev tools           # human-readable inventory, params, requires, and skipped files

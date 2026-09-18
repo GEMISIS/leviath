@@ -317,8 +317,8 @@ takes a slot before calling the provider and holds it for the whole request. The
 `[limits.max_concurrent_inferences_by_model]` uses its own number instead.
 
 One pool per *model*, which is what decides how wide a fan-out actually runs. Workers that resolve
-to the same model share a single pool no matter how many of them were spawned, so a fan-out of
-fifty agents that all lead with the same model runs `max_concurrent_inferences` at a time and the
+to the same model share a single pool, no matter how many of them were spawned. So a fan-out of
+fifty agents that all lead with the same model runs `max_concurrent_inferences` at a time, and the
 rest wait their turn. Measured on a 67-agent run where 65 agents resolved to one model: 9.9
 inference turns a minute against a default pool of 8.
 
