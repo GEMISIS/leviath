@@ -295,7 +295,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -351,7 +351,8 @@ mod tests {
         agent.stages = vec![
             make_stage_record("plan", StageRunStatus::Complete),
             make_stage_record("implement", StageRunStatus::Active),
-        ];
+        ]
+        .into();
         agent.num_stages = 2;
         terminal
             .draw(|f| {
@@ -379,7 +380,8 @@ mod tests {
             // A branch the run finished without taking. Drawn like a pending
             // stage, since that is what "never reached" looks like.
             make_stage_record("s6", StageRunStatus::Skipped),
-        ];
+        ]
+        .into();
         agent.num_stages = 6;
         agent.stage_index = 2;
         terminal
@@ -407,7 +409,8 @@ mod tests {
             make_stage_record("plan", StageRunStatus::Complete),
             make_stage_record("implement", StageRunStatus::Active),
             make_stage_record("review", StageRunStatus::Pending),
-        ];
+        ]
+        .into();
         agent.num_stages = 3;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
@@ -458,7 +461,8 @@ mod tests {
         agent.stages = vec![
             make_stage_record("plan", StageRunStatus::Complete),
             make_stage_record("implement", StageRunStatus::Active),
-        ];
+        ]
+        .into();
         agent.num_stages = 2;
         agent.graph = Some(std::sync::Arc::new(
             crate::tui::flowgraph::StageGraph::from_blueprint(
@@ -488,7 +492,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-fallback-idx", AgentDisplayStatus::Active);
-        agent.stages = vec![];
+        agent.stages = vec![].into();
         agent.num_stages = 3;
         agent.stage_index = 2;
         terminal
@@ -614,7 +618,8 @@ mod tests {
         agent.stages = vec![
             make_stage_record("plan", StageRunStatus::Complete),
             make_stage_record(long, StageRunStatus::Active),
-        ];
+        ]
+        .into();
         agent.num_stages = 2;
         agent.stage_index = 1;
         agent.stage = long.to_string();
@@ -636,7 +641,7 @@ mod tests {
 
         // The fallback strip, for a run with no stage records, takes the
         // same width for the live stage's name.
-        agent.stages.clear();
+        agent.stages = Default::default();
         let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
         terminal
             .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 120, 3), &agent))

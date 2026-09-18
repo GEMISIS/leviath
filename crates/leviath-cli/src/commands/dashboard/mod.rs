@@ -19,6 +19,7 @@ mod new_run_preview;
 mod parts;
 mod render;
 mod run_actions;
+mod run_loader;
 mod selection;
 mod state;
 #[cfg(test)]
@@ -43,7 +44,7 @@ use types::{AgentDisplayStatus, DashboardAgent};
 /// them through this path.
 pub use crate::tui::{CrosstermEventSource, EventSource, TerminalSetup};
 
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind, MouseEventKind};
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 use ratatui::Terminal;
 use std::time::Duration;
@@ -58,6 +59,11 @@ use types::DaemonCommand;
 /// frame is not a rate anything needs, since a run's status changes on the
 /// order of seconds.
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// How often the run loader reads the runs directory: the draw tick, so a
+/// run's progress reaches the screen no later than it did when the draw loop
+/// read the disk itself.
+const RUN_READ_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Background task that asks the daemon what it is holding, and publishes each
 /// round for the draw loop to pick up.
@@ -285,25 +291,106 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
             .draw(|frame| dashboard.draw(frame))
             .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
 
-        // Handle input
-        if let Some(event) = events.poll_event(tick_rate)? {
-            match event {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    dashboard.handle_key(key);
-                }
-                // Wheel scrolling and click-drag text selection, handled in one
-                // place (`selection.rs`) so they cannot disagree about state.
-                Event::Mouse(m) => dashboard.handle_mouse(m),
-                Event::Resize(_, _) => {
-                    // Terminal will redraw automatically on next tick
-                }
-                _ => {}
-            }
+        // Handle input. Until the first snapshot of the runs directory lands,
+        // look again soon rather than a whole tick later, so the list appears
+        // the moment it has been read.
+        let wait = if dashboard.runs_loading {
+            LOADING_POLL
+        } else {
+            tick_rate
+        };
+        if let Some(event) = events.poll_event(wait)? {
+            handle_input_batch(dashboard, events, event)?;
         }
 
         if dashboard.should_quit || dashboard.has_external_edit() {
             return Ok(());
         }
+    }
+}
+
+/// How long the loop waits for input while the run list is still loading.
+const LOADING_POLL: Duration = Duration::from_millis(5);
+
+/// The most queued events one pass of the loop takes before it draws.
+const MAX_EVENT_BATCH: usize = 512;
+
+/// Handle `first` and whatever mouse motion is queued behind it, then return
+/// so the loop can draw once for all of it.
+///
+/// A wheel or a moving mouse sends dozens of events a second, and a trackpad
+/// fling sends hundreds. A pass per event would cost a sync and a full redraw
+/// each; the terminal queues them faster than that, and the list would keep
+/// scrolling for seconds after the hand stops.
+///
+/// Only motion is batched: scroll notches and drags are each handled (they
+/// are cheap, and a drag's path matters), and of plain pointer moves, which
+/// only light up whatever is under the pointer, just the last one is. Any
+/// other event (a key, a click, a resize) ends the batch after it is handled,
+/// so it acts on, and is followed by, a freshly drawn frame.
+fn handle_input_batch(
+    dashboard: &mut Dashboard,
+    events: &mut impl EventSource,
+    first: Event,
+) -> std::io::Result<()> {
+    let mut hover: Option<crossterm::event::MouseEvent> = None;
+    let mut event = first;
+    let mut taken = 1;
+    loop {
+        match event {
+            Event::Mouse(m) if m.kind == MouseEventKind::Moved => hover = Some(m),
+            Event::Mouse(m) if is_motion(m.kind) => {
+                if let Some(h) = hover.take() {
+                    dashboard.handle_mouse(h);
+                }
+                dashboard.handle_mouse(m);
+            }
+            other => {
+                if let Some(h) = hover.take() {
+                    dashboard.handle_mouse(h);
+                }
+                handle_event(dashboard, other);
+                return Ok(());
+            }
+        }
+        if taken == MAX_EVENT_BATCH {
+            break;
+        }
+        match events.poll_event(Duration::ZERO)? {
+            Some(next) => event = next,
+            None => break,
+        }
+        taken += 1;
+    }
+    if let Some(h) = hover {
+        dashboard.handle_mouse(h);
+    }
+    Ok(())
+}
+
+/// Wheel notches and drags: the events a batch keeps taking.
+fn is_motion(kind: MouseEventKind) -> bool {
+    matches!(
+        kind,
+        MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+            | MouseEventKind::Drag(_)
+    )
+}
+
+/// One input event, whatever it is.
+fn handle_event(dashboard: &mut Dashboard, event: Event) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            dashboard.handle_key(key);
+        }
+        // Wheel scrolling and click-drag text selection, handled in one
+        // place (`selection.rs`) so they cannot disagree about state.
+        Event::Mouse(m) => dashboard.handle_mouse(m),
+        // A resize, a paste or focus: the next draw picks up the new size.
+        _ => {}
     }
 }
 
@@ -350,6 +437,11 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         cmd_rx,
         daemon_outcome_tx,
     ));
+
+    // Read the runs directory off the draw loop too, so the first frame and
+    // every key after it wait on nothing the disk is doing.
+    dashboard.run_feed = Some(run_loader::spawn_run_feed(RUN_READ_INTERVAL));
+    dashboard.runs_loading = true;
 
     // Ask the daemon what it is holding, off the draw loop, for the same
     // reason: the UI keeps its own time whatever the socket is doing.
@@ -815,7 +907,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "test task".to_string(),
             title: None,
@@ -889,6 +981,194 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(dashboard.should_quit);
+    }
+
+    /// A row for the run list, for tests that only need rows.
+    fn row(id: &str, started_at: i64) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "tester".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status: AgentDisplayStatus::Complete,
+            tokens_in: 0,
+            tokens_out: 0,
+            cached_tokens: 0,
+            iteration: 0,
+            broken_scripts: Vec::new(),
+            waiting_prompt: None,
+            wait_reason: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: Default::default(),
+            workdir: "/tmp".to_string(),
+            task: "task".to_string(),
+            title: None,
+            model: None,
+            parent_id: None,
+            started_at,
+            last_progress_at: None,
+            runtime_secs: 0,
+            clock_now: 0,
+            graph: None,
+            accepts_messages: true,
+        }
+    }
+
+    fn mouse_at(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    }
+
+    /// A burst of wheel notches and pointer moves is taken a batch at a time,
+    /// with one draw per batch, rather than a pass per event: a trackpad fling
+    /// queues hundreds, and a pass each would keep the list scrolling for
+    /// seconds after the hand stops.
+    #[tokio::test]
+    async fn a_burst_of_mouse_motion_is_one_pass_of_the_loop() {
+        // Isolated: every pass syncs with the runs directory.
+        crate::runstate::with_isolated_runs_dir_async("dash-mouse-burst", |_d| async move {
+            use crossterm::event::MouseEventKind;
+            let mut dashboard = make_test_dashboard();
+            for i in 0..400 {
+                dashboard
+                    .agents
+                    .push(row(&format!("run-{i:03}"), 10_000 - i64::from(i)));
+            }
+            dashboard.update_display_indices();
+            let control = no_daemon_control();
+            let mut terminal = test_terminal();
+            terminal.draw(|frame| dashboard.draw(frame)).unwrap();
+            let table = dashboard
+                .pane_rects
+                .iter()
+                .find(|(id, _)| *id == types::PaneId::RunTable)
+                .map(|(_, rect)| *rect)
+                .expect("the run table is drawn");
+            let (x, y) = (table.x + 2, table.y + 2);
+            let mut burst = Vec::new();
+            for _ in 0..300 {
+                burst.push(mouse_at(MouseEventKind::ScrollDown, x, y));
+                burst.push(mouse_at(MouseEventKind::Moved, x, y));
+            }
+            burst.push(key(KeyCode::Char('q')));
+            let mut events = TestEventSource::new(burst);
+            let before = dashboard.tick_count;
+
+            run_dashboard_loop(
+                &mut dashboard,
+                &control,
+                &mut terminal,
+                &mut events,
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(dashboard.selected, 300, "every notch moved the selection");
+            // A pass per MAX_EVENT_BATCH events, not one per event.
+            assert_eq!(
+                dashboard.tick_count - before,
+                2,
+                "600 events and the q behind them"
+            );
+        })
+        .await;
+    }
+
+    /// A batch stops at its cap, leaving the rest queued; anything but motion
+    /// ends it once handled; and of the pointer moves only the last is
+    /// handled, before whatever comes next.
+    #[test]
+    fn an_input_batch_takes_motion_only_up_to_its_cap() {
+        use crossterm::event::MouseEventKind;
+        let mut dashboard = make_test_dashboard();
+        let wheel = mouse_at(MouseEventKind::ScrollDown, 0, 0);
+        let moved = mouse_at(MouseEventKind::Moved, 0, 0);
+
+        let mut queued = vec![wheel.clone(); MAX_EVENT_BATCH];
+        queued.push(Event::FocusLost);
+        let mut events = TestEventSource::new(queued);
+        handle_input_batch(&mut dashboard, &mut events, wheel.clone()).unwrap();
+        assert_eq!(
+            events.poll_event(Duration::ZERO).unwrap(),
+            Some(wheel.clone()),
+            "the one past the cap waits for the next pass"
+        );
+        assert_eq!(
+            events.poll_event(Duration::ZERO).unwrap(),
+            Some(Event::FocusLost)
+        );
+
+        let mut events = TestEventSource::new(vec![
+            wheel.clone(),
+            moved.clone(),
+            Event::FocusGained,
+            Event::FocusLost,
+        ]);
+        handle_input_batch(&mut dashboard, &mut events, moved.clone()).unwrap();
+        assert_eq!(
+            events.poll_event(Duration::ZERO).unwrap(),
+            Some(Event::FocusLost),
+            "focus ended the batch"
+        );
+
+        // A move with nothing behind it is still handled.
+        let mut events = TestEventSource::new(vec![]);
+        handle_input_batch(&mut dashboard, &mut events, moved).unwrap();
+    }
+
+    /// Before the run list has loaded the loop still draws and takes keys; it
+    /// only looks for input more often, to show the list the moment it lands.
+    #[tokio::test]
+    async fn the_loop_takes_keys_while_the_run_list_is_loading() {
+        let (feed, _snapshots, _shown) = run_loader::RunFeed::detached();
+        let mut dashboard = make_test_dashboard();
+        dashboard.run_feed = Some(feed);
+        dashboard.runs_loading = true;
+        let control = no_daemon_control();
+        let mut terminal = test_terminal();
+        let mut events = TestEventSource::new_with_nones(vec![None, Some(key(KeyCode::Char('q')))]);
+        run_dashboard_loop(
+            &mut dashboard,
+            &control,
+            &mut terminal,
+            &mut events,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        assert!(dashboard.should_quit);
+        assert!(dashboard.runs_loading, "nothing was ever read");
+    }
+
+    /// A terminal that fails part way through a batch stops the loop with its
+    /// error, like one that fails on the first read.
+    #[tokio::test]
+    async fn an_input_error_inside_a_batch_ends_the_loop() {
+        crate::runstate::with_isolated_runs_dir_async("dash-batch-error", |_d| async move {
+            let mut dashboard = make_test_dashboard();
+            let control = no_daemon_control();
+            let mut terminal = test_terminal();
+            let wheel = mouse_at(crossterm::event::MouseEventKind::ScrollDown, 0, 0);
+            let mut events = TestEventSource::failing_after(vec![wheel]);
+            let result = run_dashboard_loop(
+                &mut dashboard,
+                &control,
+                &mut terminal,
+                &mut events,
+                Duration::from_millis(1),
+            )
+            .await;
+            assert!(result.is_err());
+        })
+        .await;
     }
 
     #[tokio::test]

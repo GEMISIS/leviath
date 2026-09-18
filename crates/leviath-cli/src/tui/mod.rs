@@ -130,8 +130,8 @@ mod test_doubles {
     ///   `poll_event` call - `Some(e)` -> `Ok(Some(e))`, `None` -> `Ok(None)`,
     ///   i.e. a simulated poll-timeout tick), then `None` forever once
     ///   exhausted.
-    /// - failing (`fail = true`): every `poll_event` returns `Err`, to drive a
-    ///   loop's `?`-propagation path.
+    /// - failing (`fail = true`): once the scripted events are used up, every
+    ///   `poll_event` returns `Err`, to drive a loop's `?`-propagation path.
     pub(crate) struct TestEventSource {
         events: std::collections::VecDeque<Option<Event>>,
         fail: bool,
@@ -157,8 +157,13 @@ mod test_doubles {
 
         /// Construct a source whose `poll_event` always errors.
         pub(crate) fn failing() -> Self {
+            Self::failing_after(vec![])
+        }
+
+        /// Construct a source that delivers `events` and then errors.
+        pub(crate) fn failing_after(events: Vec<Event>) -> Self {
             Self {
-                events: std::collections::VecDeque::new(),
+                events: events.into_iter().map(Some).collect(),
                 fail: true,
             }
         }
@@ -166,10 +171,11 @@ mod test_doubles {
 
     impl EventSource for TestEventSource {
         fn poll_event(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
-            if self.fail {
-                return Err(std::io::Error::other("simulated event source failure"));
+            match self.events.pop_front() {
+                Some(scripted) => Ok(scripted),
+                None if self.fail => Err(std::io::Error::other("simulated event source failure")),
+                None => Ok(None),
             }
-            Ok(self.events.pop_front().flatten())
         }
     }
 

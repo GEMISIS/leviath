@@ -947,7 +947,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -1790,7 +1790,7 @@ mod tests {
                     "present",
                     "# The Answer\n\nall done",
                 );
-                agent.stages = vec![make_stage_record("present")];
+                agent.stages = vec![make_stage_record("present")].into();
 
                 let dash = make_test_dashboard();
                 let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
@@ -1818,7 +1818,7 @@ mod tests {
                     setup_run_state_agent_with_final_output(run_id, "present", "the answer");
                 // The selected stage (index 0) is not the one that submitted,
                 // so its Output pane keeps the honest empty state.
-                agent.stages = vec![make_stage_record("draft")];
+                agent.stages = vec![make_stage_record("draft")].into();
 
                 let backend = TestBackend::new(120, 40);
                 let mut terminal = Terminal::new(backend).unwrap();
@@ -1872,7 +1872,7 @@ mod tests {
                 let run_id = "test-content-final-output-tail-wins";
                 let mut agent =
                     setup_run_state_agent_with_final_output(run_id, "present", "the answer");
-                agent.stages = vec![make_stage_record("present")];
+                agent.stages = vec![make_stage_record("present")].into();
                 // The stage also wrote real output, which always wins over the
                 // final-answer fallback.
                 runstate::append_stage_output(run_id, 0, "streamed stage output");
@@ -1901,7 +1901,7 @@ mod tests {
                 let run_id = "test-content-final-output-hint";
                 let mut agent =
                     setup_run_state_agent_with_final_output(run_id, "present", "the answer");
-                agent.stages = vec![make_stage_record("present")];
+                agent.stages = vec![make_stage_record("present")].into();
 
                 let backend = TestBackend::new(HINT_PANE_WIDTH, 40);
                 let mut terminal = Terminal::new(backend).unwrap();
@@ -1973,7 +1973,8 @@ hint = "after plan"
             completion_tokens: 50,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
-        }];
+        }]
+        .into();
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
@@ -1998,7 +1999,7 @@ name = "g"
 [stages.implement]
 "#,
         );
-        agent.stages = vec![]; // no stage records at all -> .get(0) is None
+        agent.stages = vec![].into(); // no stage records at all -> .get(0) is None
 
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -2022,7 +2023,7 @@ name = "g"
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         };
-        agent.stages = vec![rec.clone(), rec];
+        agent.stages = vec![rec.clone(), rec].into();
 
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -2052,7 +2053,8 @@ condition = "error"
             entered: true,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
-        }];
+        }]
+        .into();
 
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -2157,7 +2159,8 @@ transform = "clear"
             completion_tokens: 50,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ..crate::runstate::StageRecord::new("implement".to_string(), 1)
-        }];
+        }]
+        .into();
         // selected_stage = 0, so we look up index 0 in stages which is "implement"
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -2187,7 +2190,8 @@ transform = "clear"
             started_at: Some(chrono::Utc::now().timestamp() - 60),
             ended_at: Some(chrono::Utc::now().timestamp() - 10),
             ..crate::runstate::StageRecord::new("plan".to_string(), 0)
-        }];
+        }]
+        .into();
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
@@ -2211,7 +2215,8 @@ transform = "clear"
             completion_tokens: 50,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
-        }];
+        }]
+        .into();
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
@@ -2538,7 +2543,8 @@ transform = "clear"
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             ..crate::runstate::StageRecord::new("analyze".to_string(), 0)
-        }];
+        }]
+        .into();
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 10);
@@ -2683,7 +2689,8 @@ transform = "clear"
             run_id: run_id.to_string(),
             visits: crate::commands::dashboard::history::derive_visits(&points),
             points,
-            loaded_at_tick: u64::MAX, // never considered stale by the TTL
+            checked_at_tick: u64::MAX, // never considered stale by the TTL
+            stamp: None,
         });
     }
 

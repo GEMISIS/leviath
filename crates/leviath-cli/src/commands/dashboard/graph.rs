@@ -2,29 +2,47 @@
 
 use std::sync::Arc;
 
+use crate::runstate::StatCache;
 use crate::tui::flowgraph::StageGraph;
 
 /// The blueprint at `agent_path`: a manifest directory, or the manifest file
-/// itself (the daemon records `agent_path` as the file, which once made every
-/// daemon-spawned graph agent read as linear here). `None` when the manifest
-/// cannot be read or parsed.
+/// itself (the daemon records `agent_path` as the file). `None` when the
+/// manifest cannot be read or parsed.
 pub(super) fn load_blueprint(agent_path: &str) -> Option<leviath_core::Blueprint> {
+    let content = std::fs::read_to_string(manifest_path(agent_path)).ok()?;
+    leviath_core::manifest::parse_manifest(&content).ok()
+}
+
+/// Where the manifest of the blueprint at `agent_path` lives; see
+/// [`load_blueprint`].
+fn manifest_path(agent_path: &str) -> std::path::PathBuf {
     let path = std::path::Path::new(agent_path);
-    let manifest_path = if path
+    if path
         .file_name()
         .is_some_and(|f| f == leviath_core::files::MANIFEST_FILENAME)
     {
         path.to_path_buf()
     } else {
         path.join(leviath_core::files::MANIFEST_FILENAME)
-    };
-    let content = std::fs::read_to_string(&manifest_path).ok()?;
-    leviath_core::manifest::parse_manifest(&content).ok()
+    }
 }
 
 /// The stage graph of the blueprint at `agent_path`; see [`load_blueprint`].
 pub(super) fn load_stage_graph(agent_path: &str) -> Option<Arc<StageGraph>> {
     load_blueprint(agent_path).map(|blueprint| Arc::new(StageGraph::from_blueprint(&blueprint)))
+}
+
+/// [`load_stage_graph`] through a [`StatCache`]: the manifest is parsed again
+/// only when it changes on disk, however many runs share it.
+pub(super) fn load_stage_graph_cached(
+    agent_path: &str,
+    cache: &mut StatCache<StageGraph>,
+) -> Option<Arc<StageGraph>> {
+    cache.get_with(&manifest_path(agent_path), |content| {
+        leviath_core::manifest::parse_manifest(content)
+            .ok()
+            .map(|blueprint| StageGraph::from_blueprint(&blueprint))
+    })
 }
 
 /// A blueprint shipped inside the binary, by name, so the new-run screen can

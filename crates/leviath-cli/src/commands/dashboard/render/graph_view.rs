@@ -410,7 +410,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "t".to_string(),
             title: None,
@@ -460,7 +460,8 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
             run_id: "run-1".to_string(),
             visits: derive_visits(&points),
             points,
-            loaded_at_tick: u64::MAX,
+            checked_at_tick: u64::MAX,
+            stamp: None,
         });
     }
 

@@ -414,7 +414,7 @@ condition = "llm_choice"
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "t".to_string(),
             title: None,
@@ -480,7 +480,8 @@ condition = "llm_choice"
             run_id: run_id.to_string(),
             visits: derive_visits(&points),
             points,
-            loaded_at_tick: u64::MAX,
+            checked_at_tick: u64::MAX,
+            stamp: None,
         });
     }
 
@@ -614,7 +615,8 @@ condition = "llm_choice"
         dash.agents[0].stages = vec![
             record("plan", StageRunStatus::Complete),
             record("implement", StageRunStatus::Active),
-        ];
+        ]
+        .into();
         dash.stage_explorer
             .as_mut()
             .unwrap()
@@ -700,7 +702,8 @@ condition = "llm_choice"
             record("implement", StageRunStatus::Active),
             record("review", StageRunStatus::Error),
             record("done", StageRunStatus::Skipped),
-        ];
+        ]
+        .into();
         // Two workers of this run, one finished, one failed; and a stranger.
         let mut done = agent("w-1", AgentDisplayStatus::Complete);
         done.parent_id = Some("run-1".into());

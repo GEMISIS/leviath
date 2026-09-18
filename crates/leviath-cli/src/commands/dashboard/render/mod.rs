@@ -399,7 +399,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -542,7 +542,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Logs;
         let mut agent = make_test_agent("run-review-logs", AgentDisplayStatus::Waiting);
-        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)].into();
         let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
             "mc1",
             "Approve?",
@@ -571,7 +571,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Output;
         let mut agent = make_test_agent("run-review-detail", AgentDisplayStatus::Waiting);
-        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)].into();
         let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
             "mc1",
             "Approve?",
@@ -632,7 +632,7 @@ mod tests {
                 "main",
             ),
         );
-        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)].into();
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -695,7 +695,8 @@ mod tests {
         agent.stages = vec![
             crate::runstate::StageRecord::new("main".to_string(), 0),
             crate::runstate::StageRecord::new("code".to_string(), 1),
-        ];
+        ]
+        .into();
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -1022,7 +1023,8 @@ mod tests {
                 ..crate::runstate::StageRecord::new("implement".to_string(), 1)
             },
             crate::runstate::StageRecord::new("review".to_string(), 2),
-        ];
+        ]
+        .into();
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal

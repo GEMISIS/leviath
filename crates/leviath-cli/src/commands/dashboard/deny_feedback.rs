@@ -99,7 +99,7 @@ mod tests {
             )),
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "task".to_string(),
             title: None,
