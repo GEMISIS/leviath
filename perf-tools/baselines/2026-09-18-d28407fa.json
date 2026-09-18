@@ -1,0 +1,27 @@
+{
+  "taken_at": "2026-09-18T08:00:00+00:00",
+  "commit": "d28407fa",
+  "machine": "Darwin 25.6.0 arm64",
+  "notes": [
+    "lev dash over dash_pty.py (200x50 pty, DA1 answered), release binaries, the daemon already running; before = main at d28407fa, after = the dash-speedups branch",
+    "real_981: an APFS clone of a development machine's runs directory, 981 runs of which 692 are sub-runs (one parent has 25), 1.5 GB",
+    "fanout_5000: fake_runs.py --count 5000 --fanout 25 from a real 7 MB genesis-writer run",
+    "detail_22mb: one run whose run.lvr is 22 MB, opened with Enter and left on its page",
+    "idle = 20 s with no input; keys = 10-20 presses of j 300 ms apart, then --burst (N wheel notches and N pointer moves written at once; 300 for real_981, 100 for fanout_5000)",
+    "ready_ms is fork to the first frame showing a run row; after the change the first frame says 'Loading runs…' and rows follow; warm filesystem cache (a cold first read of fanout_5000 took 585 ms once)"
+  ],
+  "before": {
+    "real_981_idle": { "cpu_seconds_per_20s": 3.98, "ready_ms": 165, "max_rss_mb": 51 },
+    "real_981_keys": { "key_p50_ms": 14.6, "key_p99_ms": 19.7, "burst_settle_ms": 6428, "max_rss_mb": 232 },
+    "fanout_5000_idle": { "cpu_seconds_per_20s": 10.73, "ready_ms": 1330, "max_rss_mb": 193 },
+    "fanout_5000_keys": { "key_p50_ms": 160.7, "key_p99_ms": 213.0, "burst_settle_ms": 20806, "cpu_seconds_per_30s": 26.3 },
+    "detail_22mb": { "cpu_seconds_per_20s": 1.49, "max_rss_mb": 236 }
+  },
+  "after": {
+    "real_981_idle": { "cpu_seconds_per_20s": 1.28, "ready_ms": 46, "max_rss_mb": 36 },
+    "real_981_keys": { "key_p50_ms": 4.8, "key_p99_ms": 8.1, "burst_settle_ms": 20, "max_rss_mb": 46 },
+    "fanout_5000_idle": { "cpu_seconds_per_20s": 3.46, "ready_ms": 118, "max_rss_mb": 116 },
+    "fanout_5000_keys": { "key_p50_ms": 10.4, "key_p99_ms": 15.6, "burst_settle_ms": 15, "cpu_seconds_per_30s": 5.3 },
+    "detail_22mb": { "cpu_seconds_per_20s": 0.66, "max_rss_mb": 148 }
+  }
+}
