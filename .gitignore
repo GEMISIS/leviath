@@ -56,11 +56,7 @@ tarpaulin-report.json
 coverage/
 plans/
 
-# Ignore perf results
-perf-tools/*.csv
-perf-tools/*.png
-
-# Python bytecode from running the perf-tools scripts
+# Python bytecode from running the scripts
 __pycache__/
 
 meshy_output/

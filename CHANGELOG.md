@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- The performance probes and the live-test harness (`harness.sh`,
+  `mock.py`, `daemon_drive.py`, `dash_pty.py` and the rest of
+  `perf-tools/`) moved to
+  [leviath-benchmarks](https://github.com/GEMISIS/leviath-benchmarks)
+  under `perf/`, with their baselines. `CONTRIBUTING.md` shows how to run
+  them against a local build. `codeql_summary.py` stays here, in
+  `scripts/`.
+
 ### Fixed
 
 - `lev dash` stays quick with thousands of runs. The runs directory is read
