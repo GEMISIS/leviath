@@ -11,6 +11,20 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Fixed
+
+- `lev dash` stays quick with thousands of runs. The runs directory is read
+  on a thread of its own, so the dashboard draws and takes keys at once
+  (the list says "Loading runs…" for the moment before its first read), and
+  a key or a scroll never waits on the disk. Scrolling or moving the mouse
+  quickly no longer leaves the list scrolling on by itself after you stop.
+  On 5,000 runs the list shows in about 120 ms, down from 1.3 seconds, a key
+  answers in about 10 ms, down from 160 ms, and a fast trackpad scroll
+  settles in about 15 ms, down from 21 seconds. A finished run's page no
+  longer re-reads its whole history once a second.
+
 ## 0.6.2 - 2026-09-18
 
 ### Changed
