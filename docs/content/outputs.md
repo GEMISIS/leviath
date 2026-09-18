@@ -102,7 +102,7 @@ format's parser.
 
 For JSON, use a JSON Schema. For anything else, ship a [Rhai validator](/docs/rhai-validators) with
 your agent. A validator that cannot run rejects the submission by default, sending the script's
-error back to the model as feedback; set `on_validator_error = "accept"` on the output block if you
+error back to the model as feedback. Set `on_validator_error = "accept"` on the output block if you
 would rather record the answer unchecked.
 
 ## Asking for a shape at launch
@@ -359,17 +359,17 @@ submit_output(
 Every path must land inside the working directory, the same rule that governs serving one, and
 name a file that exists when you submit. A path that escapes, or a file that is not there, refuses
 the whole submission rather than being quietly dropped, so a named file is always a file you can
-fetch. Each accepted file is typed by the [mime registry](/docs/mime) (a `type` you give wins),
-hashed, and stored as a part of the run when it fits `[mime] max_part_bytes`, so a later stage
-sees it in the `final_output` region the way it sees any other part. The answer records
-`name`, `path`, `mime_type`, `size` and `sha256` per file.
+fetch. Each accepted file is typed by the [mime registry](/docs/mime), hashed, and stored as a part
+of the run when it fits `[mime] max_part_bytes`. A `type` you give wins over the registry's reading.
+A later stage sees the file in the `final_output` region the way it sees any other part. The answer
+records `name`, `path`, `mime_type`, `size` and `sha256` per file.
 
 A file the run **produced** but never wrote to disk can be named the same way, such as a picture
 from an image model that lives in the run's store. The name (then a sha256 prefix) is checked
 against the parts the run has produced first, and a match is written to that path before it is
 recorded. So a describe-the-image stage can attach the picture it was handed with
-`artifacts: [{ name: "image", path: "image-1.png" }]` (the file name is shown beside the part in its
-region), and the user gets a real file. Only a name no part answers to is read from the working
+`artifacts: [{ name: "image", path: "image-1.png" }]`, and the user gets a real file. The file name
+is shown beside the part in its region. Only a name no part answers to is read from the working
 directory. A name that is neither a produced part nor a file is refused, saying both places were
 checked.
 
@@ -403,8 +403,8 @@ type = "text/*"
 ```
 
 The model is told to submit each by name. A `required` one that is missing is refused back to the
-model like a schema failure, and a submitted file whose type does not match its declaration (a
-`video/*` that turns out to be a PNG) is refused with both types named. Declared artifacts cascade
+model like a schema failure. So is a submitted file whose type does not match its declaration, such
+as a `video/*` that turns out to be a PNG. That refusal names both types. Declared artifacts cascade
 like the rest of the shape: the nearest non-empty list wins whole, and a caller who reshapes the
 output with `--output-format` retires them with the schema and validator.
 
@@ -501,10 +501,20 @@ unreachable.
 | `allow-complete-skips-output` | An earlier stage may end the run instead of routing onward |
 | `output-shape-not-required` | A shape is declared but nothing must produce it |
 | `output-stage-can-modify` | An output stage can also write files |
-| `output-stage-cannot-answer` | An output stage's models cannot call tools (an image model, a 3D generator), so `submit_output` is out of reach, and it declares no artifact or routes no produced part: the run would end with nothing |
-| `mime-unseen` | A stage's regions take a mime type its listed models cannot see, so those parts reach the model as stand-ins. A warning when the models see none of what the stage takes; information when they see some of it, which is a media pipeline working as designed |
+| `output-stage-cannot-answer` | An output stage can neither call `submit_output` nor hand a file back. See below |
+| `mime-unseen` | A stage's regions take a mime type its listed models cannot see. See below |
 
-The second one is worth knowing about. `allow_complete` offers the model a "DONE" it can choose
+`output-stage-cannot-answer` fires when the stage's models cannot call tools at all, such as an
+image model or a 3D generator, so `submit_output` is out of their reach. The stage then has to hand
+its file back the other way, and it stays silent only if it both declares an artifact and routes a
+produced part into a region. Missing either one fires the finding, and the message names which.
+Such a run would end with nothing.
+
+`mime-unseen` means those parts reach the model as stand-ins. It is a warning when the models see
+none of what the stage takes. It is information when they see some of it, which is a media pipeline
+working as designed.
+
+The `allow-complete-skips-output` finding is worth knowing about. `allow_complete` offers the model a "DONE" it can choose
 instead of a transition. Leviath appends that option even to a stage's own `transition_prompt`, so a
 stage can offer an exit its prompt never mentions. A run that takes it ends with no answer and looks
 like a success.

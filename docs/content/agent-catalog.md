@@ -95,8 +95,9 @@ lev run reviewer --diff @change.patch --criteria "does the code produce what aft
 ```
 
 Screenshots are a typed input: the `screenshots` region accepts `image/*` and holds six, so a
-mockup or a before-and-after reaches a model that can see images as pixels and any other as a
-line naming the file; a `@path` in `--criteria` attaches the same way. See [Mime](/docs/mime).
+mockup or a before-and-after reaches the model. A model that can see gets it as pixels, and any
+other gets a line naming the file. A `@path` in `--criteria` attaches the same way. See
+[Mime](/docs/mime).
 
 The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then the review itself
 escalates to Opus to scrutinize only what was flagged, which keeps the expensive model focused.
@@ -190,9 +191,9 @@ rather than stages of this blueprint. Every thread the survey found is researche
 each with its own clean context window, and their findings merge into `compare`. A worker that finds
 its thread is really several independent subjects can split again, one level further.
 
-`challenge` and `polish` work as they do in [deep-researcher](#deep-researcher): every route to the
-writing stage passes through an adversary that can send the survey back for more evidence, and the
-finished overview is rewritten in plain language without any fact, number, citation or caveat
+`challenge` and `polish` work as they do in [deep-researcher](#deep-researcher). Every route to the
+writing stage passes through an adversary that can send the survey back for more evidence. The
+finished overview is rewritten in plain language, without any fact, number, citation or caveat
 changing.
 
 `compare` is then the hub: widen coverage (back to `survey`), pull one thread for a focused
@@ -241,7 +242,7 @@ feels confident will not elect to be attacked, and confidence is the failure it 
 caveat. It exists because the stage that gathers the most evidence is not the one that writes the
 clearest prose, and asking one model for both gets a worse version of each.
 
-Per stage, the models are chosen on measurement rather than by defaulting to one family: a fast
+Per stage, the models are chosen on measurement rather than by defaulting to one family. A fast
 broad-search model gathers, a cheaper reasoning model analyses, a strong writer synthesises, a
 different vendor challenges, and a plain-language model polishes. See
 [providers](/docs/providers) for how a stage picks its model and falls back.
@@ -301,12 +302,12 @@ pipeline runs with only Meshy configured.
 
 ## Running one
 
-Every agent runs the same way, name it and hand it a task:
+Every agent runs the same way. Name it and hand it a task:
 
 ```bash
 lev run deep-researcher --task "Survey the state of solid-state batteries"
 ```
 
-To build your own, read how blueprints are structured in [Agents](/docs/agents), how the stage
-graph routes and recovers in [Multi-stage workflows](/docs/stages), and how the parallel agents
-split work in [Sub-agents and fan-out](/docs/sub-agents).
+To build your own, read how blueprints are structured in [Agents](/docs/agents).
+[Multi-stage workflows](/docs/stages) covers how the stage graph routes and recovers, and
+[Sub-agents and fan-out](/docs/sub-agents) covers how the parallel agents split work.

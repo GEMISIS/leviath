@@ -139,7 +139,7 @@ that silently becomes "no limit" is the kind of typo that only shows up as a bil
 
 Prefer a relative cap for a stage that writes something whose size follows the material (a report,
 a rewrite of a file). A fixed number is easy to set smaller than the thing being written, and a
-reply cut off by its cap is not an answer: the runtime sends it back with the reason and retries
+reply cut off by its cap is not an answer. The runtime sends it back with the reason and retries
 once at the model's maximum, but the first attempt is still paid for.
 
 A tool call cut off halfway through its arguments is not run. The model is shown what arrived and
@@ -157,7 +157,7 @@ without saying so. `lev validate` reports both. See
 
 ### Which tools a stage gets
 
-`available_tools` lists what the stage may call, by name or by kind: `@builtin`, `@subagent`,
+`available_tools` lists what the stage may call, by name or by kind. `@builtin`, `@subagent`,
 `@scripts`, `@mcp` and `@all` each grant every tool of that kind, so `["@builtin", "@scripts"]`
 is every built-in and every Rhai tool with nothing to keep in step. See
 [tool groups](/docs/tools#tool-groups) for what each reaches and what none of them grant.
@@ -180,7 +180,7 @@ the tool the server calls it:
 available_tools = ["read_file", "tracker__create_issue"]
 ```
 
-The server is part of the name whether or not anything would have collided, so two servers that both
+The server is part of the name whether or not anything would have collided. Two servers that both
 offer `search` are `tracker__search` and `wiki__search`, and a grant means the same thing however
 your `config.toml` is ordered.
 
@@ -235,8 +235,8 @@ Providers cache the prompt by prefix, so a region that changes invalidates the c
 region assembled behind it. `volatility` is what orders them: `stable` first, `grows` next and
 split so its settled part still caches, `rewritten` last where it invalidates only itself.
 
-The kind cannot answer this, which is why the setting exists. Every region above is `pinned` -
-that means "never evicted", not "never written", and `context_write` into a findings region is an
+The kind cannot answer this, which is why the setting exists. Every region above is `pinned`.
+That means "never evicted", not "never written", and `context_write` into a findings region is an
 ordinary move. Only the blueprint knows which is which.
 
 Leaving it out is safe: an unclassified region is assumed to change and placed last, so declaring
@@ -253,8 +253,8 @@ kind = "pinned"
 budget = "10%"
 ```
 
-**A region the stage leaves out is hidden, not destroyed.** It keeps its contents, is left out of
-that stage's prompt, and comes back with everything in it as soon as a later stage declares it
+**A region the stage leaves out is hidden, not destroyed.** It keeps its contents and is left out
+of that stage's prompt. It comes back with everything in it as soon as a later stage declares it
 again. That is what makes this usable for narrowing: a compute stage need not carry a large data
 preview through every one of its calls, and a summary stage further on can still read it.
 
@@ -327,7 +327,7 @@ The rows are the same shape as the operator's
 [`mime_types.toml`](/docs/configuration#mime_typestoml) and layer over it for this agent's
 runs only, so a blueprint travels with the types it needs and never changes what another agent
 sees. They are checked when the manifest is parsed, so a misspelled field fails `lev validate`
-and the spawn, and a `check` script is compiled beside the agent's other scripts with the same
+and the spawn. A `check` script is compiled beside the agent's other scripts with the same
 fence: it has to live inside the blueprint's directory. [Mime](/docs/mime#the-registry) has
 every field and [Rhai mime checks](/docs/rhai-mime-checks) the script.
 
@@ -400,10 +400,11 @@ that match it, drawing more than one where it is unsure. A filter stage deletes 
 stage, on a second model chosen for a sharp eye, then compares each kept view against the source
 part by part. It records anything missing or wrong into a dedicated region, such as an absent arm
 cannon or a shoulder pad on the wrong side. It is the only stage that clears an item, and only
-after confirming on the images that the detail is now there. A coverage stage decides whether the angles are covered
-and that list is clear; if not, a generation pass redraws the views to fix exactly those items,
-conditioned on both the sprite sheet and the good views already in hand, and the whole filter to
-critique to generate loop is bounded. Meshy then builds one model from the chosen views, with
+after confirming on the images that the detail is now there. A coverage stage decides whether the
+angles are covered and that list is clear. If not, a generation pass redraws the views to fix
+exactly those items, conditioned on both the sprite sheet and the good views already in hand. The
+whole filter to critique to generate loop is bounded. Meshy then builds one model from the chosen
+views, with
 symmetry turned off so a one-sided detail like an arm cannon survives instead of being mirrored away.
 A final stage compares the model against the views and, if it drifted, sends it back to be rebuilt a
 bounded number of times before finishing.

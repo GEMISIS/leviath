@@ -46,7 +46,7 @@ configured those tools yourself.
 
 A survey of the stronger isolation options (microVMs, gVisor, V8 isolates) and
 why shared-kernel containers are not a boundary for untrusted code lives in the
-repository at `docs/design/sandboxing-approaches.md`; the section below is what
+repository at `docs/design/sandboxing-approaches.md`. The section below is what
 Leviath ships today.
 
 ```toml
@@ -192,9 +192,10 @@ The rules that keep this safe:
   into the workdir when the pattern is compiled.
 - **Taint rises.** When a grant is active, the read tools are classified `Private` for that
   agent, so taint tracking treats out-of-workdir content with more suspicion, not less.
-- **Seeds answer to the same fence.** A `seed = { files = [...] }`, `glob` or `rhai` path that
-  resolves outside the workdir is refused at spawn unless a declared and granted `[read_paths]`
-  entry covers it, on the same reasoning as `read_file`: the blueprint chose that path, not you.
+- **Seeds answer to the same fence.** A `seed` path that resolves outside the workdir is refused
+  at spawn unless a declared and granted `[read_paths]` entry covers it. That covers `files`,
+  `glob` and `rhai` seeds alike. The reasoning is the same as for `read_file`: the blueprint chose
+  that path, not you.
   A `blueprint:`-prefixed seed reads only from the blueprint's own directory, and no grant can
   let it out, since a blueprint does not ship files outside itself.
 - Rhai script tools have their own `read_file` and it stays workdir-confined; among the tools,
@@ -230,12 +231,14 @@ flowchart TD
 
 Taint recovers as entries evict, and an unrecognized tool **fails closed**: an MCP or script tool
 with no classification of its own is treated as outbound and gated. Every built-in tool carries its
-own classification, so only the ones that can carry bytes out (`shell`, `web_search`, `web_fetch`,
-the HTTP tools, and `submit_output`) are ever gated; the file, context, todo, sub-agent and
-interaction tools are not. `submit_output` is on that list because the final output counts as
-leaving the machine: `lev serve` hands it to whoever reads `GET /api/agents/{id}/result` and the
-dashboard shows it, so a Private region in a submitted answer raises the same prompt a `shell`
-call would. Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and
+own classification, so only the ones that can carry bytes out are ever gated: `shell`,
+`web_search`, `web_fetch`, the HTTP tools, and `submit_output`. The file, context, todo, sub-agent
+and interaction tools are not gated. `submit_output` is on that list because the final output
+counts as leaving the machine. `lev serve` hands it to whoever reads `GET /api/agents/{id}/result`,
+and the dashboard shows it. So a Private region in a submitted answer raises the same prompt a
+`shell` call would.
+
+Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and
 dry-run any tool:
 
 ```bash
@@ -258,7 +261,7 @@ read (which is Private) flowing into `submit_output` and into `shell`:
 | Attended, through `lev serve` or the dashboard | Raises the leak prompt and parks the run in `waiting_input` | Only if you pick **Allow once** or **Allow for this session** |
 | `--yolo`, or the dashboard's unattended toggle | Waives enforcement and lets the call through, with no prompt | **Yes** |
 | `--yolo=<profile>` whose profile sets `gate = "ask"` | Raises the leak prompt as an attended run would; the rest of the profile still applies | Only if you allow it |
-| `--yolo`, and the run calls `install_tool` | Installs the script into `~/.leviath/tools/` without a prompt; the file is stamped with the run's workdir and time as its provenance | Not by itself, but the code runs on every later run that advertises it. See [Rhai tools](/docs/rhai-tools#installing-a-tool-from-a-run) |
+| `--yolo`, and the run calls `install_tool` | Installs the script into `~/.leviath/tools/` without a prompt. See below | Not by itself, but the code runs on every later run that advertises it. See [Rhai tools](/docs/rhai-tools#installing-a-tool-from-a-run) |
 | A tool set to `allow` in `[tool_permissions]` | Still prompts. Granting a tool is not granting the data | Only if you allow it |
 | An embedded host with no interaction hub wired | Blocks the call outright and hands the model `[blocked]` | No |
 | A prompt nobody answers before `[limits] interaction_timeout_secs` | Resolves as a deny once the deadline passes | No |
@@ -272,31 +275,34 @@ evaluated, and the waived block is written to the run's `stages/<n>/taint_audit.
 read after an unattended run, and `lev policy test` is how to find out beforehand what a given tool
 would have done.
 
+An `install_tool` call stamps the file it writes with the run's workdir and the time, as that
+script's provenance.
+
 If you want an unattended run that cannot leak rather than one that reports having done so, keep the
-sensitive paths out of it: drop the `[read_paths]` grant, or set the outbound tool to `deny` in
-`[tool_permissions]`, which no launch flag lifts.
+sensitive paths out of it. Drop the `[read_paths]` grant, or set the outbound tool to `deny` in
+`[tool_permissions]`. No launch flag lifts a `deny`.
 
 ## Response size caps
 
 The daemon stops reading a remote peer at a fixed size rather than buffering
-whatever it sends. A provider's buffered JSON reply (and any error page it
-quotes) is cut at **64 MiB**, one streamed frame or partial line on a
-streaming reply is cut at **8 MiB**, and one line from an MCP stdio server is
+whatever it sends. A provider's buffered JSON reply is cut at **64 MiB**, and
+that includes any error page it quotes. One streamed frame or partial line on
+a streaming reply is cut at **8 MiB**. One line from an MCP stdio server is
 cut at **1 MiB**. Past the cap the call fails with a message naming the cap
-and the peer (`response body exceeded 64 MiB from api.openai.com`, or `line
-exceeded 1 MiB from the MCP server`), and the connection is dropped so the
-rest is never read. The same caps apply to MCP HTTP replies, their SSE
+and the peer, such as `response body exceeded 64 MiB from api.openai.com` or
+`line exceeded 1 MiB from the MCP server`. The daemon then drops the
+connection, so the rest is never read. The same caps apply to MCP HTTP replies, their SSE
 streams, and the OAuth exchanges behind `lev mcp login`. They are constants,
 not configuration: every well-formed reply is far below them, and a knob that
 only matters under attack would be a knob for the attacker.
 
 The update check (`lev update` and the daemon's cached `GET /api/update`)
 reads the GitHub releases answer under the same 64 MiB cap and reports the
-same message. One remote read stays bounded a different way: a Rhai script's
+same message. One remote read stays bounded a different way. A Rhai script's
 `http_get` refuses a body whose `Content-Length` is over its 900 KB output
-cap before reading it, but a chunked response carries no length, so a body
+cap, before reading it. A chunked response carries no length, so a body
 that lies about its size is buffered until the client's 30 s timeout or the
-peer's end of stream, then cut to 900 KB. Closing that needs a streaming
+peer's end of stream. It is then cut to 900 KB. Closing that needs a streaming
 decoder that keeps the charset handling scripts rely on, and it is a known
 residual rather than an oversight.
 

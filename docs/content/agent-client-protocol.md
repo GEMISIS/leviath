@@ -70,8 +70,11 @@ Flags (run `lev agent-client --help` for the authoritative list):
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run at spawn before any approval prompt. |
-| `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. One that differs from the blueprint's retires its declared validator and schema. |
+| `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. |
 | `--output-instructions <text>` | Extra guidance about that shape. |
+
+An `--output-format` label that differs from the blueprint's retires the validator and schema the
+blueprint declared.
 
 ## The agent's answer
 
@@ -85,24 +88,25 @@ it as the agent's conclusion rather than more log text.
 A run that submits nothing adds nothing. Ask for a shape with `--output-format`, since the protocol
 carries no field for it.
 
-The files a run produced follow the answer, one `resource_link` block per artifact with its name,
-its mime type and a `file://` URI into the session's working directory, so a host can open or
-show them itself. Nothing is inlined: the host asked for a link it can follow, and a video does not
-belong in a chat stream.
+The files a run produced follow the answer, one `resource_link` block per artifact. Each block
+carries the artifact's name, its mime type and a `file://` URI into the session's working
+directory, so a host can open or show it itself. Nothing is inlined: the host asked for a link it
+can follow, and a video does not belong in a chat stream.
 
 ## Files in a prompt
 
 `initialize` advertises `image` and `audio` prompt capabilities. An `image` or `audio` block's
 bytes, and a `resource` block carrying a `blob`, become typed [parts](/docs/mime) on the task
-region, exactly as `lev run --attach` sends them: the daemon stores each one and the model sees it
+region, exactly as `lev run --attach` sends them. The daemon stores each one, and the model sees it
 natively when the model takes the type, or as a stand-in otherwise. An image or audio block has no
 name in the protocol, so it is named for its kind and position (`image-1.png`); a resource keeps the
 last segment of its URI. A prompt that is only files gets a line naming them as its text. A
-`resource_link` whose `file://` URI points inside the session's working directory is read there and
+`resource_link` whose `file://` URI points inside the session's working directory is read there. It
 rides the prompt as a part too, named as the host named it, and the text marks it as attached under
-its URI. Any other link (another scheme, a path outside the working directory, an empty file or one
-over the part ceiling) is named in the text and marked as not fetched, since the agent has no other
-way to read a host's file by reference. On a later prompt the same blocks ride the message.
+its URI. Any other link is named in the text and marked as not fetched, since the agent has no
+other way to read a host's file by reference. That covers another scheme, a path outside the
+working directory, an empty file, and one over the part ceiling. On a later prompt the same blocks
+ride the message.
 
 ## Permission handling
 
@@ -139,7 +143,7 @@ daemon to come back (up to ten seconds), subscribes again, and follows the run, 
 daemon reloads from disk. The editor sees the output pause and resume. The turn ends only when no
 daemon returns, with whatever the run had written by then.
 
-If the daemon comes back on a different build than the bridge, which is what a `lev update` looks
-like from a session that was already open, the bridge says so in the conversation and carries on.
+The daemon can come back on a different build than the bridge, which is what a `lev update` looks
+like from a session that was already open. The bridge says so in the conversation and carries on.
 The remedy is on the editor's side: start a new session, so the bridge and the daemon run the same
 code.

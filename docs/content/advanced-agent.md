@@ -10,9 +10,9 @@ order: 6
 
 [Build your first agent](/docs/first-agent) wrote an agent whose stages pass text to each other.
 This page builds one whose stages pass pictures and video. You give it a one-line idea. A text
-model writes a prompt for concept art, an image model paints it, a model that can see looks at the
-painting and plans a shot to match, and a video model films that shot. What you get back is a short
-film whose look came from the painting, not only from your words.
+model writes a prompt for concept art, and an image model paints it. A model that can see looks at
+the painting and plans a shot to match, and a video model films that shot. What you get back is a
+short film whose look came from the painting, not only from your words.
 
 ```mermaid
 flowchart LR
@@ -28,9 +28,13 @@ written, most of it the four seconds of video. A ChatGPT sign-in ([OpenAI
 Codex](/docs/providers#openai-codex-chatgpt-subscription)) does not reach the image and video models,
 so set `OPENAI_API_KEY` or add OpenAI in `lev setup`.
 
-The ideas this page adds to the first one: regions that hold images and video, a stage that writes
-to a region with a tool, what an image or video model is sent, a model that reads a picture another
-stage made, and a run that hands back a file.
+The ideas this page adds to the first one:
+
+- Regions that hold images and video.
+- A stage that writes to a region with a tool.
+- What an image or video model is sent.
+- A model that reads a picture another stage made.
+- A run that hands back a file.
 
 ## Step 1: scaffold
 
@@ -274,7 +278,7 @@ use on your install. Then run it:
 lev run . --yolo --task "A lighthouse keeper's cat who guards the light on stormy nights"
 ```
 
-Watch it move through the four stages in `lev dash`, or ask for the film once it finishes:
+Watch it move through the four stages in `lev dash`. Ask for the film once it finishes:
 
 ```bash
 lev result <run-id> --artifact film --out .     # writes video.mp4
@@ -283,8 +287,8 @@ lev blobs <run-id> image-1.png > concept.png    # the concept art
 ```
 
 When this page was written, the pitch stage saved *"A vigilant lighthouse keeper's cat perched
-beside the lantern room window, guarding the beam on a storm-lashed night..."*, the painting showed
-a black cat with amber eyes by the glowing lantern, and the director saved *"the camera slowly
+beside the lantern room window, guarding the beam on a storm-lashed night..."*. The painting showed
+a black cat with amber eyes by the glowing lantern. The director saved *"the camera slowly
 pushes in on the black lighthouse keeper's cat perched beside the glowing lantern room, its amber
 eyes steady in the rain..."*. The film that came back is that cat, in that light.
 

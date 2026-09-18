@@ -111,8 +111,11 @@ agent design. Here is Leviath against it, factor by factor.
 | 8 | Own your control flow | ✓ | Graph transitions on error, iteration cap, stuck, and model choice |
 | 9 | Compact errors into context | ✓ | Tool, inference, and iteration-cap errors all land in context |
 | 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts, plus bounded fan-out |
-| 11 | Trigger from anywhere | ✓ | Start a run from the CLI, REST, or ACP. WebSocket updates, webhooks on completion. Scheduling is your cron or CI |
+| 11 | Trigger from anywhere | ✓ | Start a run from the CLI, REST, or ACP |
 | 12 | Stateless reducer | ✓ | Durable state lives on disk; the process is disposable. Runs resume on restart, and interrupted tool batches replay exactly-once |
+
+**Trigger from anywhere** covers reporting as well as starting. A running agent emits WebSocket
+updates, and a finished one can fire a webhook. Scheduling stays with your own cron or CI.
 
 ## How we measure
 

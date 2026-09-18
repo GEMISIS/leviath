@@ -12,8 +12,8 @@ Every prompt a run sends carries your task, your files, and whatever the agent r
 way. Once the reply is back, the provider may keep a copy for days, for abuse review, or for
 nothing at all, and nothing in the request tells you which. Leviath keeps a table of what each
 provider keeps, reads the settings a provider exposes, and lets you ask for zero retention
-everywhere. With the switch on, a model that would keep something is never sent a request: not
-a stage's, not the run's title call or a compaction summary, and not `lev test` or the
+everywhere. With the switch on, a model that would keep something is never sent a request. That
+covers a stage's request, the run's title call, a compaction summary, `lev test` and the
 `lev doctor` probe. Each is refused in the same words.
 
 ```bash
@@ -76,9 +76,9 @@ reports it unavailable. Access is per model too: a model your account has no gra
 unavailable whatever the mode, and Bedrock says why.
 
 Leviath reads the account mode and the per-model list when it starts, and reads the mode again
-before every spawn while zero retention is on. `lev providers retention` prints both, naming the
+before every spawn while zero retention is on. `lev providers retention` prints both. It names the
 models never served under
-`none` and any unavailable to your account with Bedrock's reason:
+`none`, and any unavailable to your account with Bedrock's reason:
 
 ```text
   bedrock      zero (account setting, read from the account)
@@ -93,8 +93,9 @@ daemon reads the mode again before every spawn, so either change is in force at 
 
 ## What the switch does
 
-`[providers] zero_retention = true` in `config.toml`, written by `lev providers retention set
-zero`, the setup wizard's **Zero data retention** row, or `lev setup --zero-retention true`:
+The switch is `[providers] zero_retention = true` in `config.toml`. `lev providers retention set
+zero` writes it. The setup wizard's **Zero data retention** row writes it too, and so does
+`lev setup --zero-retention true`:
 
 | Provider | With the switch on |
 |---|---|
@@ -102,10 +103,13 @@ zero`, the setup wizard's **Zero data retention** row, or `lev setup --zero-rete
 | OpenAI | `store = false` on every request; the abuse log stays unless you declare an agreement |
 | OpenRouter | `provider.zdr = true` and `data_collection = "deny"`; a model with no ZDR endpoint is refused |
 | Anthropic, Google, xAI | Refused unless you declare an agreement |
-| Meta | The standard models are refused (no retention window is published); a `-contributor` model is refused outright, since Meta trains on it |
+| Meta | Refused, the standard models and a `-contributor` model alike |
 | local models | Nothing to do; nothing leaves the machine |
 | Meshy, Codex, Grok, Claude Code | Refused; the policy is fixed |
 | Every provider with a Files API | Nothing is uploaded; parts go inline, within each provider's inline limits |
+
+Meta publishes no retention window for its standard models, so the switch refuses them. A
+`-contributor` model is refused outright, because Meta trains on it.
 
 A stage is judged by the model it would start on. Its fallbacks are judged the same way, and one
 that keeps something is dropped from failover, with a line in the stage's log saying so. Nothing
@@ -150,8 +154,8 @@ everything else and is how you tell Leviath about a custom host it cannot know.
 
 Many organisations reach a provider through a gateway of their own, which holds the real key,
 strips retention by contract, and wants a token or a tag of its own on every request. Point the
-provider at it with `<provider>_base_url`, give it what it wants with `<provider>_headers`, and
-declare the zero retention the gateway provides as an agreement, since no API can read it:
+provider at it with `<provider>_base_url`, and give it what it wants with `<provider>_headers`.
+Declare the zero retention the gateway provides as an agreement, since no API can read it:
 
 ```toml
 [providers]
@@ -165,8 +169,8 @@ zero_retention_agreements = ["anthropic"]
 Azure OpenAI is an OpenAI-compatible endpoint with its own header and its own retention terms.
 Azure keeps prompts up to 30 days for abuse monitoring unless the exemption is approved for your
 subscription, so `retention = "zero"` is yours to declare only then. `zero_retention_request`
-tells Leviath to send it OpenAI's `store = false` with the switch on, which it would otherwise
-withhold from an endpoint, because a llama.cpp server would reject the field:
+tells Leviath to send it OpenAI's `store = false` with the switch on. It would otherwise withhold
+that field from an endpoint, because a llama.cpp server would reject it:
 
 ```toml
 [model_providers.azure]

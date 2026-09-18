@@ -44,7 +44,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--count <N>` | Start this many runs of the same agent and task, each under its own run id, from one invocation |
 | `--json` | Print the spawned run as JSON rather than a sentence. See below |
-| `--output-format <LABEL>` | Ask for the final output in this shape. A label that differs from what the blueprint declares retires its Rhai validator and JSON schema, with a warning on stderr. See [Final outputs](/docs/outputs) |
+| `--output-format <LABEL>` | Ask for the final output in this shape. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
 | `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Put a file in a region as a typed part. Repeatable. See below |
@@ -55,6 +55,9 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 
 **`--json`** is for a caller that parses the run id back out. With `--count` above 1 it prints an
 array, one object per run.
+
+**`--output-format`** with a label that differs from what the blueprint declares retires its Rhai
+validator and JSON schema, and says so with a warning on stderr.
 
 **`--yolo`** waives approvals, not checkpoints. It approves every tool call, and it takes away the
 tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run does
@@ -71,8 +74,8 @@ before the run starts, and `lev validate` reports it as `holds-under-yolo`.
 
 **`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/yolo)
 says which tool calls and shell commands run unprompted, which still go through the ordinary
-approval prompt, and which are refused, and whether the model's questions, the stage checkpoints
-and the taint gate still come to you. The equals sign is required: `lev run --yolo coder` keeps
+approval prompt, and which are refused. It also says whether the model's questions, the stage
+checkpoints and the taint gate still come to you. The equals sign is required: `lev run --yolo coder` keeps
 meaning "run coder, plain yolo". A name the file does not have stops the run before the daemon is
 asked, and lists the names it does have. Before a profiled run starts, `lev run` prints what the
 profile keeps for you, above the blueprint's own held checkpoints. `lev yolo list` shows the
@@ -93,9 +96,9 @@ region from somewhere else and takes no caller input. A `--<name>` naming any ot
 dropped.
 
 A `@file` that is not text (an image, a recording, a PDF) is attached to the region as a typed
-[part](/docs/mime) instead of being read as its seed text, and a required region counts as
-provided by it. `--attach` does the same for any region the blueprint declares, caller input or
-not, and says more about the file when the name alone does not:
+[part](/docs/mime) instead of being read as its seed text. A required region counts as provided by
+it. `--attach` does the same for any region the blueprint declares, caller input or not, and says
+more about the file when the name alone does not:
 
 ```bash
 lev run storyteller --task "a 30 second trailer" \
@@ -104,8 +107,8 @@ lev run modeller --attach scene.bin:props:model/gltf-binary
 lev run reviewer --task "does @mockup.png match the brief?"
 ```
 
-The segments after the path are told apart by shape: `type/subtype` declares the mime type when
-the registry cannot tell from the bytes or the extension, `text`, `native` or `stand_in` chooses how
+The segments after the path are told apart by shape. `type/subtype` declares the mime type when
+the registry cannot tell from the bytes or the extension. `text`, `native` or `stand_in` chooses how
 the part reaches the model, and anything else names the region. Left off, the region is the one
 the task lands in. A `@path` inside the task text or a region's text attaches that file to the
 same entry, and the text keeps the `@path` as written so the model reads the same name the part
@@ -170,7 +173,7 @@ tell those apart.
 
 `COST` is what that stage spent, and it is deliberately not a number you can always get. A leading
 `~` means the figure was reconstructed from published rates rather than read off the provider's own
-answer, and a bare `?` means at least one call in that stage could not be priced at all, by either
+answer. A bare `?` means at least one call in that stage could not be priced at all, by either
 route. A `?` is not a zero: a stage whose calls went unpriced has not been shown to be free, and one
 unpriced stage takes the `TOTAL` with it for the same reason.
 
@@ -180,8 +183,8 @@ run's title call, which happens once at spawn beside the run rather than inside 
 column can sum to slightly less than the run's own figure.
 
 `--visits` splits a stage by each stay in it. The row above is the sum across every visit, which is
-the right total for the stage and the wrong number to put on a graph of the path the run took, where
-a stage entered twice is two nodes. Leviath records up to 128 stays per stage; past that the split
+the right total for the stage. It is the wrong number to put on a graph of the path the run took,
+where a stage entered twice is two nodes. Leviath records up to 128 stays per stage; past that the split
 stops and the table says so, while the stage's own row keeps counting.
 
 `--regions` answers the question a structured layout is really asking: what am I paying to carry,
@@ -201,7 +204,7 @@ model call, tool batch, tool result and status change, so the split is exact.
 | Flag | Purpose |
 |---|---|
 | `--calls` | List every model call: when it started, how long it took, prompt, cached and output tokens |
-| `--tree` | Include the run's children (and theirs), one line per run, plus the peak number of calls per model in flight at once |
+| `--tree` | Include the run's children (and theirs), one line per run. See below |
 | `--json` | Print the same data as JSON |
 
 ```
@@ -215,7 +218,8 @@ polish                    19:59      6     116670      23996
 
 A model call's time is measured from the moment the run had nothing else in flight, so it
 includes any wait for an inference slot. That is deliberate: the run experienced the queue as
-latency, and `--tree` shows which model was oversubscribed.
+latency, and `--tree` shows which model was oversubscribed. It also reports the peak number of
+calls per model in flight at once.
 
 The command warns about one shape it recognises: several back-to-back replies in the same stage,
 each thousands of tokens and all the same size. That is what a reply cut off by the stage's output
@@ -240,24 +244,23 @@ Parsing itself refuses a few things outright, before any finding is reported: a 
 anywhere in the file (`max_items = -1`), an unknown key under `[sandbox]`, and an unknown key in a
 stage table. Each of those errors names the key.
 
-The blueprint's scripts are compiled too, exactly as a spawn would compile them: a custom region
+The blueprint's scripts are compiled too, exactly as a spawn would compile them. A custom region
 script, an output validator, or a stage hook script that is missing or will not load fails the
 command, since it would fail the run. And because a clean verdict against a config the daemon
 would grumble about is worth less than it looks, the command reads your `config.toml` on the way
-past: keys nothing reads are named as warnings (usually a typo'd setting), and a
-`[model_providers.*]` script entry whose `.rhai` file is not on disk is named along with the path
-that was looked for.
+past. Keys nothing reads are named as warnings, usually a typo'd setting. A `[model_providers.*]`
+script entry whose `.rhai` file is not on disk is named along with the path that was looked for.
 
 | Level | Code | What it means |
 |---|---|---|
 | error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
 | error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
 | error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
-| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted, by name or through a group. It reads as a grant and is not one. |
-| error | `required-tool-not-granted` | A `required_tools` entry that no name and no group in `available_tools` reaches, so the model never sees it. Only checked when a group is in play; without one the load itself refuses the manifest. |
+| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. See below |
+| error | `required-tool-not-granted` | A `required_tools` entry no `available_tools` name or group reaches, so the model never sees it. See below |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
-| error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage of this blueprint, which declares no region seeded from the task. Each worker is spawned with its work item as its task, so every one is refused and the merge stage works alone. Add a region with `seed = "task"` |
-| error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something, so the spawn would be refused. The message carries the provider's reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no zero-retention endpoint, a provider whose agreement is not declared. See [data retention](/docs/providers#data-retention) |
+| error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage that seeds no region from the task. See below |
+| error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something. See below |
 | warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a fallback the stage lists keeps something, so failover skips it |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
@@ -266,22 +269,22 @@ that was looked for.
 | warning | `region-seed-not-understood` | A region's `seed` is not a recognized form, so the region starts empty. See below |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
-| warning | `blueprint-permission-clamped` | A `tool_permissions` entry that sets a granted tool more permissively than its built-in default, which a blueprint cannot do on its own. The runtime clamps it back, so the tool still asks. See below |
+| warning | `blueprint-permission-clamped` | A `tool_permissions` entry that sets a granted tool more permissively than its built-in default. See below |
 | warning | `unknown-model` | A model this build has not heard of. See below |
-| warning | `catalog-unchecked` | A script provider that will not say which models it serves, so a name against it went unchecked. See below |
+| warning | `catalog-unchecked` | A script provider that will not say which models it serves. See below |
 | warning | `no-reachable-provider` | Nothing in the stage's models list can run here, so it falls through to your default model. See below |
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
-| warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge, so an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
+| warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge: an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
-| note | `long-context-price` | A stage's context can grow past the size at which its model bills a whole request at a higher rate. The message gives both rates and the threshold; nothing needs to change unless the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token) |
+| note | `long-context-price` | A stage's context can grow past the size at which its model bills at a higher rate. See below |
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
 | note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Sixteen of those findings need more than a phrase.
+Twenty-three of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -293,6 +296,21 @@ ever match it. Write a program, optionally with the subcommand that narrows it: 
 
 **`output-missing-submit-tool`** means a stage sets `require_output` but never grants
 `submit_output`. Use `mode = "output"`, which grants the tool.
+
+**`orphan-stage-permission`** names a tool the stage never granted, by name or through a group. The
+key reads as a grant and is not one.
+
+**`required-tool-not-granted`** is only checked when a group is in play. Without one, the load
+itself refuses the manifest.
+
+**`fanout-worker-task-unheld`** fires when the worker stage is one of this blueprint's own and
+declares no region seeded from the task. Each worker is spawned with its work item as its task, so
+every one is refused and the merge stage works alone. Add a region with `seed = "task"`.
+
+**`retention-not-zero`** means the spawn would be refused. The message carries the provider's
+reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no
+zero-retention endpoint, a provider whose agreement is not declared. See
+[data retention](/docs/providers#data-retention).
 
 **`region-seed-not-understood`** is usually a typo in a table key. It is `{ caller = "task" }`, not
 `{ caller_input = "task" }`. An unrecognized seed is ignored, and the region starts empty.
@@ -307,9 +325,9 @@ prompt rather than being denied. The shell arrives with `@builtin` as surely as 
 grant with no `shell` policy is reported too.
 
 **`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
-`write_file`, `edit_file`, `install_tool`) silences `implicit-shell-policy`, but a downloaded
-blueprint is not allowed to grant itself write or shell access: the runtime clamps the policy back
-to the stricter of it and the built-in default, so the tool still asks. The line looks like a
+`write_file`, `edit_file`, `install_tool`) silences `implicit-shell-policy`. A downloaded blueprint
+is not allowed to grant itself write or shell access. The runtime clamps the policy back to the
+stricter of it and the built-in default, so the tool still asks. The line looks like a
 decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
 = true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
 blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
@@ -326,8 +344,8 @@ catalogue Leviath has read) or by having one written down under `[model_provider
 The `serves` route needs no network and no key, which makes it the way to get a script provider
 checked in CI.
 
-**`catalog-unchecked`** is the same question with no answer: the script provider loaded, but it has
-neither a `list_models(state)` function nor a `serves` list, so it has never said what it takes and
+**`catalog-unchecked`** is the same question with no answer. The script provider loaded, but it has
+neither a `list_models(state)` function nor a `serves` list. It has never said what it takes, so
 nothing here can tell a good model id from a bad one. It is a warning rather than an error because
 saying nothing is not a refusal. It exists so that "checked and fine" and "never checked" stop
 looking identical. Only script providers are named this way; a built-in that keeps quiet is either
@@ -361,6 +379,10 @@ runtime, and the fix line carries the stanza that would grant them.
 a stage keeps in `required_tools`. Both are deliberate wherever they appear. It is a note because
 `--yolo` reads as "run without me".
 
+**`long-context-price`** is about the whole request: past that size the model bills all of it at
+the higher rate. The message gives both rates and the threshold, and nothing needs to change unless
+the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token).
+
 **`safe-commands-declared`** applies only where you opt in. That is per agent via
 `[agent_safe_commands.<name>] allow_blueprint`, or globally via
 `[security] allow_blueprint_safe_commands`.
@@ -372,8 +394,12 @@ a stage keeps in `required_tools`. Both are deliberate wherever they appear. It 
 |---|---|
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
 | `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
-| `--graph` | Draw the stage graph after the report, as plain text: the same picture the dashboard's stage explorer shows, escape edges included. Ignored with `--json` |
-| `--width <COLS>` | How many columns `--graph` may use (default 120); a wider graph is shrunk to fit. Only with `--graph`: on its own it is refused |
+| `--graph` | Draw the stage graph after the report, as plain text. Ignored with `--json`. See below |
+| `--width <COLS>` | How many columns `--graph` may use (default 120). Only with `--graph`. See below |
+
+`--graph` draws the same picture the dashboard's stage explorer shows, escape edges included.
+`--width` sets how wide it may be, and a wider graph is shrunk to fit. `--width` on its own,
+without `--graph`, is refused.
 
 The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
 validated still says what is wrong with it. Nothing there refuses a spawn.
@@ -398,7 +424,7 @@ makes: an agent whose required dependency is unmet fails to spawn before any mod
 
 `lev deps install <agent>` puts them in place, and always asks before it does anything, because it
 changes your machine. For an MCP server it writes the blueprint's non-secret server settings into
-your config; for each secret the server needs it tells you to set the variable in your own
+your config. For each secret the server needs, it tells you to set the variable in your own
 environment rather than writing it to a file. For a program it runs the install command the
 blueprint declares (a per-OS one when given) or a Rhai install script. Pass `--yes` to skip the
 confirmation and `--all` to act on every dependency, not only the missing ones.
@@ -453,13 +479,26 @@ includes those checks, so a broken script is caught without spending anything.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--accepts <MIME_TYPE>` (only models that take `image/png`, `audio/*` and so on), `--produces <MIME_TYPE>` (only models that hand back `video/mp4`, `image/*` and so on), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default. The `MIME` column says what a model takes beyond text (`img,pdf`) and, after an arrow, what it hands back beyond text (`->img`). A `+` after a price marks a model that bills long prompts at a higher rate, and a `!` before a model id marks one whose retention conflicts with your settings (a model that keeps data while `zero_retention` is on), with the reasons listed under the table |
-| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above. Prints both rates of a model with a long-context tier, a media model's unit price, and a retention conflict when there is one |
+| `lev models list` | `-p/--provider <NAME>`, `--offline`, `-a/--all`, `--accepts <MIME_TYPE>`, `--produces <MIME_TYPE>`, `--json`, `-r/--remote`. See below |
+| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`, `-r/--remote`. See below |
+
+`-a/--all` includes providers with no credential here. `--accepts <MIME_TYPE>` keeps only models
+that take `image/png`, `audio/*` and so on, and `--produces <MIME_TYPE>` keeps only models that hand
+back `video/mp4`, `image/*` and so on.
+
+In `lev models list`, the `MIME` column says what a model takes beyond text (`img,pdf`) and, after
+an arrow, what it hands back beyond text (`->img`). A `+` after a price marks a model that bills
+long prompts at a higher rate. A `!` before a model id marks one whose retention conflicts with your
+settings, such as a model that keeps data while `zero_retention` is on. The reasons are listed under
+the table.
+
+`lev models show` prints both rates of a model with a long-context tier, a media model's unit price,
+and a retention conflict when there is one.
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,
-and print what the provider said: the columns include the release date and the input and output
-price per million tokens where the listing or the build's price table carries them (`n/a` where
-neither does), and a trailing line says how many rows came from a provider and how many from the
+and print what the provider said. The columns include the release date and the input and output
+price per million tokens, where the listing or the build's price table carries them (`n/a` where
+neither does). A trailing line says how many rows came from a provider and how many from the
 table compiled into this build. `lev models show` names where a table row's rate came from and the
 day the table was read; see [where the prices come from](/docs/costs#where-the-prices-come-from). A provider that could
 not be reached keeps its table rows, with a warning naming it. `--offline` skips the network and
@@ -469,9 +508,10 @@ prints the table alone. `-r/--remote` is still accepted for older scripts and ch
 `list_models`: a script names its own catalog at run time, so there is no built-in table to read it
 from. What it answers counts as a real provider listing, toward the trailing line and as
 `"learned": true` in `--json`. A `serves = [...]` or `[model_capabilities]` claim in your config
-never becomes a listing row at all: those feed validation, not this table. A `--provider` that names nothing at all - no configured
-provider, no row in the built-in table, no script of that name that loads - **exits non-zero**
-rather than printing an empty table, since there is nothing an empty table could be reporting.
+never becomes a listing row at all: those feed validation, not this table. A `--provider` may name
+nothing at all: no configured provider, no row in the built-in table, no script of that name that
+loads. That **exits non-zero** rather than printing an empty table, since there is nothing an empty
+table could be reporting.
 A provider the built-in table knows but this install has no credential for is still an empty table
 and still exits 0.
 
@@ -482,18 +522,41 @@ The mime registry as this install sees it, and what a file resolves to under it.
 
 | Command | Flags |
 |---|---|
-| `lev mime list` | `--json`. The part ceiling in force and where it came from, whether uploads to provider file storage are on, each configured provider's inline and file limits, then every type the registry knows with its family, whether its bytes are text, its extensions, which layer the row came from (`builtin`, `config`, `mime_types.toml`) and the [check](/docs/rhai-mime-checks) its bytes must pass |
-| `lev mime show <TYPE>` | `--json`. One type as the registry resolves it: every field, the token rule spelled out, the check and whether it loaded, and the source of the most specific row |
-| `lev mime check <FILE>` | `--type <MIME_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. The type the file resolves to and where that row came from, its family, size, dimensions or duration when the header says, the token estimate, the stand-in a model that cannot take it would see, how it reaches a model: as text to any model, or natively to one that lists the type (`lev models list --accepts <type>` names those) and as its stand-in to the rest, and the verdict of the type's check over the file's bytes when a row names one |
+| `lev mime list` | `--json`. What the registry holds, and the limits around it. See below |
+| `lev mime show <TYPE>` | `--json`. One type as the registry resolves it. See below |
+| `lev mime check <FILE>` | `--type <MIME_TYPE>` (take the file as this type, as a sender declaring it would), `--json`. See below |
 | `lev mime init` | `--force`. Write a commented example [`mime_types.toml`](/docs/configuration#mime_typestoml) beside your config |
-| `lev mime add <TYPE>` | `--family <NAME>`, `--text` or `--binary`, `--tokens <RULE>` (`per_byte=0.25`, `per_pixel=750,max=1600`, `per_second=32`, `per_page=2000`, `fixed=1000`), `--extensions a,b`, `--magic <HEX>`, `--stand-in <TEMPLATE>`, `--check <PATH>` or `--no-check`. Add a row to `mime_types.toml`, or set the fields given on a row that is there; `<TYPE>` may be `type/*` for a whole family. The file is checked before it is written, a `--check` script compiled included, so a flag that would leave it unloadable is refused with the reason |
+| `lev mime add <TYPE>` | `--family <NAME>`, `--text` or `--binary`, `--tokens <RULE>`, `--extensions a,b`, `--magic <HEX>`, `--stand-in <TEMPLATE>`, `--check <PATH>` or `--no-check`. See below |
 | `lev mime remove <TYPE>` | Take a row out of `mime_types.toml` |
+
+`lev mime list` prints the part ceiling in force and where it came from, whether uploads to provider
+file storage are on, and each configured provider's inline and file limits. It then prints every
+type the registry knows: its family, whether its bytes are text, its extensions, which layer the row
+came from (`builtin`, `config`, `mime_types.toml`) and the [check](/docs/rhai-mime-checks) its bytes
+must pass.
+
+`lev mime show` resolves one type and gives every field, the token rule spelled out, the check and
+whether it loaded, and the source of the most specific row.
+
+`lev mime check` reports the type the file resolves to and where that row came from, its family,
+size, dimensions or duration when the header says, and the token estimate. It shows the stand-in a
+model that cannot take it would see. It also says how the file reaches a model: as text to any
+model, or natively to one that lists the type and as its stand-in to the rest.
+
+`lev models list --accepts <type>` names the models that list a type. `lev mime check` ends with the
+verdict of the type's check over the file's bytes, when a row names one.
+
+`lev mime add` adds a row to `mime_types.toml`, or sets the fields given on a row that is there.
+`<TYPE>` may be `type/*` for a whole family. `--tokens` takes one of `per_byte=0.25`,
+`per_pixel=750,max=1600`, `per_second=32`, `per_page=2000` or `fixed=1000`. The file is checked
+before it is written, a `--check` script compiled included, so a flag that would leave it unloadable
+is refused with the reason.
 
 `init` is optional. The registry works with no file at all, `add` creates the file when it has
 to, and the example `init` writes is a starting point for editing by hand, every field
-commented. The three readers use the registry as the daemon builds it and refuse to run on a row
-that does not load, the same fault `lev doctor` reports; `add` and `remove` edit the file in
-place and leave every other row, comment and blank line as you wrote them. An edit reaches the
+commented. The three readers use the registry as the daemon builds it, and refuse to run on a row
+that does not load, the same fault `lev doctor` reports. `add` and `remove` edit the file in
+place, and leave every other row, comment and blank line as you wrote them. An edit reaches the
 next run at once and every run already under way within the daemon's housekeeping interval of
 thirty seconds.
 
@@ -508,7 +571,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's command seeds |
-| `--output-format <LABEL>` | Ask the agent for its [final output](/docs/outputs) in this format. A differing label retires the blueprint's declared validator and schema |
+| `--output-format <LABEL>` | Ask the agent for its [final output](/docs/outputs) in this format. A differing label retires the declared validator and schema |
 | `--output-instructions <TEXT>` | Extra instructions for that final output |
 
 ## Blueprints and packaging
@@ -531,13 +594,15 @@ config grants.
 |---|---|---|
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
-| `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it, as on `lev run` |
+| `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
 | `lev resume <RUN_ID>` | | Un-pause a run |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
 | `lev result <RUN_ID>` | `--json`, `--raw`, `--artifact`, `--out`, `--open` | Print what the agent handed back, or hand out the files it produced. See [below](#lev-result) |
 | `lev blobs <RUN_ID> [PART]` | `--json`, `--out`, `--open` | List the files a run holds as stored parts, or fetch one. See [below](#lev-blobs-run-id-part) |
+
+`lev msg --attach` and a `@path` in the message text take the same forms as on `lev run`.
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the
@@ -573,7 +638,7 @@ lev result agent-abc123 --open final                     # hand one to whatever 
 ```
 
 The bytes come from the run's own store when the answer recorded a hash, so they are what the
-stage submitted even if the working directory has moved on; a file the store does not hold is read
+stage submitted even if the working directory has moved on. A file the store does not hold is read
 from the working directory instead. `--open` writes the file under the system temp directory
 first, so it has a name and an extension the opener can type it by. Nothing in `lev` plays or
 draws a file.
@@ -608,10 +673,15 @@ Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the ope
 | `--choice <INDEX>` | Answer a multiple-choice interaction by zero-based option index |
 | `--approve` | Approve a tool-approval or confirm interaction. Conflicts with `--deny` |
 | `--deny` | Deny it |
-| `--feedback <TEXT>` | With `--deny`, what the model should do instead. It reads the text inside the refused call's tool result. An error with anything but `--deny` |
+| `--feedback <TEXT>` | With `--deny`, what the model should do instead. An error with anything but `--deny` |
 | `--stage` | With `--approve`, allow what this call runs until the run leaves the current stage |
 | `--session` | With `--approve`, allow what this call runs for the rest of the run (alias `--run`) |
-| `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. A `@path` inside the answer attaches that file too. Refused on a choice or an approval |
+| `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. See below |
+
+The model reads `--feedback` text inside the refused call's tool result.
+
+A `@path` inside the answer attaches that file too. `--attach` is refused on a choice or an
+approval.
 
 See [Human-in-the-loop](/docs/interaction) for what raises these.
 
@@ -626,9 +696,9 @@ waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    d
 1 run needs an answer: lev respond
 ```
 
-`TITLE` is the [generated one-line title](/docs/configuration#title), and the column appears only
-when at least one listed run has one - a run whose titling was turned off or did not finish leaves
-the cell empty rather than widening every row for nothing.
+`TITLE` is the [generated one-line title](/docs/configuration#title). The column appears only when
+at least one listed run has one. A run whose titling was turned off or did not finish leaves the
+cell empty, rather than widening every row for nothing.
 
 ### Age, work, and moved
 
@@ -640,9 +710,9 @@ minutes, at work for forty-one seconds of them, and holding a prompt open for th
 done anything.
 
 `WORK` is how long the run actually spent working. The clock runs while it is inferring,
-calling tools, or held for its own fan-out workers and sub-agents, and stops for
+calling tools, or held for its own fan-out workers and sub-agents. It stops for
 everything that is not the run's doing: paused, blocked on a person, parked until the
-machine is fixed, finished. This is the figure to call a run's duration - `AGE` counts the
+machine is fixed, finished. This is the figure to call a run's duration. `AGE` counts the
 overnight pause, and this does not. It is written to disk as `active` in `meta.json`, and
 each stage keeps one of its own in `stages.json`.
 
@@ -655,8 +725,8 @@ written to disk as `last_progress_at`, so a script can read it without the daemo
 > [!NOTE]
 > `MOVED` was headed `AGE` before, and showed what `MOVED` shows now. If you have a script
 > reading the table, read `lev ps --json` instead: every row there carries `started_at`,
-> `last_progress_at` and `active` raw, plus `age_secs` and `working_secs` already computed
-> - the same two keys the [HTTP API](/docs/api#how-long-a-run-has-taken) serves.
+> `last_progress_at` and `active` raw, plus `age_secs` and `working_secs` already computed,
+> the same two keys the [HTTP API](/docs/api#how-long-a-run-has-taken) serves.
 
 `lev ps` lists what the daemon is holding, plus the runs that finished within the
 retention window above. `lev ps --all` adds a second block read from the runs dir instead,
@@ -800,7 +870,7 @@ Start the [REST and WebSocket API](/docs/api).
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root |
 | `--no-remote-yolo` | off | Refuse `"yolo": true` and `"allow": [...]` on spawn requests |
-| `--no-remote-seed-commands` | off | Treat every spawn as `"no_seed_commands": true`, so a blueprint's command seeds never run for a run started over the API |
+| `--no-remote-seed-commands` | off | Treat every spawn as `"no_seed_commands": true`, so command seeds never run for a run started over the API |
 | `--max-concurrent-requests <N>` | `[serve]` key, else `64` | Requests in flight before the next is answered 503. `0` disables the cap. Websocket routes are not counted |
 | `--request-timeout-secs <SECS>` | `[serve]` key, else `30` | Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed |
 | `--tls-cert <PATH>` | unset | PEM certificate chain. Serves HTTPS; needs `--tls-key` too |
@@ -829,10 +899,15 @@ rest, and the one that fails is the diagnosis.
 
 | Check | What it proves | A failure means |
 |---|---|---|
-| `config` | `config.toml` parses and a provider registry can be built. The OK line also carries notes for a file that loads with problems in it: keys nothing reads, and `[model_providers.*]` script entries whose `.rhai` file is not on disk | The config file is malformed |
-| `resolve` | Your defaults pick a provider that is actually registered. With no `override_model` or `fallback_model` set it passes on the first configured provider in your preference, and the next check picks a model from that provider's catalogue | Nothing in `default_provider` or `provider_order` is configured: a key is missing or misspelled, or `lev setup` has not been run |
+| `config` | `config.toml` parses and a provider registry can be built. See below | The config file is malformed |
+| `resolve` | Your defaults pick a provider that is actually registered. See below | Nothing in `default_provider` or `provider_order` is configured: a key is missing or misspelled, or `lev setup` never ran |
 | `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
 | `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |
+
+The `config` OK line also carries notes for a file that loads with problems in it: keys nothing
+reads, and `[model_providers.*]` script entries whose `.rhai` file is not on disk. With no
+`override_model` or `fallback_model` set, `resolve` passes on the first configured provider in your
+preference. The next check then picks a model from that provider's catalogue.
 
 ```bash
 $ lev doctor
@@ -888,7 +963,7 @@ Wrote report.zip (1.4 MiB, 6 secrets removed)
 | `--note <TEXT>` | What happened, in your words. Lands at the top of the zip's README |
 | `-o`, `--output <PATH>` | Where to write the zip. Default: `./leviath-rage-<timestamp>.zip` |
 | `--no-blobs` | Leave a run's stored media parts out |
-| `--non-interactive` | No screen: build the zip from the flags and print its path. A stdout that is not a terminal does the same |
+| `--non-interactive` | No screen: build the zip from the flags and print its path. A non-terminal stdout does the same |
 
 The zip keeps your task text, the model's replies, tool output and file contents, which is what a
 helper needs. Read it before you share it.
@@ -898,20 +973,21 @@ helper needs. Read it before you share it.
 The interactive [provider](/docs/providers) wizard. Every credential and agent choice it asks for
 has a flag, so headless setup is scriptable. The wizard's Limits screen edits the
 [`[limits]`](/docs/configuration#limits) keys, which have no flags: script those by writing
-`config.toml` directly. That screen is opt-in - every limit already has a working default, so it
-only appears once you turn on **Show advanced tuning** on the Defaults screen. Skipping it changes
-nothing about what gets written.
+`config.toml` directly. That screen is opt-in, because every limit already has a working default.
+It only appears once you turn on **Show advanced tuning** on the Defaults screen. Skipping it
+changes nothing about what gets written.
 
 The Providers screen lists the providers this install has, not the whole catalog. **Add a
-provider** (or `a`) asks three short questions in a chooser, one level at a time: how the provider
-is reached (an API key, a subscription sign-in, a server you run), what it makes (text and images,
-video, speech and audio, 3D models), and which one. A provider that makes several of these is
+provider** (or `a`) asks three short questions in a chooser, one level at a time. The first is how
+the provider is reached (an API key, a subscription sign-in, a server you run). The second is what
+it makes (text and images, video, speech and audio, 3D models), and the third is which one. A
+provider that makes several of these is
 listed under each. Esc steps back a level. Or type at the first question: a provider's name or
 what it does (`anthropic`, `sora`, `video`) finds it, and Enter goes straight to it. The provider
 then opens in a modal: its
 credential, its sign-in or its endpoint entries, and three ways out at the foot. **Verify and use**
 checks the credential against the provider and keeps it once the check passes, staying open with
-the answer if it fails; **Skip verification and use** keeps it unchecked; **Cancel** puts the
+the answer if it fails. **Skip verification and use** keeps it unchecked, and **Cancel** puts the
 provider back the way it was. Enter on a listed provider reopens that modal, and `d` removes the
 provider, clearing its key when you finish. A provider supplied by an environment variable cannot
 be removed here; unset the variable. The wizard will not continue past this screen, or finish,
@@ -919,20 +995,21 @@ with no provider configured, because a config without one cannot run an agent.
 
 Each listed provider shows what it said the last time anything asked it, and when: "12 models ·
 checked 2 hours ago", or the error it gave. That answer is shared. The daemon records one each time
-it starts and reads every provider's model list, `lev models` records one for each provider it
-lists live, and the wizard records its own checks, all in `~/.leviath/model_capabilities.json`
-beside the model lists themselves. A check counts only for the key it was made with: change a key
+it starts and reads every provider's model list. `lev models` records one for each provider it
+lists live, and the wizard records its own checks. All of them land in
+`~/.leviath/model_capabilities.json`, beside the model lists themselves. A check counts only for
+the key it was made with: change a key
 and that provider reads "not checked yet" until it is checked again. The file holds a fingerprint
 of each key, never the key, made with a random key of this install's own
 (`~/.leviath/provider-check.key`). `lev rage` includes the cache in a bug report and never that
 key, so a shared report gives nothing to guess a key back from.
 
-The Defaults screen leads with **Provider priority** - the order a bare model name prefers, whose
-head is your default provider. Enter opens a modal to arrange it: drag a row by its `⠿` grip, or
-move the one under the cursor with `Shift+↑`/`Shift+↓`, or with `K`/`J` on a terminal that keeps
+The Defaults screen leads with **Provider priority**: the order a bare model name prefers, whose
+head is your default provider. Enter opens a modal to arrange it. Drag a row by its `⠿` grip, or
+move the one under the cursor with `Shift+↑`/`Shift+↓`. Use `K`/`J` on a terminal that keeps
 Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
-or brings it back in; a provider left out is still configured and still runs any stage that names
-it as `provider/model`, but a bare model name is never routed to it. Configuring a new provider
+or brings it back in. A provider left out is still configured, and still runs any stage that names
+it as `provider/model`. A bare model name is never routed to it. Configuring a new provider
 does not add it to the order on its own, and at least one provider always stays in. It writes the
 same [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order`
 and `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare
@@ -942,7 +1019,7 @@ Quitting with unsaved choices asks first, and the dialog lists the choices that 
 discarded.
 
 The same screen carries **Zero data retention (ZDR)**: a switch that asks every provider to keep
-nothing of your prompts and replies once a reply is returned, with a row under it for each chosen
+nothing of your prompts and replies once a reply is returned. Under it sits a row for each chosen
 provider that settles retention by contract (Anthropic, OpenAI, Google), so an agreement your
 organisation holds can be declared where the key is. Each row's help spells out what the provider
 keeps without it. What the switch does, provider by provider, is
@@ -955,22 +1032,29 @@ turns uploads off whatever it says. See [Files and size limits](/docs/mime#files
 | `--non-interactive` | Use only flag values, ask nothing |
 | `--no-verify` | Skip checking credentials against the provider APIs |
 | `--anthropic-key`, `--openai-key`, `--google-key`, `--xai-key`, `--meta-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
-| `--file-uploads <true\|false>` | Upload large parts to a provider's file storage once and name them by id. On unless set; zero data retention turns uploads off whatever this says |
+| `--file-uploads <true\|false>` | Upload large parts to a provider's file storage once and name them by id. On unless set |
 | `--bedrock-region <REGION>` | AWS region for Bedrock (default `us-east-1`; also read from `AWS_REGION`) |
-| `--zero-retention <true\|false>` | Ask every provider for zero data retention (ZDR): nothing of a prompt or reply is kept once the reply is returned. Writes `[providers] zero_retention`; see [data retention](/docs/providers#data-retention) |
+| `--zero-retention <true\|false>` | Ask every provider for zero data retention (ZDR). Writes `[providers] zero_retention`; see [data retention](/docs/providers#data-retention) |
 | `--zero-retention-agreements <NAMES>` | Providers your organisation holds a zero data retention agreement with, comma separated (`anthropic,openai,google`). Replaces `zero_retention_agreements` |
 | `--ollama-url <URL>` | Ollama base URL |
 | `--override-model <MODEL>` | One model every stage starts on, ahead of what its blueprint names; unset lets each blueprint decide |
 | `--fallback-model <MODEL>` | The model a stage falls back to when none of the models it names is configured here |
-| `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it: this flag is the way to turn it on |
+| `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it |
 | `--claude-code-effort <LEVEL>` | `low`, `medium`, `high`, `xhigh`, or `max` |
-| `--codex <true\|false>` | Enable the Codex transport, which bills a ChatGPT subscription. Flips the switch only: interactive `lev setup` signs in from its own screen, and a non-interactive run has nobody watching a browser, so sign in with `lev auth login codex` on that path |
-| `--grok <true\|false>` | Enable the Grok transport, which bills a SuperGrok or X Premium+ subscription. Flips the switch only, as `--codex` does: sign in with `lev auth login grok` |
+| `--codex <true\|false>` | Enable the Codex transport, which bills a ChatGPT subscription. Flips the switch only. See below |
+| `--grok <true\|false>` | Enable the Grok transport, which bills a SuperGrok or X Premium+ subscription. Flips the switch only. See below |
 | `--install-agents` | Install the bundled blueprints without asking |
 
 ```bash
 lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 ```
+
+Zero data retention turns uploads off whatever `--file-uploads` says. The wizard never asks about
+the Claude Code transport, so `--claude-code true` is the way to turn that one on.
+
+`--codex` and `--grok` flip a switch and nothing more. Interactive `lev setup` signs in from its own
+screen, and a non-interactive run has nobody watching a browser. Sign in with `lev auth login codex`
+or `lev auth login grok` on that path.
 
 The provider list ends with three entries for servers that speak OpenAI's chat API, and picking
 any of them writes a [`kind = "openai-compatible"`](/docs/configuration#openai-compatible-endpoints)
@@ -979,9 +1063,10 @@ default address (`http://localhost:8080/v1` and `http://localhost:1234/v1`) with
 written as `llama-cpp` or `lm-studio`. **Custom OpenAI-compatible endpoint** asks for a name, a
 base URL, an optional key and optional headers (`Name: value`, several separated by semicolons).
 All three repeat: a preset's modal is a small form per endpoint with **Add another** at the end
-and **Remove this endpoint** on each, so two llama.cpp servers on two ports are two entries. **Check this endpoint** asks the server for its models; on success they are
-listed and the **Default model** row cycles through them, and on failure the entry is kept and the
-**Models** row takes the ids by hand, which is what the entry's `models` list is. Every endpoint
+and **Remove this endpoint** on each, so two llama.cpp servers on two ports are two entries.
+**Check this endpoint** asks the server for its models. On success they are listed, and the
+**Default model** row cycles through them. On failure the entry is kept, and the **Models** row
+takes the ids by hand, which is what the entry's `models` list is. Every endpoint
 appears in the default-provider choice by its own name. These entries have no flags; script them
 by writing `config.toml`.
 
@@ -998,8 +1083,8 @@ first and would take your edits with it.
 blueprint that this build ships a different version of prints a one-line note before it spawns.
 
 Setup remembers what you turned down. An MCP server you left unchecked, or a blueprint you chose
-not to install, is still listed the next time you run `lev setup` - so you can change your mind -
-but it is no longer pre-selected, and finishing the wizard again will not quietly bring it in.
+not to install, is still listed the next time you run `lev setup`, so you can change your mind. It
+is no longer pre-selected, though, and finishing the wizard again will not quietly bring it in.
 Only refusals are remembered, and only from a run you finished: accepting needs no memory, because
 the server lands in your config and the blueprint lands on disk. A blueprint's refusal is recorded
 against the version that was offered, so a newer bundled version is a fresh offer and gets asked
@@ -1030,7 +1115,7 @@ nothing selected asks before letting you continue, since an agent cannot run wit
 
 ### `lev providers`
 
-Show the configured providers and set their **priority order** - the
+Show the configured providers and set their **priority order**. That is the
 [`[providers] provider_order`](/docs/configuration#provider-preference-order) that decides which
 provider serves a bare model name (one a blueprint lists with no provider) when more than one
 serves it.
@@ -1040,16 +1125,16 @@ serves it.
 | `lev providers` (or `lev providers list`) | `--json` | List configured providers and the current priority order |
 | `lev providers order <NAME>...` | | Set the order, best first (e.g. `lev providers order codex openrouter openai`) |
 | `lev providers order --clear` | | Remove the order, so `default_provider` alone decides |
-| `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's account mode read live. See [data retention](/docs/providers#data-retention) |
+| `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's live account mode. See [data retention](/docs/providers#data-retention) |
 | `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
 | `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review` or `inherit` |
 | `lev providers quota` | `--json` | How much of each signed-in subscription (Codex, Grok) is used, against what limit, and when each window resets |
 
-The order is the whole list of providers a bare model name may run on: a configured provider that
-is not in it, a subscription transport (Codex, Claude Code) as much as an API key, is reachable
-only by an explicit `provider/model`, so that configuring it never silently moves a stage or its
-billing. A name that is not a configured provider is refused rather than written, since it could
-never win a route.
+The order is the whole list of providers a bare model name may run on. A configured provider that
+is not in it is reachable only by an explicit `provider/model`, so configuring it never silently
+moves a stage or its billing. That holds for a subscription transport (Codex, Claude Code) as much
+as for an API key. A name that is not a configured provider is refused rather than written, since it
+could never win a route.
 
 ### `lev mcp`
 
@@ -1070,10 +1155,13 @@ Transport is inferred from whether you pass `--url` or `--command`.
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev auth status` | | Which credential backend is in use and what it holds, and for each signed-in subscription the plan and how much of it is used |
-| `lev auth login <provider>` | | Sign in with a browser (`codex` or `grok`); stores the grant outside `config.toml`. `lev setup` does this on its own screen, so this is for headless machines and revoked sessions |
+| `lev auth status` | | The credential backend in use and what it holds, plus each signed-in subscription's plan and usage |
+| `lev auth login <provider>` | | Sign in with a browser (`codex` or `grok`); stores the grant outside `config.toml`. See below |
 | `lev auth logout <provider>` | | Forget a browser sign-in, leaving the provider enabled. Grok's session is also revoked at xAI |
 | `lev auth migrate` | `--to-file`, `--dry-run` | Move secrets between `config.toml` and the OS keychain |
+
+`lev setup` signs in on its own screen, so `lev auth login` is for headless machines and revoked
+sessions.
 
 `lev auth migrate` moves keys into the OS store by default; `--to-file` moves them back out. Set
 `[security] credential_store` in the [config](/docs/configuration#security) first.
@@ -1124,9 +1212,9 @@ lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
   config   nothing to migrate
 ```
 
-All three steps run every time, whatever the binary step did. That is the point of the command:
+All three steps run every time, whatever the binary step did. That is the point of the command.
 `brew upgrade` and `scoop update` hand you a new binary and say nothing about the blueprints in
-`~/.leviath/agents` or the config beside them, so anyone who has ever updated that way is running
+`~/.leviath/agents` or the config beside them. Anyone who has ever updated that way is running
 blueprints from whenever they last ran `lev setup`. A binary that needs no update is not evidence
 that anything else is current.
 

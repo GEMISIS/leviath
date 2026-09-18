@@ -78,8 +78,8 @@ call until the answer comes back, then continues with it:
 
 Every prompt on this page waits on a person, and by default it waits until one answers. A run
 parked on an approval is still parked when you get back, whether that is ten minutes or a weekend
-later; it is not failed, reaped, or marked stuck by any timer while it waits, and it survives a
-daemon restart still waiting. The only things that end the wait are an answer and `lev cancel`.
+later. No timer fails it, reaps it, or marks it stuck while it waits. It survives a daemon restart
+still waiting. The only things that end the wait are an answer and `lev cancel`.
 
 That is the right default for a person at a keyboard and the wrong one for a run nobody is
 watching, where a prompt would hold a slot until the daemon restarts. For those, `[limits]
@@ -93,7 +93,7 @@ way). When a deadline passes, the prompt resolves exactly as cancelling it would
 | `ask_user_*` | The model is told no answer came, and carries on. |
 | Interaction point | Proceeds with no user text, unless it declared `unattended = "ask"`. See below. |
 
-An interaction point that declared `unattended = "ask"` behaves differently on a timeout: the run
+An interaction point that declared `unattended = "ask"` behaves differently on a timeout. The run
 **stops with an error**, rather than approving a checkpoint nobody made.
 
 The deadline is read from `config.toml` every time it reloads, so setting one or clearing it needs
@@ -145,7 +145,7 @@ opt in, because otherwise any agent package could pre-approve its own shell with
 ### The prompt
 
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
-command for `bash`/`shell`, the path for the file tools), with five options:
+command for `bash`/`shell`, the path for the file tools). The prompt offers five options:
 
 - **Allow once**: permit this one call and nothing more.
 - **Allow ... for this stage**: permit every later call this covers, until the run leaves the
@@ -175,7 +175,7 @@ what a call runs.
 
 That prompt's unanswered cases go the safe way. Left open past
 `[limits] interaction_timeout_secs`, it resolves as a deny and the model gets `[blocked]`, the same
-as if you had pressed it: the hub hands the waiting call the neutral response a cancelled prompt
+as if you had pressed it. The hub hands the waiting call the neutral response a cancelled prompt
 produces, and a neutral response carries no choice. With no `interaction_timeout_secs` configured,
 which is the default, it waits for as long as the daemon is up and the run stays in
 `waiting_input`. The one case that does not park and does not deny is `--yolo`, which waives the
@@ -263,7 +263,7 @@ lev msg <agent-id> "the arm is still wrong, see @marked_up.png" --attach notes.m
 ```
 
 A message can carry files. A `@path` in the text and every `--attach` become typed
-[parts](/docs/mime) on the same entry as the words, in the region the message lands in; an
+[parts](/docs/mime) on the same entry as the words, in the region the message lands in. An
 attachment naming another region (`--attach notes.md:brief`) lands there on its own. A part the
 run cannot take (over the size ceiling, or a region that refuses its type) is logged and dropped,
 and the text is still delivered.
@@ -300,9 +300,9 @@ lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a tex
 lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
 
-A text answer carries files the way a message does: every `--attach` and every `@path` in the
-words become typed [parts](/docs/mime) stored by the run and written beside the answer in the
-tool result, so the model reads the file where the words mention it. A choice or an approval has
+A text answer carries files the way a message does. Every `--attach` and every `@path` in the
+words become typed [parts](/docs/mime) stored by the run, and written beside the answer in the
+tool result. The model reads the file where the words mention it. A choice or an approval has
 no text for a file to sit beside, and `--attach` on one is refused. The dashboard and the API take
 the same: a `@path` in a typed reply, and `parts` or a multipart upload on
 `POST /api/agents/{id}/interaction`.

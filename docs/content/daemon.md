@@ -95,15 +95,10 @@ every result as it arrives. On reload it uses the journal to work out what actua
 
 A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
 and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
-stage afresh on reload, the same way the launch did, so its failover list is intact. (Before 0.4.1,
-the reload handed back the entry stage's resolved `provider/model` as if it had been the override,
-which pinned every stage of a reloaded run to that one pair.)
+stage afresh on reload, the same way the launch did, so its failover list is intact.
 
-A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
-and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
-stage afresh on reload, the same way the launch did, so its failover list is intact. (Before 0.4.1,
-the reload handed back the entry stage's resolved `provider/model` as if it had been the override,
-which pinned every stage of a reloaded run to that one pair.)
+Before 0.4.1, the reload handed back the entry stage's resolved `provider/model` as if it had been
+the override. That pinned every stage of a reloaded run to that one pair.
 
 If something on your end consumes completion webhooks, deduplicate on `delivery_id`, described in
 the [API guide](/docs/api). A completion that re-fires after a restart carries the same id as the
@@ -177,10 +172,12 @@ If a save leaves the file briefly unparseable, which happens while you are halfw
 edit, the daemon keeps serving the last version that worked. It reloads on your next clean save, so
 an in-progress edit never breaks a spawn.
 
-That is the right behaviour and it used to be invisible, which made it the wrong experience: a typo
+That is the right behaviour and it used to be invisible, which made it the wrong experience. A typo
 you did not spot meant every edit after it silently did nothing, and the only record was one line in
-`daemon.log`. So a config that will not load is now a state Leviath reports rather than a fact it
-keeps to itself:
+`daemon.log`.
+
+So a config that will not load is now a state Leviath reports rather than a fact it keeps to
+itself:
 
 - `lev run` prints one line before the run starts, naming the file, where in it the problem is, and
   that this run is on the last config that loaded.
@@ -192,7 +189,7 @@ keeps to itself:
 - `GET /api/config` carries a `config_error` object, and `/ws` sends a `config_health` frame each
   time the answer changes. See [the API reference](/docs/api#when-the-config-file-will-not-load).
 
-The file is re-read once per save, not once per run: a broken file that nobody has touched since
+The file is re-read once per save, not once per run. A broken file that nobody has touched since
 costs one `stat` and produces one log line, rather than a re-read and a fresh warning on every
 spawn. Fix the file and everything above clears on its own, with nothing restarted.
 
@@ -204,9 +201,9 @@ next provider load uses it.
 
 `[security] allow_env_vars` is live for both things that read it: a Rhai script's `env_var()`, and
 the `${VAR}` in an MCP server's `headers`. Naming a variable there reaches the next provider load
-and the next MCP connection. A server already connected keeps the header it was given, so a global
-`[[mcp_servers]]` entry that interpolates a variable is reconnected when you change the list, which
-is what puts the new value in front of the next run.
+and the next MCP connection. A server already connected keeps the header it was given. So a global
+`[[mcp_servers]]` entry that interpolates a variable is reconnected when you change the list, and
+that is what puts the new value in front of the next run.
 
 `[[mcp_servers]]` is live as well. Add, edit or remove a global server, with `lev mcp add`, `POST
 /api/mcp/servers`, or by hand, and the next run gets the tools the file names now. A run already
@@ -214,11 +211,12 @@ under way keeps the servers it started with: a removed one stays connected for
 `[limits] mcp_idle_disconnect_secs` so nothing loses a tool mid-call, and is torn down after that.
 
 Provider credentials reload as well. Add a key, replace one, remove one by untoggling it in
-`lev setup`, point a provider at another base URL, or change `default_provider`: the daemon
+`lev setup`, point a provider at another base URL, or change `default_provider`. The daemon
 compares the file's credentials against the ones its registry was built from, and rebuilds the
-registry when they differ, before the next run resolves its stages. It makes no difference whether
-the write came from `lev setup`, `PUT /api/config` or an editor, because all three write the same
-file. Two details are deliberate:
+registry when they differ, before the next run resolves its stages.
+
+It makes no difference whether the write came from `lev setup`, `PUT /api/config` or an editor,
+because all three write the same file. Two details are deliberate:
 
 - A run **already under way** keeps calling the provider its current stage started on, even one you
   removed, so a config edit never pulls a provider out from under a stage mid-flight. New runs, new
@@ -228,21 +226,25 @@ file. Two details are deliberate:
 
 The taint gate's own two files reload as well: `policy.toml` and the `.rhai` files in the `rules/`
 directory beside it. `lev policy add` writes a rule and the next run is gated against it, with no
-restart. The scripted half needed this most, because it failed in a way no restart advice covered:
-the rule sources were read into the compiled checker at boot, so editing a `.rhai` file changed
-nothing at all and the gate went on answering from the text it started with.
+restart.
+
+The scripted half needed this most, because it failed in a way no restart advice covered. The rule
+sources were read into the compiled checker at boot, so editing a `.rhai` file changed nothing at
+all. The gate went on answering from the text it started with.
 
 [`yolo.toml`](/docs/yolo) is read whenever a run is spawned under a named
-profile and again when such a run resumes, so an edited rule is in force for the next `lev run
+profile, and again when such a run resumes. So an edited rule is in force for the next `lev run
 --yolo=<name>` and for a parked run you `lev resume`. Three of a profile's keys are decided once,
 when the run is built: `questions`, `checkpoints` and `gate`. Those reach the next run, not one
 in flight. Bare `--yolo` never reads the file.
 
 [`mime_types.toml`](/docs/configuration#mime_typestoml) and a `[mime_types]` table in the
-config reload, and they are the one thing that reaches a run already under way without waiting
-for anything: the daemon re-reads both files on its own timer, every thirty seconds, and rebuilds
-every live run's registry over the new rows, so a type you add while a run is going types that
-run's next file. A new run reads the files as it spawns.
+config reload. They are the one thing that reaches a run already under way without waiting
+for anything. The daemon re-reads both files on its own timer, every thirty seconds, and rebuilds
+every live run's registry over the new rows.
+
+So a type you add while a run is going types that run's next file. A new run reads the files as it
+spawns.
 
 `[observability]` reloads too. Turn export on, point it at a different collector, rename the
 service, or turn it off, and the next run emits into what the file says now. The verbosity of the
@@ -253,8 +255,8 @@ restart.
 
 An agent resolves its permissions when it spawns, so an edit made while it is running does not
 reach the run that is already going. That mattered most in exactly the case you would want it to
-work: a run stopped on a tool it is not permitted to call, a path it may not read, or a write
-ceiling it has hit, with the fix sitting in a file the run was never going to read again.
+work. The run has stopped on a tool it is not permitted to call, a path it may not read, or a write
+ceiling it has hit. The fix is sitting in a file the run was never going to read again.
 
 So a run re-reads four things when it starts moving again: `[tool_permissions]` (including the
 per-agent overlay), `[safe_commands]`, `[security] read_paths`, and the write ceilings. Three
@@ -266,7 +268,7 @@ moments count as starting again:
 - The daemon paging a run back in from disk to act on it.
 
 A stage that is running keeps the snapshot it started on, so nothing is re-judged halfway through a
-batch of tool calls. Nothing the run has already spent or been granted is reset either: the write
+batch of tool calls. Nothing the run has already spent or been granted is reset either. The write
 total, the approvals you granted for the run or the stage, and the blueprint's own per-stage
 permissions all stay as they were.
 
@@ -289,35 +291,42 @@ everything else and a new fallback provider applies on the next `lev run`.
 Nor does the outbound-network policy. `[security] allow_local_network` and the two script-HTTP
 limits, `script_http_timeout_secs` and `script_http_max_per_host`, are copied into process-wide
 state because the shared HTTP client has no handle on your config by the time a script tool calls
-through it. That copy is now refreshed on every reload, so all three follow the file. It matters
-most in the direction nobody tests: turning `allow_local_network` **off** used to stop a script
-naming a loopback URL at once, while a redirect from a permitted URL down to loopback carried on
+through it. That copy is now refreshed on every reload, so all three follow the file.
+
+It matters most in the direction nobody tests. Turning `allow_local_network` **off** used to stop a
+script naming a loopback URL at once. A redirect from a permitted URL down to loopback carried on
 being followed until you restarted the daemon.
 
 ### The `[limits]` the world is built with
 
-These used to need a restart and no longer do, as of this release: the inference pools
-(`max_concurrent_inferences` and its `_by_model` and `_by_provider` tables), the tool lane
-(`max_concurrent_tools`), `stream_inference`, the two watchdogs (`stall_timeout_secs`,
-`wedge_timeout_secs`), the provider circuit breaker (`provider_failures_before_open`,
-`provider_circuit_cooldown_secs`), the inference retry schedule (`inference_retry_attempts`,
-`inference_retry_base_ms`), `dead_cycles_before_relief`, `notify_spend_usd`, `max_agents_per_run`,
-`finished_retention_secs`, `interaction_timeout_secs`, and the whole `[title]` section.
+These used to need a restart and no longer do, as of this release:
+
+- The inference pools, `max_concurrent_inferences` and its `_by_model` and `_by_provider` tables.
+- The tool lane, `max_concurrent_tools`.
+- `stream_inference`.
+- The two watchdogs, `stall_timeout_secs` and `wedge_timeout_secs`.
+- The provider circuit breaker, `provider_failures_before_open` and
+  `provider_circuit_cooldown_secs`.
+- The inference retry schedule, `inference_retry_attempts` and `inference_retry_base_ms`.
+- `dead_cycles_before_relief`, `notify_spend_usd`, `max_agents_per_run`, `finished_retention_secs`
+  and `interaction_timeout_secs`.
+- The whole `[title]` section.
 
 Most of them reach the runs already going, not only the next one, because the engine reads them on
-every pass: lower `stall_timeout_secs` and the watchdog is stricter with the run in front of it,
-lower `max_agents_per_run` and the next fan-out split stops at the new ceiling. The ones that only
-apply to what starts next are the ones nothing can retroactively change: a request already on the
-wire keeps the streaming setting, the retry schedule and the pool slot it started with, and a prompt
-already waiting keeps the deadline it opened with.
+every pass. Lower `stall_timeout_secs` and the watchdog is stricter with the run in front of it.
+Lower `max_agents_per_run` and the next fan-out split stops at the new ceiling.
+
+The ones that only apply to what starts next are the ones nothing can retroactively change. A
+request already on the wire keeps the streaming setting, the retry schedule and the pool slot it
+started with. A prompt already waiting keeps the deadline it opened with.
 
 Lowering a concurrency limit never interrupts anything. The slots nobody is holding are taken back
-at once and the rest as the requests and tool batches in flight finish, so the pool narrows by
-draining rather than by cancelling work you are paying for.
+at once, and the rest as the requests and tool batches in flight finish. So the pool narrows by
+draining, rather than by cancelling work you are paying for.
 
 `[title]` had a worse failure than doing nothing. Turning it on marked each new run for a title,
-because spawn already read a fresh config, and then the part that actually makes titles read the
-value from boot, saw titling switched off, and dropped the marker without a word. Both halves read
+because spawn already read a fresh config. The part that actually makes titles then read the value
+from boot, saw titling switched off, and dropped the marker without a word. Both halves read
 the same file now.
 
 The list is a description of the code, not a policy. Anything not on it reloads.

@@ -85,9 +85,9 @@ past 100%: regions rarely all fill at once.
 holding your commit log instead of spending a turn fetching it.
 
 **`volatility` says how much a region moves, and it is worth real money.** Providers cache the
-prompt by *prefix*: they store everything up to a marker and reuse it next turn only if every byte
-in front of that marker is identical. So one region that changes invalidates the cache for every
-region behind it, and the order the prompt is assembled in decides the bill.
+prompt by *prefix*. They store everything up to a marker, and reuse it next turn only if every
+byte in front of that marker is identical. So one region that changes invalidates the cache for
+every region behind it, and the order the prompt is assembled in decides the bill.
 
 Here `task` and `commits` are seeded once and never written again, so they are `stable` and go
 first, forming the prefix everything else caches behind. `notes` is written to as the run goes, so
@@ -246,7 +246,7 @@ including `stuck` and `max_iterations`.
 lev validate .
 ```
 
-`lev validate` reads the blueprint the way the runtime will, then says what it found:
+`lev validate` reads the blueprint the way the runtime will. It then says what it found:
 
 ```console
 ✓ Blueprint 'release-notes' is valid.
@@ -380,7 +380,7 @@ the person running this can decide what to do.
 
 ## Make it yours
 
-Small changes worth trying, each of which reaches for one more idea:
+Small changes worth trying. Each reaches for one more idea:
 
 - **Point it at a range.** Change the seed to `git log --oneline $(git describe --tags --abbrev=0)..HEAD` so it reads only what is genuinely unreleased.
 - **Make the shape strict.** Add a `schema` to `[stages.publish.output]` and the answer is validated against it before the run is allowed to finish. See [final outputs](/docs/outputs).

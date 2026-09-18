@@ -70,7 +70,7 @@ lev ps --all --json | jq --arg id "$RUN_ID" \
 a single status field.
 
 **Or use the protocol instead.** If the orchestrator can launch a subprocess and talk JSON-RPC to
-it, `lev agent-client` stays in the foreground for the whole turn and streams progress back, which
+it, `lev agent-client` stays in the foreground for the whole turn. It streams progress back, which
 removes the polling entirely. That is what the [Gas City](/docs/gas-city) page uses, and it is the
 nicer shape when it is available.
 
