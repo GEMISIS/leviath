@@ -43,10 +43,12 @@ does not apply and no benchmark target pollutes a crate's profile.
 - `daemon_drive.py --runs K [--tool NAME --args JSON --yolo]` - starts the
   mock, a daemon and `lev serve`, spawns K runs, waits for them to finish,
   and prints wall clock plus rusage as JSON. Run it through `harness.sh`.
-- `fake_runs.py --from RUN_DIR --count 750 --out DIR` - copies one real run
-  directory N times with fresh ids. Copies, not stubs: a 200-byte
-  `context.json` would hide exactly the per-frame parsing cost the dashboard
-  numbers exist to catch.
+- `fake_runs.py --from RUN_DIR --count 750 --out DIR [--fanout K]` - copies
+  one real run directory N times with fresh ids. Copies, not stubs: a
+  200-byte `context.json` would hide exactly the per-frame parsing cost the
+  dashboard numbers exist to catch. On APFS the copies are copy-on-write
+  clones, so 5,000 of a 7 MB run cost next to no disk. `--fanout K` shapes the
+  corpus like fan-out work: one parent, then its K children, repeated.
 - `serve_latency.py --port 8299 --n 200 [--burst] [--accept-encoding gzip]` -
   p50/p99 per read route over a fixed corpus, one connection per request.
   `--burst` fires the console's connect-time set (config, first runs page,
@@ -54,12 +56,18 @@ does not apply and no benchmark target pollutes a crate's profile.
   wall clock to the last byte, which is what a user waits for when The Lair
   opens. `--accept-encoding` records the compressed body size and the
   `content-encoding` the server chose.
-- `dash_pty.py --bin lev --seconds 30 --keys 'jjj'` - drives `lev dash`
-  over a real pty, accumulating the whole escape stream (a full pty buffer
-  blocks the child and corrupts the measurement), and reports the child's
-  CPU seconds, max RSS, bytes written, repaint count and a normalised hash of
-  the first frame. The hash must match before and after a change; the CPU
-  and the syscall count (`measure.sh`, Linux) must fall.
+- `dash_pty.py --bin lev --seconds 30 --keys 'jjj' [--burst N]
+  [--ready-text TEXT]` - drives `lev dash` over a real pty, accumulating the
+  whole escape stream (a full pty buffer blocks the child and corrupts the
+  measurement), and reports the child's CPU seconds, max RSS, bytes written,
+  repaint count and a normalised hash of the first frame. It also times how
+  long the list takes to show `TEXT` (`ready_ms`), each key to the repaint
+  that answers it (`key_latency_ms`), and, with `--burst`, how long the
+  screen keeps changing after N wheel notches and N pointer moves arrive at
+  once (`burst_settle_ms`). It answers the terminal queries crossterm sends
+  at start-up, as a real terminal does; a silent pty adds a 2 s wait to
+  every number. The hash must match before and after a change; the CPU and
+  the syscall count (`measure.sh`, Linux) must fall.
 - `measure.sh CMD...` - `perf stat` + `strace -c` on Linux, `/usr/bin/time
   -l` on macOS. Linux is the gate; macOS is corroboration.
 - `binsize.sh [BIN]` - release binary size, package count, `__const` /

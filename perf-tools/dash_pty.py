@@ -15,8 +15,17 @@ Reports (JSON):
     repaints        full repaints seen (cursor-home + clear sequences)
     frame1_sha256   sha256 of the first full frame with whitespace stripped and
                     clock-shaped tokens masked; must match before/after a change
+    first_frame_ms  fork to the first byte of output (the first frame drawn)
+    ready_ms        fork to the moment --ready-text first appears in the stream
+                    (a run id prefix: the list has rows)
+    key_latency_ms  p50/p99/max from each key write to the next repaint that
+                    carries real content (over 64 bytes, not just cursor toggles)
+    burst_settle_ms after --burst N wheel-down and N mouse-motion events are
+                    queued at once, how long until the last repaint the burst
+                    caused (activity ends at the first 400ms quiet gap)
 
-    --bin PATH --seconds N --cols C --rows R --keys 'jjj' --json OUT --stream OUT.bin
+    --bin PATH --seconds N --cols C --rows R --keys 'jjj' --burst 300
+    --ready-text genesis --json OUT --stream OUT.bin
 """
 import argparse
 import faulthandler
@@ -41,6 +50,30 @@ def normalise(frame: bytes) -> bytes:
     return re.sub(rb"\s+", b"", frame)
 
 
+def ms(t, since):
+    return None if t is None else round((t - since) * 1000, 1)
+
+
+def latency(key_sent):
+    lat = sorted((done - sent) * 1000 for sent, done in key_sent if done is not None)
+    if not lat:
+        return None
+    pick = lambda q: round(lat[min(len(lat) - 1, int(q * len(lat)))], 1)
+    return {"p50": pick(0.5), "p99": pick(0.99), "max": round(lat[-1], 1), "n": len(lat)}
+
+
+def settle(chunks, burst_at):
+    """The last content repaint before the first 400ms quiet gap after the burst."""
+    if burst_at is None:
+        return None
+    last = burst_at
+    for t in chunks:
+        if t - last > 0.4:
+            break
+        last = t
+    return round((last - burst_at) * 1000, 1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=os.environ.get("LV_BIN", "lev"))
@@ -48,6 +81,10 @@ def main():
     ap.add_argument("--cols", type=int, default=200)
     ap.add_argument("--rows", type=int, default=50)
     ap.add_argument("--keys", default="", help="keys to send after 2s, one per 300ms; \\e for Escape")
+    ap.add_argument("--burst", type=int, default=0,
+                    help="after the keys, queue N wheel-down + N mouse-motion events at once")
+    ap.add_argument("--ready-text", default="",
+                    help="text that appears once the run list has rows")
     ap.add_argument("--json")
     ap.add_argument("--stream", help="write the raw escape stream here")
     a = ap.parse_args()
@@ -61,24 +98,67 @@ def main():
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", a.rows, a.cols, 0, 0))
 
     keys = a.keys.encode().decode("unicode_escape").encode("latin-1")
+    ready = a.ready_text.encode()
     out = bytearray()
-    deadline = time.monotonic() + a.seconds
-    next_key = time.monotonic() + 2.0
+    start = time.monotonic()
+    deadline = start + a.seconds
+    next_key = start + 2.0
     key_i = 0
+    first_output = None
+    ready_at = None
+    key_sent = []  # (time sent, time of the first content repaint after it)
+    burst_at = None
+    burst_chunks = []
+    pending = bytearray()  # input not yet accepted by the pty
+    os.set_blocking(fd, False)
     while time.monotonic() < deadline:
-        r, _, _ = select.select([fd], [], [], 0.05)
+        r, w, _ = select.select([fd], [fd] if pending else [], [], 0.005)
+        now = time.monotonic()
         if r:
             try:
                 chunk = os.read(fd, 1 << 16)
+            except BlockingIOError:
+                chunk = b"-"
             except OSError:
                 break
             if not chunk:
                 break
-            out.extend(chunk)
-        if key_i < len(keys) and time.monotonic() >= next_key:
-            os.write(fd, keys[key_i:key_i + 1])
+            if chunk != b"-":
+                out.extend(chunk)
+                # Answer the terminal queries a real emulator answers. crossterm
+                # asks for keyboard-enhancement flags and primary device
+                # attributes on startup and waits up to 2s for a reply; a
+                # silent pty would add that wait to every number below.
+                if b"\x1b[c" in chunk:
+                    pending.extend(b"\x1b[?62;22c")
+                if first_output is None:
+                    first_output = now
+                if ready and ready_at is None and ready in out[-(len(chunk) + len(ready)):]:
+                    ready_at = now
+                if len(chunk) > 64:
+                    if key_sent and key_sent[-1][1] is None:
+                        key_sent[-1] = (key_sent[-1][0], now)
+                    if burst_at is not None:
+                        burst_chunks.append(now)
+        if w and pending:
+            try:
+                n = os.write(fd, pending)
+                del pending[:n]
+            except BlockingIOError:
+                pass
+        if key_i < len(keys) and now >= next_key:
+            pending.extend(keys[key_i:key_i + 1])
+            key_sent.append((now, None))
             key_i += 1
-            next_key = time.monotonic() + 0.3
+            next_key = now + 0.3
+        if a.burst and burst_at is None and key_i >= len(keys) and now >= next_key + 0.5:
+            seq = bytearray()
+            for i in range(a.burst):
+                seq += b"\x1b[<65;20;10M"
+                seq += b"\x1b[<35;%d;%dM" % (10 + i % 150, 5 + i % 30)
+            pending.extend(seq)
+            burst_at = now
+    os.set_blocking(fd, True)
     # Teardown escalates: `q` (then `y` for a confirm dialog), SIGTERM, SIGKILL.
     # Keep draining the pty meanwhile so the child never blocks on a full buffer.
     def reap(grace):
@@ -126,6 +206,10 @@ def main():
         "seconds": a.seconds,
         "frame1_sha256": hashlib.sha256(normalise(bytes(frame1))).hexdigest(),
         "exit_status": status,
+        "first_frame_ms": ms(first_output, start),
+        "ready_ms": ms(ready_at, start),
+        "key_latency_ms": latency(key_sent),
+        "burst_settle_ms": settle(burst_chunks, burst_at),
     }
     print(json.dumps(result, indent=2))
     if a.json:
