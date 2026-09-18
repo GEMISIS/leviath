@@ -21,43 +21,69 @@ impl Dashboard {
         runstate::looks_abandoned(run, self.daemon_run_ids.as_ref(), self.now_secs())
     }
 
-    /// Sync agent list from on-disk run-state dir (background workers).
+    /// Sync the agent list with the runs directory.
+    ///
+    /// With a [`RunFeed`](super::super::run_loader::RunFeed) attached (the
+    /// real dashboard), this takes the loader thread's newest snapshot and
+    /// never touches the disk itself; until the first snapshot lands there is
+    /// nothing to show and the list says it is loading. Without one (tests),
+    /// it reads the directory there and then, the same way.
     pub(in crate::commands::dashboard) fn sync_from_run_state(&mut self) {
-        // Cached listing: metas re-parse only when their files change, and a
-        // finished run's is not even stat'ed every tick. Kept as the cache's
-        // own `Arc`s: the loop below reads fields and clones the few strings
-        // it keeps, and cloning 750 records ten times a second was a measurable
-        // share of an idle dashboard's work.
-        let runs: Vec<std::sync::Arc<runstate::RunMeta>> =
-            runstate::list_runs_cached(&mut self.meta_cache);
-        // Prune the per-run caches down to runs that still exist.
-        let live_dirs: std::collections::HashSet<std::path::PathBuf> = runs
-            .iter()
-            .map(|run| runstate::run_dir(&run.run_id))
-            .collect();
-        self.stages_cache.retain_under(&live_dirs);
-        self.context_cache.retain_under(&live_dirs);
-        // The run whose context is worth reading this tick: the one the cursor
-        // is on, which is the one the detail view draws. Taken before the loop
-        // because the loop borrows `self.agents` mutably.
+        // The run whose context is worth reading: the one the cursor is on,
+        // which is the one the detail view draws.
         //
         // Last frame's selection, which is this frame's: a keypress that moves
-        // the cursor is handled before the tick that follows it, so opening a
-        // run always finds its context already read.
+        // the cursor is handled before the tick that follows it.
         let showing = self
             .display_indices
             .get(self.selected)
             .and_then(|&i| self.agents.get(i))
             .map(|agent| agent.id.clone());
-        // Where each known run sits, so the loop is not a search per run: 750
-        // runs was 280,000 string compares a tick.
+        let snapshot = match self.run_feed.as_mut() {
+            Some(feed) => {
+                feed.show(showing.as_deref());
+                if let Some(latest) = feed.take() {
+                    self.run_snapshot = Some(latest);
+                }
+                let Some(snapshot) = self.run_snapshot.clone() else {
+                    return;
+                };
+                snapshot
+            }
+            None => std::sync::Arc::new(self.run_loader.collect(showing.as_deref(), true)),
+        };
+        self.runs_loading = false;
+        self.apply_run_snapshot(&snapshot);
+    }
+
+    /// Reconcile the agent list with one [`RunSnapshot`]: new runs become
+    /// rows, known ones take the snapshot's fields, and the clocks and
+    /// staleness that depend on "now" are worked out afresh.
+    ///
+    /// Runs every tick, with the same snapshot until a newer one lands, so it
+    /// reads memory only.
+    ///
+    /// [`RunSnapshot`]: super::super::run_loader::RunSnapshot
+    pub(super) fn apply_run_snapshot(&mut self, snapshot: &super::super::run_loader::RunSnapshot) {
+        // A run deleted here after this snapshot was read is still in it;
+        // adding it back would have the row the user just deleted reappear
+        // until the next snapshot. Once a snapshot read after the delete
+        // arrives, the disk has the final word again.
+        self.deleted_runs
+            .retain(|_, deleted_at| *deleted_at > snapshot.taken_at);
+        // Where each known run sits, so the loop is not a search per run.
         let positions: std::collections::HashMap<String, usize> = self
             .agents
             .iter()
             .enumerate()
             .map(|(i, agent)| (agent.id.clone(), i))
             .collect();
-        for run in runs {
+        let mut order_changed = !self.initial_sync_done;
+        for entry in &snapshot.runs {
+            let run = &entry.meta;
+            if self.deleted_runs.contains_key(&run.run_id) {
+                continue;
+            }
             // A live open prompt from the daemon's hub (populated each tick by
             // `sync_interactions`) is the authoritative signal that this agent is
             // blocked on us - surface it regardless of the persisted status,
@@ -65,7 +91,7 @@ impl Dashboard {
             // never flips on its own.
             let pending_request = self.pending_interactions.get(&run.run_id).cloned();
 
-            let stale = self.looks_stale(&run);
+            let stale = self.looks_stale(run);
             // The moment to read the run's working clock at. Nothing is driving
             // an abandoned run, so its clock stopped when its record was last
             // written; reading that one against the wall clock would have its
@@ -109,28 +135,15 @@ impl Dashboard {
                 (None, None)
             };
 
-            // Read stages index + context snapshot through the poll caches,
-            // hoisted out of the per-agent branches below so the cache borrow
-            // does not overlap the `self.agents` borrow.
-            let stages = runstate::read_stages_index_settled(
-                &run.run_id,
-                &mut self.stages_cache,
-                runstate::settle_window(&run),
-            );
-            // The context window, only for the run on screen. It is the largest
-            // file in a run directory by a wide margin, and the only thing that
-            // reads it is the detail view's context card, which draws one run.
-            //
-            // Reading every run's cost what the history cost: a machine with
-            // 750 runs behind it held 194 MB of context.json, and the dashboard
-            // parsed all of it before its first frame and then kept every
-            // snapshot alive in the cache. 1.3s to draw a list of runs, and
-            // 267 MB resident to show one of them.
-            let context_snapshot = if showing.as_deref() == Some(run.run_id.as_str()) {
-                runstate::read_context_snapshot_cached(&run.run_id, &mut self.context_cache)
-            } else {
-                None
-            };
+            let stages = entry.stages.clone();
+            // The context window is read for the run on screen only: it is the
+            // largest file in a run directory by a wide margin, and the only
+            // thing that reads it is the detail view's context card.
+            let context_snapshot = snapshot
+                .context
+                .as_ref()
+                .filter(|(id, _)| *id == run.run_id)
+                .map(|(_, context)| context.clone());
 
             if let Some(agent) = positions.get(&run.run_id).map(|&i| &mut self.agents[i]) {
                 let prev_status_was_active = matches!(
@@ -170,6 +183,14 @@ impl Dashboard {
                     }
                 }
 
+                // Only these decide where the row sits and whether a filter
+                // matches it; anything else changing leaves the order alone.
+                if agent.status != status
+                    || agent.last_progress_at != run.last_progress_at
+                    || agent.title != run.title
+                {
+                    order_changed = true;
+                }
                 agent.stage = run.current_stage.clone();
                 agent.stage_index = run.stage_index;
                 agent.num_stages = run.num_stages;
@@ -255,6 +276,7 @@ impl Dashboard {
                         );
                     }
                 }
+                order_changed = true;
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
                     blueprint_name: run.agent_name.clone(),
@@ -282,12 +304,16 @@ impl Dashboard {
                     last_progress_at: run.last_progress_at,
                     runtime_secs: run.active_runtime_secs(clock_now),
                     clock_now,
-                    graph: load_stage_graph(&run.agent_path),
+                    graph: entry.graph.clone(),
                     accepts_messages: true,
                 });
             }
         }
-        self.update_display_indices();
+        // Re-sorting and re-nesting thousands of rows is wasted on the ticks
+        // where only clocks move.
+        if order_changed {
+            self.update_display_indices();
+        }
         self.initial_sync_done = true;
     }
 }

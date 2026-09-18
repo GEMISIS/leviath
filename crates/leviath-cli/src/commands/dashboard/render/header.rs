@@ -227,7 +227,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -468,7 +468,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-stok", AgentDisplayStatus::Active);
-        agent.stages.push(crate::runstate::StageRecord {
+        std::sync::Arc::make_mut(&mut agent.stages).push(crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             prompt_tokens: 200,

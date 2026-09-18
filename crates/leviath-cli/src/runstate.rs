@@ -162,8 +162,21 @@ impl<T> StatCache<T> {
         parse: impl FnOnce(&str) -> Option<T>,
         recheck_after: std::time::Duration,
     ) -> Option<Arc<T>> {
+        self.get_with_recheck_by(path, parse, |_| recheck_after)
+    }
+
+    /// [`get_with_recheck`](Self::get_with_recheck), with the window worked
+    /// out from what the cache holds for `path` (`None` for nothing, or a file
+    /// that did not parse), in one lookup: a poller over thousands of settled
+    /// runs does little else per run but hash its path.
+    pub(crate) fn get_with_recheck_by(
+        &mut self,
+        path: &Path,
+        parse: impl FnOnce(&str) -> Option<T>,
+        recheck_after: impl FnOnce(Option<&T>) -> std::time::Duration,
+    ) -> Option<Arc<T>> {
         if let Some(entry) = self.entries.get(path)
-            && entry.checked.elapsed() < recheck_after
+            && entry.checked.elapsed() < recheck_after(entry.value.as_deref())
         {
             return entry.value.clone();
         }
@@ -197,11 +210,6 @@ impl<T> StatCache<T> {
         value
     }
 
-    /// The cached value for `path`, without asking the filesystem anything.
-    pub(crate) fn peek(&self, path: &Path) -> Option<Arc<T>> {
-        self.entries.get(path).and_then(|entry| entry.value.clone())
-    }
-
     /// Drop entries for files under runs that no longer exist, so a
     /// long-lived poller's cache stays bounded by the live run set.
     pub(crate) fn retain_under(&mut self, keep: &std::collections::HashSet<PathBuf>) {
@@ -228,6 +236,24 @@ pub(crate) fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_arc
     leviath_core::run_archive::read_archive_lenient(&mut bytes.as_slice())
         .ok()
         .map(|(_version, records)| records)
+}
+
+/// A file's size and modification time: what tells a reader whether it has
+/// changed since it was last read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    pub(crate) mtime: std::time::SystemTime,
+    pub(crate) len: u64,
+}
+
+/// The stamp of a run's archive (`<run_dir>/run.lvr`), or `None` when it has
+/// none.
+pub(crate) fn archive_stamp(run_id: &str) -> Option<FileStamp> {
+    let meta = std::fs::metadata(run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE)).ok()?;
+    Some(FileStamp {
+        mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+        len: meta.len(),
+    })
 }
 
 /// Stream a run's raw journal records through `visit`, one at a time, without
@@ -677,33 +703,106 @@ pub(crate) fn family_of(root_id: &str) -> Vec<String> {
 }
 
 /// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
-/// re-parsed only when its stat changes, and cache entries for deleted runs
-/// are dropped. Same ordering and skip-unreadable behavior as `list_runs`.
-pub(crate) fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
-    let dir = runs_dir();
-    let mut runs = Vec::new();
-    let mut live_dirs = std::collections::HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            live_dirs.insert(entry.path());
-            let meta_path = entry.path().join(leviath_core::files::META_FILE);
-            // A run this poller already knows to be finished is asked about
-            // once a second; a live one (or one never seen) every time.
-            let recheck = cache
-                .peek(&meta_path)
-                .map_or(std::time::Duration::ZERO, |meta| settle_window(&meta));
-            if let Some(meta) = cache.get_with_recheck(
-                &meta_path,
-                |json| serde_json::from_str::<RunMeta>(json).ok(),
-                recheck,
-            ) {
-                runs.push(meta);
-            }
+/// re-parsed only when its stat changes, the runs directory is listed again
+/// only when it may have gained or lost a run (see [`RunDirListing`]), and
+/// cache entries for deleted runs are dropped. Same ordering and
+/// skip-unreadable behavior as `list_runs`.
+pub(crate) fn list_runs_cached(
+    cache: &mut StatCache<RunMeta>,
+    listing: &mut RunDirListing,
+) -> Vec<Arc<RunMeta>> {
+    if listing.refresh(&runs_dir()) {
+        cache.retain_under(&listing.dir_set());
+    }
+    let mut runs = Vec::with_capacity(listing.dirs.len());
+    for dir in &listing.dirs {
+        let meta_path = dir.join(leviath_core::files::META_FILE);
+        // A run this poller already knows to be finished is asked about
+        // once a second; a live one (or one never seen) every time.
+        if let Some(meta) = cache.get_with_recheck_by(
+            &meta_path,
+            |json| serde_json::from_str::<RunMeta>(json).ok(),
+            |meta| meta.map_or(std::time::Duration::ZERO, settle_window),
+        ) {
+            runs.push(meta);
         }
     }
-    cache.retain_under(&live_dirs);
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs
+}
+
+/// The run directories under the runs directory, for a poller that asks many
+/// times a second.
+///
+/// Listing a directory of thousands of runs ten times a second, to learn that
+/// no run was created or deleted, would be most of what an idle poller does.
+/// Either one changes the runs directory's mtime, so the listing is kept
+/// until the mtime moves.
+///
+/// Unless the mtime is recent: a filesystem stamps times more coarsely than a
+/// poller asks (a second, on some), so a run created in the same stamp as the
+/// last listing would leave the mtime where it was. A listing is only trusted
+/// once its mtime is [`LISTING_TRUSTED_AFTER`] older than the moment it was
+/// taken; a directory that changed more recently than that is listed every
+/// time, as it always was.
+#[derive(Default)]
+pub(crate) struct RunDirListing {
+    dirs: Vec<PathBuf>,
+    /// The runs directory's mtime at the last listing, and when it was taken.
+    stamp: Option<(std::time::SystemTime, std::time::SystemTime)>,
+    /// Whether the last [`refresh`](Self::refresh) listed the directory.
+    relisted: bool,
+}
+
+#[cfg(test)]
+impl RunDirListing {
+    /// As if the last listing was taken long after its directory last
+    /// changed, so an unchanged directory is not listed again.
+    pub(crate) fn age(&mut self) {
+        self.stamp = self
+            .stamp
+            .map(|(mtime, _)| (mtime, mtime + LISTING_TRUSTED_AFTER));
+    }
+}
+
+/// See [`RunDirListing`]: coarser than any filesystem's time stamps.
+const LISTING_TRUSTED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl RunDirListing {
+    /// List `dir` again unless it cannot have changed since the last listing.
+    /// Returns whether it listed, which is when the set of runs may differ.
+    pub(crate) fn refresh(&mut self, dir: &Path) -> bool {
+        let mtime = std::fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+        let settled = match (mtime, self.stamp) {
+            (Some(now), Some((then, listed_at))) => {
+                now == then
+                    && listed_at
+                        .duration_since(then)
+                        .is_ok_and(|age| age >= LISTING_TRUSTED_AFTER)
+            }
+            _ => false,
+        };
+        self.relisted = !settled;
+        if settled {
+            return false;
+        }
+        let listed_at = std::time::SystemTime::now();
+        self.dirs = std::fs::read_dir(dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        self.stamp = mtime.map(|mtime| (mtime, listed_at));
+        true
+    }
+
+    /// Whether the last [`refresh`](Self::refresh) listed the directory.
+    pub(crate) fn relisted(&self) -> bool {
+        self.relisted
+    }
+
+    /// The listed run directories, as a set for [`StatCache::retain_under`].
+    pub(crate) fn dir_set(&self) -> std::collections::HashSet<PathBuf> {
+        self.dirs.iter().cloned().collect()
+    }
 }
 
 /// How long a poller may go without re-stat'ing a run's files once the run
@@ -731,21 +830,21 @@ const SETTLED_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 pub(crate) fn read_stages_index_cached(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
-) -> Vec<StageRecord> {
+) -> Arc<Vec<StageRecord>> {
     read_stages_index_settled(run_id, cache, std::time::Duration::ZERO)
 }
 
 /// [`read_stages_index_cached`] with the poller's [`settle_window`] for the
 /// run, so a finished run's stage ledger is not stat'ed every tick either.
+/// Shared, not copied: the ledger is handed to the run list every tick.
 pub(crate) fn read_stages_index_settled(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
     recheck_after: std::time::Duration,
-) -> Vec<StageRecord> {
+) -> Arc<Vec<StageRecord>> {
     let path = run_dir(run_id).join(leviath_core::files::STAGES_FILE);
     cache
         .get_with_recheck(&path, |json| serde_json::from_str(json).ok(), recheck_after)
-        .map(|records| records.as_ref().clone())
         .unwrap_or_default()
 }
 
@@ -1913,8 +2012,9 @@ mod tests {
             let mut metas = StatCache::default();
             let mut stages = StatCache::default();
             let mut contexts = StatCache::default();
+            let mut listing = RunDirListing::default();
 
-            let listed = list_runs_cached(&mut metas);
+            let listed = list_runs_cached(&mut metas, &mut listing);
             assert_eq!(listed.len(), 1);
             assert_eq!(listed[0].run_id, list_runs()[0].run_id);
 
@@ -1945,7 +2045,7 @@ mod tests {
             );
             second.started_at += 100;
             create_run(&second).unwrap();
-            let listed = list_runs_cached(&mut metas);
+            let listed = list_runs_cached(&mut metas, &mut listing);
             assert_eq!(listed.len(), 2);
             assert_eq!(listed[0].run_id, "cached-run-2", "newest first");
 
@@ -1954,25 +2054,59 @@ mod tests {
             // cached until the file changes).
             std::fs::create_dir_all(run_dir("garbled-run")).unwrap();
             std::fs::write(run_dir("garbled-run").join("meta.json"), "not json {{").unwrap();
-            assert_eq!(list_runs_cached(&mut metas).len(), 2);
+            assert_eq!(list_runs_cached(&mut metas, &mut listing).len(), 2);
 
             // A run whose dir disappears falls out of the cached listing.
             std::fs::remove_dir_all(run_dir("garbled-run")).unwrap();
             std::fs::remove_dir_all(run_dir("cached-run")).unwrap();
             std::fs::remove_dir_all(run_dir("cached-run-2")).unwrap();
-            assert!(list_runs_cached(&mut metas).is_empty());
+            assert!(list_runs_cached(&mut metas, &mut listing).is_empty());
             assert!(read_stages_index_cached("cached-run", &mut stages).is_empty());
             assert!(read_context_snapshot_cached("cached-run", &mut contexts).is_none());
 
             // And a missing runs DIRECTORY altogether lists nothing (the
             // read_dir-failed arm).
             std::fs::remove_dir_all(runs_dir()).unwrap();
-            assert!(list_runs_cached(&mut metas).is_empty());
+            assert!(list_runs_cached(&mut metas, &mut listing).is_empty());
         });
     }
 
+    /// A listing is kept only once the directory's mtime is older than the
+    /// listing by more than a coarse filesystem's stamp; a directory that
+    /// changed since, or recently, or is missing, is listed again.
+    #[test]
+    fn a_run_listing_is_kept_only_once_its_directory_has_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("run-a")).unwrap();
+        let mut listing = RunDirListing::default();
+        assert!(listing.refresh(dir.path()), "never listed");
+        assert!(listing.relisted());
+        assert_eq!(listing.dir_set().len(), 1);
+        assert!(listing.refresh(dir.path()), "changed too recently to trust");
+
+        // As if listed well after the directory last changed.
+        listing.age();
+        let (mtime, _) = listing.stamp.unwrap();
+        assert!(!listing.refresh(dir.path()), "settled and unchanged");
+        assert!(!listing.relisted());
+
+        // The directory moved on since that listing.
+        listing.stamp = Some((
+            mtime - std::time::Duration::from_secs(60),
+            mtime + LISTING_TRUSTED_AFTER,
+        ));
+        assert!(listing.refresh(dir.path()));
+
+        // A runs directory that is not there lists nothing.
+        let missing = dir.path().join("missing");
+        assert!(listing.refresh(&missing));
+        assert!(listing.dir_set().is_empty());
+        assert!(listing.stamp.is_none());
+    }
+
     /// A settled entry is answered from memory inside its window and from the
-    /// filesystem outside it; `peek` never asks the filesystem at all.
+    /// filesystem outside it, and the window is worked out from what is
+    /// cached.
     #[test]
     fn a_stat_cache_honours_the_recheck_window() {
         let dir = tempfile::tempdir().unwrap();
@@ -1980,9 +2114,26 @@ mod tests {
         std::fs::write(&path, "1").unwrap();
         let mut cache: StatCache<String> = StatCache::default();
         let parse = |s: &str| Some(s.to_string());
-        assert!(cache.peek(&path).is_none(), "nothing cached yet");
-        assert_eq!(*cache.get_with(&path, parse).unwrap(), "1");
-        assert_eq!(*cache.peek(&path).unwrap(), "1");
+        let mut seen = Vec::new();
+        let mut window_for = |cached: Option<&String>| {
+            seen.push(cached.cloned());
+            std::time::Duration::from_secs(3600)
+        };
+        assert_eq!(
+            *cache
+                .get_with_recheck_by(&path, parse, &mut window_for)
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            *cache
+                .get_with_recheck_by(&path, parse, &mut window_for)
+                .unwrap(),
+            "1"
+        );
+        // Nothing was cached for the first read, so it had no window to ask
+        // about; the second saw what the first cached.
+        assert_eq!(seen, vec![Some("1".to_string())]);
 
         // The file changes. Inside the window the old value stands, because
         // the point is not to stat; outside it the change is seen. The new
@@ -2001,7 +2152,6 @@ mod tests {
         // A missing file is forgotten, and a window does not resurrect it.
         std::fs::remove_file(&path).unwrap();
         assert!(cache.get_with(&path, parse).is_none());
-        assert!(cache.peek(&path).is_none());
         assert!(cache.get_with_recheck(&path, parse, hour).is_none());
     }
 
@@ -2066,15 +2216,16 @@ mod tests {
             live.status = RunStatus::Running;
             create_run(&live).unwrap();
             let mut metas = StatCache::default();
+            let mut listing = RunDirListing::default();
             let mut stages = StatCache::default();
-            assert_eq!(list_runs_cached(&mut metas).len(), 2);
+            assert_eq!(list_runs_cached(&mut metas, &mut listing).len(), 2);
 
             // Both records change on disk.
             done.title = Some("renamed".to_string());
             write_meta(&done).unwrap();
             live.iteration = 7;
             write_meta(&live).unwrap();
-            let listed = list_runs_cached(&mut metas);
+            let listed = list_runs_cached(&mut metas, &mut listing);
             let by_id = |id: &str| listed.iter().find(|m| m.run_id == id).unwrap().clone();
             assert_eq!(by_id("live").iteration, 7, "a live run is read every tick");
             assert_eq!(

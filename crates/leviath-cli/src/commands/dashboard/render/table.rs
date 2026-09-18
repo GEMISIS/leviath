@@ -38,6 +38,30 @@ fn table_column_widths(area: Rect) -> Vec<usize> {
         .collect()
 }
 
+/// The rows of a `len`-row table worth building for one frame of a table
+/// `height` rows tall that was last scrolled to `offset`, with `selected`
+/// highlighted.
+///
+/// The table widget scrolls only as far as it must to show the selection, so
+/// this frame's first row lies between the selection and the last offset. The
+/// window reaches a screen beyond both ends of that span, which holds every
+/// row the widget could draw, and sits inside the list.
+fn row_window(
+    len: usize,
+    offset: usize,
+    selected: Option<usize>,
+    height: usize,
+) -> std::ops::Range<usize> {
+    let selected = selected.unwrap_or(offset);
+    let start = offset.min(selected).saturating_sub(height).min(len);
+    let end = offset
+        .max(selected)
+        .saturating_add(height.saturating_mul(2))
+        .saturating_add(1)
+        .min(len);
+    start..end
+}
+
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_agent_table(
         &mut self,
@@ -80,11 +104,20 @@ impl Dashboard {
         let any_marked = !self.marked.is_empty();
         let col_w = table_column_widths(area);
 
-        let rows: Vec<Row> = self
-            .display_indices
+        // Rows are built for a window around what is on screen, not for the
+        // whole list: formatting thousands of rows a frame to show forty would
+        // be most of the draw. See `row_window`.
+        let window = row_window(
+            self.display_indices.len(),
+            self.table_state.offset(),
+            self.table_state.selected(),
+            area.height.saturating_sub(3) as usize,
+        );
+        let rows: Vec<Row> = self.display_indices[window.clone()]
             .iter()
             .enumerate()
-            .map(|(pos, &idx)| {
+            .map(|(i, &idx)| {
+                let pos = window.start + i;
                 let agent = &self.agents[idx];
                 // Tree shape (parent → child nesting); default when flat.
                 let tree = self.tree_rows.get(pos).cloned().unwrap_or_default();
@@ -197,7 +230,9 @@ impl Dashboard {
             })
             .collect();
 
-        let empty_state_msg: Option<String> = if self.agents.is_empty() {
+        let empty_state_msg: Option<String> = if self.runs_loading {
+            Some("  Loading runs…".to_string())
+        } else if self.agents.is_empty() {
             Some(
                 "  No agent runs yet. Press `n` to start one, or `a` to build an agent."
                     .to_string(),
@@ -273,7 +308,14 @@ impl Dashboard {
                     .fg(C_WHITE),
             );
 
-        frame.render_stateful_widget(table, area, &mut self.table_state);
+        // The widget scrolls within the window exactly as it would over the
+        // whole list, since the window holds everything it could scroll to;
+        // its answer is moved back into whole-list positions.
+        let mut state = ratatui::widgets::TableState::default()
+            .with_offset(self.table_state.offset() - window.start)
+            .with_selected(self.table_state.selected().map(|s| s - window.start));
+        frame.render_stateful_widget(table, area, &mut state);
+        *self.table_state.offset_mut() = state.offset() + window.start;
         self.register_run_row_clicks(area, any_marked);
     }
 
@@ -764,7 +806,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -808,6 +850,70 @@ mod tests {
             style_at_text(&terminal, "daemon unreachable").fg,
             Some(crate::tui::theme::C_WARN)
         );
+    }
+
+    /// The window holds a screen either side of the span between the last
+    /// offset and the selection, clipped to the list.
+    #[test]
+    fn the_row_window_covers_everything_the_table_could_scroll_to() {
+        assert_eq!(row_window(1000, 0, Some(0), 20), 0..41);
+        assert_eq!(row_window(1000, 500, Some(510), 20), 480..551);
+        // A jump far past the offset (End) reaches the selection.
+        assert_eq!(row_window(1000, 0, Some(999), 20), 0..1000);
+        // Nothing selected: the window follows the offset alone.
+        assert_eq!(row_window(1000, 300, None, 20), 280..341);
+        // A list shorter than a screen, and an offset left past its end.
+        assert_eq!(row_window(5, 0, Some(4), 20), 0..5);
+        assert_eq!(row_window(5, 40, None, 20), 5..5);
+    }
+
+    /// Scrolled deep into a long list, the table draws the rows around the
+    /// selection, and keeps the offset it scrolled to in whole-list terms.
+    #[test]
+    fn a_long_list_draws_the_rows_around_the_selection() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        let mut dash = make_test_dashboard();
+        for i in 0..2000 {
+            let mut agent = make_test_agent(&format!("run-{i:04}"), AgentDisplayStatus::Complete);
+            agent.title = Some(format!("row {i:04}"));
+            agent.started_at = 100_000 - i;
+            dash.agents.push(agent);
+        }
+        dash.update_display_indices();
+        dash.selected = 1500;
+        dash.table_state.select(Some(1500));
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("row 1500"), "{text}");
+        assert!(!text.contains("row 0000"), "{text}");
+        let offset = dash.table_state.offset();
+        assert!(offset <= 1500 && 1500 < offset + 17, "offset {offset}");
+
+        // Back to the top: the table scrolls up to it.
+        dash.selected = 0;
+        dash.table_state.select(Some(0));
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        assert!(rendered_buffer(&terminal).contains("row 0000"));
+        assert_eq!(dash.table_state.offset(), 0);
+    }
+
+    /// Before the first read of the runs directory the list says it is
+    /// loading, not that there are no runs.
+    #[test]
+    fn the_run_list_says_it_is_loading_until_the_first_read() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.runs_loading = true;
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("Loading runs"), "{text}");
+        assert!(!text.contains("No agent runs yet"), "{text}");
     }
 
     #[test]
@@ -1478,7 +1584,7 @@ mod tests {
             "ft1", "prompt", "main", true,
         ));
         agent.stage_index = 0;
-        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)].into();
         dash.agents.push(agent);
         dash.update_display_indices();
         let line = dash.build_detail_help_bar();

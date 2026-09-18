@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::runstate::{self, RunMeta, StatCache};
 
-/// The shared parse cache over the runs directory. Cloning shares it; a fresh
-/// one starts empty and fills on its first read.
+/// The shared parse cache over the runs directory, and its listing. Cloning
+/// shares them; a fresh one starts empty and fills on its first read.
 #[derive(Clone, Default)]
 pub(super) struct RunIndex {
-    cache: Arc<Mutex<StatCache<RunMeta>>>,
+    cache: Arc<Mutex<(StatCache<RunMeta>, runstate::RunDirListing)>>,
 }
 
 /// Every run as of one read of the runs directory, newest first, with the
@@ -79,13 +79,14 @@ impl RunIndex {
     ///
     /// The lock is taken inside the blocking task and released before it
     /// returns, so it is never held across an await. Requests that arrive
-    /// together take turns; a warm pass over a thousand settled runs is a
-    /// `read_dir` and a stat per live run, so the turn is short.
+    /// together take turns; a warm pass over a thousand settled runs is a stat
+    /// of the runs directory and one per live run, so the turn is short.
     pub(super) async fn snapshot(&self) -> RunSnapshot {
         let cache = Arc::clone(&self.cache);
         super::blocking::blocking(move || {
-            let mut cache = leviath_core::sync::lock(&cache);
-            RunSnapshot::new(runstate::list_runs_cached(&mut cache))
+            let mut guard = leviath_core::sync::lock(&cache);
+            let (metas, listing) = &mut *guard;
+            RunSnapshot::new(runstate::list_runs_cached(metas, listing))
         })
         .await
     }

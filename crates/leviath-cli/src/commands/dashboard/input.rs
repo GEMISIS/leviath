@@ -1186,7 +1186,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "test".to_string(),
             title: None,
@@ -2788,7 +2788,7 @@ mod tests {
             "ft1", "prompt", "main", true,
         ));
         agent.stage_index = 0;
-        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)].into();
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -3846,7 +3846,8 @@ mod tests {
             run_id: "run-1".to_string(),
             visits: crate::commands::dashboard::history::derive_visits(&points),
             points,
-            loaded_at_tick: u64::MAX,
+            checked_at_tick: u64::MAX,
+            stamp: None,
         });
         dash.context_history_idx = Some(0);
         dash

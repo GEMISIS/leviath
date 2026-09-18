@@ -366,8 +366,8 @@ pub(crate) struct DashboardAgent {
     /// stat-gated cache, and cloning a full context window per tick is the
     /// churn that cache exists to remove.
     pub context_snapshot: Option<std::sync::Arc<runstate::ContextSnapshot>>,
-    /// Per-stage records from stages.json
-    pub stages: Vec<StageRecord>,
+    /// Per-stage records from stages.json, shared with the loader's cache.
+    pub stages: std::sync::Arc<Vec<StageRecord>>,
     /// Working directory the agent ran in
     pub workdir: String,
     /// Original task prompt
@@ -768,7 +768,7 @@ mod tests {
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "do stuff".to_string(),
             title: Some("My Task".to_string()),

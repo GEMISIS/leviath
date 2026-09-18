@@ -207,6 +207,9 @@ impl Dashboard {
             self.delete_one(id, cancel);
         }
         self.agents.retain(|a| !ids.contains(&a.id));
+        let now = std::time::Instant::now();
+        self.deleted_runs
+            .extend(ids.into_iter().map(|id| (id, now)));
         self.update_display_indices();
     }
 

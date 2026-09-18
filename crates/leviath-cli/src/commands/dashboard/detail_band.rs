@@ -453,7 +453,7 @@ condition = "llm_choice"
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
-            stages: vec![],
+            stages: Default::default(),
             workdir: "/tmp".to_string(),
             task: "t".to_string(),
             title: None,
@@ -504,7 +504,8 @@ condition = "llm_choice"
             points,
             // Far enough ahead that the TTL never reloads it over a stub
             // loader that would hand back nothing.
-            loaded_at_tick: u64::MAX,
+            checked_at_tick: u64::MAX,
+            stamp: None,
         });
     }
 
@@ -542,7 +543,8 @@ condition = "llm_choice"
             record("implement", 1, true),
             record("review", 2, true),
             record("done", 3, false),
-        ];
+        ]
+        .into();
         dash.agents.push(run);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -593,7 +595,7 @@ condition = "llm_choice"
         looped_run(&mut dash, "run-1");
         let mut failed = record("review", 2, true);
         failed.status = leviath_core::run_meta::StageRunStatus::Error;
-        dash.agents[0].stages[2] = failed;
+        std::sync::Arc::make_mut(&mut dash.agents[0].stages)[2] = failed;
         let terminal = draw(&mut dash, 160, 40);
         assert_eq!(style_at_text(&terminal, "review").fg, Some(C_ERROR));
         // The stages that did not fail are untouched.

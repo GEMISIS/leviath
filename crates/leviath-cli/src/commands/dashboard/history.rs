@@ -6,8 +6,8 @@
 //! data plus real visit counts (stages.json holds one record per stage,
 //! rewritten in place, so revisits are invisible there). This module loads
 //! the archive once per run (through an injectable loader, so tests count
-//! reads), derives the visit timeline, and refreshes on a tick-based TTL
-//! only while something is actually looking at it.
+//! reads), derives the visit timeline, and refreshes only when the archive
+//! has changed, checked on a tick-based TTL while something is looking at it.
 
 use leviath_core::run_archive::RunPoint;
 
@@ -33,11 +33,15 @@ pub(super) struct RunHistoryCache {
     pub(super) run_id: String,
     pub(super) points: Vec<RunPoint>,
     pub(super) visits: Vec<StageVisit>,
-    /// Tick the points were loaded at, for the TTL.
-    pub(super) loaded_at_tick: u64,
+    /// Tick the archive was last found unchanged (or loaded), for the TTL.
+    pub(super) checked_at_tick: u64,
+    /// The archive's stat when the points were read, so a reload happens only
+    /// when it has grown: a finished run's archive is read once.
+    pub(super) stamp: Option<crate::runstate::FileStamp>,
 }
 
-/// Reload no more often than this many ticks (~1s at the 100ms tick rate).
+/// Look at the archive no more often than this many ticks (~1s at the 100ms
+/// tick rate), and read it again only if it changed.
 pub(super) const HISTORY_TTL_TICKS: u64 = 10;
 
 /// Derive the visit timeline: a new visit starts at every point whose
