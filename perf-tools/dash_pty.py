@@ -118,12 +118,14 @@ def main():
             try:
                 chunk = os.read(fd, 1 << 16)
             except BlockingIOError:
-                chunk = b"-"
+                # select() said readable but the data went elsewhere first;
+                # the next pass reads it.
+                chunk = None
             except OSError:
                 break
-            if not chunk:
+            if chunk == b"":
                 break
-            if chunk != b"-":
+            if chunk:
                 out.extend(chunk)
                 # Answer the terminal queries a real emulator answers. crossterm
                 # asks for keyboard-enhancement flags and primary device
@@ -143,9 +145,10 @@ def main():
         if w and pending:
             try:
                 n = os.write(fd, pending)
-                del pending[:n]
             except BlockingIOError:
-                pass
+                # The pty's input buffer is full; the rest goes on a later pass.
+                n = 0
+            del pending[:n]
         if key_i < len(keys) and now >= next_key:
             pending.extend(keys[key_i:key_i + 1])
             key_sent.append((now, None))
