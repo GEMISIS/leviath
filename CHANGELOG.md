@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.6.3 - 2026-09-19
 
 ### Changed
 
@@ -22,6 +22,11 @@ same list.
   under `perf/`, with their baselines. `CONTRIBUTING.md` shows how to run
   them against a local build. `codeql_summary.py` stays here, in
   `scripts/`.
+- The **What is Leviath?** page opens on a table of six words: blueprint,
+  stage, transition, run, region, and agent. A blueprint is the files you
+  write (`agent.leviath` and the tools and scripts beside it), a run is one
+  execution of it, and a region is part of a run's memory. The glossary
+  says the same.
 
 ### Fixed
 
