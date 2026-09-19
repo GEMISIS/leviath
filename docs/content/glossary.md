@@ -13,13 +13,15 @@ not met, it should be here.
 
 ## The basics
 
-**Agent**: a directory holding an [`agent.leviath`](/docs/agents) blueprint, which you start with
-`lev run`.
+**Agent**: the casual word, and it means two things. "The agents I've built" means blueprints. "The
+agents I'm running" means runs. These docs say blueprint or run where the difference matters.
 
-**Blueprint**: the TOML file describing an agent, listing its stages, models, tools, and context
-layout. Some older text says *manifest*; it means the same file.
+**Blueprint**: the files you write to define what a run does: its [`agent.leviath`](/docs/agents)
+file (stages, models, tools, regions) and the tools and scripts in the directory beside it. Some older text says
+*manifest* for the `agent.leviath` file.
 
-**Run**: one execution of an agent. An agent is the recipe, a run is the cooking.
+**Run**: one execution of a blueprint, started with `lev run`, with its own id and its own memory. A
+blueprint is the recipe, a run is the cooking.
 
 **Run id**: the name a run is known by everywhere outside the engine, such as
 `coder-1785568852-8b48c0d1e2f3`. The CLI, the API, and the dashboard all use it. It is the handle you pass to
@@ -68,8 +70,8 @@ worked out once when the run began rather than repeatedly.
 
 ## Memory
 
-**Context region**: a named slice of the model's context window with its own budget and its own rule
-for what to throw away first. See [Structured context](/docs/context).
+**Context region**: a named part of a run's memory (its context window) with its own budget and
+its own rule for what to throw away first. See [Structured context](/docs/context).
 
 **Eviction**: what happens when a region goes over its budget. Depending on the region's kind, its
 content is dropped, summarized, or cleared.
