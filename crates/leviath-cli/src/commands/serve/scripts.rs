@@ -270,7 +270,8 @@ fn resolve(
             ));
         }
         (Some(agent), _) => {
-            let base = agent_dir(config, agent)?;
+            let base =
+                agent_dir(config, agent).map_err(|e| super::core::error::as_api_error(&e))?;
             // Tools are scanned out of `tools/`; a hook or validator is named by
             // a manifest path that resolves against the agent's own directory.
             let dir = match kind {
@@ -994,7 +995,8 @@ pub(super) async fn list_scripts(
     let candidates = wants_candidates(q.include.as_deref())?;
     let mut scripts = Vec::new();
     if let Some(name) = q.agent.as_deref() {
-        let dir = agent_dir(&state.current_config(), name)?;
+        let dir = agent_dir(&state.current_config(), name)
+            .map_err(|e| super::core::error::as_api_error(&e))?;
         collect_tools(&dir.join("tools"), "agent", Some(name), &mut scripts);
         collect_declared(&dir, name, &mut scripts);
         if candidates {

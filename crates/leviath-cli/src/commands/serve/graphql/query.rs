@@ -5,6 +5,8 @@
 //! re-implements a filter: `runs` builds the same [`RunSelection`] the REST
 //! listing builds, so the two cannot disagree about which runs match.
 
+use std::sync::Arc;
+
 use async_graphql::{Context, Enum, InputObject, Object};
 
 use super::super::blocking::blocking;
@@ -17,6 +19,7 @@ use super::connection::{Highlight, PageInfo, RunConnection, RunEdge};
 use super::error::IntoGraphql;
 use super::scalars::{Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
+use super::types::catalog::{Model, Provider, SkippedTool, Tool, ToolGroup, ToolInventory};
 use super::types::run::{Run, RunStatus};
 
 /// Sort order for the run listing.
@@ -208,7 +211,7 @@ impl RunFilter {
 /// hand-written and a clamped answer is still useful; a GraphQL client builds
 /// its query in code, and silently getting 200 of the 500 it asked for is the
 /// kind of bug that only shows up as missing rows much later.
-fn page_size(first: i32) -> Result<usize, ServeError> {
+pub(crate) fn page_size(first: i32) -> Result<usize, ServeError> {
     match usize::try_from(first) {
         Ok(0) | Err(_) => Err(ServeError::BadRequest(
             "`first` must be at least 1; omit it for the default".to_string(),
@@ -289,8 +292,11 @@ impl Query {
         let has_next_page = chosen.len() > skip.saturating_add(page.len());
         let mut edges = Vec::with_capacity(page.len());
         for info in page {
+            // The parse came with the listing row, so there is no second parse
+            // here and no failure path: a row exists only because its manifest
+            // parsed.
             let manifest = blueprints::ManifestText::installed(info.manifest.clone());
-            let parsed = state.caches.blueprints.parse(&manifest).gql()?;
+            let parsed = Arc::clone(&info.parsed);
             edges.push(BlueprintEdge {
                 node: Blueprint {
                     parsed,
@@ -313,6 +319,90 @@ impl Query {
             },
             total,
             missing,
+        })
+    }
+
+    /// Every model this machine can route to.
+    ///
+    /// Answered from the catalogue this server keeps, so it costs no provider
+    /// call. Two providers can serve the same model id and bill to different
+    /// places, so `provider` is part of each answer rather than something a
+    /// client infers.
+    async fn models(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Only this provider's models.")] provider: Option<String>,
+        #[graphql(
+            desc = "Reload the provider listings before answering.",
+            default = false
+        )]
+        refresh: bool,
+    ) -> Vec<Model> {
+        let state = ctx.data_unchecked::<AppState>();
+        let query = super::super::config_types::ModelsQuery { provider, refresh };
+        let (_, listing) = super::super::config::models_with(state, &query).await;
+        listing.0.iter().map(Model::from).collect()
+    }
+
+    /// The providers this machine can reach, configured or not.
+    ///
+    /// `enabled` and `signedIn` are different questions with different
+    /// answers: a provider can be turned on with no credential stored, and a
+    /// credential can outlive the config entry that used it.
+    async fn providers(&self, ctx: &Context<'_>) -> Vec<Provider> {
+        let state = ctx.data_unchecked::<AppState>();
+        super::super::providers::provider_infos(state)
+            .iter()
+            .map(Provider::from)
+            .collect()
+    }
+
+    /// The tools an agent on this machine can call.
+    ///
+    /// Scoped to one blueprint's own directory when `agent` names one, which
+    /// is what an editor offering an `available_tools` list wants.
+    async fn tools(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Scope to this blueprint's own tools directory.")] agent: Option<String>,
+    ) -> async_graphql::Result<ToolInventory> {
+        let state = ctx.data_unchecked::<AppState>();
+        let config = state.current_config();
+        let dir = match agent.as_deref() {
+            Some(name) => Some(super::super::tools::agent_dir(&config, name).gql()?),
+            None => None,
+        };
+        // The walk over an agent directory belongs on the blocking pool.
+        let inventory = blocking(move || {
+            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), agent.as_deref())
+        })
+        .await;
+        Ok(ToolInventory {
+            tools: inventory
+                .tools
+                .into_iter()
+                .map(|tool| Tool {
+                    name: tool.name,
+                    source: tool.source.as_str().to_string(),
+                    path: tool.path.map(|p| p.display().to_string()),
+                    agent: tool.agent,
+                })
+                .collect(),
+            groups: leviath_core::blueprint::ToolGroup::ALL
+                .iter()
+                .map(|group| ToolGroup {
+                    name: group.token().to_string(),
+                    description: group.describe().to_string(),
+                })
+                .collect(),
+            skipped: inventory
+                .skipped
+                .into_iter()
+                .map(|skipped| SkippedTool {
+                    path: skipped.path.display().to_string(),
+                    reason: skipped.reason,
+                })
+                .collect(),
         })
     }
 

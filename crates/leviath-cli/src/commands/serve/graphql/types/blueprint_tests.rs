@@ -265,6 +265,46 @@ async fn a_stage_carries_its_own_block() {
     );
 }
 
+/// The stage fields a run's limits come from, and the edge ordering.
+///
+/// A stage with two edges is what makes the sort observable: the manifest
+/// holds them in a map, so without an order two identical requests could
+/// answer differently.
+#[tokio::test]
+async fn a_stage_carries_its_limits_and_orders_its_edges() {
+    let text = "[agent]\nname = \"router\"\n\n\
+                [stages.pick]\nmode = \"autonomous\"\nmax_revisits = 2\n\
+                requires_children = true\nallow_complete = true\nallow_as_worker = true\n\
+                available_connectors = [\"github\"]\n\n\
+                [stages.pick.transitions.zeta]\nhint = \"last alphabetically\"\n\n\
+                [stages.pick.transitions.alpha]\ncondition = \"always\"\n\n\
+                [stages.alpha]\nmode = \"autonomous\"\nallow_complete = true\n\n\
+                [stages.zeta]\nmode = \"autonomous\"\nallow_complete = true\n";
+    let json = ask(
+        text,
+        CoreSource::Installed,
+        "{ blueprint { stages { name maxRevisits requiresChildren allowComplete allowAsWorker
+                                availableConnectors transitions { target hint } } } }",
+    )
+    .await;
+    let pick = &json["blueprint"]["stages"][0];
+    assert_eq!(pick["name"], "pick");
+    assert_eq!(pick["maxRevisits"], 2);
+    assert_eq!(pick["requiresChildren"], true);
+    assert_eq!(pick["allowComplete"], true);
+    assert_eq!(pick["allowAsWorker"], true);
+    assert_eq!(pick["availableConnectors"][0], "github");
+    // Sorted by target, whatever order the manifest listed them in.
+    assert_eq!(pick["transitions"][0]["target"], "alpha");
+    assert!(pick["transitions"][0]["hint"].is_null());
+    assert_eq!(pick["transitions"][1]["target"], "zeta");
+
+    // A stage naming no revisit bound says so with a null rather than a zero.
+    let alpha = &json["blueprint"]["stages"][1];
+    assert!(alpha["maxRevisits"].is_null());
+    assert_eq!(alpha["requiresChildren"], false);
+}
+
 /// Regions carry what they hold and how they behave when full.
 #[tokio::test]
 async fn regions_carry_their_kind_and_ceiling() {

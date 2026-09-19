@@ -20,17 +20,21 @@
 //! `docs/schema/leviath.graphql` is generated from them and held in lockstep
 //! by a test, the way `openapi.json` is held to the router.
 
-use async_graphql::{EmptySubscription, Schema};
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::extract::Extension;
+use async_graphql::Schema;
+use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
+use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
+use axum::extract::{Extension, WebSocketUpgrade};
+use axum::response::Response;
 
 use super::types::AppState;
 
 mod connection;
 mod error;
+mod events;
 mod mutation;
 mod query;
 mod scalars;
+mod subscription;
 mod types;
 
 /// How deeply one query may nest.
@@ -48,7 +52,8 @@ const MAX_DEPTH: usize = 12;
 const MAX_COMPLEXITY: usize = 10_000;
 
 /// This server's schema.
-pub(super) type LeviathSchema = Schema<query::Query, mutation::Mutation, EmptySubscription>;
+pub(super) type LeviathSchema =
+    Schema<query::Query, mutation::Mutation, subscription::Subscription_>;
 
 /// Build the schema for one server.
 ///
@@ -56,11 +61,15 @@ pub(super) type LeviathSchema = Schema<query::Query, mutation::Mutation, EmptySu
 /// same for every request, and the per-request state travels in the execution
 /// context instead.
 pub(super) fn build_schema(state: AppState) -> LeviathSchema {
-    Schema::build(query::Query, mutation::Mutation, EmptySubscription)
-        .data(state)
-        .limit_depth(MAX_DEPTH)
-        .limit_complexity(MAX_COMPLEXITY)
-        .finish()
+    Schema::build(
+        query::Query,
+        mutation::Mutation,
+        subscription::Subscription_,
+    )
+    .data(state)
+    .limit_depth(MAX_DEPTH)
+    .limit_complexity(MAX_COMPLEXITY)
+    .finish()
 }
 
 /// `POST /graphql`: queries and mutations.
@@ -77,12 +86,34 @@ pub(super) async fn http(
     schema.execute(req.into_inner()).await.into()
 }
 
+/// `GET /ws/graphql`: subscriptions over `graphql-transport-ws`.
+///
+/// Mounted under `/ws/` deliberately. That prefix is what the auth layer
+/// accepts a `?token=` on, because a browser cannot put a header on a
+/// WebSocket, and what the request-limit layer exempts from the per-request
+/// deadline, because a subscription is meant to stay open.
+pub(super) async fn ws(
+    Extension(schema): Extension<LeviathSchema>,
+    protocol: GraphQLProtocol,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    // Upgraded by hand rather than with the ready-made service, so this stays a
+    // handler in the one route table the spec is held to.
+    upgrade
+        .protocols(ALL_WEBSOCKET_PROTOCOLS)
+        .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema, protocol).serve())
+}
+
 /// The SDL for this schema, for the lockstep test and
 /// `lev serve --print-graphql-schema`.
 pub(super) fn sdl() -> String {
-    Schema::build(query::Query, mutation::Mutation, EmptySubscription)
-        .finish()
-        .sdl()
+    Schema::build(
+        query::Query,
+        mutation::Mutation,
+        subscription::Subscription_,
+    )
+    .finish()
+    .sdl()
 }
 
 #[cfg(test)]

@@ -30,6 +30,15 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- Live frames over GraphQL, at `GET /ws/graphql`. A subscription names the frame
+  types it wants and the runs it is about, and both filters are applied on the
+  server, before a frame is serialized: a console watching one run of five
+  thousand is handed one run's frames rather than the fleet's.
+  `includeDescendants` adds the sub-agents of those runs as they spawn, so a
+  fan-out needs no re-subscribe. A subscription that falls behind now receives an
+  `EventsDropped` frame saying how many frames it missed; `/ws` skips a slow
+  listener silently, which reads exactly like a quiet run.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

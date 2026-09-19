@@ -1682,6 +1682,7 @@ than that feature, not broken.
 | `providers.signin` | `GET /api/providers` and the three admin routes under it. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
+| `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
 

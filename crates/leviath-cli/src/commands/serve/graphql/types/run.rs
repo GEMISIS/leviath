@@ -12,10 +12,12 @@ use async_graphql::{Context, Enum, Object, SimpleObject};
 
 use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
+use super::super::super::core::error::ServeError;
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
 use super::super::scalars::{BigInt, Decimal, Timestamp};
 use super::blueprint::Blueprint;
+use super::run_detail::{ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason};
 use crate::runstate::RunMeta;
 
 /// The lifecycle states a run moves through.
@@ -298,6 +300,202 @@ impl Run {
         self.meta.blueprint_digest.as_deref()
     }
 
+    /// Why this run is parked, and what would unblock it.
+    ///
+    /// Present only while the status is `WAITING_INPUT`. A run waiting on a
+    /// person also carries the prompt itself; a run parked on its own workers
+    /// carries only this, and needs nobody.
+    async fn wait_reason(&self) -> Option<WaitReason> {
+        self.meta.waiting_on.as_ref().map(WaitReason::from)
+    }
+
+    /// Post-hoc diagnostics: an empty or degraded run told from a healthy one
+    /// without reading logs.
+    async fn flags(&self) -> RunFlags {
+        RunFlags::from(&self.meta.flags)
+    }
+
+    /// The run's stage ledger: what each stage cost, and how often it ran.
+    ///
+    /// Bounded by the blueprint's stage count, so it is a list rather than a
+    /// connection. Read from the run's own `stages.json` only when selected.
+    /// Null, with an error, when that file will not read: one run's broken
+    /// ledger must not cost a client the page around it.
+    async fn stages(&self) -> Option<Vec<StageRecord>> {
+        let run_id = self.meta.run_id.clone();
+        let records = blocking(move || crate::runstate::read_stages_index(&run_id)).await;
+        Some(records.iter().map(StageRecord::from).collect())
+    }
+
+    /// The run's context window as it stands right now.
+    ///
+    /// Null for a run that has not written one yet, and for a finished run
+    /// whose window was never persisted. Region contents are their own field,
+    /// so asking for the shape of the window does not read its text.
+    async fn context(&self) -> Option<ContextWindow> {
+        let run_id = self.meta.run_id.clone();
+        let snapshot = blocking(move || crate::runstate::read_context_snapshot(&run_id)).await;
+        snapshot.map(|snapshot| ContextWindow {
+            snapshot: Arc::new(snapshot),
+        })
+    }
+
+    /// The answer this run submitted. Null until something is submitted.
+    async fn final_output(&self) -> Option<FinalOutput> {
+        let run_id = self.meta.run_id.clone();
+        blocking(move || crate::runstate::read_final_output(&run_id))
+            .await
+            .map(FinalOutput::from)
+    }
+
+    /// This run's direct children, paged.
+    ///
+    /// A connection rather than an array: a two-hundred-worker fan-out would
+    /// otherwise be one unbounded response. Nest the field to walk deeper, one
+    /// level per nesting, and read `pageInfo.hasNextPage` to see a level that
+    /// was cut. For a flat read of a whole subtree, `runs(filter: { parent: })`
+    /// is the same walk one page at a time.
+    async fn children(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Page size for this level.", default = 50)] first: i32,
+        #[graphql(desc = "How many of this run's children to skip.", default = 0)] skip: i32,
+    ) -> async_graphql::Result<ChildConnection> {
+        let state = ctx.data_unchecked::<AppState>();
+        let limit = super::super::query::page_size(first).gql()?;
+        let skip = usize::try_from(skip)
+            .map_err(|_| ServeError::BadRequest("`skip` cannot be negative".to_string()))
+            .gql()?;
+        // The index already holds the parent-to-children map, so a level is a
+        // lookup rather than a scan of every run.
+        let snapshot = state.caches.run_index.snapshot().await;
+        let children: Vec<Arc<RunMeta>> = snapshot
+            .under(Some(self.meta.run_id.as_str()))
+            .cloned()
+            .collect();
+        let total = i32::try_from(children.len()).unwrap_or(i32::MAX);
+        let page: Vec<Arc<RunMeta>> = children.iter().skip(skip).take(limit).cloned().collect();
+        let has_next_page = children.len() > skip.saturating_add(page.len());
+        let now = self.now;
+        Ok(ChildConnection {
+            edges: page
+                .into_iter()
+                .map(|meta| ChildEdge {
+                    node: Run { meta, now },
+                })
+                .collect(),
+            total,
+            has_next_page,
+        })
+    }
+
+    /// How deep and how wide this run's sub-agent tree is, without walking it.
+    ///
+    /// The roll-up covers the whole subtree, which is the figure a fan-out is
+    /// judged by: a parent that spent little and whose fifty workers spent a
+    /// great deal is not a cheap run.
+    async fn tree_status(&self, ctx: &Context<'_>) -> RunTreeStatus {
+        let state = ctx.data_unchecked::<AppState>();
+        let snapshot = state.caches.run_index.snapshot().await;
+        let mut depth = 0;
+        let mut descendants = 0;
+        let mut prompt_tokens = 0usize;
+        let mut completion_tokens = 0usize;
+        let mut cached_tokens = 0usize;
+        let mut cache_write_tokens = 0usize;
+        // Breadth-first over the index's own parent map, which is why this is a
+        // walk of the subtree rather than of the store.
+        let mut level: Vec<String> = vec![self.meta.run_id.clone()];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for run_id in &level {
+                for child in snapshot.under(Some(run_id.as_str())) {
+                    descendants += 1;
+                    prompt_tokens += child.prompt_tokens;
+                    completion_tokens += child.completion_tokens;
+                    cached_tokens += child.cached_tokens;
+                    cache_write_tokens += child.cache_write_tokens;
+                    next.push(child.run_id.clone());
+                }
+            }
+            if !next.is_empty() {
+                depth += 1;
+            }
+            level = next;
+        }
+        RunTreeStatus {
+            rollup: TokenUsage {
+                prompt_tokens: BigInt((self.meta.prompt_tokens + prompt_tokens) as i64),
+                completion_tokens: BigInt((self.meta.completion_tokens + completion_tokens) as i64),
+                cached_tokens: BigInt((self.meta.cached_tokens + cached_tokens) as i64),
+                cache_write_tokens: BigInt(
+                    (self.meta.cache_write_tokens + cache_write_tokens) as i64,
+                ),
+            },
+            depth: as_i32(depth),
+            descendant_count: as_i32(descendants),
+        }
+    }
+
+    /// A stage's logs.
+    ///
+    /// `stageIndex` picks one stage, `allStages` reads every stage in order, and
+    /// neither reads more than `tail` bytes from the end of each stream. The cap
+    /// is the server's, because `allStages` multiplies whatever the client asks
+    /// for by the stage count.
+    async fn logs(
+        &self,
+        #[graphql(desc = "One stage by index; omitted means the stage the run is on now.")]
+        stage_index: Option<i32>,
+        #[graphql(
+            desc = "Every stage's logs in order, instead of one stage's.",
+            default = false
+        )]
+        all_stages: bool,
+        #[graphql(
+            desc = "Read the operational log rather than the output stream.",
+            default = false
+        )]
+        operational: bool,
+        #[graphql(desc = "Bytes to read from the end of each stream.")] tail: Option<i32>,
+    ) -> async_graphql::Result<String> {
+        let selector = match (stage_index, all_stages) {
+            (Some(_), true) => {
+                return Err(ServeError::BadRequest(
+                    "`stageIndex` names one stage and `allStages` names all of them, so they \
+                     cannot be combined"
+                        .to_string(),
+                ))
+                .gql();
+            }
+            (Some(index), false) => crate::runstate::StageSelector::Index(
+                usize::try_from(index)
+                    .map_err(|_| {
+                        ServeError::BadRequest("`stageIndex` cannot be negative".to_string())
+                    })
+                    .gql()?,
+            ),
+            (None, true) => crate::runstate::StageSelector::All,
+            (None, false) => crate::runstate::StageSelector::Current,
+        };
+        let stream = match operational {
+            true => crate::runstate::LogStream::Operational,
+            false => crate::runstate::LogStream::Output,
+        };
+        let bytes = match tail {
+            None => DEFAULT_LOG_TAIL_BYTES,
+            Some(asked) => u64::try_from(asked)
+                .map_err(|_| ServeError::BadRequest("`tail` cannot be negative".to_string()))
+                .gql()?
+                .min(MAX_LOG_TAIL_BYTES),
+        };
+        let run_id = self.meta.run_id.clone();
+        Ok(
+            blocking(move || crate::runstate::tail_run_logs(&run_id, selector, stream, bytes))
+                .await,
+        )
+    }
+
     /// Caller-supplied metadata from spawn. Values are always strings.
     ///
     /// Sorted by key: the daemon keeps these in a hash map, and a listing
@@ -317,6 +515,48 @@ impl Run {
         entries
     }
 }
+
+/// One child run with nothing else attached.
+///
+/// No cursor: a level is read from the index's parent map in listing order, and
+/// `skip` walks it. A keyset cursor would promise stability across a tree that
+/// is growing under the reader, which is not something this can offer.
+#[derive(SimpleObject)]
+pub(crate) struct ChildEdge {
+    /// The child run.
+    pub(crate) node: Run,
+}
+
+/// One page of a run's direct children.
+#[derive(SimpleObject)]
+pub(crate) struct ChildConnection {
+    /// The children on this page.
+    pub(crate) edges: Vec<ChildEdge>,
+    /// How many direct children this run has.
+    pub(crate) total: i32,
+    /// Whether another page follows.
+    pub(crate) has_next_page: bool,
+}
+
+/// How deep and how wide a run's sub-agent tree is.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct RunTreeStatus {
+    /// Token roll-up over the whole subtree, this run included.
+    pub(crate) rollup: TokenUsage,
+    /// The deepest nesting below this run.
+    pub(crate) depth: i32,
+    /// How many runs are below it, at any depth.
+    pub(crate) descendant_count: i32,
+}
+
+/// How much of a log stream is read when the client does not say.
+const DEFAULT_LOG_TAIL_BYTES: u64 = 32 * 1024;
+
+/// The most one request reads from each stream.
+///
+/// `allStages` multiplies whatever is asked for by the stage count, so the cap
+/// is the server's rather than the client's.
+const MAX_LOG_TAIL_BYTES: u64 = 1024 * 1024;
 
 /// Narrow a daemon counter to the 32 bits GraphQL's `Int` carries.
 ///

@@ -155,12 +155,15 @@ pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<Bl
     let content = std::fs::read_to_string(manifest_path).ok()?;
     let bp = parse_manifest(&content).ok()?;
     Some(BlueprintInfo {
-        name: bp.name,
-        version: bp.version,
-        description: bp.description,
+        name: bp.name.clone(),
+        version: bp.version.clone(),
+        description: bp.description.clone(),
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
         manifest: content,
+        // Kept rather than dropped: the whole manifest is already parsed here,
+        // and the GraphQL surface answers a blueprint object from it.
+        parsed: std::sync::Arc::new(bp),
     })
 }
 
@@ -447,14 +450,15 @@ pub(super) async fn create_blueprint(
     })?;
 
     Ok(Json(BlueprintInfo {
-        name: bp.name,
-        version: bp.version,
-        description: bp.description,
+        name: bp.name.clone(),
+        version: bp.version.clone(),
+        description: bp.description.clone(),
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
         // The text just written. Not serialized on this route, which returns
         // the catalog shape, but carried so the value is never a lie.
         manifest: body.manifest,
+        parsed: std::sync::Arc::new(bp),
     }))
 }
 
@@ -492,14 +496,15 @@ pub(super) async fn update_blueprint(
     })?;
 
     Ok(Json(BlueprintInfo {
-        name: bp.name,
-        version: bp.version,
-        description: bp.description,
+        name: bp.name.clone(),
+        version: bp.version.clone(),
+        description: bp.description.clone(),
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
         // The text just written. Not serialized on this route, which returns
         // the catalog shape, but carried so the value is never a lie.
         manifest: body.manifest,
+        parsed: std::sync::Arc::new(bp),
     }))
 }
 
@@ -834,6 +839,14 @@ mod canonicalize_tests {
             path: path.to_string(),
             stages: vec![],
             manifest: String::new(),
+            // These tests are about which row wins a name clash, so the
+            // manifest behind the row is the emptiest one that exists.
+            parsed: std::sync::Arc::new(leviath_core::Blueprint::new(
+                name.to_string(),
+                String::new(),
+                Vec::new(),
+                leviath_core::layout::ContextLayout::new(Vec::new(), 0),
+            )),
         }
     }
 

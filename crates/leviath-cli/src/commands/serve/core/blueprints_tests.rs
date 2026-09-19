@@ -5,7 +5,6 @@ use std::sync::Arc;
 use super::{
     BlueprintCache, BlueprintSource, MAX_PARSED, ManifestText, digest_of, manifest_for_run,
 };
-use crate::commands::serve::core::error::ServeError;
 use crate::runstate::RunMeta;
 
 /// The smallest manifest that parses, with a distinguishable name.
@@ -95,7 +94,7 @@ fn neither_copy_is_a_not_found_naming_the_file() {
     let installed = dir.path().join("gone.leviath");
 
     let failure = manifest_for_run(&run_dir, &meta(&installed)).expect_err("nothing to read");
-    assert!(matches!(failure, ServeError::NotFound(_)), "{failure:?}");
+    assert_eq!(failure.code(), "NOT_FOUND");
     assert!(failure.to_string().contains("gone.leviath"), "{failure}");
     assert!(failure.to_string().contains("run-a"), "{failure}");
 }
@@ -145,7 +144,7 @@ fn a_manifest_that_will_not_parse_is_not_cached() {
     let cache = BlueprintCache::default();
     let broken = text_of("this is not a manifest at all");
     let failure = cache.parse(&broken).expect_err("it does not parse");
-    assert!(matches!(failure, ServeError::Internal(_)), "{failure:?}");
+    assert_eq!(failure.code(), "INTERNAL");
     assert!(failure.to_string().contains("will not parse"), "{failure}");
     // Nothing was stored, so a fixed file is read afresh rather than answered
     // from a remembered failure.

@@ -234,6 +234,25 @@ pub(super) async fn list_providers(
     listing_with(&state, &query).await
 }
 
+/// Every provider this machine can reach, with what is configured and what is
+/// signed in. No quota: reading that costs a provider call, so it is asked for
+/// separately.
+///
+/// Both surfaces build their rows here, so "which providers are there" cannot
+/// have two answers.
+pub(super) fn provider_infos(state: &AppState) -> Vec<ProviderInfo> {
+    let config = state.current_config();
+    // Read once, not once per row: this is a file, and the answer is the same
+    // for every provider in it.
+    let paths = super::mcp::admin_paths();
+    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
+    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
+    signin_providers()
+        .into_iter()
+        .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
+        .collect()
+}
+
 /// [`list_providers`], callable from a test without a request.
 ///
 /// With `?quota=true` the answer carries `X-Leviath-Quota-Age` and
@@ -244,16 +263,7 @@ pub(super) async fn listing_with(
     query: &ListQuery,
 ) -> (HeaderMap, Json<serde_json::Value>) {
     let config = state.current_config();
-    // Read once, not once per row: this is a file, and the answer is the same
-    // for every provider in it. The location comes from `admin_paths` rather
-    // than from `state`; see `ProviderAdmin`.
-    let paths = super::mcp::admin_paths();
-    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
-    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
-    let mut providers: Vec<ProviderInfo> = signin_providers()
-        .into_iter()
-        .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
-        .collect();
+    let mut providers: Vec<ProviderInfo> = provider_infos(state);
     let mut headers = HeaderMap::new();
     if query.quota {
         // Built from the rows above rather than from a second look at the
@@ -267,10 +277,13 @@ pub(super) async fn listing_with(
                 account: p.account.clone(),
             })
             .collect();
+        // The grant store's location comes from `admin_paths` rather than from
+        // `state`; see `ProviderAdmin`.
+        let grants = super::mcp::admin_paths().grants;
         let (reading, _) = state
             .caches
             .provider_quota
-            .report(Accounts::new(config, paths.grants, asked), query.refresh)
+            .report(Accounts::new(config, grants, asked), query.refresh)
             .await;
         let mut read: HashMap<&str, serde_json::Value> = reading
             .value

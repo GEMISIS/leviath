@@ -357,6 +357,15 @@ pub(super) struct Highlight {
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct BlueprintInfo {
+    /// The parsed manifest, kept from the parse the discovery already did.
+    ///
+    /// Not serialized: the REST body is unchanged by this field's presence.
+    /// It exists because GraphQL resolves a whole blueprint object from a
+    /// listing row, and parsing the same text a second time would be both
+    /// slower and a failure path that cannot happen, since a row only exists
+    /// when its manifest parsed.
+    #[serde(skip)]
+    pub(super) parsed: Arc<leviath_core::Blueprint>,
     pub(super) name: String,
     pub(super) version: String,
     pub(super) description: String,

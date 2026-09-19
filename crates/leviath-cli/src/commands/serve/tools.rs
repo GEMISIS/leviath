@@ -12,11 +12,10 @@
 use std::path::PathBuf;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
-use super::types::{ApiError, AppState, err};
+use super::types::{ApiError, AppState};
 use crate::tool_inventory::ToolInventory;
 
 /// The directory of the agent called `name`, refusing a name that is not a
@@ -36,15 +35,15 @@ use crate::tool_inventory::ToolInventory;
 /// absolute path, and this name arrives in a query string. Shared from here
 /// because the tools and scripts routes both take an `?agent=` and both would
 /// otherwise write their own copy of the check.
-pub(super) fn agent_dir(config: &crate::config::Config, name: &str) -> Result<PathBuf, ApiError> {
+pub(super) fn agent_dir(
+    config: &crate::config::Config,
+    name: &str,
+) -> Result<PathBuf, super::core::error::ServeError> {
     if !leviath_core::is_safe_path_component(name) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Invalid agent name '{name}': names may contain only letters, digits, \
-                 '.', '_' and '-'"
-            ),
-        ));
+        return Err(super::core::error::ServeError::BadRequest(format!(
+            "Invalid agent name '{name}': names may contain only letters, digits, \
+             '.', '_' and '-'"
+        )));
     }
     let known = super::blueprints::discover_blueprints(config)
         .into_iter()
@@ -122,7 +121,10 @@ pub(super) async fn list_tools(
     Query(q): Query<ToolsQuery>,
 ) -> Result<Json<ToolsResp>, ApiError> {
     let dir = match q.agent.as_deref() {
-        Some(name) => Some(agent_dir(&state.current_config(), name)?),
+        Some(name) => Some(
+            agent_dir(&state.current_config(), name)
+                .map_err(|e| super::core::error::as_api_error(&e))?,
+        ),
         None => None,
     };
     let inventory = ToolInventory::discover(dir.as_deref(), q.agent.as_deref());
@@ -163,6 +165,8 @@ pub(super) async fn list_tools(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     use super::*;
     use axum::Router;
     use axum::body::Body;
