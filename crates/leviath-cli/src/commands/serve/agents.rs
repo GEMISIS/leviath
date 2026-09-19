@@ -6,9 +6,11 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use leviath_core::mime::MimeRegistry;
-use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+use leviath_runtime::control_socket::ControlResponse;
 use leviath_runtime::host::SpawnArgs;
 
+use super::core::error::as_api_error;
+use super::core::lifecycle;
 use super::runs::run_json;
 use super::types::*;
 use crate::runstate::{self, ContextSnapshot, RunMeta};
@@ -835,37 +837,32 @@ pub(super) async fn agent_stages(
 /// `DELETE /api/agents/{id}`: cancel a run in the shared-world daemon. The
 /// daemon cancels the agent (cascading to its sub-agents in the one world) and
 /// persists the terminal status.
+///
+/// A run that has already finished answers 409: it is not that the run cannot
+/// be found, it is that there is nothing left to stop.
 pub(super) async fn kill_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let reply = state
-        .control
-        .request(&ControlRequest::Cancel { run_id: id.clone() })
-        .await;
-    daemon_ok(
-        reply,
-        StatusCode::NO_CONTENT,
-        format!("Agent run '{id}' not found"),
-    )
+    lifecycle::act(&state, &id, lifecycle::Action::Cancel)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| as_api_error(&e))
 }
 
-/// `POST /api/agents/{id}/pause`: park a run. The daemon refuses when the run
-/// does not exist or is not pausable (waiting on input, or finished), which
-/// both surface as 404 - the daemon's reply does not distinguish them.
+/// `POST /api/agents/{id}/pause`: park a run.
+///
+/// A finished run answers 409, from its own record. Every other refusal is
+/// the daemon's, which does not say which of "no such run" and "not pausable
+/// right now" it means, so the 404 names both.
 pub(super) async fn pause_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let reply = state
-        .control
-        .request(&ControlRequest::Pause { run_id: id.clone() })
-        .await;
-    daemon_ok(
-        reply,
-        StatusCode::NO_CONTENT,
-        format!("Agent run '{id}' not found or not pausable"),
-    )
+    lifecycle::act(&state, &id, lifecycle::Action::Pause)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| as_api_error(&e))
 }
 
 /// `POST /api/agents/{id}/resume`: un-pause a run.
@@ -873,19 +870,16 @@ pub(super) async fn resume_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let reply = state
-        .control
-        .request(&ControlRequest::Resume { run_id: id.clone() })
-        .await;
-    daemon_ok(
-        reply,
-        StatusCode::NO_CONTENT,
-        format!("Agent run '{id}' not found or not paused"),
-    )
+    lifecycle::act(&state, &id, lifecycle::Action::Resume)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| as_api_error(&e))
 }
 
 #[cfg(test)]
 mod tests {
+    use leviath_runtime::control_socket::ControlRequest;
+
     use super::*;
 
     use axum::Router;
@@ -3471,6 +3465,31 @@ system_prompt = "Plan the work"
             post_agent_action(control, "run-a", "pause").await,
             StatusCode::NO_CONTENT
         );
+    }
+
+    /// A run that has already finished answers 409, not 404: "not found" about
+    /// a run sitting in the listing is what sends somebody hunting for a wrong
+    /// run id. The daemon is never asked, so the answer holds with it down.
+    #[tokio::test]
+    async fn pausing_a_finished_run_is_a_conflict() {
+        crate::runstate::with_isolated_runs_dir_async("rest-pause-finished", |_d| async move {
+            let mut meta = RunMeta::new(
+                "run-done".to_string(),
+                "test-agent".to_string(),
+                "/agents/test".to_string(),
+                "do the thing".to_string(),
+                None,
+                "/work".to_string(),
+                1,
+            );
+            meta.status = crate::runstate::RunStatus::Complete;
+            crate::runstate::create_run(&meta).expect("run written");
+            assert_eq!(
+                post_agent_action(no_daemon(), "run-done", "pause").await,
+                StatusCode::CONFLICT
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -5,14 +5,11 @@ use super::*;
 
 /// Phase one of search: keep the runs that could match, bounding how many of
 /// them are allowed to cost a file read.
-pub(super) fn apply_search(
-    runs: Vec<Arc<RunMeta>>,
-    resolved: &Resolved,
-) -> (Vec<Arc<RunMeta>>, bool) {
-    let Some(ref q) = resolved.q else {
+pub(crate) fn apply_search(runs: Vec<Arc<RunMeta>>, spec: &RunSpec) -> (Vec<Arc<RunMeta>>, bool) {
+    let Some(ref q) = spec.q else {
         return (runs, false);
     };
-    let budgeted = resolved.searches_filesystem();
+    let budgeted = spec.searches_filesystem();
     let mut kept = Vec::new();
     let mut scanned = 0usize;
     let mut truncated = false;
@@ -24,7 +21,7 @@ pub(super) fn apply_search(
             }
             scanned += 1;
         }
-        if matches_query(&meta, q, &resolved.sources) {
+        if matches_query(&meta, q, &spec.sources) {
             kept.push(meta);
         }
     }
@@ -36,7 +33,7 @@ pub(super) fn apply_search(
 /// Nothing here parses. The cheap sources read already-parsed metadata; the
 /// deep ones substring-scan raw file bytes. Parsing is phase two's job, and it
 /// only happens for the items actually being returned.
-pub(super) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool {
+pub(crate) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool {
     sources.iter().any(|source| match source {
         Source::Meta => meta_fields(meta)
             .iter()
@@ -65,7 +62,7 @@ pub(super) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool
 
 /// The stage indices a run recorded, from `stages.json` - the index of record,
 /// rather than a `read_dir` of the directory its bytes happened to land in.
-pub(super) fn stage_indices(run_id: &str) -> Vec<usize> {
+pub(crate) fn stage_indices(run_id: &str) -> Vec<usize> {
     runstate::read_stages_index(run_id)
         .iter()
         .map(|stage| stage.index)
@@ -73,7 +70,7 @@ pub(super) fn stage_indices(run_id: &str) -> Vec<usize> {
 }
 
 /// Substring-scan a whole file's bytes without parsing it.
-pub(super) fn scan_file(path: &std::path::Path, q: &str) -> bool {
+pub(crate) fn scan_file(path: &std::path::Path, q: &str) -> bool {
     match std::fs::read(path) {
         Ok(bytes) => search::contains_ignore_ascii_case(&bytes, q.as_bytes()).is_some(),
         Err(_) => false,
@@ -81,7 +78,7 @@ pub(super) fn scan_file(path: &std::path::Path, q: &str) -> bool {
 }
 
 /// The searchable `(name, text)` pairs already present in a `RunMeta`.
-pub(super) fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
+pub(crate) fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
     let mut out = vec![
         ("run_id".to_string(), meta.run_id.clone()),
         ("agent_name".to_string(), meta.agent_name.clone()),
@@ -112,7 +109,7 @@ pub(super) fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
 }
 
 /// Phase two: why this run matched, for the items actually being returned.
-pub(super) fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec<Highlight> {
+pub(crate) fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec<Highlight> {
     let mut out = Vec::new();
     for source in sources {
         if out.len() >= MAX_HIGHLIGHTS {
@@ -161,7 +158,7 @@ pub(super) fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec
 /// Parses `context.json` once. Never replays the journal: that deep-copies a
 /// whole context window per recorded point, which is the cost this design
 /// exists to avoid.
-pub(super) fn context_highlight(meta: &RunMeta, q: &str) -> Option<Highlight> {
+pub(crate) fn context_highlight(meta: &RunMeta, q: &str) -> Option<Highlight> {
     let snapshot = runstate::read_context_snapshot(&meta.run_id)?;
     snapshot.regions.iter().find_map(|region| {
         region.entries.iter().find_map(|entry| {
@@ -181,7 +178,7 @@ pub(super) fn context_highlight(meta: &RunMeta, q: &str) -> Option<Highlight> {
 /// second. Expressed as a `find_map` rather than a loop with early returns
 /// because the caller already caps the total, so there is nothing here that
 /// needs to bail out partway.
-pub(super) fn logs_highlights(meta: &RunMeta, q: &str) -> Vec<Highlight> {
+pub(crate) fn logs_highlights(meta: &RunMeta, q: &str) -> Vec<Highlight> {
     stage_indices(&meta.run_id)
         .into_iter()
         .filter_map(|idx| {
@@ -224,7 +221,7 @@ pub(super) fn logs_highlights(meta: &RunMeta, q: &str) -> Vec<Highlight> {
 /// metadata blocks. A query matching only there (a workdir path, say) yields a
 /// run with no highlight. The same text is searchable, with a highlight, through
 /// `q_in=meta`.
-pub(super) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
+pub(crate) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
     use leviath_core::run_archive::{RegionDelta, RunRecord};
 
     /// The first entry in a region whose content matches, named by region.

@@ -4,6 +4,7 @@
 //! HTTP. No web UI - the frontend lives in a separate repo.
 
 mod agents;
+mod args;
 mod artifact_types;
 mod auth;
 mod blobs;
@@ -14,10 +15,12 @@ mod caches;
 mod config;
 mod config_health;
 mod config_types;
+mod core;
 mod cursor;
 mod doctor;
 mod events;
 mod fs;
+mod graphql;
 mod interactions;
 mod mcp;
 mod mime;
@@ -49,11 +52,11 @@ mod yolo;
 #[path = "event_seam_tests.rs"]
 mod event_seam_tests;
 
+pub use args::ServeArgs;
 pub(crate) use config::list_model_ids;
 pub(crate) use events::ServerEvent;
 pub(crate) use mcp::list_mcp_tools;
 pub(crate) use types::AppState;
-pub use types::ServeArgs;
 use types::ServeLimits;
 
 use std::net::SocketAddr;
@@ -116,6 +119,15 @@ pub async fn execute(
         None,
     )
     .await
+}
+
+/// The GraphQL schema this build serves, as SDL.
+///
+/// `lev serve --print-graphql-schema` prints this, and that is how
+/// `docs/schema/leviath.graphql` is regenerated. A test holds the two
+/// together, so the published schema cannot drift from the served one.
+pub fn graphql_schema() -> String {
+    graphql::sdl()
 }
 
 /// Every API route with its production handlers - the single route table,
@@ -215,6 +227,11 @@ fn api_router() -> Router<AppState> {
         .route("/api/config", get(config::get_config))
         .route("/api/config/validate", post(config::validate_config_key))
         .route("/api/models", get(config::get_models))
+        // GraphQL. One endpoint where the request body names the fields it
+        // wants, over the same core the REST routes above call. Mounted here
+        // rather than beside them in a module of its own so this file stays
+        // the one place a route is registered.
+        .route("/graphql", post(graphql::http))
         // WebSocket
         .route("/ws", get(websocket::ws_global))
         .route("/ws/agents/{id}", get(websocket::ws_agent))
@@ -562,6 +579,13 @@ async fn execute_with_shutdown(
     let body_limit = axum::extract::DefaultBodyLimit::max(
         usize::try_from(request_limits.max_upload_bytes).unwrap_or(usize::MAX),
     );
+    // Built once, shared by every request: the type registry and the query
+    // limits do not change, and what does change per request travels in the
+    // execution context instead.
+    let app = app.layer(axum::extract::Extension(graphql::build_schema(
+        state.clone(),
+    )));
+
     let app = app
         .layer(body_limit)
         // Require a valid token on every route; CORS stays outermost so browser
@@ -923,6 +947,7 @@ mod tests {
         ("config", include_str!("config.rs")),
         ("doctor", include_str!("doctor.rs")),
         ("fs", include_str!("fs.rs")),
+        ("graphql", include_str!("graphql/mod.rs")),
         ("interactions", include_str!("interactions.rs")),
         ("mcp", include_str!("mcp.rs")),
         ("mime", include_str!("mime.rs")),
@@ -959,15 +984,112 @@ mod tests {
         ("GATEWAY_TIMEOUT", 504),
     ];
 
+    /// The service-layer modules a handler can answer through, by the name it
+    /// calls them under.
+    ///
+    /// A handler that hands its work to `serve::core` names no
+    /// `StatusCode::` itself, so without this the scan below would read every
+    /// such route as answering nothing and the spec could quietly list a
+    /// status no longer reachable, or miss one that is.
+    const CORE_SOURCES: &[(&str, &str)] = &[
+        ("lifecycle", include_str!("core/lifecycle.rs")),
+        ("run_core", include_str!("core/runs.rs")),
+    ];
+
+    /// The statuses a service-layer function can answer with, from the
+    /// `ServeError` variants its body names.
+    fn core_status_codes(module: &str, function: &str) -> Vec<u16> {
+        let (_, source) = CORE_SOURCES
+            .iter()
+            .find(|(name, _)| *name == module)
+            .expect("a core module with a source entry");
+        let source = source.replace("\r\n", "\n");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .unwrap_or(&source)
+            .to_string();
+        let Some((_, rest)) = production.split_once(&format!("fn {function}(")) else {
+            return Vec::new();
+        };
+        let body = rest.split("\n}\n").next().unwrap_or(rest);
+        let mut codes: Vec<u16> = body
+            .split("ServeError::")
+            .skip(1)
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_alphabetic())
+                    .collect::<String>()
+            })
+            .filter_map(|variant| {
+                SERVE_ERROR_STATUSES
+                    .iter()
+                    .find(|(known, _)| *known == variant)
+                    .map(|(_, code)| *code)
+            })
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        codes
+    }
+
+    /// Each `ServeError` variant's status, so the scan can read a handler that
+    /// answers through the service layer. The numbers are
+    /// `ServeError::status`'s, and `every_serve_error_variant_is_in_the_status_table`
+    /// holds the two together.
+    const SERVE_ERROR_STATUSES: &[(&str, u16)] = &[
+        ("BadRequest", 400),
+        ("NotFound", 404),
+        ("Conflict", 409),
+        ("DaemonUnavailable", 503),
+        ("DaemonIncompatible", 502),
+        ("Internal", 500),
+    ];
+
     /// Every `StatusCode::` constant named in the body of `function` in
-    /// `module`: the text from `async fn <function>(` to the first
-    /// column-zero `}`.
+    /// `module`, plus the statuses of any service-layer call it makes: the
+    /// text from `async fn <function>(` to the first column-zero `}`.
     fn handler_status_codes(module: &str, function: &str) -> Vec<u16> {
         let (_, source) = HANDLER_SOURCES
             .iter()
             .find(|(name, _)| *name == module)
             .expect("a handler module with a source entry");
-        status_codes_in(source, function)
+        let mut codes = status_codes_in(source, function);
+        codes.extend(delegated_status_codes(source, function));
+        codes.sort_unstable();
+        codes.dedup();
+        codes
+    }
+
+    /// The statuses a handler answers with through the service layer.
+    ///
+    /// Reads the handler's body for `<core module>::<function>(` calls and
+    /// asks the core module what those can fail with. One level deep on
+    /// purpose: a chain the reader cannot follow is a chain the spec should
+    /// not be trusted against, and the assertion allows the spec to list
+    /// more than this finds.
+    fn delegated_status_codes(source: &str, function: &str) -> Vec<u16> {
+        let source = source.replace("\r\n", "\n");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .unwrap_or(&source)
+            .to_string();
+        let Some((_, rest)) = production.split_once(&format!("async fn {function}(")) else {
+            return Vec::new();
+        };
+        let body = rest.split("\n}\n").next().unwrap_or(rest);
+        let mut codes = Vec::new();
+        for (name, _) in CORE_SOURCES {
+            for call in body.split(&format!("{name}::")).skip(1) {
+                let called: String = call
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                codes.extend(core_status_codes(name, &called));
+            }
+        }
+        codes
     }
 
     /// [`handler_status_codes`] over source text a test can write. The text
@@ -1054,6 +1176,48 @@ mod tests {
             .filter(|(_, undocumented)| !undocumented.is_empty())
             .collect();
         assert_eq!(problems, Vec::new());
+    }
+
+    /// The scan's `ServeError` table is the same mapping `ServeError::status`
+    /// makes. Two copies of a mapping is exactly how a spec check comes to
+    /// pass while describing something else.
+    #[test]
+    fn every_serve_error_variant_is_in_the_status_table() {
+        use crate::commands::serve::core::error::ServeError;
+        let variants = [
+            ("BadRequest", ServeError::BadRequest(String::new())),
+            ("NotFound", ServeError::NotFound(String::new())),
+            ("Conflict", ServeError::Conflict(String::new())),
+            (
+                "DaemonUnavailable",
+                ServeError::DaemonUnavailable(String::new()),
+            ),
+            (
+                "DaemonIncompatible",
+                ServeError::DaemonIncompatible(String::new()),
+            ),
+            ("Internal", ServeError::Internal(String::new())),
+        ];
+        assert_eq!(variants.len(), SERVE_ERROR_STATUSES.len());
+        for (name, error) in variants {
+            let (_, code) = SERVE_ERROR_STATUSES
+                .iter()
+                .find(|(known, _)| *known == name)
+                .expect("the variant is in the table");
+            assert_eq!(*code, error.status().as_u16(), "{name}");
+        }
+    }
+
+    /// A handler that hands its work to the service layer still has its
+    /// statuses read, through the core function it calls.
+    #[test]
+    fn the_scan_follows_a_handler_into_the_service_layer() {
+        let codes = handler_status_codes("agents", "pause_agent");
+        assert!(codes.contains(&204), "the handler's own status: {codes:?}");
+        assert!(codes.contains(&409), "a finished run conflicts: {codes:?}");
+        assert!(codes.contains(&404), "the daemon's refusal: {codes:?}");
+        // 503 is not here: it comes from a helper one level further in, and
+        // the layer rule already requires it of every non-websocket route.
     }
 
     /// The same source with Windows line ends scans the same: a handler's
@@ -1789,6 +1953,7 @@ system_prompt = "Run"
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,
             tls_cert: None,
@@ -1893,6 +2058,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -1972,6 +2138,7 @@ system_prompt = "Run"
                 cors: None,
                 token: Some("test-token".to_string()),
                 allow_admin: false,
+                print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
                 tls_cert: Some(cert),
@@ -2053,6 +2220,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2128,6 +2296,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: Some(cert),
@@ -2181,6 +2350,7 @@ system_prompt = "Run"
                     cors: Some("*".to_string()),
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2275,6 +2445,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2351,6 +2522,7 @@ system_prompt = "Run"
                     cors: Some("https://example.com".to_string()),
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2391,6 +2563,7 @@ system_prompt = "Run"
                 cors: None,
                 token: Some("test-token".to_string()),
                 allow_admin: false,
+                print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
                 tls_cert: None,
@@ -2433,6 +2606,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2470,6 +2644,7 @@ system_prompt = "Run"
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,
                     tls_cert: None,
@@ -2528,6 +2703,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2570,6 +2746,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2603,6 +2780,7 @@ system_prompt = "Run"
                 cors: None,
                 token: None,
                 allow_admin: false,
+                print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
                 tls_cert: None,
@@ -2631,6 +2809,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2685,6 +2864,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2736,6 +2916,7 @@ system_prompt = "Run"
                     cors: cors.map(str::to_string),
                     token: Some("t".to_string()),
                     allow_admin: false,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2809,6 +2990,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -2885,6 +3067,7 @@ system_prompt = "Run"
                         cors: None,
                         token: Some("t".to_string()),
                         allow_admin,
+                        print_graphql_schema: false,
                         workdir_root: None,
                         no_remote_yolo: false,
                         tls_cert: None,
@@ -2988,6 +3171,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -3046,6 +3230,7 @@ system_prompt = "Run"
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
                     tls_cert: None,
@@ -3112,6 +3297,7 @@ system_prompt = "Run"
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,
             tls_cert: None,

@@ -429,6 +429,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // apart has to keep showing the config as authoritative while the user's
     // edits are quietly going nowhere.
     "config.health",
+    // `POST /graphql`. Announced because a client picks its transport once, at
+    // start-up: a Lair that would use GraphQL where it exists and REST
+    // otherwise has to know which server it is talking to before it builds its
+    // first request, and finding out by posting a query and reading a 404
+    // costs a round trip on every launch.
+    "graphql",
 ];
 
 /// The server's numeric limits.
@@ -474,12 +480,12 @@ impl ApiLimits {
     /// resolved at start-up, for the same reason.
     pub(super) fn current(requests: &super::request_limits::RequestLimits) -> Self {
         Self {
-            max_limit: super::runs::MAX_LIMIT,
-            max_ids: super::runs::MAX_IDS,
+            max_limit: super::core::runs::MAX_LIMIT,
+            max_ids: super::core::runs::MAX_IDS,
             max_file_bytes: super::agents::MAX_FILE_READ_BYTES,
             max_listing_entries: super::agents::MAX_LISTING_ENTRIES,
-            max_search_scan: super::runs::MAX_SEARCH_SCAN,
-            search_log_tail_bytes: super::runs::SEARCH_LOG_TAIL_BYTES,
+            max_search_scan: super::core::runs::MAX_SEARCH_SCAN,
+            search_log_tail_bytes: super::core::runs::SEARCH_LOG_TAIL_BYTES,
             max_history_limit: super::agents::HISTORY_MAX_LIMIT,
             max_tracked_modified_files: leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
             max_concurrent_requests: requests.max_concurrent_requests,

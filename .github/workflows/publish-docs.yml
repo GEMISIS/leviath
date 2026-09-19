@@ -106,7 +106,8 @@ jobs:
           }
 
       # The machine-readable half: JSON Schemas for agent.leviath and
-      # config.toml, the OpenAPI spec for `lev serve`, and the commented example
+      # config.toml, the OpenAPI spec and GraphQL schema for `lev serve`, and
+      # the commented example
       # config that Configuration links beside the schema. llms.txt links these
       # by name, and the sync below uses --delete, so anything not copied in
       # here becomes a 404 that the index still advertises. The example is not
@@ -114,8 +115,8 @@ jobs:
       # and the check below did not name it.
       - name: Add the machine-readable schemas
         run: |
-          cp docs/schema/*.json docs/schema/config.example.toml docs/schema/yolo.example.toml docs/schema/mime_types.example.toml docs-out/
-          for f in blueprint.schema.json config.schema.json openapi.json config.example.toml yolo.example.toml mime_types.example.toml; do
+          cp docs/schema/*.json docs/schema/leviath.graphql docs/schema/config.example.toml docs/schema/yolo.example.toml docs/schema/mime_types.example.toml docs-out/
+          for f in blueprint.schema.json config.schema.json openapi.json leviath.graphql config.example.toml yolo.example.toml mime_types.example.toml; do
             test -s "docs-out/$f" || { echo "missing docs-out/$f"; exit 1; }
           done
 

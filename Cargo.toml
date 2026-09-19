@@ -256,6 +256,19 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 # it at a tenth of the bytes. Both codecs were already in the lockfile through
 # reqwest, so this adds no crate.
 tower-http = { version = "0.7", features = ["cors", "compression-gzip", "compression-br"] }
+# The GraphQL surface on `lev serve` (`POST /graphql`, `GET /ws/graphql`).
+# Code-first: the Rust types are the schema, and `docs/schema/leviath.graphql`
+# is generated from them and held in lockstep by a test, the way the OpenAPI
+# spec is held to the router. `dataloader` batches the per-run file reads a
+# selection set asks for; `apollo_persisted_queries` lets a client send a hash
+# instead of re-sending (and this server re-parsing) the same document.
+async-graphql = { version = "7.2", features = [
+    "dataloader",
+    "apollo_persisted_queries",
+] }
+# `axum-0.8.1` is what this pins, which is the axum the workspace already uses,
+# so the GraphQL routes mount on the existing router rather than a second one.
+async-graphql-axum = "7.2"
 
 # ── Release profile ──────────────────────────────────────────────────────────
 #

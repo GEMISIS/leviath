@@ -1,0 +1,517 @@
+"""
+What a lifecycle mutation answers with.
+"""
+type AgentPayload {
+	"""
+	The run, read back after the act, so its status is what the act made
+	it rather than what the caller hoped.
+	"""
+	run: Run!
+	"""
+	Retired checks the mutation noticed. Empty unless something was
+	superseded.
+	"""
+	warnings: [String!]!
+}
+
+"""
+A 64-bit integer, serialized as a JSON number. GraphQL's `Int` is 32-bit:
+it cannot hold a 2 GiB file size or a large aggregate token count. Every
+magnitude this API produces is well under 2^53, so it round-trips through
+a browser without loss.
+"""
+scalar BigInt
+
+"""
+Spend for a run, a stage, or a subtree roll-up.
+"""
+type CostBreakdown {
+	"""
+	Null is unknown, never free: some call in the run went unpriced.
+	"""
+	costUsd: Decimal
+	"""
+	The priced subtotal, kept even while `costUsd` is null.
+	"""
+	costPricedUsd: Decimal!
+	"""
+	True when every priced call carried the provider's own figure.
+	"""
+	costIsExact: Boolean!
+	"""
+	Calls no provider priced.
+	"""
+	unpricedCalls: Int!
+}
+
+"""
+An opaque keyset cursor: the same token the REST routes hand out. It
+encodes the sort, the order and a digest of the filters, so a cursor from
+one listing cannot resume a different one.
+"""
+scalar Cursor
+
+"""
+An exact decimal, serialized as a JSON string. Money is never a `Float` on
+the wire: a cost figure that a JSON parser silently re-rounds is a lie
+about spend. The daemon keeps costs as `f64`, so this carries that number's
+shortest round-tripping form rather than inventing precision.
+"""
+scalar Decimal
+
+"""
+Where a search matched, and enough text to show a person why.
+
+The part of search a browser cannot do: the client never holds a run's
+transcript, so without this a deep match is an unexplained result.
+"""
+type Highlight {
+	"""
+	What matched: a run field name, `metadata.<key>`, `modified_files`,
+	`context.<region>`, `logs.output`, `logs.operational`, or
+	`journal.tool.<tool_name>`.
+	"""
+	field: String!
+	"""
+	The matching text, with a little either side.
+	"""
+	snippet: String!
+	"""
+	Which stage the match came from, for the sources that have one.
+	"""
+	stage: Int
+}
+
+"""
+One caller-supplied metadata entry on a run.
+"""
+type MetadataEntry {
+	"""
+	The key.
+	"""
+	key: String!
+	"""
+	The value. Always a string.
+	"""
+	value: String!
+}
+
+type Mutation {
+	"""
+	Park a run.
+	
+	Read `run.status` on the way back: `PAUSED` means the pause landed.
+	A finished run is a `CONFLICT`, never a silent no-op.
+	"""
+	pauseAgent(
+		"""
+		The run to pause.
+		"""
+		runId: String!
+	): AgentPayload!
+	"""
+	Resume a paused run.
+	
+	Read `run.status`: `RUNNING` means it is moving again.
+	"""
+	resumeAgent(
+		"""
+		The run to resume.
+		"""
+		runId: String!
+	): AgentPayload!
+	"""
+	Cancel a run, and its sub-agents with it.
+	
+	Read `run.status`: `CANCELLED` means the cancel landed. A run that had
+	already finished is a `CONFLICT`, which tells a client the difference
+	between "you stopped it" and "it was over before you asked".
+	"""
+	cancelAgent(
+		"""
+		The run to cancel.
+		"""
+		runId: String!
+	): AgentPayload!
+}
+
+"""
+Keyset page state.
+"""
+type PageInfo {
+	"""
+	Whether another page follows this one.
+	"""
+	hasNextPage: Boolean!
+	"""
+	Pass as `after` to get it.
+	"""
+	endCursor: Cursor
+}
+
+type Query {
+	"""
+	Keyset-paged run listing.
+	
+	`ids` fetches exact runs, which is also how a client reads one run:
+	`runs(ids: ["..."])`. An id that names nothing lands in `missing`
+	rather than failing the request, so one dead id in a batch of fifty
+	does not cost the other forty-nine.
+	"""
+	runs(
+		"""
+		Status, search, parentage and time filters.
+		"""
+		filter: RunFilter,
+		"""
+		Page size; capped by the server's page-size limit.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page's pageInfo.
+		"""
+		after: Cursor,
+		"""
+		Exact ids to fetch; unknown ones land in missing.
+		"""
+		ids: [String!]
+	): RunConnection!
+}
+
+type Run {
+	"""
+	Globally unique run id.
+	"""
+	id: String!
+	"""
+	The agent name from the blueprint this run was spawned from.
+	"""
+	agentName: String!
+	"""
+	Human title, set by the titling pass; null until it lands.
+	"""
+	title: String
+	"""
+	Why titling failed, when it did.
+	"""
+	titleError: String
+	"""
+	The lifecycle state: the filter and subscription vocabulary.
+	"""
+	status: RunStatus!
+	"""
+	Present only when the status is `ERROR`.
+	"""
+	error: String
+	"""
+	The initial ask this run was given.
+	"""
+	task: String!
+	"""
+	Inference turns in the current stage, reset on entering a new one.
+	"""
+	iteration: Int!
+	"""
+	Tool calls across the whole run.
+	"""
+	toolCalls: Int!
+	"""
+	Unix epoch seconds, as the daemon stores it.
+	"""
+	startedAt: Timestamp!
+	"""
+	Last state change, unix epoch seconds.
+	"""
+	updatedAt: Timestamp!
+	"""
+	When the run last actually moved. Age a wedged run against this.
+	"""
+	lastProgressAt: Timestamp
+	"""
+	Seconds since `startedAt`, wall-clock.
+	"""
+	ageSecs: BigInt!
+	"""
+	Seconds actually working, parked time excluded.
+	"""
+	workingSecs: BigInt!
+	"""
+	The working span in progress; null while the clock is stopped.
+	"""
+	active: WorkingClock
+	"""
+	Token roll-up for the whole run.
+	"""
+	usage: TokenUsage!
+	"""
+	Spend roll-up for the whole run.
+	"""
+	cost: CostBreakdown!
+	"""
+	Whether the run was spawned unattended, so approvals resolve without
+	a person.
+	"""
+	unattended: Boolean!
+	"""
+	The yolo profile this run was spawned with, when it named one.
+	"""
+	yoloProfileName: String
+	"""
+	The working directory the run executes in.
+	"""
+	workdir: String!
+	"""
+	The run that spawned this one; null for a top-level run.
+	"""
+	parentId: String
+	"""
+	Caller-supplied metadata from spawn. Values are always strings.
+	
+	Sorted by key: the daemon keeps these in a hash map, and a listing
+	whose order changes between two identical requests is a diff nobody
+	can read.
+	"""
+	metadata: [MetadataEntry!]!
+}
+
+"""
+A keyset-paged run listing.
+"""
+type RunConnection {
+	"""
+	The runs on this page.
+	"""
+	edges: [RunEdge!]!
+	"""
+	Keyset page state.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many runs matched. Null when `scanTruncated` is true: a count from
+	a partial scan is not a fact.
+	"""
+	total: Int
+	"""
+	True when the search gave up before covering the store.
+	"""
+	scanTruncated: Boolean!
+	"""
+	Ids from an `ids` fetch that name no run here. Never fails the request.
+	"""
+	missing: [String!]!
+	"""
+	Daemon time when the page was built. Pass it back as `since` to poll.
+	"""
+	serverTime: Timestamp!
+}
+
+"""
+One run with its page cursor and its match highlights.
+"""
+type RunEdge {
+	"""
+	The run.
+	"""
+	node: Run!
+	"""
+	Cursor for this edge.
+	"""
+	cursor: Cursor!
+	"""
+	Why this run matched a search; empty when there was no search.
+	"""
+	highlights: [Highlight!]!
+}
+
+"""
+Which runs a listing is about: status, search, parentage and time, in one
+place.
+"""
+input RunFilter {
+	"""
+	Only runs in this status.
+	"""
+	status: RunStatus
+	"""
+	Runs in any of these statuses. Prefer this over one request per status
+	when a client wants "everything active" as a single predicate.
+	"""
+	statusIn: [RunStatus!]
+	"""
+	Case-insensitive substring. No regex, no boolean operators.
+	"""
+	query: String
+	"""
+	Where to look. Defaults to metadata and files, which are free.
+	"""
+	queryIn: [SearchScope!]
+	"""
+	Direct children of this run id. A run id naming nothing gives an empty
+	page rather than an error: a run with no children yet is a normal
+	answer.
+	"""
+	parent: String
+	"""
+	Only runs nobody started, when true.
+	"""
+	topLevelOnly: Boolean
+	"""
+	Inclusive lower bound on the sort value. Pass the previous page's
+	`serverTime` to poll for what changed.
+	"""
+	since: Timestamp
+	"""
+	Newest spawns or most recently active first.
+	"""
+	sort: RunSort
+	"""
+	Oldest first when true.
+	"""
+	ascending: Boolean
+}
+
+"""
+Sort order for the run listing.
+"""
+enum RunSort {
+	"""
+	Newest spawns first.
+	"""
+	STARTED_AT
+	"""
+	Most recently changed first.
+	"""
+	UPDATED_AT
+	"""
+	Runs that moved most recently first.
+	"""
+	LAST_PROGRESS_AT
+}
+
+"""
+The lifecycle states a run moves through.
+
+One state per variant of the daemon's own `RunStatus`, so the two cannot
+drift: the conversion below is exhaustive and a new daemon state will not
+compile until it is named here.
+"""
+enum RunStatus {
+	"""
+	Spawned but not yet running.
+	"""
+	STARTING
+	"""
+	Moving: inferring, calling tools, transitioning.
+	"""
+	RUNNING
+	"""
+	Parked: on a prompt somebody has to answer, or holding for children.
+	"""
+	WAITING_INPUT
+	"""
+	Paused by `lev pause`; resumes with `lev resume`.
+	"""
+	PAUSED
+	"""
+	Finished with an answer or a terminal state.
+	"""
+	COMPLETE
+	"""
+	Every required stage finished but the agent still accepts messages.
+	"""
+	COMPLETE_INTERACTIVE
+	"""
+	Unrecoverable failure; `Run.error` carries what went wrong.
+	"""
+	ERROR
+	"""
+	Stopped from outside. Nothing went wrong; somebody decided.
+	"""
+	CANCELLED
+}
+
+"""
+Where a run search looks.
+
+`META` and `FILES` answer from what is already parsed in memory. The other
+three read files per run, so they are what a client offers as a "search
+inside runs" toggle rather than paying for on every keystroke.
+"""
+enum SearchScope {
+	"""
+	Run metadata: title, agent name, status, task, caller metadata.
+	"""
+	META
+	"""
+	The run's own record of the files it changed.
+	"""
+	FILES
+	"""
+	Region contents on disk.
+	"""
+	CONTEXT
+	"""
+	Log lines on disk.
+	"""
+	LOGS
+	"""
+	The crash-resume journal.
+	"""
+	JOURNAL
+}
+
+"""
+Unix epoch seconds, as the daemon stores them. No string dates, so no
+timezone maths over a number that never had a timezone.
+"""
+scalar Timestamp
+
+"""
+Token counts for a run, a stage, or a subtree roll-up.
+"""
+type TokenUsage {
+	"""
+	Input tokens, cached ones included.
+	"""
+	promptTokens: BigInt!
+	"""
+	Output tokens.
+	"""
+	completionTokens: BigInt!
+	"""
+	Counted within `promptTokens`, not on top of it. Do not add them twice.
+	"""
+	cachedTokens: BigInt!
+	"""
+	Tokens written to the provider's cache.
+	"""
+	cacheWriteTokens: BigInt!
+}
+
+"""
+Elapsed working time: banked spans plus the one in progress.
+"""
+type WorkingClock {
+	"""
+	Seconds banked by spans that have ended.
+	"""
+	bankedSecs: Int!
+	"""
+	When the span in progress began; null while the clock is stopped.
+	"""
+	since: Timestamp
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+	mutation: Mutation
+}
+
