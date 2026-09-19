@@ -7,7 +7,6 @@
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 
 use super::{Action, act, is_terminal};
-use crate::commands::serve::core::error::ServeError;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client};
 use crate::runstate::{RunMeta, RunStatus, create_run};
 
@@ -97,9 +96,31 @@ async fn a_finished_run_is_a_conflict_that_names_its_state() {
         let failure = act(&state_with(no_daemon_client()), "run-done", Action::Pause)
             .await
             .expect_err("a finished run cannot be paused");
-        assert!(matches!(failure, ServeError::Conflict(_)), "{failure:?}");
+        assert_eq!(failure.code(), "CONFLICT");
         assert!(failure.to_string().contains("complete"), "{failure}");
         assert!(failure.to_string().contains("paused"), "{failure}");
+    })
+    .await;
+}
+
+/// Each act names itself in the conflict, so the message says what was
+/// refused rather than only that something was.
+#[tokio::test]
+async fn a_conflict_names_the_act_it_refused() {
+    crate::runstate::with_isolated_runs_dir_async("lifecycle-verbs", |_d| async move {
+        create_run(&run_in("run-done", RunStatus::Error)).expect("run written");
+        let cases = [
+            (Action::Pause, "paused"),
+            (Action::Resume, "resumed"),
+            (Action::Cancel, "cancelled"),
+        ];
+        for (action, verb) in cases {
+            let failure = act(&state_with(no_daemon_client()), "run-done", action)
+                .await
+                .expect_err("a finished run refuses every act");
+            assert_eq!(failure.code(), "CONFLICT");
+            assert!(failure.to_string().contains(verb), "{failure}");
+        }
     })
     .await;
 }
@@ -132,7 +153,7 @@ async fn a_refusal_names_what_it_could_mean() {
         let failure = act(&state_with(control), "ghost", action)
             .await
             .expect_err("the daemon said no");
-        assert!(matches!(failure, ServeError::NotFound(_)), "{failure:?}");
+        assert_eq!(failure.code(), "NOT_FOUND");
         assert!(failure.to_string().contains(expected), "{failure}");
     }
 }
@@ -147,7 +168,7 @@ async fn an_answer_to_another_question_is_internal() {
     let failure = act(&state_with(control), "run-a", Action::Pause)
         .await
         .expect_err("a reply with no arm for it");
-    assert!(matches!(failure, ServeError::Internal(_)), "{failure:?}");
+    assert_eq!(failure.code(), "INTERNAL");
 }
 
 /// No daemon is not a missing run: the remedy is to get the daemon back, and
@@ -157,9 +178,6 @@ async fn a_daemon_that_cannot_be_reached_says_so() {
     let failure = act(&state_with(no_daemon_client()), "run-a", Action::Pause)
         .await
         .expect_err("no daemon");
-    assert!(
-        matches!(failure, ServeError::DaemonUnavailable(_)),
-        "{failure:?}"
-    );
+    assert_eq!(failure.code(), "DAEMON_UNAVAILABLE");
     assert!(failure.to_string().contains("not reachable"), "{failure}");
 }

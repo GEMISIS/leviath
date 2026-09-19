@@ -148,7 +148,25 @@ fn assert_handshake_101_panics_on_non_101() {
 
 impl WsTestClient {
     pub(super) async fn connect(addr: std::net::SocketAddr, path: &str) -> Self {
+        Self::connect_with_protocol(addr, path, None).await
+    }
+
+    /// Connect, naming a WebSocket sub-protocol.
+    ///
+    /// The GraphQL subscription endpoint answers only to a client that asks for
+    /// `graphql-transport-ws` (or the older `graphql-ws`), because the protocol
+    /// decides the frame vocabulary. A plain upgrade with no protocol is what
+    /// `/ws` takes.
+    pub(super) async fn connect_with_protocol(
+        addr: std::net::SocketAddr,
+        path: &str,
+        protocol: Option<&str>,
+    ) -> Self {
         let mut stream = TcpStream::connect(addr).await.unwrap();
+        let protocol_header = match protocol {
+            Some(name) => format!("Sec-WebSocket-Protocol: {name}\r\n"),
+            None => String::new(),
+        };
         let request = format!(
             "GET {path} HTTP/1.1\r\n\
              Host: {addr}\r\n\
@@ -156,6 +174,7 @@ impl WsTestClient {
              Upgrade: websocket\r\n\
              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
              Sec-WebSocket-Version: 13\r\n\
+             {protocol_header}\
              \r\n"
         );
         stream.write_all(request.as_bytes()).await.unwrap();

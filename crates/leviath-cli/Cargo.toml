@@ -71,6 +71,7 @@ crossterm = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }
 futures-util = { workspace = true }
+tokio-stream = { workspace = true }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
 leviath-sys = { workspace = true }

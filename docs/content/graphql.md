@@ -118,6 +118,54 @@ The deep search sources read two files per stage per run, so treat them as a "se
 toggle rather than something every keystroke pays for. When the scan gives up, `scanTruncated` says
 so.
 
+### What a run holds
+
+The summary fields come from one stat-cached read, so a listing of fifty costs
+fifty stats. Everything below reads a file in the run's directory, and only
+when you ask for it.
+
+| Field | What it reads |
+|---|---|
+| `waitReason` | Why a parked run is parked. Already in memory |
+| `flags` | Post-hoc diagnostics. Already in memory |
+| `stages` | The per-stage ledger: tokens, spend and region peaks |
+| `context` | The live window, with region sizes |
+| `context { regions { content } }` | The region text itself. Heavy; select it for the regions you draw |
+| `finalOutput` | The answer the run submitted |
+| `blueprint` | The manifest the run executed |
+| `children` | The run's direct sub-agents, paged |
+| `treeStatus` | Depth, descendant count and the subtree token roll-up |
+| `logs` | A stage's output or operational log, from the end |
+
+`children` is a connection because a two-hundred-worker fan-out would otherwise
+be one unbounded response. Nest it to walk deeper, one level per nesting, and
+read `hasNextPage` to see a level that was cut. `runs(filter: { parent: })` is
+the same walk from the other direction.
+
+`treeStatus` answers "what did this fan-out cost" without walking it: the
+roll-up covers every run below, at any depth. A parent that spent little and
+whose fifty workers spent a great deal is not a cheap run.
+
+`logs` reads from the end of a stream. `stageIndex` picks one stage, `allStages`
+reads them all in order, and `tail` bounds the bytes, capped at 1 MiB per stream
+because `allStages` multiplies it by the stage count.
+
+`waitReason.needsAPerson` is the field a fleet view wants. A run waiting on
+workers is healthy and resolves on its own; a run waiting on an answer is a row
+somebody has to act on. `NEEDS_SETUP` also carries a `blocker` and a `remedy`,
+so a client can offer the right fix rather than parse a sentence.
+
+```graphql
+{
+  runs(filter: { status: WAITING_INPUT }) {
+    edges { node {
+      id
+      waitReason { reason needsAPerson blocker remedy outstanding }
+    } }
+  }
+}
+```
+
 ## Blueprints
 
 Two different questions, and the schema keeps them apart.
@@ -154,6 +202,32 @@ The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name
 are two different objects, so a client that caches by type and id cannot merge a
 run's frozen copy with whatever is installed now.
 
+## The machine itself
+
+Three catalogues, sized by what you configured rather than by what has piled
+up, so they are plain lists with no paging.
+
+```graphql
+{
+  models { id provider maxContextTokens limitsSource pricing { inputPerMtok } }
+  providers { id display enabled signedIn account }
+  tools { tools { name source } groups { name description } skipped { path reason } }
+}
+```
+
+* `models` answers from the catalogue this server keeps, so it costs no
+  provider call. Pass `refresh: true` to ask the providers again and wait.
+* Two providers can serve the same model id and bill to different places, so
+  `provider` is part of each model rather than something you infer.
+* `enabled` and `signedIn` are different questions. A provider can be turned on
+  with no credential stored, and a credential can outlive the config entry that
+  used it.
+* `tools(agent: "coder")` scopes the inventory to one blueprint's own tools
+  directory, which is what an editor offering an `available_tools` list wants.
+  `skipped` names scripts that were found and could not be offered, with the
+  reason, because a tool an author believes exists and silently is not there is
+  the failure worth reporting.
+
 ## Moving a run
 
 Mutations return the run as it is afterwards, so you never have to guess whether the act landed, and
@@ -167,6 +241,45 @@ mutation { pauseAgent(runId: "coder-1788924523-abc123") { run { id status } } }
 * A run that has already finished answers `CONFLICT`. That is the difference between "you stopped
   it" and "it was over before you asked".
 * A run the daemon does not know answers `NOT_FOUND`, naming both things that can mean.
+
+## Live frames
+
+`GET /ws/graphql` streams the same frames `/ws` carries, over
+`graphql-transport-ws`. Authenticate with `?token=`, because a browser cannot
+put a header on a WebSocket handshake.
+
+```graphql
+subscription Watch($run: ID!) {
+  events(runId: $run, includeDescendants: true, types: [AGENT_STATUS, LOG, INTERACTION_NEEDED]) {
+    __typename
+    ... on AgentStatusChanged { runId status stage }
+    ... on LogLine { runId line }
+    ... on InteractionNeeded { runId request { id kind prompt options } }
+    ... on EventsDropped { count }
+  }
+}
+```
+
+What this buys over `/ws`:
+
+* `types` and the run scope are applied on the server, before a frame is
+  serialized. A console watching one run of five thousand is handed one run's
+  frames.
+* `includeDescendants` adds the sub-agents of those runs as they spawn. Without
+  it, a fan-out means re-querying the tree and re-subscribing while it grows,
+  and the frames in between are lost.
+* `EventsDropped` says you fell behind, and by how many frames. The broadcast is
+  bounded, and a listener that cannot keep up is skipped past rather than
+  allowed to hold up the daemon. Treat it as the cue to re-read whatever you
+  render.
+
+Two delivery rules match `/ws` exactly. `DaemonLinkChanged` reaches every
+subscription, scoped or not, because it explains why a run's frames stopped.
+The machine's other frames, such as config health and update progress, reach
+unscoped subscriptions only.
+
+Delivery is at-most-once. A dropped connection delivers nothing until you
+reconnect, so re-read the state you render when you do.
 
 ## Failures
 

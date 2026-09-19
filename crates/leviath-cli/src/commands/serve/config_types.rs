@@ -441,6 +441,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // now": a client that cannot tell those apart shows a blueprint the run may
     // never have seen.
     "runs.blueprint_snapshot",
+    // `GET /ws/graphql`: the live frames with server-side filtering. Separate
+    // from `graphql` because a client picks its live transport separately from
+    // its read transport, and because the filtering is the reason to move: a
+    // console watching one run of five thousand should not be handed the
+    // fleet's frames to sort through.
+    "graphql.subscriptions",
 ];
 
 /// The server's numeric limits.

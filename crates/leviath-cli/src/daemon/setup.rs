@@ -1306,6 +1306,27 @@ mod tests {
         );
     }
 
+    /// A snapshot that cannot be written is logged, not fatal.
+    ///
+    /// The copy is an archive, not a prerequisite: a run that executes is
+    /// better than a run refused because its own record could not be filed.
+    #[test]
+    fn a_snapshot_that_cannot_be_written_is_logged_not_fatal() {
+        crate::test_support::with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            // A regular file where the snapshot's directory should be, so the
+            // write cannot land.
+            let blocker = dir.path().join("run-a");
+            std::fs::write(&blocker, "x").unwrap();
+            write_blueprint_snapshot(&blocker, "[agent]\nname = \"a\"\n", "run-a");
+            assert!(
+                !blocker
+                    .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE)
+                    .exists()
+            );
+        });
+    }
+
     /// A run with a snapshot resumes on its own copy; one without falls back to
     /// the installed file, exactly as every run did before snapshots existed.
     #[test]

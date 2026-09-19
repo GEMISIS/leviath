@@ -1,4 +1,30 @@
 """
+A run reached a terminal status.
+"""
+type AgentCompleted {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The terminal status.
+	"""
+	status: String!
+	"""
+	The run's error, when that is how it ended.
+	"""
+	error: String
+	"""
+	The answer it submitted, when there is one.
+	"""
+	finalOutput: CompletedOutput
+}
+
+"""
 What a lifecycle mutation answers with.
 """
 type AgentPayload {
@@ -12,6 +38,98 @@ type AgentPayload {
 	superseded.
 	"""
 	warnings: [String!]!
+}
+
+"""
+A run spawned.
+"""
+type AgentSpawned {
+	"""
+	The run's durable id.
+	"""
+	runId: String!
+	"""
+	The agent's live id in the world, which a run outlives.
+	"""
+	agentId: String!
+	"""
+	The blueprint it was spawned from, by name.
+	"""
+	blueprint: String!
+	"""
+	The run that spawned it, for a sub-agent.
+	"""
+	parentId: String
+}
+
+"""
+Spend crossed a threshold.
+"""
+type AgentSpend {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The figure that was crossed, in dollars.
+	"""
+	thresholdUsd: Decimal!
+	"""
+	What the run has spent so far, in dollars.
+	"""
+	totalUsd: Decimal!
+	"""
+	Whether every call behind that total could be priced. When false the
+	run has spent at least this and more by an unknown amount, so it must
+	not be shown as a final figure.
+	"""
+	complete: Boolean!
+	"""
+	The stage that was running when it crossed.
+	"""
+	stage: String!
+}
+
+"""
+A run's status, stage or counters moved.
+"""
+type AgentStatusChanged {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The status, in the daemon's own spelling.
+	"""
+	status: String!
+	"""
+	The stage it is in, by name.
+	"""
+	stage: String!
+	"""
+	Inference turns in that stage.
+	"""
+	iteration: Int!
+	"""
+	Tool calls across the whole run.
+	"""
+	toolCalls: Int!
+	"""
+	Whether a message reaches this run right now.
+	"""
+	acceptsMessages: Boolean!
+	"""
+	Its title, once it has one.
+	"""
+	title: String
 }
 
 """
@@ -136,6 +254,163 @@ enum BlueprintSource {
 }
 
 """
+One page of a run's direct children.
+"""
+type ChildConnection {
+	"""
+	The children on this page.
+	"""
+	edges: [ChildEdge!]!
+	"""
+	How many direct children this run has.
+	"""
+	total: Int!
+	"""
+	Whether another page follows.
+	"""
+	hasNextPage: Boolean!
+}
+
+"""
+One child run with nothing else attached.
+
+No cursor: a level is read from the index's parent map in listing order, and
+`skip` walks it. A keyset cursor would promise stability across a tree that
+is growing under the reader, which is not something this can offer.
+"""
+type ChildEdge {
+	"""
+	The child run.
+	"""
+	node: Run!
+}
+
+"""
+The answer carried on a completion frame.
+"""
+type CompletedOutput {
+	"""
+	The answer itself.
+	"""
+	content: String!
+	"""
+	The output format label the submission carried.
+	"""
+	format: String
+	"""
+	The stage that submitted it.
+	"""
+	stage: String!
+	"""
+	When it was submitted.
+	"""
+	submittedAt: Timestamp!
+	"""
+	True when the stored answer was cut to fit.
+	"""
+	truncated: Boolean!
+}
+
+"""
+The config file's health changed.
+"""
+type ConfigHealthChanged {
+	"""
+	Whether the file on disk loads right now.
+	"""
+	healthy: Boolean!
+	"""
+	The file that was checked.
+	"""
+	path: String!
+	"""
+	One line on why it does not load. Absent when healthy.
+	"""
+	error: String
+	"""
+	While unhealthy this is the last good save, not what is on disk.
+	"""
+	configMtime: Timestamp
+}
+
+type ContextRegion {
+	"""
+	The region's name, matching the blueprint's declaration.
+	"""
+	name: String!
+	"""
+	What the region does when it fills, as the snapshot recorded it.
+	"""
+	kind: String!
+	"""
+	Tokens it holds right now.
+	"""
+	tokens: Int!
+	"""
+	Its ceiling, in tokens.
+	"""
+	maxTokens: Int!
+	"""
+	How many entries it holds.
+	"""
+	entryCount: Int!
+	"""
+	One line on what the region is for.
+	"""
+	description: String
+	"""
+	The region's text, entries joined in order.
+	
+	Heavy, and the reason the window is not one blob: select it only for the
+	regions you display. An entry holding a stored part reads as whatever
+	stand-in the registry gives it, which is what the model sees too.
+	"""
+	content: String!
+}
+
+"""
+Context window totals moved.
+"""
+type ContextUpdated {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	Tokens held across every region.
+	"""
+	totalTokens: Int!
+	"""
+	The window's budget.
+	"""
+	maxTokens: Int!
+}
+
+type ContextWindow {
+	"""
+	Tokens held across every region: what the next request costs before the
+	model's reply.
+	"""
+	totalTokens: Int!
+	"""
+	The window's budget, from the blueprint or the model's own limit.
+	"""
+	maxTokens: Int!
+	"""
+	The stage the run was in when this window was written.
+	"""
+	stageName: String!
+	"""
+	Every region, in layout order.
+	"""
+	regions: [ContextRegion!]!
+}
+
+"""
 Spend for a run, a stage, or a subtree roll-up.
 """
 type CostBreakdown {
@@ -165,12 +440,99 @@ one listing cannot resume a different one.
 scalar Cursor
 
 """
+The daemon on the other end of the link.
+"""
+type DaemonIdentity {
+	"""
+	The version it was built from.
+	"""
+	version: String!
+	"""
+	Its build id.
+	"""
+	build: String!
+	"""
+	Its process id.
+	"""
+	pid: Int!
+}
+
+"""
+The link to the daemon changed.
+
+About the machine rather than a run, and delivered to every subscription,
+scoped or not, because it explains why a run's frames stopped.
+"""
+type DaemonLinkChanged {
+	"""
+	Whether this server is receiving the daemon's events right now.
+	"""
+	connected: Boolean!
+	"""
+	Who is on the other end, once it has said.
+	"""
+	daemon: DaemonIdentity
+	"""
+	Whether the daemon behind the link is a different process than before:
+	a restart this server lived through and its clients need not.
+	"""
+	restarted: Boolean!
+	"""
+	Present when the daemon and this server run different code, with what
+	to do about it. Requests keep working while the two still understand
+	each other.
+	"""
+	restartAdvised: String
+}
+
+"""
 An exact decimal, serialized as a JSON string. Money is never a `Float` on
 the wire: a cost figure that a JSON parser silently re-rounds is a lie
 about spend. The daemon keeps costs as `f64`, so this carries that number's
 shortest round-tripping form rather than inventing precision.
 """
 scalar Decimal
+
+"""
+This subscription fell behind, and frames were dropped.
+
+The daemon's broadcast is bounded, and a subscriber that cannot keep up is
+skipped past rather than allowed to hold the fan-out. Silently, before
+this: a client could not tell a quiet run from a missed one. Re-query the
+state you render when you see this.
+"""
+type EventsDropped {
+	"""
+	How many frames this subscription missed.
+	"""
+	count: BigInt!
+}
+
+"""
+The answer a run submitted.
+"""
+type FinalOutput {
+	"""
+	The answer itself.
+	"""
+	content: String!
+	"""
+	The output format label the submission carried.
+	"""
+	format: String
+	"""
+	The stage that submitted it.
+	"""
+	stage: String!
+	"""
+	When it was submitted, unix epoch seconds.
+	"""
+	submittedAt: Timestamp!
+	"""
+	True when the stored answer was cut to fit.
+	"""
+	truncated: Boolean!
+}
 
 """
 Where a search matched, and enough text to show a person why.
@@ -219,6 +581,108 @@ enum HintSetting {
 }
 
 """
+What kind of answer a parked run is waiting for.
+"""
+enum InteractionKind {
+	"""
+	The person writes anything.
+	"""
+	FREE_TEXT
+	"""
+	The person picks from options.
+	"""
+	MULTIPLE_CHOICE
+	"""
+	The person confirms or denies.
+	"""
+	CONFIRM
+	"""
+	The person approves or denies a tool call.
+	"""
+	TOOL_APPROVAL
+	"""
+	The person edits a document directly.
+	"""
+	EDIT_TEXT
+}
+
+"""
+A run parked on a prompt somebody has to answer.
+"""
+type InteractionNeeded {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The parked request. Null when this build cannot read the shape the
+	daemon sent, which is what a newer daemon's new kind looks like.
+	"""
+	request: InteractionRequest
+}
+
+"""
+One pending ask, parked on a run.
+"""
+type InteractionRequest {
+	"""
+	The request's id, which is what an answer names.
+	"""
+	id: String!
+	"""
+	What kind of answer it takes.
+	"""
+	kind: InteractionKind!
+	"""
+	What the person is asked.
+	"""
+	prompt: String!
+	"""
+	A longer document shown alongside the prompt, such as a plan to review.
+	"""
+	body: String
+	"""
+	The choices, for a multiple-choice ask.
+	"""
+	options: [String!]!
+	"""
+	The tool awaiting approval, for an approval ask.
+	"""
+	tool: String
+	"""
+	The stage the run is in.
+	"""
+	stageName: String!
+	"""
+	Whether the run holds until this is answered.
+	"""
+	required: Boolean!
+}
+
+"""
+One log line.
+"""
+type LogLine {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The line, without its trailing newline. Long lines are cut for the
+	broadcast; the stage log on disk keeps the whole thing.
+	"""
+	line: String!
+}
+
+"""
 One caller-supplied metadata entry on a run.
 """
 type MetadataEntry {
@@ -230,6 +694,117 @@ type MetadataEntry {
 	The value. Always a string.
 	"""
 	value: String!
+}
+
+"""
+One model this machine can route to.
+"""
+type Model {
+	"""
+	The model id, as the provider names it.
+	"""
+	id: String!
+	"""
+	The provider that serves it. Two providers can serve the same id and
+	bill to different places, which is why this is part of the answer.
+	"""
+	provider: String!
+	"""
+	The name to show, when the provider gives one.
+	"""
+	displayName: String
+	"""
+	Context window in tokens.
+	"""
+	maxContextTokens: Int!
+	"""
+	The most one reply may be, in tokens.
+	"""
+	maxOutputTokens: Int!
+	"""
+	Where those two limits came from.
+	"""
+	limitsSource: ModelLimitsSource!
+	"""
+	Whether the model takes tool definitions.
+	"""
+	supportsTools: Boolean!
+	"""
+	Whether it takes a sampling temperature.
+	"""
+	supportsTemperature: Boolean!
+	"""
+	Whether the limits were learned from a live call rather than declared.
+	"""
+	learned: Boolean!
+	"""
+	When the model was released, when the provider says.
+	"""
+	released: Timestamp
+	"""
+	When it retires, as the provider writes it.
+	"""
+	retires: String
+	"""
+	What it costs, when the price file knows.
+	"""
+	pricing: ModelPricing
+	"""
+	Mime type patterns it takes.
+	"""
+	inputTypes: [String!]!
+	"""
+	Mime type patterns it produces.
+	"""
+	outputTypes: [String!]!
+}
+
+"""
+Where a model's token limits came from.
+"""
+enum ModelLimitsSource {
+	"""
+	What the provider's own API reports.
+	"""
+	API
+	"""
+	This build's compiled table, matched on the model name.
+	"""
+	BUILTIN
+	"""
+	A config override.
+	"""
+	OVERRIDE
+	"""
+	The daemon reported something this build does not know. The limits are
+	still whatever it sent; only their provenance is unrecognised.
+	"""
+	UNKNOWN
+}
+
+"""
+What one model costs per million tokens.
+
+Absent where the price file has no entry for the model, which is why a run
+can report an unpriced call rather than a cost of zero.
+"""
+type ModelPricing {
+	"""
+	Input tokens, per million.
+	"""
+	inputPerMtok: Decimal!
+	"""
+	Input tokens served from the provider's cache, per million.
+	"""
+	cachedInputPerMtok: Decimal!
+	"""
+	Tokens written to that cache, per million.
+	"""
+	cacheWritePerMtok: Decimal!
+	"""
+	Output tokens, per million.
+	"""
+	outputPerMtok: Decimal!
 }
 
 type Mutation {
@@ -298,6 +873,47 @@ type PageInfo {
 	endCursor: Cursor
 }
 
+"""
+One provider this machine can reach.
+"""
+type Provider {
+	"""
+	The registry name a blueprint would use.
+	"""
+	id: String!
+	"""
+	The name to show.
+	"""
+	display: String!
+	"""
+	Whether the config has it turned on.
+	
+	Separate from `signedIn`: the two are set by different routes, and
+	either can be true on its own.
+	"""
+	enabled: Boolean!
+	"""
+	Whether a credential is stored for it.
+	"""
+	signedIn: Boolean!
+	"""
+	The account, when the credential names one.
+	"""
+	account: String
+	"""
+	The subscription tier, when the credential names one.
+	"""
+	plan: String
+	"""
+	When the access token lapses.
+	
+	Not a deadline for anybody: it is refreshed well before this. It is
+	here so a console can show the session is live rather than implying
+	somebody must act.
+	"""
+	expiresAt: Timestamp
+}
+
 type Query {
 	"""
 	The blueprints installed on this machine, by name.
@@ -327,6 +943,44 @@ type Query {
 		"""
 		skip: Int! = 0
 	): BlueprintConnection!
+	"""
+	Every model this machine can route to.
+	
+	Answered from the catalogue this server keeps, so it costs no provider
+	call. Two providers can serve the same model id and bill to different
+	places, so `provider` is part of each answer rather than something a
+	client infers.
+	"""
+	models(
+		"""
+		Only this provider's models.
+		"""
+		provider: String,
+		"""
+		Reload the provider listings before answering.
+		"""
+		refresh: Boolean! = false
+	): [Model!]!
+	"""
+	The providers this machine can reach, configured or not.
+	
+	`enabled` and `signedIn` are different questions with different
+	answers: a provider can be turned on with no credential stored, and a
+	credential can outlive the config entry that used it.
+	"""
+	providers: [Provider!]!
+	"""
+	The tools an agent on this machine can call.
+	
+	Scoped to one blueprint's own directory when `agent` names one, which
+	is what an editor offering an `available_tools` list wants.
+	"""
+	tools(
+		"""
+		Scope to this blueprint's own tools directory.
+		"""
+		agent: String
+	): ToolInventory!
 	"""
 	Keyset-paged run listing.
 	
@@ -427,6 +1081,20 @@ enum RegionKind {
 	Behaviour defined by a Rhai script under `context_hooks/`.
 	"""
 	CUSTOM
+}
+
+"""
+The most one region reached while a stage was active.
+"""
+type RegionPeak {
+	"""
+	The region's name.
+	"""
+	region: String!
+	"""
+	The most tokens it held while this stage was active.
+	"""
+	tokens: Int!
 }
 
 type Run {
@@ -539,6 +1207,93 @@ type Run {
 	"""
 	blueprintDigest: String
 	"""
+	Why this run is parked, and what would unblock it.
+	
+	Present only while the status is `WAITING_INPUT`. A run waiting on a
+	person also carries the prompt itself; a run parked on its own workers
+	carries only this, and needs nobody.
+	"""
+	waitReason: WaitReason
+	"""
+	Post-hoc diagnostics: an empty or degraded run told from a healthy one
+	without reading logs.
+	"""
+	flags: RunFlags!
+	"""
+	The run's stage ledger: what each stage cost, and how often it ran.
+	
+	Bounded by the blueprint's stage count, so it is a list rather than a
+	connection. Read from the run's own `stages.json` only when selected.
+	Null, with an error, when that file will not read: one run's broken
+	ledger must not cost a client the page around it.
+	"""
+	stages: [StageRecord!]
+	"""
+	The run's context window as it stands right now.
+	
+	Null for a run that has not written one yet, and for a finished run
+	whose window was never persisted. Region contents are their own field,
+	so asking for the shape of the window does not read its text.
+	"""
+	context: ContextWindow
+	"""
+	The answer this run submitted. Null until something is submitted.
+	"""
+	finalOutput: FinalOutput
+	"""
+	This run's direct children, paged.
+	
+	A connection rather than an array: a two-hundred-worker fan-out would
+	otherwise be one unbounded response. Nest the field to walk deeper, one
+	level per nesting, and read `pageInfo.hasNextPage` to see a level that
+	was cut. For a flat read of a whole subtree, `runs(filter: { parent: })`
+	is the same walk one page at a time.
+	"""
+	children(
+		"""
+		Page size for this level.
+		"""
+		first: Int! = 50,
+		"""
+		How many of this run's children to skip.
+		"""
+		skip: Int! = 0
+	): ChildConnection!
+	"""
+	How deep and how wide this run's sub-agent tree is, without walking it.
+	
+	The roll-up covers the whole subtree, which is the figure a fan-out is
+	judged by: a parent that spent little and whose fifty workers spent a
+	great deal is not a cheap run.
+	"""
+	treeStatus: RunTreeStatus!
+	"""
+	A stage's logs.
+	
+	`stageIndex` picks one stage, `allStages` reads every stage in order, and
+	neither reads more than `tail` bytes from the end of each stream. The cap
+	is the server's, because `allStages` multiplies whatever the client asks
+	for by the stage count.
+	"""
+	logs(
+		"""
+		One stage by index; omitted means the stage the run is on now.
+		"""
+		stageIndex: Int,
+		"""
+		Every stage's logs in order, instead of one stage's.
+		"""
+		allStages: Boolean! = false,
+		"""
+		Read the operational log rather than the output stream.
+		"""
+		operational: Boolean! = false,
+		"""
+		Bytes to read from the end of each stream.
+		"""
+		tail: Int
+	): String!
+	"""
 	Caller-supplied metadata from spawn. Values are always strings.
 	
 	Sorted by key: the daemon keeps these in a hash map, and a listing
@@ -598,6 +1353,88 @@ type RunEdge {
 }
 
 """
+One frame off the daemon broadcast.
+"""
+union RunEvent = AgentSpawned | AgentStatusChanged | RunRenamed | TokensUpdated | ContextUpdated | StageTransition | ToolCallStarted | ToolCallFinished | LogLine | AgentSpend | InteractionNeeded | AgentCompleted | DaemonLinkChanged | ConfigHealthChanged | UpdateProgress | UpdateFinished | EventsDropped
+
+"""
+One frame type off the daemon broadcast.
+
+Subscribe with the types you render. The names match the frame names `/ws`
+uses, so a client moving over reads the same vocabulary.
+"""
+enum RunEventType {
+	"""
+	A run spawned.
+	"""
+	AGENT_SPAWNED
+	"""
+	A run's status, stage or counters moved.
+	"""
+	AGENT_STATUS
+	"""
+	A run got its title.
+	"""
+	RUN_RENAMED
+	"""
+	Token usage ticked up.
+	"""
+	TOKENS
+	"""
+	Context window totals moved.
+	"""
+	CONTEXT_UPDATE
+	"""
+	The run entered a new stage.
+	"""
+	STAGE_TRANSITION
+	"""
+	A tool call began.
+	"""
+	TOOL_CALL_STARTED
+	"""
+	A tool call finished.
+	"""
+	TOOL_CALL_FINISHED
+	"""
+	One log line.
+	"""
+	LOG
+	"""
+	Spend crossed a threshold.
+	"""
+	AGENT_SPEND
+	"""
+	A run parked on a prompt somebody has to answer.
+	"""
+	INTERACTION_NEEDED
+	"""
+	A run reached a terminal status.
+	"""
+	AGENT_COMPLETED
+	"""
+	The serving daemon's identity or link state changed.
+	"""
+	DAEMON_LINK
+	"""
+	The config file's health changed.
+	"""
+	CONFIG_HEALTH
+	"""
+	A self-update step moved.
+	"""
+	UPDATE_PROGRESS
+	"""
+	A self-update finished.
+	"""
+	UPDATE_FINISHED
+	"""
+	This subscription fell behind and frames were dropped.
+	"""
+	EVENTS_DROPPED
+}
+
+"""
 Which runs a listing is about: status, search, parentage and time, in one
 place.
 """
@@ -642,6 +1479,84 @@ input RunFilter {
 	Oldest first when true.
 	"""
 	ascending: Boolean
+}
+
+"""
+Post-hoc diagnostics: an empty or degraded run told from a healthy one
+without reading logs.
+"""
+type RunFlags {
+	"""
+	The run finished with nothing to show.
+	"""
+	emptyOutput: Boolean!
+	"""
+	Whether the run ever submitted an answer.
+	"""
+	producedOutput: Boolean!
+	"""
+	How many times a stage that must submit was let through without having
+	submitted, after being asked again its bounded number of times.
+	"""
+	outputForced: Int!
+	"""
+	Whether the run was offered no tool it could answer with.
+	"""
+	noOutputTools: Boolean!
+	"""
+	How many transitions were taken with their gates forced.
+	"""
+	gatesForced: Int!
+	"""
+	How many times a stage exhausted its iteration budget.
+	"""
+	maxIterationsHit: Int!
+	"""
+	How many fan-outs ran degraded, with fewer workers than they split.
+	"""
+	splitsDegraded: Int!
+	"""
+	Files the run recorded as changed.
+	"""
+	modifiedFileCount: Int!
+	"""
+	The files themselves, capped when recorded.
+	"""
+	modifiedFiles: [String!]!
+	"""
+	Search operations the run performed.
+	"""
+	searchesRun: Int!
+	"""
+	Searches that matched nothing.
+	"""
+	searchesEmpty: Int!
+	"""
+	Required regions the run left empty when it ended.
+	"""
+	requiredRegionsAbandoned: [String!]!
+	"""
+	Whether the run's working directory went missing under it.
+	"""
+	workspaceLost: Boolean!
+}
+
+"""
+A run got its title.
+"""
+type RunRenamed {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The new title.
+	"""
+	title: String!
 }
 
 """
@@ -705,6 +1620,24 @@ enum RunStatus {
 }
 
 """
+How deep and how wide a run's sub-agent tree is.
+"""
+type RunTreeStatus {
+	"""
+	Token roll-up over the whole subtree, this run included.
+	"""
+	rollup: TokenUsage!
+	"""
+	The deepest nesting below this run.
+	"""
+	depth: Int!
+	"""
+	How many runs are below it, at any depth.
+	"""
+	descendantCount: Int!
+}
+
+"""
 Where a run search looks.
 
 `META` and `FILES` answer from what is already parsed in memory. The other
@@ -732,6 +1665,62 @@ enum SearchScope {
 	The crash-resume journal.
 	"""
 	JOURNAL
+}
+
+"""
+What has to change before a parked run can go on.
+
+One value per remedy, not per error: topping up an account, adding a
+provider and replacing a rejected key are three different screens, and a
+client with only the sentence would have to match on its wording.
+"""
+enum SetupBlocker {
+	"""
+	The stage names a provider this install has not configured.
+	"""
+	PROVIDER_MISSING
+	"""
+	The account behind the provider is out of credits.
+	"""
+	CREDITS_EXHAUSTED
+	"""
+	The key was rejected.
+	"""
+	AUTH_FAILED
+	"""
+	The key is valid but not allowed to use the model.
+	"""
+	FORBIDDEN
+	"""
+	No provider is available at all.
+	"""
+	PROVIDERS_UNAVAILABLE
+	"""
+	The provider could not be reached.
+	"""
+	PROVIDER_UNREACHABLE
+	"""
+	The provider took too long.
+	"""
+	PROVIDER_TIMED_OUT
+	"""
+	The provider failed.
+	"""
+	PROVIDER_FAILED
+}
+
+"""
+A `.rhai` file that was found and could not be offered as a tool.
+"""
+type SkippedTool {
+	"""
+	The file that was skipped.
+	"""
+	path: String!
+	"""
+	Why it could not be offered.
+	"""
+	reason: String!
 }
 
 type Stage {
@@ -840,6 +1829,178 @@ enum StageMode {
 }
 
 """
+One stage's record within a run: what it cost, and how often it ran.
+"""
+type StageRecord {
+	"""
+	The stage's name.
+	"""
+	name: String!
+	"""
+	Visit order within the blueprint.
+	"""
+	index: Int!
+	"""
+	The stage's own lifecycle state.
+	"""
+	status: StageStatus!
+	"""
+	False when the run never reached this stage.
+	"""
+	entered: Boolean!
+	"""
+	Token roll-up for this stage, across every visit.
+	"""
+	usage: TokenUsage!
+	"""
+	Spend roll-up for this stage, across every visit.
+	"""
+	cost: CostBreakdown!
+	"""
+	How many times the run entered this stage.
+	"""
+	visitCount: Int!
+	"""
+	One entry per stay, capped when recorded. When `visitCount` is larger
+	than this list, the roll-ups above are still the complete figures.
+	"""
+	visits: [StageVisit!]!
+	"""
+	The most each region held while this stage was active.
+	"""
+	regionPeaks: [RegionPeak!]!
+	"""
+	Whether the runaway detector fired here.
+	"""
+	runawayWarned: Boolean!
+	"""
+	First entry, unix epoch seconds.
+	"""
+	startedAt: Timestamp
+	"""
+	Last exit; null while the stage is active.
+	"""
+	endedAt: Timestamp
+	"""
+	The working span in progress; null while the clock is stopped.
+	"""
+	active: WorkingClock
+}
+
+"""
+A stage's own lifecycle state within a run.
+"""
+enum StageStatus {
+	"""
+	Declared but not yet entered.
+	"""
+	PENDING
+	"""
+	The stage the run is in right now.
+	"""
+	ACTIVE
+	"""
+	Entered, and blocked on a person answering.
+	"""
+	WAITING_INPUT
+	"""
+	Finished and left.
+	"""
+	COMPLETE
+	"""
+	Ended in a failure. The run's own error carries the message.
+	"""
+	ERROR
+	"""
+	The run finished without ever entering this stage.
+	"""
+	SKIPPED
+}
+
+"""
+The run entered a new stage.
+"""
+type StageTransition {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The stage it left.
+	"""
+	from: String!
+	"""
+	The stage it entered.
+	"""
+	to: String!
+	"""
+	How many times the destination has been entered, this entry included.
+	"""
+	iteration: Int!
+}
+
+"""
+One visit to a stage.
+"""
+type StageVisit {
+	"""
+	When the run entered, unix epoch seconds.
+	"""
+	enteredAt: Timestamp!
+	"""
+	When it left; null for the visit in progress.
+	"""
+	leftAt: Timestamp
+	"""
+	Tokens burned on this visit.
+	"""
+	usage: TokenUsage!
+	"""
+	Spend on this visit.
+	"""
+	cost: CostBreakdown!
+}
+
+type Subscription {
+	"""
+	The daemon broadcast, filtered server-side.
+	
+	Pass `types` to name only the frames you render. Pass `runId` or
+	`runIds` to narrow to particular runs, and `includeDescendants` to have
+	their sub-agents included as they spawn, which is what a fan-out needs:
+	without it a client has to re-query the tree and re-subscribe as it
+	grows. Pass no scope and it is every run, like `/ws`.
+	
+	Delivery is at-most-once. A dropped connection delivers nothing until
+	the client reconnects, and a subscription that falls behind gets an
+	`EventsDropped` frame saying how many it missed, which is the cue to
+	re-read whatever it renders.
+	"""
+	events(
+		"""
+		Only these frame types; omitted or empty means all of them.
+		"""
+		types: [RunEventType!],
+		"""
+		Narrow to one run.
+		"""
+		runId: String,
+		"""
+		Narrow to a set of runs.
+		"""
+		runIds: [String!],
+		"""
+		Include the sub-agents of the runs in scope, as they spawn.
+		"""
+		includeDescendants: Boolean! = false
+	): RunEvent!
+}
+
+"""
 Unix epoch seconds, as the daemon stores them. No string dates, so no
 timezone maths over a number that never had a timezone.
 """
@@ -868,6 +2029,112 @@ type TokenUsage {
 }
 
 """
+Token usage ticked up.
+"""
+type TokensUpdated {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	Input tokens so far, cached ones included.
+	"""
+	promptTokens: BigInt!
+	"""
+	Output tokens so far.
+	"""
+	completionTokens: BigInt!
+	"""
+	Counted within `promptTokens`, not on top of it.
+	"""
+	cachedTokens: BigInt!
+	"""
+	Tokens written to the provider's cache.
+	"""
+	cacheWriteTokens: BigInt!
+}
+
+"""
+Where a tool comes from.
+"""
+type Tool {
+	"""
+	The name the model calls it by.
+	"""
+	name: String!
+	"""
+	Which source offers it: a built-in, a sub-agent tool, a script, or an
+	MCP server.
+	"""
+	source: String!
+	"""
+	The file behind it, for a script tool.
+	"""
+	path: String
+	"""
+	The agent whose directory it came from, for an agent-scoped script.
+	"""
+	agent: String
+}
+
+"""
+A tool call finished.
+"""
+type ToolCallFinished {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	Pairs with the start.
+	"""
+	callId: String!
+	"""
+	The tool called.
+	"""
+	tool: String!
+	"""
+	Whether the call took effect. False for a refused or failed call: a
+	finish is not a success on its own.
+	"""
+	ok: Boolean!
+	"""
+	The result, flattened to one line and cut to fit.
+	"""
+	summary: String!
+}
+
+"""
+A tool call began.
+"""
+type ToolCallStarted {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The provider's call id, which pairs this with its finish.
+	"""
+	callId: String!
+	"""
+	The tool called.
+	"""
+	tool: String!
+}
+
+"""
 Whether a run sees tools that appear after it started.
 """
 enum ToolDiscovery {
@@ -883,6 +2150,41 @@ enum ToolDiscovery {
 	decide.
 	"""
 	RESCAN_AFTER_WRITES
+}
+
+"""
+One group token an `available_tools` list may name in place of tool names.
+"""
+type ToolGroup {
+	"""
+	The token itself, such as `@builtin`.
+	"""
+	name: String!
+	"""
+	What the token stands for.
+	"""
+	description: String!
+}
+
+"""
+The tool inventory: what an agent on this machine can call.
+"""
+type ToolInventory {
+	"""
+	The tools themselves.
+	"""
+	tools: [Tool!]!
+	"""
+	The group tokens a blueprint may name instead of individual tools.
+	"""
+	groups: [ToolGroup!]!
+	"""
+	Scripts that were found and could not be offered, with the reason.
+	
+	Reported rather than dropped: a tool an author believes exists and that
+	silently is not there is the failure this prevents.
+	"""
+	skipped: [SkippedTool!]!
 }
 
 """
@@ -916,6 +2218,116 @@ type TransitionEdge {
 }
 
 """
+A self-update finished.
+"""
+type UpdateFinished {
+	"""
+	The update job.
+	"""
+	jobId: String!
+	"""
+	Its terminal status.
+	"""
+	status: String!
+	"""
+	Whether both this server and the daemon keep running the old build
+	until they are restarted.
+	"""
+	restartRequired: Boolean!
+}
+
+"""
+A self-update step moved.
+"""
+type UpdateProgress {
+	"""
+	The update job.
+	"""
+	jobId: String!
+	"""
+	Which part of the install the step touches.
+	"""
+	step: String!
+	"""
+	The step's status.
+	"""
+	status: String!
+	"""
+	One line about what just happened, ready to print.
+	"""
+	detail: String!
+}
+
+"""
+Why a run is parked, and what would unblock it.
+
+Present only while the run is in `WAITING_INPUT`. A run waiting on a person
+carries the prompt in `interaction`; a run parked on its own sub-agents
+carries the reason here and needs nobody.
+"""
+type WaitReason {
+	"""
+	The machine-readable cause.
+	"""
+	reason: WaitReasonKind!
+	"""
+	What is blocked. Present when `reason` is `NEEDS_SETUP`.
+	"""
+	blocker: SetupBlocker
+	"""
+	What to do about it, in a sentence. Present with `blocker`.
+	"""
+	remedy: String
+	"""
+	How many are still outstanding. Present for `FAN_OUT_WORKERS` and
+	`CHILDREN`.
+	"""
+	outstanding: Int
+	"""
+	Whether this needs a person, as against resolving on its own.
+	
+	The difference a client cares about: a run waiting on workers is
+	healthy, and a run waiting on an answer is a row somebody has to act
+	on.
+	"""
+	needsAPerson: Boolean!
+}
+
+"""
+Why a run is parked.
+"""
+enum WaitReasonKind {
+	"""
+	Waiting on a tool-permission decision.
+	"""
+	TOOL_APPROVAL
+	"""
+	Waiting on an answer to a question the agent asked.
+	"""
+	USER_PROMPT
+	"""
+	Waiting at a taint gate.
+	"""
+	TAINT_GATE
+	"""
+	Waiting at a blueprint interaction point.
+	"""
+	INTERACTION_POINT
+	"""
+	Fan-out workers are still running. Healthy; it resolves on its own.
+	"""
+	FAN_OUT_WORKERS
+	"""
+	Child runs are still running. Healthy; it resolves on its own.
+	"""
+	CHILDREN
+	"""
+	Something on the machine has to change before this run can go on.
+	"""
+	NEEDS_SETUP
+}
+
+"""
 Elapsed working time: banked spans plus the one in progress.
 """
 type WorkingClock {
@@ -940,5 +2352,6 @@ directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: Query
 	mutation: Mutation
+	subscription: Subscription
 }
 

@@ -232,6 +232,11 @@ fn api_router() -> Router<AppState> {
         // rather than beside them in a module of its own so this file stays
         // the one place a route is registered.
         .route("/graphql", post(graphql::http))
+        // Subscriptions. Under `/ws/` because that is the prefix the auth layer
+        // takes a `?token=` on and the request limits exempt from the deadline:
+        // a browser cannot header a WebSocket, and a subscription is meant to
+        // stay open.
+        .route("/ws/graphql", get(graphql::ws))
         // WebSocket
         .route("/ws", get(websocket::ws_global))
         .route("/ws/agents/{id}", get(websocket::ws_agent))
@@ -1178,6 +1183,31 @@ mod tests {
         assert_eq!(problems, Vec::new());
     }
 
+    /// `lev serve --print-graphql-schema` prints what this build serves.
+    ///
+    /// The flag exists so the checked-in copy can be regenerated on a machine
+    /// with no daemon, so this covers the one function behind it.
+    #[test]
+    fn the_printed_schema_is_the_served_one() {
+        let printed = graphql_schema();
+        assert!(printed.contains("type Run "), "{printed}");
+        assert_eq!(printed, graphql::sdl());
+    }
+
+    /// A service-layer function the scan cannot find contributes no statuses.
+    ///
+    /// Reached when a handler names a core module and the reader looks for a
+    /// function that is not in it, which is what a rename looks like: the
+    /// answer is "nothing found", not a panic, and the spec check then holds
+    /// the route to what it can see.
+    #[test]
+    fn the_core_scan_finds_nothing_for_a_function_that_is_not_there() {
+        assert_eq!(
+            core_status_codes("lifecycle", "no_such_function"),
+            Vec::<u16>::new()
+        );
+    }
+
     /// The scan's `ServeError` table is the same mapping `ServeError::status`
     /// makes. Two copies of a mapping is exactly how a spec check comes to
     /// pass while describing something else.
@@ -1496,6 +1526,75 @@ mod tests {
     /// admin routes are absent, exactly as `api_router` leaves them.
     fn test_app() -> Router {
         crate::commands::serve::mcp::scoped(api_router().with_state(test_state()), test_paths())
+    }
+
+    /// The GraphQL endpoint answers over HTTP, through the same router and the
+    /// same layers every REST route sits behind.
+    ///
+    /// The resolvers are exercised directly elsewhere; what this covers is the
+    /// endpoint itself: a request body carrying a query, and an answer in the
+    /// `{"data": ...}` envelope a GraphQL client expects.
+    #[tokio::test]
+    async fn the_graphql_endpoint_answers_over_http() {
+        let state = test_state();
+        let app = api_router()
+            .layer(axum::extract::Extension(graphql::build_schema(
+                state.clone(),
+            )))
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "query": "{ __typename }" }).to_string(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["__typename"], "Query");
+    }
+
+    /// A query the schema refuses still answers 200, with the failure in
+    /// `errors`. That is the GraphQL contract, and it is what lets one bad
+    /// field travel beside forty-nine good ones.
+    #[tokio::test]
+    async fn a_refused_graphql_query_answers_two_hundred_with_errors() {
+        let state = test_state();
+        let app = api_router()
+            .layer(axum::extract::Extension(graphql::build_schema(
+                state.clone(),
+            )))
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "query": "{ noSuchField }" }).to_string(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["errors"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("noSuchField"),
+            "{json}"
+        );
     }
 
     #[tokio::test]

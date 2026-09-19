@@ -121,6 +121,34 @@ fn a_search_scope_selects_its_source_and_digests_as_written() {
     );
 }
 
+/// Every search scope maps to the source it reads, and digests as the request
+/// spelled it.
+///
+/// The table is checked whole because the mapping is the contract: a scope that
+/// quietly read a different source would answer a search nobody asked for.
+#[test]
+fn every_search_scope_maps_to_one_source() {
+    use super::SearchScope;
+    let cases = [
+        (SearchScope::Meta, Source::Meta, "meta"),
+        (SearchScope::Files, Source::Files, "files"),
+        (SearchScope::Context, Source::Context, "context"),
+        (SearchScope::Logs, Source::Logs, "logs"),
+        (SearchScope::Journal, Source::Journal, "journal"),
+    ];
+    for (scope, source, word) in cases {
+        let selection = RunFilter {
+            query: Some("x".to_string()),
+            query_in: Some(vec![scope]),
+            ..Default::default()
+        }
+        .selection(50, None)
+        .expect("the scope resolves");
+        assert_eq!(selection.sources, vec![source], "{word}");
+        assert_eq!(selection.sources_raw, word);
+    }
+}
+
 /// Parentage is one question with two spellings, and asking both at once is a
 /// client bug worth saying out loud.
 #[test]
@@ -574,4 +602,466 @@ async fn the_blueprint_listing_pages() {
     );
   })
   .await;
+}
+
+/// The catalogue fields answer from what this machine has configured.
+///
+/// A daemon-less state configures no provider, so the honest answer is empty
+/// lists rather than an error: "nothing configured" is a state, not a failure.
+#[tokio::test]
+async fn the_catalogue_answers_for_an_unconfigured_machine() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer =
+            run_query("{ models { id provider } providers { id display enabled signedIn } }").await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["models"].as_array().map(Vec::len), Some(0));
+        // Every provider Leviath can sign in to is listed, configured or not,
+        // which is what a settings screen needs to offer them.
+        let providers = json["providers"].as_array().expect("providers");
+        assert!(!providers.is_empty(), "the sign-in providers are listed");
+        assert!(
+            providers.iter().all(|p| p["enabled"] == false),
+            "nothing is configured here: {providers:?}"
+        );
+    })
+    .await;
+}
+
+/// The tool inventory carries the built-ins, the group tokens a blueprint may
+/// name, and whatever could not be offered.
+#[tokio::test]
+async fn the_tool_inventory_lists_tools_and_groups() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query(
+            "{ tools { tools { name source } groups { name description } skipped { path reason } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let tools = json["tools"]["tools"].as_array().expect("tools");
+        assert!(
+            tools.iter().any(|t| t["name"] == "read_file"),
+            "the built-ins are there"
+        );
+        let groups = json["tools"]["groups"].as_array().expect("groups");
+        assert!(
+            groups.iter().any(|g| g["name"] == "@builtin"),
+            "the group tokens are named: {groups:?}"
+        );
+    })
+    .await;
+}
+
+/// A script that was found and cannot be offered is reported, with the reason.
+///
+/// Silence here is the failure worth preventing: an author who believes a tool
+/// exists, and whose agent is never offered it, has nothing to read.
+#[tokio::test]
+async fn a_script_that_cannot_be_offered_is_reported() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        // An agent whose own `tools/` holds a script that will not compile.
+        let agent = home.join(".leviath").join("agents").join("coder");
+        std::fs::create_dir_all(agent.join("tools")).expect("the agent's tools dir");
+        std::fs::write(
+            agent.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"coder\"\n",
+        )
+        .expect("manifest written");
+        std::fs::write(
+            agent.join("tools").join("broken.rhai"),
+            "fn main( { this does not compile",
+        )
+        .expect("script written");
+
+        let answer = run_query(r#"{ tools(agent: "coder") { skipped { path reason } } }"#).await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let skipped = json["tools"]["skipped"].as_array().expect("skipped");
+        assert!(
+            skipped.iter().any(|s| s["path"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("broken.rhai")),
+            "the broken script is named: {skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .all(|s| !s["reason"].as_str().unwrap_or_default().is_empty()),
+            "each one says why: {skipped:?}"
+        );
+    })
+    .await;
+}
+
+/// An agent name that could escape the agents directory is refused, on this
+/// surface as on the REST one: the name arrives from a client and `join`
+/// resists neither `..` nor an absolute path.
+#[tokio::test]
+async fn a_tool_scope_refuses_an_unsafe_agent_name() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query(r#"{ tools(agent: "../etc") { tools { name } } }"#).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("Invalid agent name"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+    })
+    .await;
+}
+
+/// A run's answer, read from the run's own directory when a client asks for
+/// it and not before.
+#[tokio::test]
+async fn a_run_carries_the_answer_it_submitted() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-final-output", |_d| async move {
+        // The descriptor in `meta.json` says an answer exists; the bytes live
+        // in the sidecar beside it, which is how the daemon stores it.
+        let mut meta = meta_at("coder-1788924523-out000", 100);
+        meta.final_output = Some(leviath_core::FinalOutputDescriptor {
+            format: Some("markdown".to_string()),
+            stage: "output".to_string(),
+            submitted_at: 1_788_924_600,
+            bytes: 10,
+            truncated: false,
+            artifacts: Vec::new(),
+        });
+        create_run(&meta).expect("run written");
+        crate::runstate::write_final_output(
+            &crate::commands::serve::core::blueprints::run_dir(&meta.run_id),
+            "the answer",
+        )
+        .expect("output written");
+
+        let answer = run_query(
+            "{ runs { edges { node { finalOutput { content format stage submittedAt truncated } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let output = &json["runs"]["edges"][0]["node"]["finalOutput"];
+        assert_eq!(output["content"], "the answer");
+        assert_eq!(output["format"], "markdown");
+        assert_eq!(output["stage"], "output");
+        assert_eq!(output["submittedAt"], 1_788_924_600i64);
+        assert_eq!(output["truncated"], false);
+    })
+    .await;
+}
+
+/// A run that has submitted nothing says so with nulls, and its detail fields
+/// are empty rather than absent.
+#[tokio::test]
+async fn a_run_with_nothing_recorded_reads_as_empty() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-empty-detail", |_d| async move {
+        create_run(&meta_at("coder-1788924523-bare00", 100)).expect("run written");
+
+        let answer = run_query(
+            "{ runs { edges { node { finalOutput { content } context { totalTokens }
+                                     stages { name } waitReason { reason }
+                                     flags { emptyOutput modifiedFileCount } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let node = &json["runs"]["edges"][0]["node"];
+        assert!(node["finalOutput"].is_null(), "nothing submitted");
+        assert!(node["context"].is_null(), "no window written yet");
+        assert!(node["waitReason"].is_null(), "not parked");
+        assert_eq!(node["stages"].as_array().map(Vec::len), Some(0));
+        assert_eq!(node["flags"]["modifiedFileCount"], 0);
+    })
+    .await;
+}
+
+/// The blueprint listing is bounded by the same page cap the run listing is.
+#[tokio::test]
+async fn the_blueprint_listing_refuses_an_oversized_page() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query("{ blueprints(first: 100000) { total } }").await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(error.message.contains("page-size cap"), "{}", error.message);
+    })
+    .await;
+}
+
+/// A run's live window, read from the run's own directory.
+#[tokio::test]
+async fn a_run_carries_its_context_window() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-window", |_d| async move {
+        let meta = meta_at("coder-1788924523-win000", 100);
+        create_run(&meta).expect("run written");
+        crate::runstate::write_context_snapshot(
+            &meta.run_id,
+            &leviath_core::run_meta::ContextSnapshot {
+                stage_name: "build".to_string(),
+                total_tokens: 42,
+                max_tokens: 8_000,
+                regions: vec![leviath_core::run_meta::RegionSnapshot {
+                    name: "plan".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 42,
+                    max_tokens: 2_000,
+                    description: None,
+                    entries: Vec::new(),
+                }],
+            },
+        )
+        .expect("window written");
+
+        let answer = run_query(
+            "{ runs { edges { node { context { totalTokens maxTokens stageName
+                                              regions { name tokens } } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let window = &json["runs"]["edges"][0]["node"]["context"];
+        assert_eq!(window["totalTokens"], 42);
+        assert_eq!(window["stageName"], "build");
+        assert_eq!(window["regions"][0]["name"], "plan");
+    })
+    .await;
+}
+
+/// A run whose blueprint snapshot will not parse reports that, rather than
+/// answering with a blueprint it had to invent.
+#[tokio::test]
+async fn a_snapshot_that_will_not_parse_is_reported() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-bad-snapshot", |_d| async move {
+        let meta = meta_at("coder-1788924523-bad000", 100);
+        create_run(&meta).expect("run written");
+        std::fs::write(
+            crate::commands::serve::core::blueprints::run_dir(&meta.run_id)
+                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
+            "this is not a manifest",
+        )
+        .expect("snapshot written");
+
+        let answer = run_query("{ runs { edges { node { blueprint { name } } } } }").await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("will not parse"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"INTERNAL\"".to_string())
+        );
+    })
+    .await;
+}
+
+/// A run's children are paged, and the page says whether a level was cut.
+///
+/// A fan-out of two hundred workers is the case this exists for: the whole
+/// level in one response is what a connection avoids.
+#[tokio::test]
+async fn a_runs_children_are_paged() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-children", |_d| async move {
+        create_run(&meta_at("root", 100)).expect("run written");
+        for i in 0..3 {
+            let mut child = meta_at(&format!("worker-{i}"), 200 + i);
+            child.parent_run_id = Some("root".to_string());
+            create_run(&child).expect("run written");
+        }
+
+        let answer = run_query(
+            r#"{ runs(ids: ["root"]) { edges { node {
+                   children(first: 2) { total hasNextPage edges { node { id parentId } } }
+                 } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let children = &json["runs"]["edges"][0]["node"]["children"];
+        assert_eq!(children["total"], 3);
+        assert_eq!(children["hasNextPage"], true, "the level was cut");
+        assert_eq!(children["edges"].as_array().map(Vec::len), Some(2));
+        assert_eq!(children["edges"][0]["node"]["parentId"], "root");
+
+        let rest = run_query(
+            r#"{ runs(ids: ["root"]) { edges { node {
+                   children(first: 2, skip: 2) { hasNextPage edges { node { id } } }
+                 } } } }"#,
+        )
+        .await;
+        let json = serde_json::to_value(&rest.data).expect("data serializes");
+        let children = &json["runs"]["edges"][0]["node"]["children"];
+        assert_eq!(children["edges"].as_array().map(Vec::len), Some(1));
+        assert_eq!(children["hasNextPage"], false);
+
+        let refused = run_query(
+            r#"{ runs(ids: ["root"]) { edges { node { children(skip: -1) { total } } } } }"#,
+        )
+        .await;
+        assert!(
+            refused
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("negative"),
+            "{:?}",
+            refused.errors
+        );
+    })
+    .await;
+}
+
+/// The subtree roll-up covers every run below, at any depth.
+///
+/// A parent that spent little and whose workers spent a great deal is not a
+/// cheap run, and this is the figure that says so.
+#[tokio::test]
+async fn the_tree_status_rolls_up_the_whole_subtree() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-status", |_d| async move {
+        let mut root = meta_at("root", 100);
+        root.prompt_tokens = 10;
+        create_run(&root).expect("run written");
+        let mut child = meta_at("worker", 200);
+        child.parent_run_id = Some("root".to_string());
+        child.prompt_tokens = 100;
+        create_run(&child).expect("run written");
+        let mut grandchild = meta_at("helper", 300);
+        grandchild.parent_run_id = Some("worker".to_string());
+        grandchild.prompt_tokens = 1_000;
+        create_run(&grandchild).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs(ids: ["root"]) { edges { node {
+                   treeStatus { depth descendantCount rollup { promptTokens } }
+                 } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let tree = &json["runs"]["edges"][0]["node"]["treeStatus"];
+        assert_eq!(tree["depth"], 2, "two levels below the root");
+        assert_eq!(tree["descendantCount"], 2);
+        assert_eq!(tree["rollup"]["promptTokens"], 1_110);
+    })
+    .await;
+}
+
+/// A run with no children reports a bare tree rather than nothing.
+#[tokio::test]
+async fn a_leaf_run_has_a_tree_of_its_own() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-leaf", |_d| async move {
+        let mut leaf = meta_at("leaf", 100);
+        leaf.prompt_tokens = 7;
+        create_run(&leaf).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs { edges { node { treeStatus { depth descendantCount
+                                                    rollup { promptTokens } } } } } }"#,
+        )
+        .await;
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let tree = &json["runs"]["edges"][0]["node"]["treeStatus"];
+        assert_eq!(tree["depth"], 0);
+        assert_eq!(tree["descendantCount"], 0);
+        assert_eq!(tree["rollup"]["promptTokens"], 7);
+    })
+    .await;
+}
+
+/// The log selectors: one stage, every stage, and the two streams.
+#[tokio::test]
+async fn logs_read_one_stage_or_every_stage() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-logs", |_d| async move {
+        let meta = meta_at("coder-1788924523-log000", 100);
+        create_run(&meta).expect("run written");
+        crate::runstate::append_stage_output(&meta.run_id, 0, "first stage output\n");
+        crate::runstate::append_stage_log(&meta.run_id, 0, "[tool] read_file\n");
+
+        let output = run_query("{ runs { edges { node { logs(stageIndex: 0) } } } }").await;
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        let json = serde_json::to_value(&output.data).expect("data serializes");
+        assert!(
+            json["runs"]["edges"][0]["node"]["logs"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("first stage output"),
+            "{json}"
+        );
+
+        let operational =
+            run_query("{ runs { edges { node { logs(stageIndex: 0, operational: true) } } } }")
+                .await;
+        let json = serde_json::to_value(&operational.data).expect("data serializes");
+        assert!(
+            json["runs"]["edges"][0]["node"]["logs"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[tool] read_file"),
+            "{json}"
+        );
+
+        let every =
+            run_query("{ runs { edges { node { logs(allStages: true, tail: 100) } } } }").await;
+        assert!(every.errors.is_empty(), "{:?}", every.errors);
+    })
+    .await;
+}
+
+/// Asking for one stage and every stage at once is a contradiction, and so is a
+/// negative index or window.
+#[tokio::test]
+async fn the_log_selectors_refuse_a_contradiction() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-logs-refused", |_d| async move {
+        create_run(&meta_at("coder-1788924523-bad999", 100)).expect("run written");
+
+        let both =
+            run_query("{ runs { edges { node { logs(stageIndex: 0, allStages: true) } } } }").await;
+        assert!(
+            both.errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("cannot be combined"),
+            "{:?}",
+            both.errors
+        );
+
+        let negative = run_query("{ runs { edges { node { logs(stageIndex: -1) } } } }").await;
+        assert!(
+            negative
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("negative"),
+            "{:?}",
+            negative.errors
+        );
+
+        let window = run_query("{ runs { edges { node { logs(tail: -1) } } } }").await;
+        assert!(
+            window
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("negative"),
+            "{:?}",
+            window.errors
+        );
+    })
+    .await;
 }

@@ -183,16 +183,19 @@ mod tests {
     /// it is the one that maps somewhere else.
     #[test]
     fn a_protocol_mismatch_is_told_apart_from_an_unreachable_socket() {
+        // Compared by code rather than by `matches!`: a `matches!` inside an
+        // assert leaves the non-matching arm as a region nothing reaches, and
+        // the code is the thing a client branches on anyway.
         let unsupported = std::io::Error::new(std::io::ErrorKind::Unsupported, "daemon speaks v2");
-        assert!(matches!(
-            ServeError::from_daemon_io(&unsupported),
-            ServeError::DaemonIncompatible(_)
-        ));
+        assert_eq!(
+            ServeError::from_daemon_io(&unsupported).code(),
+            "DAEMON_INCOMPATIBLE"
+        );
         let broken = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone");
-        assert!(matches!(
-            ServeError::from_daemon_io(&broken),
-            ServeError::DaemonUnavailable(_)
-        ));
+        assert_eq!(
+            ServeError::from_daemon_io(&broken).code(),
+            "DAEMON_UNAVAILABLE"
+        );
     }
 
     /// The REST body keeps the shape every client already parses, and the

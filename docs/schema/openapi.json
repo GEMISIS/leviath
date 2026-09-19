@@ -3320,6 +3320,33 @@
         }
       }
     },
+    "/ws/graphql": {
+      "get": {
+        "tags": [
+          "graphql"
+        ],
+        "summary": "Subscribe to the live frames over GraphQL",
+        "description": "A WebSocket upgrade speaking `graphql-transport-ws` (the older `graphql-ws` protocol is accepted too), not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. The difference from `/ws`: a subscription names the frame types it wants and the runs it is about, and the filtering happens on the server, before a frame is serialized. `includeDescendants` widens a run-scoped subscription to the sub-agents of those runs as they spawn, so a fan-out needs no re-subscribe. A subscription that falls behind receives an `EventsDropped` frame saying how many frames it missed, rather than silently skipping them.",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching protocols."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/ws/agents/{id}": {
       "parameters": [
         {
