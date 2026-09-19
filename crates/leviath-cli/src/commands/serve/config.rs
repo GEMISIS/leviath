@@ -908,7 +908,7 @@ mod tests {
         // every one it guesses would be hardcoded and eventually wrong.
         assert_eq!(
             config.limits.max_limit,
-            crate::commands::serve::runs::MAX_LIMIT
+            crate::commands::serve::core::runs::MAX_LIMIT
         );
         assert_eq!(
             config.limits.max_file_bytes,

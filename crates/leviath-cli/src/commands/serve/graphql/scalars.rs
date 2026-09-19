@@ -1,0 +1,175 @@
+//! The four scalars the schema adds to GraphQL's own.
+//!
+//! Each one exists because a built-in would have lied:
+//!
+//! - `Int` is 32-bit. A 2 GiB file size and a large token roll-up both
+//!   overflow it, so sizes and counters are [`BigInt`].
+//! - `Float` is binary floating point. A cost that silently rounds is a lie
+//!   about spend, so money is [`Decimal`], written as a string.
+//! - A date string would invite timezone maths over a number the daemon
+//!   stores as unix seconds, so times are [`Timestamp`].
+//! - A cursor is the server's own token, and a client that takes it apart
+//!   has coupled itself to the paging implementation, so it is [`Cursor`].
+
+use async_graphql::{InputValueError, InputValueResult, Scalar, ScalarType, Value};
+
+/// Unix epoch seconds. The schema description is on the impl below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Timestamp(pub(crate) i64);
+
+/// Unix epoch seconds, as the daemon stores them. No string dates, so no
+/// timezone maths over a number that never had a timezone.
+#[Scalar(name = "Timestamp")]
+impl ScalarType for Timestamp {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::Number(n) => n
+                .as_i64()
+                .map(Timestamp)
+                .ok_or_else(|| InputValueError::custom("expected whole unix seconds")),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Number(self.0.into())
+    }
+}
+
+/// A 64-bit integer. The schema description is on the impl below, which is
+/// what clients read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BigInt(pub(crate) i64);
+
+/// A 64-bit integer, serialized as a JSON number. GraphQL's `Int` is 32-bit:
+/// it cannot hold a 2 GiB file size or a large aggregate token count. Every
+/// magnitude this API produces is well under 2^53, so it round-trips through
+/// a browser without loss.
+#[Scalar(name = "BigInt")]
+impl ScalarType for BigInt {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::Number(n) => n
+                .as_i64()
+                .map(BigInt)
+                .ok_or_else(|| InputValueError::custom("expected a whole number")),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Number(self.0.into())
+    }
+}
+
+/// An exact decimal. The schema description is on the impl below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Decimal(pub(crate) f64);
+
+/// An exact decimal, serialized as a JSON string. Money is never a `Float` on
+/// the wire: a cost figure that a JSON parser silently re-rounds is a lie
+/// about spend. The daemon keeps costs as `f64`, so this carries that number's
+/// shortest round-tripping form rather than inventing precision.
+#[Scalar(name = "Decimal")]
+impl ScalarType for Decimal {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::String(s) => s
+                .parse::<f64>()
+                .map(Decimal)
+                .map_err(|_| InputValueError::custom("expected a decimal string")),
+            Value::Number(n) => n
+                .as_f64()
+                .map(Decimal)
+                .ok_or_else(|| InputValueError::custom("expected a number")),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(self.0.to_string())
+    }
+}
+
+/// An opaque keyset cursor. The schema description is on the impl below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Cursor(pub(crate) String);
+
+/// An opaque keyset cursor: the same token the REST routes hand out. It
+/// encodes the sort, the order and a digest of the filters, so a cursor from
+/// one listing cannot resume a different one.
+#[Scalar(name = "Cursor")]
+impl ScalarType for Cursor {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::String(s) => Ok(Cursor(s)),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BigInt, Cursor, Decimal, Timestamp};
+    use async_graphql::{ScalarType, Value};
+
+    /// Times and counters cross the wire as numbers, both ways.
+    #[test]
+    fn whole_numbers_round_trip() {
+        let stamp = Timestamp(1_788_924_523);
+        assert_eq!(stamp.to_value(), Value::Number(1_788_924_523.into()));
+        assert_eq!(
+            Timestamp::parse(Value::Number(1_788_924_523.into())).expect("parsed"),
+            stamp
+        );
+        let big = BigInt(2_147_483_648);
+        assert_eq!(big.to_value(), Value::Number(2_147_483_648i64.into()));
+        assert_eq!(
+            BigInt::parse(Value::Number(2_147_483_648i64.into())).expect("parsed"),
+            big
+        );
+    }
+
+    /// A count that does not fit a whole number is refused rather than
+    /// truncated, and so is a value of the wrong type.
+    #[test]
+    fn a_number_that_is_not_whole_is_refused() {
+        let fractional = Value::Number(serde_json::Number::from_f64(1.5).expect("finite"));
+        assert!(Timestamp::parse(fractional.clone()).is_err());
+        assert!(BigInt::parse(fractional).is_err());
+        assert!(Timestamp::parse(Value::String("now".into())).is_err());
+        assert!(BigInt::parse(Value::String("many".into())).is_err());
+    }
+
+    /// Money leaves as a string, and arrives as either a string or a number,
+    /// because a client that writes `0.02` in a literal should not be told it
+    /// meant something else.
+    #[test]
+    fn money_is_written_as_a_string_and_read_from_either() {
+        assert_eq!(Decimal(0.25).to_value(), Value::String("0.25".into()));
+        assert_eq!(
+            Decimal::parse(Value::String("0.25".into())).expect("parsed"),
+            Decimal(0.25)
+        );
+        let number = Value::Number(serde_json::Number::from_f64(0.25).expect("finite"));
+        assert_eq!(Decimal::parse(number).expect("parsed"), Decimal(0.25));
+        assert!(Decimal::parse(Value::String("free".into())).is_err());
+        assert!(Decimal::parse(Value::Boolean(true)).is_err());
+    }
+
+    /// A cursor is carried, never interpreted.
+    #[test]
+    fn a_cursor_is_carried_verbatim() {
+        let token = Cursor("ab12cd".to_string());
+        assert_eq!(token.to_value(), Value::String("ab12cd".into()));
+        assert_eq!(
+            Cursor::parse(Value::String("ab12cd".into())).expect("parsed"),
+            token
+        );
+        assert!(Cursor::parse(Value::Boolean(false)).is_err());
+    }
+}

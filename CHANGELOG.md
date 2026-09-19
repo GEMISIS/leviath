@@ -13,7 +13,29 @@ same list.
 
 ## 0.6.3 - 2026-09-19
 
+### Added
+
+- `lev serve` answers GraphQL at `POST /graphql`, beside its REST routes. One
+  request names exactly the fields it wants, at any depth, and a field nobody
+  selected is never read from disk: a fleet view that costs a listing plus one
+  request per waiting run over REST is a single request here. It is not a layer
+  over the REST routes. Both surfaces call the same code inside the server, so
+  the two cannot drift, and the same bearer token, request cap and deadline
+  apply. This release serves the run listing, with its filters, keyset paging
+  and search, and the pause, resume and cancel mutations, which answer with the
+  run as it is afterwards. Failures carry `extensions.code`, so a client
+  branches on a word rather than on message text. Queries are bounded by depth,
+  complexity and page size before any of them runs. The schema is published as
+  `leviath.graphql` beside the OpenAPI spec, generated from the server's own
+  types and held to them by a test. See [the GraphQL
+  docs](https://leviath.dev/docs/graphql).
+
 ### Changed
+
+- A run that has already finished now answers `409` to pause, resume and
+  cancel, on both surfaces, rather than `404`. "Not found" about a run sitting
+  in the listing reads as a wrong run id, and sent people looking for a run
+  that was right there. The message names the state the run finished in.
 
 - The performance probes and the live-test harness (`harness.sh`,
   `mock.py`, `daemon_drive.py`, `dash_pty.py` and the rest of

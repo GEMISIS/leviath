@@ -53,6 +53,10 @@
     {
       "name": "yolo",
       "description": "The named profiles behind `lev run --yolo=<name>`."
+    },
+    {
+      "name": "graphql",
+      "description": "One endpoint where the request body names the fields it wants."
     }
   ],
   "paths": {
@@ -734,6 +738,12 @@
           "204": {
             "description": "Done. No body."
           },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -1402,6 +1412,12 @@
           "204": {
             "description": "Done. No body."
           },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -1428,6 +1444,12 @@
         "responses": {
           "204": {
             "description": "Done. No body."
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3210,6 +3232,60 @@
           },
           "502": {
             "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/graphql": {
+      "post": {
+        "tags": [
+          "graphql"
+        ],
+        "summary": "Run a GraphQL query",
+        "description": "The GraphQL surface of this server. It runs over the same core the REST routes call, so it is not a wrapper around them. One request names exactly the fields it wants, at every depth: a view that costs a listing plus one request per run over REST is a single request here, and a field nobody selected is never read from disk. The schema is published beside this spec as `leviath.graphql`, and introspection answers the same thing live. A failure inside a field answers 200 with an `errors` array, each entry carrying `extensions.code` (`BAD_USER_INPUT`, `NOT_FOUND`, `CONFLICT`, `DAEMON_UNAVAILABLE`, `DAEMON_INCOMPATIBLE`, `INTERNAL`) and `extensions.httpStatus`, the status the matching REST route answers with. The statuses below are the transport ones, answered by the layers around the handler before any query runs.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "query"
+                ],
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "The GraphQL document to run."
+                  },
+                  "operationName": {
+                    "type": ["string", "null"],
+                    "description": "Which operation to run, for a document carrying several."
+                  },
+                  "variables": {
+                    "type": ["object", "null"],
+                    "additionalProperties": true,
+                    "description": "Values for the document's variables."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
           },
           "503": {
             "$ref": "#/components/responses/Overloaded"

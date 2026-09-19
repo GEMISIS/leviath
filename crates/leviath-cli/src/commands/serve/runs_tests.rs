@@ -5,7 +5,14 @@
 //! ordering rule is a plain unit test with no HTTP and no temp directory. Only
 //! the tests that genuinely need files on disk take the isolated-runs-dir path.
 
+use std::sync::Arc;
+
 use super::*;
+use crate::commands::serve::core::runs::matching::{apply_search, highlights_for, matches_query};
+use crate::commands::serve::core::runs::{
+    MAX_HIGHLIGHTS, MAX_SEARCH_SCAN, RunSpec, paginate, sort_runs,
+};
+use crate::commands::serve::cursor::{self, CursorKey};
 use crate::runstate::{RunStatus, create_run};
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
@@ -63,19 +70,24 @@ fn urlencode(raw: &str) -> String {
         .collect()
 }
 
-fn resolve_ok(pairs: &[(&str, &str)]) -> Resolved {
+fn resolve_ok(pairs: &[(&str, &str)]) -> RunSpec {
     match resolve(&query(pairs)) {
-        Ok(resolved) => resolved,
-        Err((_, body)) => panic!("expected resolve to succeed: {}", body.0.error),
+        Ok(spec) => spec,
+        Err(e) => panic!("expected resolve to succeed: {e}"),
     }
 }
 
+/// The message of a refusal, having checked it is the refusal a client caused.
+///
+/// Both surfaces render this one failure: REST as a 400, GraphQL as
+/// `BAD_USER_INPUT`, so the status assertion lives where the mapping does and
+/// this one checks the variant.
 fn resolve_err(pairs: &[(&str, &str)]) -> String {
     match resolve(&query(pairs)) {
         Ok(_) => String::new(),
-        Err((status, body)) => {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            body.0.error.clone()
+        Err(e) => {
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST, "{e}");
+            e.to_string()
         }
     }
 }

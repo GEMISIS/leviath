@@ -707,6 +707,7 @@ mod tests {
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,
             tls_cert: None,

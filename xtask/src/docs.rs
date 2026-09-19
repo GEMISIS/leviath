@@ -307,6 +307,10 @@ pub const PUBLISHED_ARTIFACTS: &[&str] = &[
     "config.example.toml",
     "yolo.example.toml",
     "mime_types.example.toml",
+    // The GraphQL schema, which is SDL rather than JSON. A `leviath-cli` test
+    // holds it to the schema the build serves, so this only catches the file
+    // going missing from a release.
+    "leviath.graphql",
 ];
 
 /// Every published schema must exist and be parseable JSON, and every other
