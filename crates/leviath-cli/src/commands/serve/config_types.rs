@@ -435,6 +435,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // first request, and finding out by posting a query and reading a 404
     // costs a round trip on every launch.
     "graphql",
+    // `blueprint_digest` on a run, and the manifest copy beside it. Announced
+    // because the absence of the digest has to be readable as "this run
+    // predates snapshots" rather than as "this run executed what is installed
+    // now": a client that cannot tell those apart shows a blueprint the run may
+    // never have seen.
+    "runs.blueprint_snapshot",
 ];
 
 /// The server's numeric limits.

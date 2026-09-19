@@ -14,4 +14,7 @@ pub(super) struct ServeCaches {
     pub(super) model_catalog: super::model_catalog::ModelCatalog,
     /// The subscription usage `GET /api/providers?quota=true` answers from.
     pub(super) provider_quota: super::quota_cache::QuotaCache,
+    /// Manifests already parsed, by digest. Five hundred runs of one blueprint
+    /// parse it once.
+    pub(super) blueprints: super::core::blueprints::BlueprintCache,
 }

@@ -335,3 +335,243 @@ async fn a_parent_filter_pages_one_runs_children() {
     })
     .await;
 }
+
+/// A run answers for the blueprint it executed, from its own snapshot.
+///
+/// The installed file is edited in between, and the run still answers with what
+/// it ran: that is the whole reason the snapshot exists.
+#[tokio::test]
+async fn a_run_answers_with_the_blueprint_it_executed() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-blueprint", |_d| async move {
+        let installed = tempfile::tempdir().expect("a temp dir");
+        let path = installed.path().join("agent.leviath");
+        std::fs::write(&path, "[agent]\nname = \"coder\"\nversion = \"9.9.9\"\n")
+            .expect("installed written");
+
+        let mut meta = meta_at("coder-1788924523-abc123", 100);
+        meta.agent_path = path.to_string_lossy().into_owned();
+        let ran = "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\n";
+        meta.blueprint_digest = Some(
+            crate::commands::serve::core::blueprints::digest_of(ran),
+        );
+        create_run(&meta).expect("run written");
+        std::fs::write(
+            crate::commands::serve::core::blueprints::run_dir(&meta.run_id)
+                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
+            ran,
+        )
+        .expect("snapshot written");
+
+        let answer = run_query(
+            "{ runs { edges { node { blueprintDigest blueprint { name version source digest } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let node = &json["runs"]["edges"][0]["node"];
+        assert_eq!(node["blueprint"]["version"], "1.0.0", "what ran, not what is installed");
+        assert_eq!(node["blueprint"]["source"], "SNAPSHOT");
+        assert_eq!(node["blueprint"]["digest"], node["blueprintDigest"]);
+    })
+    .await;
+}
+
+/// A run from before snapshots existed falls back to the installed blueprint,
+/// and says so. Its digest is null, because what it executed is unknown.
+#[tokio::test]
+async fn a_run_without_a_snapshot_reads_the_installed_blueprint() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-installed", |_d| async move {
+        let installed = tempfile::tempdir().expect("a temp dir");
+        let path = installed.path().join("agent.leviath");
+        std::fs::write(&path, "[agent]\nname = \"coder\"\nversion = \"9.9.9\"\n")
+            .expect("installed written");
+        let mut meta = meta_at("coder-1788924523-old000", 100);
+        meta.agent_path = path.to_string_lossy().into_owned();
+        create_run(&meta).expect("run written");
+
+        let answer = run_query(
+            "{ runs { edges { node { blueprintDigest blueprint { version source } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let node = &json["runs"]["edges"][0]["node"];
+        assert_eq!(node["blueprint"]["version"], "9.9.9");
+        assert_eq!(node["blueprint"]["source"], "INSTALLED");
+        assert!(node["blueprintDigest"].is_null(), "unknown, not the same");
+    })
+    .await;
+}
+
+/// A run whose blueprint is gone nulls that one field and says why, leaving the
+/// rest of the page intact. One unreadable file must not cost a client the
+/// forty-nine runs beside it.
+#[tokio::test]
+async fn an_unreadable_blueprint_nulls_one_field_and_keeps_the_page() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-noblueprint", |_d| async move {
+        let mut gone = meta_at("coder-1788924523-gone00", 200);
+        gone.agent_path = "/nowhere/agent.leviath".to_string();
+        create_run(&gone).expect("run written");
+        create_run(&meta_at("coder-1788924523-fine00", 100)).expect("run written");
+
+        let answer = run_query("{ runs { edges { node { id blueprint { name } } } } }").await;
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let edges = json["runs"]["edges"].as_array().expect("edges");
+        assert_eq!(edges.len(), 2, "both runs are still on the page");
+        assert!(edges[0]["node"]["blueprint"].is_null(), "the field is null");
+        assert_eq!(edges[0]["node"]["id"], "coder-1788924523-gone00");
+        let error = answer.errors.first().expect("an error names the field");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+        assert!(error.message.contains("agent.leviath"), "{}", error.message);
+    })
+    .await;
+}
+
+/// The installed blueprints, by name, with the digest that says which bytes
+/// they are.
+#[tokio::test]
+async fn the_blueprint_listing_reads_what_is_installed() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        for (name, version) in [("alpha", "1.0.0"), ("beta", "2.0.0")] {
+            let dir = agents.path().join(name);
+            std::fs::create_dir_all(&dir).expect("agent dir");
+            std::fs::write(
+                dir.join(leviath_core::files::MANIFEST_FILENAME),
+                format!("[agent]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+            )
+            .expect("manifest written");
+        }
+        let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
+            agents.path().to_path_buf(),
+        ]);
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(Request::new(
+                "{ blueprints { edges { cursor node { name version source digest } } total missing
+                            pageInfo { hasNextPage endCursor } } }",
+            ))
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let listing = &json["blueprints"];
+        assert_eq!(listing["total"], 2);
+        assert_eq!(listing["edges"][0]["node"]["name"], "alpha");
+        assert_eq!(listing["edges"][0]["node"]["version"], "1.0.0");
+        // A listing is always the live definition, never a run's frozen copy.
+        assert_eq!(listing["edges"][0]["node"]["source"], "INSTALLED");
+        assert_eq!(listing["edges"][1]["node"]["name"], "beta");
+        assert_eq!(listing["pageInfo"]["hasNextPage"], false);
+        assert!(listing["missing"].as_array().map(Vec::is_empty) == Some(true));
+    })
+    .await;
+}
+
+/// A name that is not installed is reported rather than thrown, and a prefix
+/// narrows the listing.
+#[tokio::test]
+async fn an_unknown_blueprint_name_lands_in_missing() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        let dir = agents.path().join("alpha");
+        std::fs::create_dir_all(&dir).expect("agent dir");
+        std::fs::write(
+            dir.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"alpha\"\n",
+        )
+        .expect("manifest written");
+        let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
+            agents.path().to_path_buf(),
+        ]);
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(Request::new(
+                r#"{ blueprints(exact: ["alpha", "ghost"]) { edges { node { name } } missing } }"#,
+            ))
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["blueprints"]["edges"][0]["node"]["name"], "alpha");
+        assert_eq!(json["blueprints"]["missing"][0], "ghost");
+
+        let narrowed = schema
+            .execute(Request::new(
+                r#"{ blueprints(query: "ghos") { total edges { node { name } } } }"#,
+            ))
+            .await;
+        let json = serde_json::to_value(&narrowed.data).expect("data serializes");
+        assert_eq!(json["blueprints"]["total"], 0, "the prefix matches nothing");
+    })
+    .await;
+}
+
+/// Paging the listing: a page, then the rest, with `hasNextPage` marking the
+/// cut.
+#[tokio::test]
+async fn the_blueprint_listing_pages() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+    let agents = tempfile::tempdir().expect("a temp dir");
+    for name in ["alpha", "beta", "gamma"] {
+        let dir = agents.path().join(name);
+        std::fs::create_dir_all(&dir).expect("agent dir");
+        std::fs::write(
+            dir.join(leviath_core::files::MANIFEST_FILENAME),
+            format!("[agent]\nname = \"{name}\"\n"),
+        )
+        .expect("manifest written");
+    }
+    let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
+        agents.path().to_path_buf(),
+    ]);
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .data(state)
+        .finish();
+
+    let first = schema
+        .execute(Request::new(
+            "{ blueprints(first: 2) { edges { node { name } } pageInfo { hasNextPage endCursor } } }",
+        ))
+        .await;
+    let json = serde_json::to_value(&first.data).expect("data serializes");
+    assert_eq!(json["blueprints"]["edges"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], true);
+    assert_eq!(json["blueprints"]["pageInfo"]["endCursor"], "beta");
+
+    let rest = schema
+        .execute(Request::new(
+            "{ blueprints(first: 2, skip: 2) { edges { node { name } } pageInfo { hasNextPage } } }",
+        ))
+        .await;
+    let json = serde_json::to_value(&rest.data).expect("data serializes");
+    assert_eq!(json["blueprints"]["edges"][0]["node"]["name"], "gamma");
+    assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], false);
+
+    let negative = schema
+        .execute(Request::new("{ blueprints(skip: -1) { total } }"))
+        .await;
+    assert!(
+        negative
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("negative"),
+        "{:?}",
+        negative.errors
+    );
+  })
+  .await;
+}

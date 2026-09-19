@@ -227,6 +227,7 @@ fn probe_meta() -> RunMeta {
     probe.output_request = Some(Default::default());
     probe.model_override = Some(String::new());
     probe.yolo_profile = Some(String::new());
+    probe.blueprint_digest = Some(String::new());
     probe
 }
 

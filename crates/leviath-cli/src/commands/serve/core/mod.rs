@@ -12,6 +12,7 @@
 //! to a filter, a cursor or a daemon reply lands in one place and both
 //! surfaces get it.
 
+pub(super) mod blueprints;
 pub(super) mod error;
 pub(super) mod lifecycle;
 pub(super) mod runs;

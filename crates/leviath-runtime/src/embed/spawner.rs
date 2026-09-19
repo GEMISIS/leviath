@@ -149,6 +149,11 @@ impl EmbedSpawner {
                 callback_secret: None,
                 title: None,
                 title_error: None,
+                // The embedded host keeps no run directory to snapshot a
+                // manifest into, and a staged blueprint never had a file, so
+                // there is no digest to record. `None` says "unknown", which
+                // is the truth here rather than a missing feature.
+                blueprint_digest: None,
                 unattended: args.yolo,
                 yolo_profile: args.yolo_profile.clone(),
                 // The embedded spawner has no user config to grant against, so

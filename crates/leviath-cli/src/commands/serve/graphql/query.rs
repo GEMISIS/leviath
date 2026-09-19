@@ -7,6 +7,8 @@
 
 use async_graphql::{Context, Enum, InputObject, Object};
 
+use super::super::blocking::blocking;
+use super::super::core::blueprints;
 use super::super::core::error::ServeError;
 use super::super::core::runs::{self as run_core, ParentFilter, RunSelection, SortKey, Source};
 use super::super::cursor::{self, CursorKey};
@@ -14,6 +16,7 @@ use super::super::types::AppState;
 use super::connection::{Highlight, PageInfo, RunConnection, RunEdge};
 use super::error::IntoGraphql;
 use super::scalars::{Cursor, Timestamp};
+use super::types::blueprint::Blueprint;
 use super::types::run::{Run, RunStatus};
 
 /// Sort order for the run listing.
@@ -223,6 +226,96 @@ pub(crate) struct Query;
 
 #[Object]
 impl Query {
+    /// The blueprints installed on this machine, by name.
+    ///
+    /// This is the live definition, not what any run executed: for that, read
+    /// `blueprint` on the run, which answers from the run's own snapshot. The
+    /// digests tell you whether the two are the same bytes.
+    ///
+    /// `exact` fetches blueprints by name. A name that is not installed lands
+    /// in `missing` rather than failing the request.
+    async fn blueprints(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Case-insensitive prefix match on the blueprint name.")] query: Option<
+            String,
+        >,
+        #[graphql(desc = "Exact names to fetch; unknown ones land in missing.")] exact: Option<
+            Vec<String>,
+        >,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "How many to skip, for the page after the first.", default = 0)] skip: i32,
+    ) -> async_graphql::Result<BlueprintConnection> {
+        let state = ctx.data_unchecked::<AppState>();
+        let limit = page_size(first).gql()?;
+        let skip = usize::try_from(skip)
+            .map_err(|_| ServeError::BadRequest("`skip` cannot be negative".to_string()))
+            .gql()?;
+        let config = state.current_config();
+        // The walk over every agent directory belongs on the blocking pool,
+        // and the roots are resolved first so a test's agents-dir override is
+        // visible from the task that resolves them.
+        let roots = super::super::blueprints::blueprint_roots(&config);
+        let installed = blocking(move || super::super::blueprints::discover_in(roots)).await;
+
+        let mut missing = Vec::new();
+        let chosen: Vec<_> = match exact {
+            Some(names) => {
+                let mut kept = Vec::new();
+                for name in names {
+                    match installed.iter().find(|info| info.name == name) {
+                        Some(info) => kept.push(info.clone()),
+                        None => missing.push(name),
+                    }
+                }
+                kept
+            }
+            None => {
+                let prefix = query.unwrap_or_default().to_lowercase();
+                installed
+                    .iter()
+                    .filter(|info| info.name.to_lowercase().starts_with(&prefix))
+                    .cloned()
+                    .collect()
+            }
+        };
+
+        let total = i32::try_from(chosen.len()).unwrap_or(i32::MAX);
+        let page: Vec<_> = chosen.iter().skip(skip).take(limit).collect();
+        let has_next_page = chosen.len() > skip.saturating_add(page.len());
+        let mut edges = Vec::with_capacity(page.len());
+        for info in page {
+            let manifest = blueprints::ManifestText::installed(info.manifest.clone());
+            let parsed = state.caches.blueprints.parse(&manifest).gql()?;
+            edges.push(BlueprintEdge {
+                node: Blueprint {
+                    parsed,
+                    digest: manifest.digest,
+                    source: manifest.source.into(),
+                },
+                // The listing is name-sorted and read whole, so the cursor is
+                // the name: resuming means "the ones after this name", which
+                // survives a blueprint being installed or removed mid-walk.
+                cursor: Cursor(info.name.clone()),
+            });
+        }
+        let end_cursor = edges.last().map(|edge| edge.cursor.clone());
+
+        Ok(BlueprintConnection {
+            edges,
+            page_info: PageInfo {
+                has_next_page,
+                end_cursor,
+            },
+            total,
+            missing,
+        })
+    }
+
     /// Keyset-paged run listing.
     ///
     /// `ids` fetches exact runs, which is also how a client reads one run:
@@ -297,6 +390,29 @@ impl Query {
             server_time: Timestamp(now),
         })
     }
+}
+
+/// One installed blueprint with its page cursor.
+#[derive(async_graphql::SimpleObject)]
+pub(crate) struct BlueprintEdge {
+    /// The blueprint.
+    pub(crate) node: Blueprint,
+    /// Cursor for this edge.
+    pub(crate) cursor: Cursor,
+}
+
+/// A paged listing of the installed blueprints.
+#[derive(async_graphql::SimpleObject)]
+pub(crate) struct BlueprintConnection {
+    /// The blueprints on this page.
+    pub(crate) edges: Vec<BlueprintEdge>,
+    /// Keyset page state.
+    pub(crate) page_info: PageInfo,
+    /// How many blueprints are installed.
+    pub(crate) total: i32,
+    /// Names from an `exact` fetch that are not installed. Never fails the
+    /// request.
+    pub(crate) missing: Vec<String>,
 }
 
 #[cfg(test)]

@@ -13278,6 +13278,7 @@ fn run_metadata() -> RunMetadata {
         callback_secret: None,
         title: None,
         title_error: None,
+        blueprint_digest: None,
         unattended: false,
         yolo_profile: None,
         read_paths: None,

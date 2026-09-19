@@ -464,6 +464,7 @@ mod tests {
             callback_secret: None,
             title: None,
             title_error: None,
+            blueprint_digest: None,
             unattended,
             yolo_profile: None,
             read_paths: None,

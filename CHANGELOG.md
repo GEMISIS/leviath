@@ -32,6 +32,15 @@ same list.
 
 ### Changed
 
+- A run keeps its own copy of the blueprint it executed. Spawn writes the
+  manifest into the run's directory and records its SHA-256 as
+  `blueprint_digest`, so "what did this run execute" stays answerable after the
+  installed file is edited or deleted, and a daemon restart resumes a run on the
+  manifest it started with rather than on whatever the file says by then. Only
+  the manifest is frozen: scripts it names are still read from the installed
+  agent directory. Runs recorded before this carry no copy and no digest, and
+  fall back to the installed file exactly as before.
+
 - A run that has already finished now answers `409` to pause, resume and
   cancel, on both surfaces, rather than `404`. "Not found" about a run sitting
   in the listing reads as a wrong run id, and sent people looking for a run

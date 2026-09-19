@@ -8,9 +8,14 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Enum, Object, SimpleObject};
+use async_graphql::{Context, Enum, Object, SimpleObject};
 
+use super::super::super::blocking::blocking;
+use super::super::super::core::blueprints;
+use super::super::super::types::AppState;
+use super::super::error::IntoGraphql;
 use super::super::scalars::{BigInt, Decimal, Timestamp};
+use super::blueprint::Blueprint;
 use crate::runstate::RunMeta;
 
 /// The lifecycle states a run moves through.
@@ -251,6 +256,46 @@ impl Run {
     /// The run that spawned this one; null for a top-level run.
     async fn parent_id(&self) -> Option<&str> {
         self.meta.parent_run_id.as_deref()
+    }
+
+    /// The blueprint this run executed.
+    ///
+    /// The run's own snapshot of the manifest, taken at spawn, so it answers
+    /// for the run even after the installed blueprint is edited or deleted.
+    /// For a run recorded before snapshots existed there is no copy, and this
+    /// falls back to the installed file: `blueprint.source` says which, and
+    /// `blueprintDigest` is set only for a run that carries its own.
+    ///
+    /// Null, with an error naming the file, when neither can be read. Nullable
+    /// on purpose: one unreadable blueprint in a page of fifty runs must not
+    /// cost a client the other forty-nine.
+    async fn blueprint(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Blueprint>> {
+        let state = ctx.data_unchecked::<AppState>();
+        let meta = Arc::clone(&self.meta);
+        // One `meta.json`-sized read, off the async runtime: a selection set
+        // that asks fifty runs for their blueprints is fifty small reads, and
+        // the parse behind them is shared by digest.
+        let manifest = blocking(move || {
+            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
+        })
+        .await
+        .gql()?;
+        let parsed = state.caches.blueprints.parse(&manifest).gql()?;
+        Ok(Some(Blueprint {
+            parsed,
+            digest: manifest.digest,
+            source: manifest.source.into(),
+        }))
+    }
+
+    /// The digest of the manifest this run executed, lowercase hex SHA-256.
+    ///
+    /// Recorded at spawn. Compare it with the installed blueprint's digest to
+    /// tell "this run executed what is installed now" from "this run executed
+    /// something else". Null for a run recorded before snapshots existed,
+    /// where the answer is unknown rather than "the same".
+    async fn blueprint_digest(&self) -> Option<&str> {
+        self.meta.blueprint_digest.as_deref()
     }
 
     /// Caller-supplied metadata from spawn. Values are always strings.
