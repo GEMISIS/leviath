@@ -30,8 +30,9 @@ flowchart LR
 
 ## An agent is a blueprint
 
-An agent is a directory holding an `agent.leviath` file, a TOML **blueprint**. It names the stages
-the agent moves through, the model and tools each stage gets, and the shape of its memory. There is
+An agent is described by its **blueprint**: a directory holding an `agent.leviath` TOML file and
+its own tools and scripts. The file names the stages a run moves through, the model and tools each
+stage gets, what each stage takes in and hands back, and the shape of a run's memory. There is
 no agent code to write, and nothing is compiled.
 
 Seven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
