@@ -8,9 +8,9 @@ order: 5
 
 # Agent blueprints (`agent.leviath`)
 
-An agent is a directory with an `agent.leviath` file, a TOML **blueprint** describing a
-multi-stage [workflow graph](/docs/stages). The [agent catalog](/docs/agent-catalog) has seven
-complete ones worth stealing from.
+A **blueprint** is a multi-stage [workflow graph](/docs/stages): a directory holding an
+`agent.leviath` TOML file and the blueprint's own tools and scripts. Each `lev run` of it is a run.
+The [agent catalog](/docs/agent-catalog) has seven complete ones worth stealing from.
 
 New to this? [Build your first agent](/docs/first-agent) walks through writing one stage by
 stage; this page is the reference for every field it uses.
