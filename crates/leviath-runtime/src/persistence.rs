@@ -47,6 +47,14 @@ pub struct RunMetadata {
     pub callback_secret: Option<String>,
     /// Short human-readable title (None until generated).
     pub title: Option<String>,
+    /// The SHA-256 of the manifest this run executed, in lowercase hex.
+    ///
+    /// Carried on the run rather than recomputed on read, because the file it
+    /// came from may have been edited or deleted since. It identifies the
+    /// snapshot in the run's own directory, which is the copy a reader should
+    /// trust about what ran. `None` for a run whose manifest could not be read
+    /// back at spawn.
+    pub blueprint_digest: Option<String>,
     /// Why [`Self::title`] is still `None`, once titling has given up.
     ///
     /// `None` means titling has not finished (or was never asked for), which is
@@ -460,6 +468,10 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         },
         title: md.title.clone(),
         title_error: md.title_error.clone(),
+        // Carried through every write: the persistence lane rebuilds the whole
+        // record each tick, so a field it forgets is a field that exists only
+        // until the run first moves.
+        blueprint_digest: md.blueprint_digest.clone(),
         metadata: md.metadata.clone(),
         callback_url: md.callback_url.clone(),
         callback_secret: md.callback_secret.clone(),
@@ -521,6 +533,7 @@ mod tests {
             callback_secret: Some("sekret".to_string()),
             title: Some("Do It".to_string()),
             title_error: None,
+            blueprint_digest: None,
             unattended: false,
             yolo_profile: None,
             read_paths: None,

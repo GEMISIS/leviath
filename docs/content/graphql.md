@@ -118,6 +118,42 @@ The deep search sources read two files per stage per run, so treat them as a "se
 toggle rather than something every keystroke pays for. When the scan gives up, `scanTruncated` says
 so.
 
+## Blueprints
+
+Two different questions, and the schema keeps them apart.
+
+* `blueprints` lists what is installed on the machine now.
+* `blueprint` on a run is the manifest that run executed, read from the run's
+  own copy.
+
+```graphql
+{
+  runs(first: 1) {
+    edges { node {
+      blueprintDigest
+      blueprint { id name version source digest }
+    } }
+  }
+}
+```
+
+A run copies its manifest into its own directory at spawn and records that
+copy's digest. So editing or deleting the installed blueprint never changes
+what a finished run says it ran, and a daemon restart resumes a run on the
+manifest it started with.
+
+Only the manifest is frozen. Scripts it names, such as hooks and validators,
+are still read from the installed agent directory.
+
+`source` says which file a blueprint came from, `SNAPSHOT` or `INSTALLED`. A run
+recorded before this feature existed has no copy, so it reads `INSTALLED` and
+its `blueprintDigest` is null: what it executed is unknown, which is not the
+same as "unchanged".
+
+The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name
+are two different objects, so a client that caches by type and id cannot merge a
+run's frozen copy with whatever is installed now.
+
 ## Moving a run
 
 Mutations return the run as it is afterwards, so you never have to guess whether the act landed, and

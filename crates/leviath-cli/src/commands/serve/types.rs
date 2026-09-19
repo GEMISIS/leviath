@@ -355,7 +355,7 @@ pub(super) struct Highlight {
 
 // ─── Blueprint types ────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct BlueprintInfo {
     pub(super) name: String,
     pub(super) version: String,

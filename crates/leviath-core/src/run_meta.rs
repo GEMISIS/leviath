@@ -610,6 +610,16 @@ pub struct RunMeta {
     /// pair the user may never have named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
+
+    /// The SHA-256 of the manifest this run executed, in lowercase hex.
+    ///
+    /// The identity of the run's blueprint snapshot
+    /// (`files::BLUEPRINT_SNAPSHOT_FILE`), so a reader can tell whether the
+    /// installed blueprint is still the one that ran. Absent for a run written
+    /// before snapshots existed, where the answer is genuinely unknown rather
+    /// than "the same".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blueprint_digest: Option<String>,
 }
 
 /// How many `[read_paths]` entries a run's blueprint declared, and how many of
@@ -872,6 +882,7 @@ impl RunMeta {
             waiting_on: None,
             output_request: None,
             model_override: None,
+            blueprint_digest: None,
             flags: RunFlags::default(),
             yolo: false,
             yolo_profile: None,

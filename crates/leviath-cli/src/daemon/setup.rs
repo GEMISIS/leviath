@@ -719,7 +719,7 @@ fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::ho
         .nth(2)
         .unwrap_or(&args.run_id)
         .to_string();
-    let meta = leviath_core::run_meta::RunMeta::new(
+    let mut meta = leviath_core::run_meta::RunMeta::new(
         args.run_id.clone(),
         agent_name,
         args.blueprint_path.clone(),
@@ -728,8 +728,47 @@ fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::ho
         args.workdir.clone(),
         0,
     );
-    if let Err(e) = crate::runstate::create_run_in(&runs_dir.join(&args.run_id), &meta) {
+    let dir = runs_dir.join(&args.run_id);
+    // The manifest text, read before it is parsed: a blueprint that will not
+    // load still leaves behind the bytes that would not load, which is what
+    // somebody reading the failure wants to see.
+    let snapshot = std::fs::read_to_string(&args.blueprint_path).ok();
+    meta.blueprint_digest = snapshot
+        .as_deref()
+        .map(|text| leviath_core::mime::store::sha256_hex(text.as_bytes()));
+    if let Err(e) = crate::runstate::create_run_in(&dir, &meta) {
         tracing::warn!(run_id = %args.run_id, error = %e, "could not pre-create run directory");
+    }
+    if let Some(text) = snapshot {
+        write_blueprint_snapshot(&dir, &text, &args.run_id);
+    }
+}
+
+/// Copy the manifest a run is about to execute into the run directory.
+///
+/// Best-effort, like the placeholder metadata beside it: a run that executes
+/// is better than a run refused because its own archive copy could not be
+/// written. A reader that finds no snapshot falls back to the installed file,
+/// which is what every run before this behaved like.
+fn write_blueprint_snapshot(dir: &std::path::Path, manifest: &str, run_id: &str) {
+    let path = dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
+    if let Err(e) = crate::runstate::write_private_atomic(&path, manifest) {
+        tracing::warn!(run_id = %run_id, error = %e, "could not snapshot the run's blueprint");
+    }
+}
+
+/// The blueprint a run should execute: its own snapshot when it has one, and
+/// the installed file otherwise.
+///
+/// Recovery pages a run back in by spawning it afresh from a manifest path, so
+/// this is what decides whether a restart resumes the run on what it started
+/// with or on whatever the installed file says now. Runs written before
+/// snapshots existed have only the latter, and keep the old behaviour.
+pub(crate) fn blueprint_source(dir: &std::path::Path, installed: &str) -> String {
+    let snapshot = dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
+    match snapshot.is_file() {
+        true => snapshot.to_string_lossy().into_owned(),
+        false => installed.to_string(),
     }
 }
 
@@ -1052,6 +1091,7 @@ mod tests {
             callback_secret: None,
             title: None,
             title_error: None,
+            blueprint_digest: None,
             unattended: false,
             yolo_profile: None,
             read_paths: None,
@@ -1199,6 +1239,95 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// The run keeps its own copy of the manifest it is about to execute, and
+    /// records that copy's digest.
+    ///
+    /// This is what makes "what did this run execute" answerable later. Without
+    /// it, the answer was whatever the installed file said by the time somebody
+    /// asked, which is a different file after any edit.
+    #[test]
+    fn a_spawn_snapshots_the_manifest_it_is_about_to_run() {
+        let runs = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let manifest = installed.path().join("agent.leviath");
+        let text = "[agent]\nname = \"my-agent\"\n";
+        std::fs::write(&manifest, text).unwrap();
+        let args = SpawnArgs {
+            run_id: "my-agent-1788924523-abc123".to_string(),
+            blueprint_path: manifest.to_string_lossy().into_owned(),
+            task: "t".to_string(),
+            ..Default::default()
+        };
+
+        write_placeholder_meta(runs.path(), &args);
+
+        let dir = runs.path().join(&args.run_id);
+        let snapshot =
+            std::fs::read_to_string(dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE))
+                .unwrap();
+        assert_eq!(snapshot, text, "the bytes the run will execute");
+        let meta = crate::runstate::read_meta_from(&dir).unwrap();
+        assert_eq!(
+            meta.blueprint_digest.as_deref(),
+            Some(leviath_core::mime::store::sha256_hex(text.as_bytes()).as_str()),
+            "the digest identifies the snapshot"
+        );
+    }
+
+    /// A manifest that cannot be read leaves no snapshot and no digest, and the
+    /// spawn carries on to fail on its own terms.
+    ///
+    /// `None` here reads as "unknown", which is the truth. A digest over
+    /// nothing would have claimed the run executed something.
+    #[test]
+    fn a_manifest_that_cannot_be_read_leaves_no_snapshot() {
+        let runs = tempfile::tempdir().unwrap();
+        let args = SpawnArgs {
+            run_id: "ghost-1788924523-abc123".to_string(),
+            blueprint_path: "/nowhere/agent.leviath".to_string(),
+            ..Default::default()
+        };
+
+        write_placeholder_meta(runs.path(), &args);
+
+        let dir = runs.path().join(&args.run_id);
+        assert!(
+            !dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE)
+                .exists(),
+            "nothing to copy"
+        );
+        assert!(
+            crate::runstate::read_meta_from(&dir)
+                .unwrap()
+                .blueprint_digest
+                .is_none()
+        );
+    }
+
+    /// A run with a snapshot resumes on its own copy; one without falls back to
+    /// the installed file, exactly as every run did before snapshots existed.
+    #[test]
+    fn a_reload_prefers_the_runs_own_blueprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run-a");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let installed = "/agents/coder/agent.leviath";
+
+        assert_eq!(
+            blueprint_source(&run_dir, installed),
+            installed,
+            "no snapshot, so the installed file"
+        );
+
+        let snapshot = run_dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
+        std::fs::write(&snapshot, "[agent]\nname = \"coder\"\n").unwrap();
+        assert_eq!(
+            blueprint_source(&run_dir, installed),
+            snapshot.to_string_lossy(),
+            "the run's own copy wins"
+        );
     }
 
     #[test]
@@ -2177,6 +2306,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                     error: None,
                     title: None,
                     title_error: None,
+                    blueprint_digest: None,
                     metadata: Default::default(),
                     callback_url: None,
                     callback_secret: None,
@@ -2294,6 +2424,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             error: None,
             title: None,
             title_error: None,
+            blueprint_digest: None,
             metadata: Default::default(),
             callback_url: None,
             callback_secret: None,

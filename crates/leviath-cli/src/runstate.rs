@@ -71,7 +71,7 @@ pub(crate) fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> an
 /// Not JSON-specific despite where it started: the final-output sidecar is raw
 /// content, and wants the same private-then-rename treatment for the same
 /// reason.
-fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
+pub(crate) fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
     // `write_private`: these files carry the run's full task prompt,
     // conversation and tool output - and `meta.json` carries the webhook

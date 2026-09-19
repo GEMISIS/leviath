@@ -311,7 +311,9 @@ fn reload_one(
 ) -> Result<Entity, String> {
     let args = SpawnArgs {
         run_id: meta.run_id.clone(),
-        blueprint_path: meta.agent_path.clone(),
+        // The run's own snapshot when it has one, so a restart resumes the
+        // manifest the run started with rather than an edited installed file.
+        blueprint_path: crate::daemon::setup::blueprint_source(run_dir, &meta.agent_path),
         task: meta.task.clone(),
         // Region seed content isn't replayed on reload: the window is restored
         // from the persisted context snapshot after build_agent, so re-seeding
@@ -701,6 +703,7 @@ mod tests {
             error: None,
             title: Some("Resume Me".to_string()),
             title_error: None,
+            blueprint_digest: None,
             metadata: std::collections::HashMap::new(),
             callback_url: Some("http://cb".to_string()),
             callback_secret: None,

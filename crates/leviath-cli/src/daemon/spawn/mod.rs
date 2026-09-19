@@ -261,6 +261,9 @@ fn tool_mime(
 /// which four are collections is a transposition waiting to happen.
 struct RunRecordParts {
     agent_name: String,
+    /// The SHA-256 of the manifest text this run is executing, which is also
+    /// the identity of the snapshot written into its run directory.
+    blueprint_digest: Option<String>,
     model_label: Option<String>,
     num_stages: usize,
     read_path_counts: Option<leviath_core::run_meta::ReadPathGrantCounts>,
@@ -312,6 +315,7 @@ fn attach_run_record(
         callback_secret: args.callback_secret.clone(),
         title: None,
         title_error: None,
+        blueprint_digest: parts.blueprint_digest,
         unattended: args.yolo,
         yolo_profile: parts.yolo_profile,
         read_paths: parts.read_path_counts,
@@ -1032,6 +1036,7 @@ fn build_agent_inner(
         &deps,
         RunRecordParts {
             agent_name: agent_name.clone(),
+            blueprint_digest: Some(leviath_core::mime::store::sha256_hex(content.as_bytes())),
             model_label: model_label.clone(),
             num_stages,
             read_path_counts,

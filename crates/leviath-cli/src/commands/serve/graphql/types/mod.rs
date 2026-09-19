@@ -5,4 +5,5 @@
 //! a blueprint whether it is the installed definition or the copy a run
 //! executed.
 
+pub(crate) mod blueprint;
 pub(crate) mod run;
