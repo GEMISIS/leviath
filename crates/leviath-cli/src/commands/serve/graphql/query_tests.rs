@@ -1870,3 +1870,97 @@ mod the_awkward_shapes {
         .await;
     }
 }
+
+/// A config file that will not parse is reported, not read as an empty machine.
+///
+/// "No MCP servers" and "this file is broken" lead somewhere different, and a
+/// console that showed the first for the second would hide the reason its tools
+/// disappeared. The same holds for the script registry, which reads the same
+/// file.
+#[tokio::test]
+async fn an_unparseable_config_is_reported_rather_than_read_as_empty() {
+    crate::config::with_isolated_config_path_async("graphql-bad-config", |dir| async move {
+        std::fs::write(dir.join("config.toml"), "this is not = = toml").expect("a broken config");
+
+        let answer = run_query("{ mcpServers { name } }").await;
+        let message = &answer
+            .errors
+            .first()
+            .expect("a broken config is an error")
+            .message;
+        assert!(!message.is_empty(), "it says what went wrong");
+    })
+    .await;
+}
+
+/// A blueprint name that is not a name is refused before any directory is read.
+///
+/// The name becomes a path, so this is the check that stops one being used as a
+/// way out of the agents directory. An empty list would look like an answer.
+#[tokio::test]
+async fn scripts_of_an_unsafe_blueprint_name_are_refused() {
+    let answer = run_query(r#"{ scripts(agent: "../../etc") { name } }"#).await;
+    let message = &answer.errors.first().expect("a refusal").message;
+    assert!(message.contains("Invalid agent name"), "{message}");
+}
+
+/// A listing cursor from another query is refused rather than resumed.
+#[tokio::test]
+async fn a_listing_cursor_from_elsewhere_is_refused() {
+    let answer = run_query(r#"{ runs(after: "not-a-cursor") { total } }"#).await;
+    let message = &answer.errors.first().expect("a refusal").message;
+    assert!(!message.is_empty(), "{message}");
+}
+
+/// Oldest-first paging mints cursors of its own order.
+///
+/// The order is part of the cursor, so a page taken one way cannot be resumed as
+/// though it were the other. That is what stops a client walking a listing in
+/// both directions and seeing a run once or twice by accident.
+#[tokio::test]
+async fn an_ascending_listing_mints_its_own_cursors() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-asc-cursors", |_dir| async move {
+        for (id, at) in [("first", 100), ("second", 200), ("third", 300)] {
+            create_run(&meta_at(id, at)).expect("run written");
+        }
+        let answer = run_query(
+            "{ runs(first: 2, filter: { ascending: true }) {
+                 pageInfo { hasNextPage endCursor }
+                 edges { cursor node { id } }
+               } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let page = &json["runs"];
+        assert_eq!(page["edges"][0]["node"]["id"], "first", "oldest first");
+        assert!(
+            page["edges"][0]["cursor"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty()),
+            "every edge carries where to resume from"
+        );
+
+        // The cursor resumes the same order rather than starting again.
+        let cursor = page["pageInfo"]["endCursor"].as_str().expect("a cursor");
+        let answer = run_query(&format!(
+            r#"{{ runs(first: 2, after: "{cursor}", filter: {{ ascending: true }}) {{
+                 edges {{ node {{ id }} }} }} }}"#
+        ))
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["runs"]["edges"][0]["node"]["id"], "third");
+    })
+    .await;
+}
+
+/// The run filter refuses what it cannot read.
+#[test]
+fn the_run_filter_refuses_what_it_cannot_read() {
+    use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
+    assert!(RunFilter::parse(Some(Value::String("nope".to_string()))).is_err());
+    let mut map = IndexMap::new();
+    map.insert(Name::new("query"), Value::Number(7.into()));
+    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
+}

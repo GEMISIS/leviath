@@ -955,3 +955,78 @@ async fn a_truncated_window_says_where_to_continue() {
     assert_eq!(rest["run"]["fileContent"]["truncated"], false);
     assert!(rest["run"]["fileContent"]["nextOffset"].is_null());
 }
+
+/// Before the first stage is entered, the answer is the entry stage's.
+///
+/// That is the stage a message would arrive in, so reading the blueprint's entry
+/// rather than answering unknown is what makes the field useful on a run that has
+/// only just been queued.
+#[tokio::test]
+async fn a_run_yet_to_enter_a_stage_answers_from_its_entry_stage() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-accepts-entry", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut meta = meta_in(workdir.path());
+        meta.current_stage = String::new();
+        crate::runstate::create_run(&meta).expect("run written");
+        std::fs::write(
+            crate::runstate::run_dir(&meta.run_id)
+                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
+            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
+             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
+             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
+             \n[stages.build]\nmode = \"autonomous\"\n",
+        )
+        .expect("a snapshot");
+
+        let json = data(meta, "{ run { acceptsMessages } }").await;
+        assert_eq!(
+            json["run"]["acceptsMessages"], false,
+            "the entry stage is `review`, which takes no messages"
+        );
+    })
+    .await;
+}
+
+/// A page of children larger than the cap is refused, and a negative skip too.
+///
+/// The cap is what stops one query walking a whole sub-agent tree, so it has to
+/// hold on the nested field as well as on the root listing.
+#[tokio::test]
+async fn a_child_page_over_the_cap_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-children-cap", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+
+        let answer = ask(meta.clone(), "{ run { children(first: 5000) { total } } }").await;
+        let message = &answer.errors.first().expect("a refusal").message;
+        assert!(message.contains("at most"), "{message}");
+
+        let answer = ask(meta, "{ run { children(first: 10, skip: -1) { total } } }").await;
+        let message = &answer.errors.first().expect("a refusal").message;
+        assert!(message.contains("negative"), "{message}");
+    })
+    .await;
+}
+
+/// A context-history cursor from somewhere else is refused rather than followed.
+#[tokio::test]
+async fn a_history_cursor_from_elsewhere_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-history-cursor", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+        write_journal(&meta, &[10, 20]);
+
+        let answer = ask(
+            meta,
+            r#"{ run { contextHistory(first: 1, after: "not-from-here") { total } } }"#,
+        )
+        .await;
+        assert!(
+            !answer.errors.is_empty(),
+            "a cursor this listing did not mint is not followed"
+        );
+    })
+    .await;
+}

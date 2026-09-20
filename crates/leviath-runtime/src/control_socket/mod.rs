@@ -29,11 +29,11 @@ use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
-pub use client::{ControlClient, RESTART_GRACE, WorldEventStream};
+pub use client::{CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, WorldEventStream};
 #[cfg(test)]
 use client::{
-    DEFAULT_CONTROL_TIMEOUT_SECS, LinkStatus, SPAWN_CONTROL_TIMEOUT_SECS, is_transient,
-    request_timeout, timeout_for,
+    DEFAULT_CONTROL_TIMEOUT_SECS, SPAWN_CONTROL_TIMEOUT_SECS, is_transient, request_timeout,
+    timeout_for,
 };
 
 #[cfg(unix)]

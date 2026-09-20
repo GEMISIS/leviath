@@ -38,9 +38,16 @@ pub(crate) struct DaemonStatus {
 }
 
 impl DaemonStatus {
-    /// What the control client currently knows.
-    pub(crate) fn of(control: &leviath_runtime::control_socket::ControlClient) -> Self {
-        let link = control.link();
+    /// What the control client knows, as the schema says it.
+    ///
+    /// Takes the two readings rather than the client, so this stays a mapping
+    /// with nothing to arrange: a daemon that has introduced itself, and one that
+    /// runs different code, are both states a caller can hand over and neither
+    /// needs a live socket to describe.
+    pub(crate) fn of(
+        link: leviath_runtime::control_socket::LinkStatus,
+        mismatch: Option<leviath_runtime::control_socket::CodeMismatch>,
+    ) -> Self {
         Self {
             reachable: link.reachable,
             version: link.daemon.as_ref().map(|daemon| daemon.version.clone()),
@@ -50,7 +57,7 @@ impl DaemonStatus {
                 .as_ref()
                 .map(|daemon| i32::try_from(daemon.pid).unwrap_or(i32::MAX)),
             restarts: i32::try_from(link.restarts).unwrap_or(i32::MAX),
-            restart_advised: control.code_mismatch().map(|mismatch| mismatch.to_string()),
+            restart_advised: mismatch.map(|mismatch| mismatch.to_string()),
         }
     }
 }

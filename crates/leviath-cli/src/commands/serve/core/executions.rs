@@ -193,3 +193,98 @@ impl ResultText {
         self.bytes > self.text.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{EXECUTIONS_DEFAULT_LIMIT, EXECUTIONS_MAX_LIMIT, ExecutionsSpec, result};
+    use crate::commands::serve::cursor;
+
+    /// The page size is bounded at both ends, and a zero is refused rather than
+    /// read as "give me none".
+    #[test]
+    fn a_request_is_bounded_at_both_ends() {
+        let spec = ExecutionsSpec::resolve("run-a", None, None).expect("the defaults");
+        assert_eq!(spec.limit, EXECUTIONS_DEFAULT_LIMIT);
+        assert!(spec.after.is_none());
+
+        // Clamped rather than refused: a smaller page is still an answer, and
+        // the cap is there to bound the response rather than to scold.
+        let spec = ExecutionsSpec::resolve("run-a", Some(10_000), None).expect("clamped");
+        assert_eq!(spec.limit, EXECUTIONS_MAX_LIMIT);
+
+        let refused = ExecutionsSpec::resolve("run-a", Some(0), None).expect_err("zero");
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+    }
+
+    /// A cursor this listing did not mint is ignored or refused, never followed.
+    #[test]
+    fn a_cursor_from_elsewhere_does_not_resume_this_listing() {
+        let mine = cursor::encode(
+            "index",
+            "asc",
+            &cursor::filter_digest(&["run-a"]),
+            cursor::CursorKey::Int(7),
+            "",
+        );
+        let spec = ExecutionsSpec::resolve("run-a", None, Some(&mine)).expect("its own cursor");
+        assert_eq!(spec.after, Some(7));
+
+        // A key of a kind this listing never mints: readable, and not usable.
+        let lettered = cursor::encode(
+            "index",
+            "asc",
+            &cursor::filter_digest(&["run-a"]),
+            cursor::CursorKey::Text("seven".to_string()),
+            "",
+        );
+        let spec = ExecutionsSpec::resolve("run-a", None, Some(&lettered)).expect("readable");
+        assert!(spec.after.is_none(), "a key this listing cannot use");
+
+        // A cursor minted for another run is refused: the digest binds it.
+        let elsewhere = cursor::encode(
+            "index",
+            "asc",
+            &cursor::filter_digest(&["run-b"]),
+            cursor::CursorKey::Int(1),
+            "",
+        );
+        let refused = ExecutionsSpec::resolve("run-a", None, Some(&elsewhere))
+            .expect_err("a cursor from another run");
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+    }
+
+    /// A result asked for on a run with no journal answers nothing.
+    ///
+    /// Not an error: the caller read a page a moment ago and the run has been
+    /// deleted since, which is a race rather than a mistake.
+    #[test]
+    fn a_result_from_a_run_with_no_journal_is_nothing() {
+        crate::runstate::with_isolated_runs_dir("executions-no-journal", |_dir| {
+            assert!(
+                result("no-such-run", 0, "c1")
+                    .expect("no journal is not a failure")
+                    .is_none()
+            );
+        });
+    }
+
+    /// A journal that cannot be read is reported rather than read as empty.
+    #[test]
+    fn a_result_from_an_unreadable_journal_is_an_error() {
+        crate::runstate::with_isolated_runs_dir("executions-corrupt", |_dir| {
+            let dir = crate::runstate::run_dir("broken");
+            std::fs::create_dir_all(&dir).expect("a run dir");
+            std::fs::write(
+                dir.join(leviath_core::files::ARCHIVE_FILE),
+                b"not an archive",
+            )
+            .expect("a corrupt journal");
+            let failed = result("broken", 0, "c1").expect_err("an unreadable journal");
+            assert_eq!(failed.code(), "INTERNAL");
+            assert!(
+                failed.to_string().contains("unreadable journal"),
+                "{failed}"
+            );
+        });
+    }
+}

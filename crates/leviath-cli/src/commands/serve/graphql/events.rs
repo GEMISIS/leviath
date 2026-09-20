@@ -294,10 +294,10 @@ pub(crate) struct InteractionRequest {
     /// Null for every other kind of ask. An approval that names a tool whose
     /// arguments do not fit its shape comes through untyped rather than tidied:
     /// deciding whether to approve a call means seeing what it actually says.
-    ///
-    /// Boxed because a typed call is as large as the largest tool's arguments,
-    /// and every live frame would otherwise carry that much room for one it
-    /// almost never holds.
+    // Boxed because a typed call is as large as the largest tool's arguments,
+    // and every live frame would otherwise carry that much room for one it
+    // almost never holds. An implementation detail, so not part of the
+    // description a client reads.
     pub(crate) tool_call: Option<Box<super::types::tool_calls::ToolCall>>,
     /// The stage the run is in.
     pub(crate) stage_name: String,
