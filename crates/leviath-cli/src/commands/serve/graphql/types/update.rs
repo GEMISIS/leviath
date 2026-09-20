@@ -28,6 +28,12 @@ pub(crate) struct DaemonStatus {
     pub(crate) build: Option<String>,
     /// Its process id.
     pub(crate) pid: Option<i32>,
+    /// Which tool credentials the daemon can see, by name. Names only: no
+    /// value crosses the wire.
+    ///
+    /// Null means no daemon has said, which is an older one or none reached
+    /// yet. An empty list is the other answer: asked, and it sees none.
+    pub(crate) tool_env: Option<Vec<String>>,
     /// How many times the daemon behind this link has changed process since
     /// this server started.
     pub(crate) restarts: i32,
@@ -56,6 +62,10 @@ impl DaemonStatus {
                 .daemon
                 .as_ref()
                 .map(|daemon| i32::try_from(daemon.pid).unwrap_or(i32::MAX)),
+            tool_env: link
+                .daemon
+                .as_ref()
+                .and_then(|daemon| daemon.tool_env.clone()),
             restarts: i32::try_from(link.restarts).unwrap_or(i32::MAX),
             restart_advised: mismatch.map(|mismatch| mismatch.to_string()),
         }

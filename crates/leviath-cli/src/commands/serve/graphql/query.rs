@@ -948,6 +948,7 @@ pub(crate) fn config_of(
             line: error.line.and_then(|line| i32::try_from(line).ok()),
             column: error.column.and_then(|col| i32::try_from(col).ok()),
             key: error.key,
+            since: Timestamp(error.since),
             note: error.note,
         }),
         config_mtime: redacted.config_mtime.map(Timestamp),

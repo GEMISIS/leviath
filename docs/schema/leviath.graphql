@@ -956,6 +956,12 @@ type ConfigError {
 	"""
 	key: String
 	"""
+	When this server first saw the file in this state. A banner that has
+	been up for an hour is a different thing from one that appeared while
+	somebody was editing.
+	"""
+	since: Timestamp!
+	"""
 	Said in words, for a client that only renders strings.
 	"""
 	note: String!
@@ -1626,6 +1632,15 @@ type DaemonIdentity {
 	Its process id.
 	"""
 	pid: Int!
+	"""
+	Which tool credentials it can see, by name. Names only: no value ever
+	crosses the wire.
+	
+	Null means the process did not say, which is an older daemon or an
+	embedder driving the runtime directly. That is "unknown", not "sees
+	nothing" - an empty list is the answer for that.
+	"""
+	toolEnv: [String!]
 }
 
 """
@@ -1686,6 +1701,14 @@ type DaemonStatus {
 	Its process id.
 	"""
 	pid: Int
+	"""
+	Which tool credentials the daemon can see, by name. Names only: no
+	value crosses the wire.
+	
+	Null means no daemon has said, which is an older one or none reached
+	yet. An empty list is the other answer: asked, and it sees none.
+	"""
+	toolEnv: [String!]
 	"""
 	How many times the daemon behind this link has changed process since
 	this server started.
@@ -3578,7 +3601,11 @@ type Mutation {
 		"""
 		Arguments for a stdio server.
 		"""
-		args: [String!]
+		args: [String!],
+		"""
+		Headers sent with every request to an HTTP server. An `Authorization` header here is a credential, so the server needs no separate sign-in.
+		"""
+		headers: [EnvEntryInput!]
 	): Boolean!
 	"""
 	Remove an MCP server from the config.

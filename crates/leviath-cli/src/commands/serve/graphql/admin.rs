@@ -81,12 +81,21 @@ impl AdminMutation {
         #[graphql(desc = "The command, for a stdio server.")] command: Option<String>,
         #[graphql(desc = "The URL, for an HTTP server.")] url: Option<String>,
         #[graphql(desc = "Arguments for a stdio server.")] args: Option<Vec<String>>,
+        #[graphql(desc = "Headers sent with every request to an HTTP server. An \
+                    `Authorization` header here is a credential, so the server \
+                    needs no separate sign-in.")]
+        headers: Option<Vec<super::config_input::EnvEntryInput>>,
     ) -> async_graphql::Result<bool> {
         super::super::mcp::install_server(
-            &name,
-            command.as_deref(),
-            url.as_deref(),
+            name,
+            command,
+            url,
             args.unwrap_or_default(),
+            headers
+                .unwrap_or_default()
+                .into_iter()
+                .map(|entry| (entry.name, entry.value))
+                .collect(),
         )
         .gql()?;
         Ok(true)
