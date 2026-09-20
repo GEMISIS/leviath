@@ -1758,7 +1758,18 @@ mod the_awkward_shapes {
             // Broken after the server started, which is the order a person
             // editing it produces: the server keeps the last one that loaded and
             // says what is wrong with the file on disk.
+            //
+            // The modified time is pushed forward, because that is what the
+            // reloader compares. Two writes inside one tick of the filesystem's
+            // clock look like no change at all, and the coarser that clock is the
+            // more often the test says the file still loads.
             std::fs::write(&path, "default_provider = \n").expect("a broken config file");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("the file to stamp")
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+                .expect("a later modified time");
             let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
                 .data(state)
                 .finish();
