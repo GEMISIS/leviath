@@ -112,6 +112,29 @@ impl ScalarType for Cursor {
     }
 }
 
+/// Arbitrary JSON. The schema description is on the impl below.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Json(pub(crate) serde_json::Value);
+
+/// Arbitrary JSON, for the few places where the shape is the caller's rather
+/// than ours: a model's provider-specific parameters, a tool call's arguments,
+/// an output schema. A typed field is better wherever the type is ours to
+/// define, so this appears only where a manifest or a model chose the shape and
+/// inventing one here would mean dropping whatever did not fit.
+#[Scalar(name = "JSON")]
+impl ScalarType for Json {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        value
+            .into_json()
+            .map(Json)
+            .map_err(|e| InputValueError::custom(e.to_string()))
+    }
+
+    fn to_value(&self) -> Value {
+        Value::from_json(self.0.clone()).unwrap_or(Value::Null)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BigInt, Cursor, Decimal, Timestamp};

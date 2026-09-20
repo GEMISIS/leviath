@@ -372,6 +372,61 @@ type Blueprint {
 	granting: an entry takes effect only where the host grants it.
 	"""
 	readPaths: [String!]!
+	"""
+	What must be on the machine before a run of this will start. A required
+	one missing fails the spawn with its remedy; the rest are warnings.
+	"""
+	dependencies: [BlueprintDependency!]!
+	"""
+	The mime rows this blueprint ships, so an agent that works in a file type
+	the machine has never heard of carries the row that describes it.
+	"""
+	mimeTypes: [BlueprintMimeRow!]!
+	"""
+	What this blueprint asks of the taint layer. Null inherits the machine's
+	setting.
+	"""
+	security: BlueprintSecurity
+	"""
+	Where this agent's tools run, unless a stage says otherwise. Null leaves
+	the machine's own setting.
+	"""
+	sandbox: SandboxConfig
+	"""
+	What happens when a model answers with text before calling any tool,
+	unless a stage says otherwise. Null leaves the machine's own setting.
+	"""
+	nudge: NudgeConfig
+	"""
+	The model that summarizes a region when it fills. Null leaves the
+	machine's own summarizer.
+	"""
+	compaction: CompactionConfig
+	"""
+	Keeping the files this agent reads and writes in one region, so a tool
+	result can point at the region rather than repeating the file.
+	"""
+	fileTracking: FileTrackingConfig
+	"""
+	When a run of this is stopped for going round in circles. Null leaves the
+	machine's own thresholds.
+	"""
+	repetitionDetection: RepetitionDetection
+	"""
+	What this agent would like to run without being asked. A request rather
+	than a grant: the machine's own policy decides, and this is what an
+	operator reads when deciding whether to write it in.
+	"""
+	safeCommands: SafeCommands
+	"""
+	The shape this agent's answer takes, unless a stage narrows it.
+	"""
+	output: OutputSpec
+	"""
+	How this agent's context maps onto another's, for a handoff to a
+	different blueprint.
+	"""
+	transforms: [ContextTransform!]!
 }
 
 """
@@ -398,6 +453,59 @@ type BlueprintConnection {
 }
 
 """
+One thing a blueprint needs.
+"""
+type BlueprintDependency {
+	"""
+	A short name, unique within the blueprint.
+	"""
+	name: String!
+	"""
+	What kind of thing it is. Which of the fields below is set follows from
+	this.
+	"""
+	kind: DependencyKind!
+	"""
+	Whether the spawn fails when it is missing. False makes a miss a warning
+	the run goes past.
+	"""
+	required: Boolean!
+	"""
+	A sentence telling the person how to satisfy it, shown wherever the miss
+	is reported.
+	"""
+	remedy: String
+	"""
+	One line on why the agent needs it.
+	"""
+	description: String
+	"""
+	How it can be installed, when the blueprint says.
+	"""
+	install: DependencyInstall
+	"""
+	The server that must be configured, for an MCP dependency.
+	"""
+	server: String
+	"""
+	The variables that server needs set, for an MCP dependency.
+	"""
+	env: [String!]!
+	"""
+	The variable that must be set, for an environment dependency.
+	"""
+	var: String
+	"""
+	The program that must resolve on the path, for a binary dependency.
+	"""
+	command: String
+	"""
+	The script that decides, for a script dependency.
+	"""
+	check: String
+}
+
+"""
 One installed blueprint with its page cursor.
 """
 type BlueprintEdge {
@@ -409,6 +517,61 @@ type BlueprintEdge {
 	Cursor for this edge.
 	"""
 	cursor: Cursor!
+}
+
+"""
+One row of the mime registry, as a blueprint writes it.
+
+Every field but the key is optional, because a row says only what it
+changes: a row that names a family and nothing else leaves the rest to
+whatever broader row already covers the type.
+"""
+type BlueprintMimeRow {
+	"""
+	The type or pattern this row covers: `image/png`, or `image/*`.
+	"""
+	mimeType: String!
+	"""
+	What providers key their encoders on.
+	"""
+	family: String
+	"""
+	Whether the bytes are text, and so may travel inline and reach any model
+	as text.
+	"""
+	text: Boolean
+	"""
+	How the part's tokens are estimated.
+	"""
+	tokens: MimeTokenRates
+	"""
+	Extensions that imply this type, without the dot.
+	"""
+	extensions: [String!]!
+	"""
+	A hex prefix that identifies the bytes.
+	"""
+	magic: String
+	"""
+	What a consumer that cannot take this type sees in the part's place.
+	"""
+	standIn: String
+	"""
+	A script the bytes must pass before they are stored as this type. An
+	empty string lifts a check a broader row put on the type.
+	"""
+	check: String
+}
+
+"""
+What this level asks of the taint layer.
+"""
+type BlueprintSecurity {
+	"""
+	Whether content that came from outside is followed through the run, so a
+	tool call carrying it can be held.
+	"""
+	taintTracking: TaintTracking!
 }
 
 """
@@ -484,6 +647,39 @@ type ChildEdge {
 	The child run.
 	"""
 	node: Run!
+}
+
+"""
+The model that summarizes a region when it fills.
+
+Its own model on purpose: compaction is cheap, frequent and not the work, so
+an agent running on an expensive model usually summarizes on a small one.
+"""
+type CompactionConfig {
+	"""
+	The provider that serves the summarizer.
+	"""
+	provider: String!
+	"""
+	The model it runs on.
+	"""
+	model: String!
+	"""
+	What the summarizer is told it is for.
+	"""
+	systemPrompt: String
+	"""
+	The template the region's content is wrapped in.
+	"""
+	userPromptTemplate: String
+	"""
+	The longest summary it may return.
+	"""
+	maxSummaryTokens: Int!
+	"""
+	How much it may wander. A summary wants little.
+	"""
+	temperature: Float!
 }
 
 """
@@ -669,6 +865,32 @@ type ContextRegion {
 }
 
 """
+How this blueprint's context maps onto another's.
+
+What a handoff needs: two agents with different memory structures cannot
+simply pass a context along, so the blueprint that hands off says which of
+its regions becomes which of the other's.
+
+The blueprints are named rather than resolved. The receiving one has to be
+installed for the handoff to happen, and it may not be installed now, so
+naming it is the answer that stays true.
+"""
+type ContextTransform {
+	"""
+	The blueprint handing off, by name.
+	"""
+	fromBlueprint: String!
+	"""
+	The blueprint receiving, by name.
+	"""
+	toBlueprint: String!
+	"""
+	The region-to-region mappings.
+	"""
+	mappings: [RegionMapping!]!
+}
+
+"""
 Context window totals moved.
 """
 type ContextUpdated {
@@ -812,6 +1034,71 @@ type DeletePayload {
 }
 
 """
+How a dependency can be put in place.
+
+Nothing here runs by itself. Each option changes the machine, by running a
+command, running a script, or writing a server into the config, so
+`lev deps install` asks first every time.
+"""
+type DependencyInstall {
+	"""
+	One command for any system.
+	"""
+	command: String
+	"""
+	Commands for particular systems, preferred over `command` on a match.
+	"""
+	commands: [InstallCommand!]!
+	"""
+	A Rhai script, relative to the blueprint, run with the same gates a
+	script tool answers to.
+	"""
+	script: String
+	"""
+	The server to write into the config, for an MCP dependency.
+	"""
+	server: McpServerTemplate
+}
+
+"""
+What kind of thing a dependency is.
+"""
+enum DependencyKind {
+	"""
+	An MCP server that must be in the config, with its variables set.
+	"""
+	MCP_SERVER
+	"""
+	An environment variable that must be set and not empty.
+	"""
+	ENV
+	"""
+	A program that must resolve on the path.
+	"""
+	BINARY
+	"""
+	A condition a script decides.
+	"""
+	SCRIPT
+}
+
+"""
+One option, and what the stage is told when it is picked.
+"""
+type DirectiveEntry {
+	"""
+	The option label this applies to.
+	"""
+	option: String!
+	"""
+	What the stage is told to do next. It re-runs in place rather than
+	transitioning, so the decision is the runtime's and the work is the
+	agent's.
+	"""
+	instruction: String!
+}
+
+"""
 One directory, for a file picker.
 """
 type Directory {
@@ -871,6 +1158,81 @@ type DoctorReport {
 }
 
 """
+What the nudge resolves to for this stage.
+"""
+type EffectiveNudge {
+	"""
+	Whether a text-only answer sends the stage back round. Off by default for
+	a stage with checkpoints, whose text is its work product.
+	"""
+	nudges: Boolean!
+	"""
+	How many text-only answers are nudged before the text is taken as final.
+	"""
+	max: Int!
+	"""
+	The nudge itself, before `{stage}` and `{regions}` are filled in.
+	"""
+	text: String!
+}
+
+"""
+What this stage's settings resolve to.
+
+The cascade is stage over blueprint over the machine's config, each field on
+its own, and this is the answer. Every name says what true means, because a
+bare `enabled` beside three levels of inheritance reads as any of them.
+
+This is what a run spawned **now** would get. The daemon does not record the
+resolution a past run was spawned with, so this is not a claim about a run
+that has already started: for that, read the run's own snapshot and the
+config beside it.
+"""
+type EffectiveStageSettings {
+	"""
+	Whether the system prompt tells the model it may send independent tool
+	calls together.
+	"""
+	includesBatchHint: Boolean!
+	"""
+	Whether the platform's shell guidance is eligible for the system prompt.
+	Eligible rather than present: it is emitted only where this host has
+	guidance worth giving and the stage offers a shell tool.
+	"""
+	shellHintEligible: Boolean!
+	"""
+	What happens when the model answers with text before calling any tool.
+	"""
+	nudge: EffectiveNudge!
+	"""
+	Where this stage's tools run.
+	"""
+	sandbox: SandboxConfig!
+	"""
+	Whether content that came from outside is followed through the run, so a
+	tool call carrying it can be held. A manifest can turn this on and cannot
+	turn it off.
+	"""
+	tracksTaint: Boolean!
+}
+
+"""
+One name and value, for a server's environment or headers.
+"""
+type EnvEntry {
+	"""
+	The variable or header name.
+	"""
+	name: String!
+	"""
+	Its value, as the blueprint wrote it. A `${VAR}` reference stands for a
+	secret the installer asks for, so the secret itself never ships in a
+	manifest and never appears here.
+	"""
+	value: String!
+}
+
+"""
 This subscription fell behind, and frames were dropped.
 
 The daemon's broadcast is bounded, and a subscriber that cannot keep up is
@@ -883,6 +1245,93 @@ type EventsDropped {
 	How many frames this subscription missed.
 	"""
 	count: BigInt!
+}
+
+"""
+What a stage's fan-out splits into, and how.
+
+Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
+block of defaults nobody wrote.
+"""
+type FanOut {
+	"""
+	A separate installed blueprint run as the worker, by name. It has to be
+	installed when the fan-out runs, and it may not be installed now, so this
+	is a name rather than a blueprint.
+	"""
+	workerAgent: String
+	"""
+	A stage of this same blueprint run as the worker, by name. That stage has
+	to allow it.
+	"""
+	workerStage: String
+	"""
+	A description matched against the installed agents, when the manifest
+	would rather describe the worker than name it.
+	"""
+	workerQuery: String
+	"""
+	The stage that reconciles what the workers sent back, by name.
+	"""
+	mergeStage: String
+	"""
+	The prompt that produces the work items.
+	"""
+	splitPrompt: String!
+	"""
+	How many workers run at once. Zero means as many as the daemon's
+	inference pool will carry.
+	"""
+	maxWorkers: Int!
+	"""
+	The most work items the split may produce. Null means however many it
+	produces. This bounds what there is at all, where `maxWorkers` bounds how
+	many run together, and it is also what decides each worker's share of the
+	results region.
+	"""
+	maxItems: Int
+	"""
+	How many times the stage is asked again when it ends without having
+	fanned out, before it is let through with no workers.
+	"""
+	maxAttempts: Int
+	"""
+	What happens when one worker fails.
+	"""
+	onWorkerFailure: WorkerFailurePolicy!
+	"""
+	The region the consolidated report is written to, by name. Null means the
+	conversation, which is a sliding window, so a bulky report is worth its
+	own region and its own budget.
+	"""
+	resultsRegion: String
+}
+
+"""
+Keeping the files a run reads and writes in one region.
+
+So a tool result can point at the region rather than repeating a file the
+context already holds.
+"""
+type FileTrackingConfig {
+	"""
+	The key-value region the files are synced to, by name.
+	"""
+	region: String!
+	"""
+	Whether a read updates it.
+	"""
+	trackReads: Boolean!
+	"""
+	Whether a write updates it. An edit does not: its arguments are the old
+	and new text, so the file's new body is not there to record without
+	reading it again.
+	"""
+	trackWrites: Boolean!
+	"""
+	The most tokens one file may take in the region before it is truncated.
+	"""
+	maxFileTokens: Int
 }
 
 """
@@ -980,6 +1429,20 @@ enum HintSetting {
 }
 
 """
+A shell command for one operating system.
+"""
+type InstallCommand {
+	"""
+	Which system it is for: `macos`, `linux` or `windows`.
+	"""
+	os: String!
+	"""
+	The command line.
+	"""
+	command: String!
+}
+
+"""
 What kind of answer a parked run is waiting for.
 """
 enum InteractionKind {
@@ -1040,6 +1503,76 @@ type InteractionPayload {
 }
 
 """
+A checkpoint a stage raises, where the run waits for a person.
+"""
+type InteractionPoint {
+	"""
+	The point's name, unique within the stage.
+	"""
+	name: String!
+	"""
+	What the person is asked.
+	"""
+	prompt: String!
+	"""
+	Whether an answer is expected rather than optional. A presentation hint,
+	not to be confused with `unattended`, which decides whether the question
+	is raised at all.
+	"""
+	required: Boolean!
+	"""
+	What happens when nobody is watching.
+	"""
+	unattended: UnattendedPolicy!
+	"""
+	What the person is asked for.
+	"""
+	style: InteractionPointStyle!
+	"""
+	The options, for a multiple choice.
+	"""
+	options: [String!]!
+	"""
+	Options that send the stage back round with an instruction instead of
+	letting it transition.
+	"""
+	directives: [DirectiveEntry!]!
+	"""
+	Options that cancel the run outright, with no further inference.
+	"""
+	abortOptions: [String!]!
+	"""
+	Options that open the stage's last output for the person to edit, and
+	feed the edit back into the context.
+	"""
+	editOptions: [String!]!
+	"""
+	The region holding this point's authoritative document, by name. Each
+	time the point is raised, the current document replaces that region, so a
+	later revision builds on the current version rather than starting over.
+	"""
+	documentRegion: String
+}
+
+"""
+What the person is asked for.
+"""
+enum InteractionPointStyle {
+	"""
+	Anything they type.
+	"""
+	FREE_TEXT
+	"""
+	One of the options.
+	"""
+	MULTIPLE_CHOICE
+	"""
+	Yes or no.
+	"""
+	CONFIRM
+}
+
+"""
 One pending ask, parked on a run.
 """
 type InteractionRequest {
@@ -1078,6 +1611,15 @@ type InteractionRequest {
 }
 
 """
+Arbitrary JSON, for the few places where the shape is the caller's rather
+than ours: a model's provider-specific parameters, a tool call's arguments,
+an output schema. A typed field is better wherever the type is ours to
+define, so this appears only where a manifest or a model chose the shape and
+inventing one here would mean dropping whatever did not fit.
+"""
+scalar JSON
+
+"""
 One log line.
 """
 type LogLine {
@@ -1094,6 +1636,74 @@ type LogLine {
 	broadcast; the stage log on disk keeps the whole thing.
 	"""
 	line: String!
+}
+
+"""
+What happens to one region's content as it crosses between blueprints.
+"""
+enum MappingTransform {
+	"""
+	Carried verbatim.
+	"""
+	DIRECT
+	"""
+	Summarized on the way.
+	"""
+	SUMMARIZE
+	"""
+	Narrowed to named fields, and the rest dropped.
+	"""
+	EXTRACT
+}
+
+"""
+How large one reply may be.
+
+Three shapes because a fixed number is the wrong answer to two of the three
+questions. A relative cap resolves against the model or the region at
+inference time, so a stage moved to a larger model uses it.
+"""
+union MaxOutputTokens = MaxTokensCount | MaxTokensContextPercent | MaxTokensRegionPercent
+
+"""
+A share of the model's context window.
+
+What a stage that rewrites a whole document wants: the number that fits is
+the model's, not the author's, and it changes with the model the stage lands
+on. The resolved value is clamped to the model's own maximum.
+"""
+type MaxTokensContextPercent {
+	"""
+	The share, as a percentage.
+	"""
+	percent: Float!
+}
+
+"""
+A fixed number of output tokens, sent as written.
+"""
+type MaxTokensCount {
+	"""
+	The number of tokens.
+	"""
+	tokens: Int!
+}
+
+"""
+A share of one region's token budget.
+
+What a stage that fills a region wants: a reply larger than the region it
+goes into is cut somewhere, and the region's budget is the honest ceiling.
+"""
+type MaxTokensRegionPercent {
+	"""
+	The share, as a percentage.
+	"""
+	percent: Float!
+	"""
+	The region whose budget it is a share of, by name.
+	"""
+	region: String!
 }
 
 """
@@ -1118,6 +1728,55 @@ type McpServer {
 	Its one-word auth state.
 	"""
 	auth: String!
+}
+
+"""
+An MCP server a blueprint can ship, for `lev deps install` to write into the
+config.
+
+The settings that are the same for everybody. A secret is never here: it is
+named in the dependency's variables and asked for when it is installed.
+"""
+type McpServerTemplate {
+	"""
+	How it is reached. Null when the manifest leaves it to be inferred from
+	whichever of the command and the URL it gives.
+	"""
+	transport: McpTransport
+	"""
+	The program to launch, for a stdio server.
+	"""
+	command: String
+	"""
+	The endpoint, for an HTTP server.
+	"""
+	url: String
+	"""
+	Arguments passed to the program.
+	"""
+	args: [String!]!
+	"""
+	The child process's environment, for a stdio server.
+	"""
+	env: [EnvEntry!]!
+	"""
+	Headers sent with every request, for an HTTP server.
+	"""
+	headers: [EnvEntry!]!
+}
+
+"""
+The transport an MCP server is reached over.
+"""
+enum McpTransport {
+	"""
+	A program the daemon launches and talks to over its own pipes.
+	"""
+	STDIO
+	"""
+	An HTTP endpoint.
+	"""
+	HTTP
 }
 
 """
@@ -1187,6 +1846,37 @@ type MimeRowWritten {
 	True when the row is new, false when an existing one was updated.
 	"""
 	created: Boolean!
+}
+
+"""
+How a part's tokens are estimated. Exactly one rate is set.
+"""
+type MimeTokenRates {
+	"""
+	Tokens per byte of the stored file.
+	"""
+	perByte: Float
+	"""
+	Pixels one token buys, paired with `max`.
+	"""
+	perPixel: Int
+	"""
+	The most one part may cost, and the answer when the dimensions are
+	unknown.
+	"""
+	max: Int
+	"""
+	Tokens per second of audio or video.
+	"""
+	perSecond: Int
+	"""
+	Tokens per page of a document.
+	"""
+	perPage: Int
+	"""
+	A flat charge, whatever the size.
+	"""
+	fixed: Int
 }
 
 """
@@ -1273,6 +1963,29 @@ enum ModelLimitsSource {
 	still whatever it sent; only their provenance is unrecognised.
 	"""
 	UNKNOWN
+}
+
+"""
+What a stage asks of whichever model it lands on.
+
+`temperature` and `maxOutputTokens` are pulled out because every provider
+takes them and a client renders them. Everything else stays in
+`providerParams` as written: a parameter one provider understands is not a
+parameter we should invent a field for, and dropping it would lose it.
+"""
+type ModelParameters {
+	"""
+	How much the model may wander, when the stage sets it.
+	"""
+	temperature: Float
+	"""
+	The largest reply this stage will accept.
+	"""
+	maxOutputTokens: MaxOutputTokens
+	"""
+	Every other parameter, as the manifest wrote it.
+	"""
+	providerParams: JSON!
 }
 
 """
@@ -1576,6 +2289,47 @@ type Mutation {
 }
 
 """
+What happens when a model answers with text before calling any tool.
+
+Each field cascades on its own, so a level that sets only `max` inherits the
+policy and the text. Unset everywhere, the nudge fires, except for a stage
+with checkpoints, whose text is its work product.
+"""
+type NudgeConfig {
+	"""
+	Whether the nudge fires.
+	"""
+	policy: NudgePolicy!
+	"""
+	How many text-only answers are nudged before the text is taken as final.
+	"""
+	max: Int
+	"""
+	The nudge itself. `{stage}` and `{regions}` are filled in.
+	"""
+	text: String
+}
+
+"""
+Whether a stage is sent back round when it answers with text instead of
+calling a tool.
+"""
+enum NudgePolicy {
+	"""
+	Take the level above.
+	"""
+	INHERIT
+	"""
+	Send it back round with the nudge.
+	"""
+	NUDGE
+	"""
+	Take the text as the answer.
+	"""
+	NEVER_NUDGE
+}
+
+"""
 One open ask, with the run it is parked on.
 """
 type OpenInteraction {
@@ -1590,6 +2344,31 @@ type OpenInteraction {
 }
 
 """
+One file the output is expected to carry.
+
+A slot rather than a file: this is what the blueprint asked for, and a run's
+`artifacts` is what it produced.
+"""
+type OutputArtifact {
+	"""
+	The name the agent hands it back under.
+	"""
+	name: String!
+	"""
+	The mime type or pattern it must be.
+	"""
+	mimeType: String!
+	"""
+	Whether the output is incomplete without it.
+	"""
+	required: Boolean!
+	"""
+	One line on what it should contain, shown to the model.
+	"""
+	description: String
+}
+
+"""
 What a stage must produce before it may transition.
 """
 type OutputRequirement {
@@ -1600,6 +2379,65 @@ type OutputRequirement {
 	a run.
 	"""
 	reasks: Int!
+}
+
+"""
+Where the parts a stage produces are written, by mime pattern.
+"""
+type OutputRoute {
+	"""
+	The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The
+	most specific match wins.
+	"""
+	pattern: String!
+	"""
+	The region matching parts are written to, by name.
+	"""
+	region: String!
+}
+
+"""
+The shape an output must take.
+
+Declaring a shape does not by itself demand an output: that is
+`outputRequirement` on the stage. This says what the answer has to look like
+when it comes.
+"""
+type OutputSpec {
+	"""
+	The format asked for, such as `json` or `markdown`.
+	"""
+	format: String
+	"""
+	What to tell the model about the answer wanted.
+	"""
+	instructions: String
+	"""
+	An example answer, shown to the model.
+	"""
+	example: String
+	"""
+	A JSON Schema the answer must satisfy.
+	"""
+	schema: JSON
+	"""
+	A script that checks the answer, beyond the schema.
+	"""
+	validator: String
+	"""
+	What happens when that script refuses an answer. Null leaves the default,
+	which is to refuse the output and ask again.
+	"""
+	onValidatorError: ValidatorErrorPolicy
+	"""
+	Whether an artifact may replace a file of the same name in the working
+	directory.
+	"""
+	overwriteArtifacts: Boolean
+	"""
+	The files the answer is expected to carry.
+	"""
+	artifacts: [OutputArtifact!]!
 }
 
 """
@@ -1836,9 +2674,28 @@ type Region {
 	"""
 	kind: RegionKind!
 	"""
-	Hard token ceiling for the region.
+	Hard token ceiling for the region, as resolved for this layout.
+	
+	A region whose budget is a share of the window carries the share in
+	`budgetPercent`, and this number is what that resolved to against the
+	layout's own window.
 	"""
 	maxTokens: Int!
+	"""
+	The share of the model's context window this region claims, as a
+	percentage. Null when the region names a fixed ceiling instead.
+	"""
+	budgetPercent: Float
+	"""
+	The floor a percentage budget resolves no lower than, so a small-context
+	model does not starve the region.
+	"""
+	minTokens: Int
+	"""
+	The ceiling a percentage budget resolves no higher than, so a share of a
+	very large window does not balloon.
+	"""
+	budgetMaxTokens: Int
 	"""
 	One line on what this region is for.
 	"""
@@ -1848,10 +2705,107 @@ type Region {
 	"""
 	required: Boolean!
 	"""
+	Shown when a required region is empty. `{region}` is filled in.
+	"""
+	requiredMessage: String
+	"""
 	Whether the description is also shown to the model, above the region's
 	contents.
 	"""
 	describeInPrompt: Boolean!
+	"""
+	Whether an edge that compacts the context may hand this region to the
+	summarizer.
+	"""
+	summarizable: Boolean!
+	"""
+	How much the contents move between requests, which is what decides where
+	the region sits in the assembled prompt and so what the prompt cache can
+	keep.
+	"""
+	volatility: RegionVolatility!
+	"""
+	What happens to a write that does not fit.
+	"""
+	admission: RegionAdmission!
+	"""
+	The fraction of the budget at which a compacting region compacts.
+	"""
+	compactAt: Float
+	"""
+	The mime patterns this region takes as parts. Empty means anything.
+	"""
+	accepts: [String!]!
+	"""
+	What fills this region before the first inference. Null means it starts
+	empty, for the agent to fill.
+	"""
+	seed: RegionSeed
+	"""
+	The most entries a sliding region keeps.
+	"""
+	maxItems: Int
+	"""
+	How a sliding region makes room. Null for every other kind.
+	"""
+	strategy: RegionStrategy
+	"""
+	How many entries over its ceiling a bulk eviction waits for.
+	"""
+	overflow: Int
+	"""
+	How many of the oldest entries one compaction pass takes.
+	"""
+	compactCount: Int
+	"""
+	The token count at which a compacting region compacts.
+	"""
+	thresholdTokens: Int
+	"""
+	The compacting region whose summaries land here, by name.
+	"""
+	sourceRegion: String
+	"""
+	The most keys a key-value region holds.
+	"""
+	maxEntries: Int
+	"""
+	The Rhai script that owns this region, for a custom one.
+	"""
+	script: String
+	"""
+	Whether a custom region is never evicted, like a pinned one, rather than
+	first out, like a temporary one.
+	"""
+	persistent: Boolean
+}
+
+"""
+What happens to a write that does not fit.
+"""
+enum RegionAdmission {
+	"""
+	The oldest entries roll off to make room.
+	"""
+	EVICT
+	"""
+	The write is refused, and what is there stays.
+	"""
+	REJECT
+}
+
+"""
+A region and the fewest entries it must hold.
+"""
+type RegionEntryRequirement {
+	"""
+	The region counted, by name.
+	"""
+	region: String!
+	"""
+	The fewest entries that satisfy the gate.
+	"""
+	atLeast: Int!
 }
 
 """
@@ -1901,6 +2855,28 @@ enum RegionKind {
 }
 
 """
+One region's route into another blueprint's layout.
+"""
+type RegionMapping {
+	"""
+	The region it comes from, by name in the handing-off blueprint.
+	"""
+	fromRegion: String!
+	"""
+	The region it goes to, by name in the receiving blueprint.
+	"""
+	toRegion: String!
+	"""
+	What happens to the content on the way. Null leaves it verbatim.
+	"""
+	transform: MappingTransform
+	"""
+	The fields kept, for an `EXTRACT` transform. Empty for the others.
+	"""
+	fields: [String!]!
+}
+
+"""
 The most one region reached while a stage was active.
 """
 type RegionPeak {
@@ -1915,6 +2891,15 @@ type RegionPeak {
 }
 
 """
+What fills a region before the first inference.
+
+A region with no seed starts empty and is filled by the agent. A union rather
+than one object with a field per source: a seed has exactly one source, and a
+bag of nullable fields would admit combinations no manifest can express.
+"""
+union RegionSeed = SeedFromCaller | SeedFromGlob | SeedFromFiles | SeedFromLiteral | SeedFromScript | SeedFromCommand | SeedFromTools
+
+"""
 Seed text for one named context region at spawn.
 """
 input RegionSeedInput {
@@ -1926,6 +2911,73 @@ input RegionSeedInput {
 	The text it starts with.
 	"""
 	text: String!
+}
+
+"""
+How a sliding region makes room.
+
+It decides more than eviction: `PER_ITEM` shifts the prompt's prefix every
+turn, which costs the prompt cache, while the other two keep it still
+between eviction events.
+"""
+enum RegionStrategy {
+	"""
+	One entry at a time, as soon as the region is over.
+	"""
+	PER_ITEM
+	"""
+	Nothing until the region is `overflow` entries over, then back down to
+	its ceiling in one go.
+	"""
+	BULK
+	"""
+	The oldest entries are summarized into one, `compactCount` at a time.
+	"""
+	COMPACT
+}
+
+"""
+How much a region's contents move between requests.
+
+A prompt cache keys on an unchanged prefix, so this is what decides where a
+region sits in the assembled prompt.
+"""
+enum RegionVolatility {
+	"""
+	Written once and left alone.
+	"""
+	STABLE
+	"""
+	Appended to, keeping what is already there.
+	"""
+	GROWS
+	"""
+	Replaced wholesale.
+	"""
+	REWRITTEN
+}
+
+"""
+When a run is stopped for going round in circles.
+
+For the degenerate read loop: the same call again and again, or a long run of
+read-only calls with nothing produced between them.
+"""
+type RepetitionDetection {
+	"""
+	Whether detection runs. Null inherits, and unset everywhere it is on.
+	"""
+	enabled: Boolean
+	"""
+	How many times one call with one set of arguments may repeat before a
+	nudge.
+	"""
+	maxRepeatCalls: Int
+	"""
+	How many read-only calls may run in a row with nothing produced between
+	them.
+	"""
+	maxReadonlyStreak: Int
 }
 
 type Run {
@@ -2500,6 +3552,90 @@ type RunTreeStatus {
 }
 
 """
+What the blueprint would like to run without being asked.
+
+A request rather than a grant: the machine's own policy decides, and this is
+what an operator reads when they are deciding whether to write it in.
+"""
+type SafeCommands {
+	"""
+	Tools the agent would like allowed outright.
+	"""
+	tools: [String!]!
+	"""
+	Shell command lines it would like allowed outright.
+	"""
+	shell: [String!]!
+}
+
+"""
+Where tools execute.
+"""
+type SandboxConfig {
+	"""
+	Which kind of isolation.
+	"""
+	kind: SandboxKind!
+	"""
+	The container image, for a container sandbox.
+	"""
+	image: String
+	"""
+	The container engine, when the manifest names one rather than letting the
+	daemon pick what is on the machine.
+	"""
+	engine: String
+	"""
+	Whether the sandbox reaches the network.
+	"""
+	network: Boolean!
+	"""
+	Paths mounted into it, as written.
+	"""
+	mounts: [String!]!
+	"""
+	Whether one sandbox is kept for the whole run rather than one per call.
+	"""
+	persist: Boolean!
+	"""
+	What happens when it cannot be established.
+	"""
+	onUnavailable: SandboxUnavailable!
+}
+
+"""
+Where a stage's tools run.
+"""
+enum SandboxKind {
+	"""
+	On the host, which is the default and an explicit opt-out.
+	"""
+	NONE
+	"""
+	Under fresh Linux namespaces. Linux only.
+	"""
+	NAMESPACE
+	"""
+	Inside a container.
+	"""
+	CONTAINER
+}
+
+"""
+What happens when the sandbox cannot be established.
+"""
+enum SandboxUnavailable {
+	"""
+	The spawn fails. The safe default for code you did not write.
+	"""
+	ERROR
+	"""
+	A warning, and the tools run on the host after all.
+	"""
+	WARN
+}
+
+"""
 One registered script.
 """
 type Script {
@@ -2550,6 +3686,120 @@ enum SearchScope {
 	The crash-resume journal.
 	"""
 	JOURNAL
+}
+
+"""
+Filled at run time by whoever starts the run.
+"""
+type SeedFromCaller {
+	"""
+	The caller-input key this region is filled from. The key `task` is the
+	run's own prompt.
+	"""
+	key: String!
+}
+
+"""
+Filled with the output of a shell command run at spawn.
+
+The one seed that executes something through a shell, and it runs before the
+first inference, so before any approval prompt could exist. It runs inside
+the entry stage's sandbox when one is configured, and the `allow_seed_commands`
+switch turns the whole feature off.
+"""
+type SeedFromCommand {
+	"""
+	The command line, run with the platform shell in the working directory.
+	"""
+	command: String!
+}
+
+"""
+Filled from a list of files.
+"""
+type SeedFromFiles {
+	"""
+	The paths, resolved against the run's working directory.
+	"""
+	paths: [String!]!
+}
+
+"""
+Filled from the working-directory files matching a pattern.
+"""
+type SeedFromGlob {
+	"""
+	The pattern, resolved against the run's working directory.
+	"""
+	pattern: String!
+}
+
+"""
+Filled with text written into the blueprint.
+"""
+type SeedFromLiteral {
+	"""
+	The text, verbatim.
+	"""
+	text: String!
+}
+
+"""
+Filled with what a Rhai script returns.
+"""
+type SeedFromScript {
+	"""
+	The script, relative to the blueprint.
+	"""
+	script: String!
+}
+
+"""
+Filled with the output of tool calls run at spawn.
+
+Through the run's own tool layer rather than a shell, so each call answers to
+the same permissions and taint rules it would answer to mid-run. That is what
+makes an unrestricted list safe: a seed reaches nothing the agent was not
+already granted.
+"""
+type SeedFromTools {
+	"""
+	The calls, in order. Each writes its own headed block into the region.
+	"""
+	calls: [SeedToolCall!]!
+	"""
+	Whether the calls run once or on every stage entry.
+	"""
+	refresh: SeedRefresh!
+}
+
+"""
+When a seed that runs tools runs again.
+"""
+enum SeedRefresh {
+	"""
+	Once, at spawn. What every other kind of seed does.
+	"""
+	ONCE
+	"""
+	Again whenever a stage is entered, replacing the region. For a seed whose
+	answer moves, such as the time.
+	"""
+	EACH_STAGE
+}
+
+"""
+One tool call a seed makes.
+"""
+type SeedToolCall {
+	"""
+	The tool to call, by the name the manifest used.
+	"""
+	tool: String!
+	"""
+	Its arguments, as the manifest wrote them.
+	"""
+	args: JSON!
 }
 
 """
@@ -2754,9 +4004,20 @@ type Stage {
 	"""
 	description: String
 	"""
+	Extra prompt text for when the stage is choosing where to go next.
+	"""
+	transitionPrompt: String
+	"""
+	Which model this stage runs on, and what it asks of it.
+	"""
+	model: StageModelConfig!
+	"""
 	The only tools the model is offered here. Group tokens (`@all`,
 	`@builtin`, `@subagent`, `@scripts`, `@mcp`) stand for whole sources and
 	resolve at spawn.
+	
+	Names rather than tools: a blueprint may name a tool this machine does
+	not have, and resolving would drop it. Read `tools` for what is here.
 	"""
 	availableTools: [String!]!
 	"""
@@ -2781,6 +4042,16 @@ type Stage {
 	leave without producing anything.
 	"""
 	outputRequirement: OutputRequirement
+	"""
+	The shape this stage's answer must take, narrowing the blueprint's own.
+	Declaring a shape is not demanding one: that is `outputRequirement`.
+	"""
+	output: OutputSpec
+	"""
+	What this stage takes as typed parts, when its regions do not already
+	say.
+	"""
+	input: StageInput!
 	"""
 	Whether `sendMessage` reaches a run parked in this stage.
 	"""
@@ -2813,9 +4084,147 @@ type Stage {
 	"""
 	toolGuidance: ToolUseGuidance!
 	"""
+	What this stage does with each tool it names, where that differs from the
+	blueprint's own rules. A stage may only tighten them.
+	"""
+	toolPermissions: [ToolPermissionRule!]!
+	"""
+	What each tool may be handed here, as mime patterns.
+	"""
+	toolAccepts: [ToolAcceptRule!]!
+	"""
+	Where this stage's tool results land in its context. Null leaves the
+	daemon's own routing.
+	"""
+	toolRouting: ToolRouting
+	"""
+	Where the parts this stage produces are written, by mime pattern.
+	"""
+	outputRouting: [OutputRoute!]!
+	"""
+	Which regions this stage adds, hides or empties.
+	"""
+	context: StageContext!
+	"""
+	What happens when the model answers with text before calling any tool.
+	Null inherits the blueprint's setting.
+	"""
+	nudge: NudgeConfig
+	"""
+	Where this stage's tools run. Null inherits the blueprint's setting.
+	"""
+	sandbox: SandboxConfig
+	"""
+	What this stage asks of the taint layer. Null inherits the blueprint's
+	setting, which inherits the machine's.
+	"""
+	security: BlueprintSecurity
+	"""
+	The scripts this stage runs at points in its own lifecycle. Null when it
+	declares none, which costs nothing at run time.
+	"""
+	hooks: StageHooks
+	"""
+	The checkpoints this stage raises, where the run waits for a person.
+	Empty for every mode but `INTERACTIVE_POINTS`.
+	"""
+	interactionPoints: [InteractionPoint!]!
+	"""
+	What this stage splits into, for a `FAN_OUT` stage. Null for every other
+	mode.
+	"""
+	fanOut: FanOut
+	"""
+	What this stage's settings resolve to against this machine's config, as
+	they would for a run spawned now.
+	
+	The fields above are what the author declared, which is a different
+	question: a stage that declares nothing still runs with something.
+	"""
+	effective: EffectiveStageSettings!
+	"""
 	Outgoing edges. An empty list marks a terminal stage.
 	"""
 	transitions: [TransitionEdge!]!
+}
+
+"""
+Which regions a stage adds, hides or empties on its way in.
+"""
+type StageContext {
+	"""
+	Regions this stage declares of its own, beyond the blueprint's layout, by
+	name. Look them up in the blueprint's `regions`.
+	"""
+	regions: [String!]!
+	"""
+	Regions kept out of this stage's prompt, by name. The contents survive;
+	the stage simply does not see them.
+	"""
+	hide: [String!]!
+	"""
+	Regions emptied as this stage is entered, by name.
+	"""
+	reset: [String!]!
+}
+
+"""
+The scripts a stage runs at points in its own lifecycle.
+
+Each names a Rhai file relative to the blueprint. The function a script has to
+define is named for the field it is given as, so one file may back several
+hooks. A stage that declares none costs nothing: no file is read and no
+engine is built.
+"""
+type StageHooks {
+	"""
+	As the stage is entered, before its first inference.
+	"""
+	onStageEnter: String
+	"""
+	When the stage finishes, before its transitions are considered.
+	"""
+	onStageExit: String
+	"""
+	With the context assembled, before the request goes out.
+	"""
+	beforeInference: String
+	"""
+	With the model's answer in hand, before it reaches the context.
+	"""
+	afterInference: String
+	"""
+	With the model's tool calls, before the permission and taint layers see
+	them, so a hook can narrow what runs and never widen it.
+	"""
+	onToolCall: String
+	"""
+	Once, when the run finishes successfully.
+	"""
+	onCompletion: String
+	"""
+	Once, when the run finishes in error.
+	"""
+	onError: String
+}
+
+"""
+What a stage takes as typed parts.
+
+Both lists empty means the stage takes whatever the regions it sees accept,
+which is the usual case: a stage says this only when it wants something
+narrower or wider than its regions imply.
+"""
+type StageInput {
+	"""
+	Mime patterns this stage takes as parts.
+	"""
+	accepts: [String!]!
+	"""
+	Mime patterns whose parts reach the model as text whatever that model
+	takes. For a type the registry already calls text this changes nothing.
+	"""
+	asText: [String!]!
 }
 
 """
@@ -2843,6 +4252,45 @@ enum StageMode {
 	Produces the run's final answer and nothing else.
 	"""
 	OUTPUT
+}
+
+"""
+A stage's model block.
+"""
+type StageModelConfig {
+	"""
+	The models to try, best first. The first whose provider is configured on
+	this machine is the one that runs.
+	"""
+	models: [StageModelRoute!]!
+	"""
+	Whether the machine's own default model may stand in when none of the
+	listed models is configured. False makes the list a requirement.
+	"""
+	allowUserDefault: Boolean!
+	"""
+	What the stage asks of the model it lands on.
+	"""
+	parameters: ModelParameters!
+	"""
+	A per-stage deadline for one inference, in seconds, including retries.
+	Null leaves the daemon's own deadline in place.
+	"""
+	requestTimeoutSecs: Int
+}
+
+"""
+One provider and model, in a stage's ordered list.
+"""
+type StageModelRoute {
+	"""
+	The provider that serves it, as the config names providers.
+	"""
+	provider: String!
+	"""
+	The model id, as that provider spells it.
+	"""
+	model: String!
 }
 
 """
@@ -2982,6 +4430,34 @@ type StageVisit {
 	cost: CostBreakdown!
 }
 
+"""
+What arms a `STUCK` edge.
+
+At least one threshold is always set: an edge with none could never fire, so
+the manifest parser refuses that shape rather than building a dead edge.
+Every one counts against the current visit to the stage, so the same
+blueprint can arm two stages differently.
+"""
+type StuckThresholds {
+	"""
+	Inferences run in this stage without finishing it.
+	"""
+	afterIterations: Int
+	"""
+	Wall-clock minutes spent in this stage.
+	"""
+	afterMinutes: Int
+	"""
+	Writes against a single path in this stage: the "a hundred iterations in
+	the wrong file" case.
+	"""
+	afterSameFileEdits: Int
+	"""
+	Tool calls made in this stage.
+	"""
+	afterToolCalls: Int
+}
+
 type Subscription {
 	"""
 	The daemon broadcast, filtered server-side.
@@ -3015,6 +4491,23 @@ type Subscription {
 		"""
 		includeDescendants: Boolean! = false
 	): RunEvent!
+}
+
+"""
+Whether taint tracking runs.
+
+Two states, not three: a manifest can ask for tracking, and it cannot ask for
+less than the machine already insists on. There is no way to spell "off".
+"""
+enum TaintTracking {
+	"""
+	Take the machine's own setting.
+	"""
+	INHERIT
+	"""
+	Track, whatever the machine's setting.
+	"""
+	TRACK
 }
 
 """
@@ -3096,6 +4589,24 @@ type Tool {
 	The agent whose directory it came from, for an agent-scoped script.
 	"""
 	agent: String
+}
+
+"""
+What one tool may be handed at this stage.
+
+A stored part outside a tool's list is out of that tool's reach here. A tool
+absent from the table has no limit beyond what it takes itself, and inline
+text is never hidden by one.
+"""
+type ToolAcceptRule {
+	"""
+	The tool, by the name the manifest used.
+	"""
+	tool: String!
+	"""
+	The mime patterns it may be handed.
+	"""
+	patterns: [String!]!
 }
 
 """
@@ -3205,6 +4716,96 @@ type ToolInventory {
 }
 
 """
+What a stage does with one tool.
+"""
+enum ToolPermissionPolicy {
+	"""
+	Runs without asking.
+	"""
+	ALLOW
+	"""
+	Parks the run until a person answers.
+	"""
+	ASK
+	"""
+	Refused at dispatch.
+	"""
+	DENY
+}
+
+"""
+One tool and what this level does with it.
+"""
+type ToolPermissionRule {
+	"""
+	The tool, by the name the manifest used.
+	"""
+	tool: String!
+	"""
+	What happens when it is called. Null when the manifest's word is one the
+	daemon does not recognise, which is a rule that grants nothing.
+	"""
+	policy: ToolPermissionPolicy
+}
+
+"""
+Where one tool's results go, in place of the stage's default region.
+"""
+type ToolRouteOverride {
+	"""
+	The tool, by canonical name.
+	"""
+	tool: String!
+	"""
+	The region its results are written to, by name.
+	"""
+	region: String!
+}
+
+"""
+Where a stage's tool results land in its context.
+"""
+type ToolRouting {
+	"""
+	The region results go to when no override names another.
+	"""
+	defaultRegion: String!
+	"""
+	Tools whose results go somewhere else.
+	"""
+	overrides: [ToolRouteOverride!]!
+	"""
+	Whether results stay in the context after the turn that produced them.
+	"""
+	persist: Boolean!
+	"""
+	The most tokens any one result may take, before truncation.
+	"""
+	maxResultTokens: Int
+	"""
+	Tools with a ceiling of their own.
+	"""
+	maxResultTokensPerTool: [ToolTokenCeiling!]!
+}
+
+"""
+A per-tool ceiling on one result, in place of the stage's own.
+
+One number for a whole stage cannot fit a stage that both greps, where the
+answer is small and wanted whole, and reads files, where it can be enormous.
+"""
+type ToolTokenCeiling {
+	"""
+	The tool, by canonical name.
+	"""
+	tool: String!
+	"""
+	The most tokens one of its results may take.
+	"""
+	maxResultTokens: Int!
+}
+
+"""
 The prompt guidance a blueprint or a stage declares.
 """
 type ToolUseGuidance {
@@ -3221,17 +4822,198 @@ type ToolUseGuidance {
 }
 
 """
+What a transform does in detail: which regions it carries, compacts and
+clears, and what it asks the summarizer for.
+
+Set for `COMPACT`, which carries the prompt and nothing else, and for
+`CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
+which have nothing to say.
+
+Region names rather than regions: a transform may name one a later edit
+removed, and dropping it would hide the instruction rather than the problem.
+"""
+type TransformConfig {
+	"""
+	Regions carried over verbatim.
+	"""
+	carry: [String!]!
+	"""
+	Regions handed to the summarizer.
+	"""
+	compact: [String!]!
+	"""
+	Regions emptied.
+	"""
+	clear: [String!]!
+	"""
+	A prompt for the summarizer on this edge, in place of the default.
+	"""
+	compactPrompt: String
+}
+
+"""
+When an edge may be taken.
+"""
+enum TransitionCondition {
+	"""
+	Taken as soon as the stage finishes.
+	"""
+	ALWAYS
+	"""
+	The model chooses this edge over the stage's others.
+	"""
+	LLM_CHOICE
+	"""
+	Taken when the stage ends in an error.
+	"""
+	ERROR
+	"""
+	Taken when the stage runs out of iterations.
+	"""
+	MAX_ITERATIONS
+	"""
+	Taken when the stage is detected stuck. The thresholds that arm it are
+	on `stuck`.
+	"""
+	STUCK
+	"""
+	Taken when no other edge can fire.
+	"""
+	DEAD_END
+}
+
+"""
 One outgoing edge of a stage.
+
+A stage with no edges is terminal. The target is an object because the
+manifest cannot name a stage it does not declare: that is refused at load.
 """
 type TransitionEdge {
 	"""
-	The stage this edge leads to.
+	The stage this edge leads to, by name. Look it up in the blueprint's
+	`stages`.
 	"""
 	target: String!
 	"""
 	Told to the model when it is choosing where to go next.
 	"""
 	hint: String
+	"""
+	When this edge may be taken.
+	"""
+	condition: TransitionCondition!
+	"""
+	What happens to the context on the way through.
+	"""
+	transform: TransitionTransform!
+	"""
+	The transform in detail: a `COMPACT` edge's prompt, or a `CUSTOM` edge's
+	per-region lists. Null for `DIRECT` and `CLEAR`.
+	"""
+	transformConfig: TransformConfig
+	"""
+	What must be true before this edge is taken. Null when the edge asks for
+	nothing beyond its condition.
+	"""
+	gate: TransitionGate
+	"""
+	What arms this edge, for a `STUCK` condition. Null for every other
+	condition, and never null for that one.
+	"""
+	stuck: StuckThresholds
+}
+
+"""
+What a stage must have done before an edge may be taken.
+
+A gate that is not satisfied re-runs the stage with `message` instead of
+transitioning, up to `maxAttempts` times, and then lets the run through: an
+unmet gate slows a run down, it never strands one.
+"""
+type TransitionGate {
+	"""
+	The stage must have modified something.
+	"""
+	requireModifications: Boolean!
+	"""
+	A second way to satisfy `requireModifications`: this region holding
+	anything also passes. It is an alternative rather than a requirement,
+	because per-stage tool counters do not survive a daemon restart and a
+	region does.
+	"""
+	region: String
+	"""
+	Tools counted as modifying, beyond `write_file` and `edit_file`. For an
+	agent whose writes go through MCP or a script.
+	"""
+	tools: [String!]!
+	"""
+	Regions that must all hold something. Conjunctive, unlike `region`.
+	"""
+	requireRegions: [String!]!
+	"""
+	A region that must have changed during this stage, not merely be
+	present. What a revise loop needs: re-emitting the same content
+	satisfies a presence check.
+	"""
+	requireRegionUpdated: String
+	"""
+	A checklist region that must have no open items left.
+	"""
+	requireNoOpenItems: String
+	"""
+	A region that must hold at least so many entries.
+	"""
+	requireRegionEntries: RegionEntryRequirement
+	"""
+	Sent back to the stage while the gate holds it. A default explaining the
+	framework's change tracking is generated when this is absent.
+	"""
+	message: String
+	"""
+	How many times the stage is re-asked before the gate gives up and lets
+	the transition through with a warning.
+	"""
+	maxAttempts: Int
+}
+
+"""
+What happens to the context on the way through an edge.
+"""
+enum TransitionTransform {
+	"""
+	Everything carries over untouched.
+	"""
+	DIRECT
+	"""
+	The context is cleared.
+	"""
+	CLEAR
+	"""
+	The context is compacted: the summarizer replaces it with a summary of
+	itself. `transformConfig.compactPrompt` carries the instruction when the
+	edge names one.
+	"""
+	COMPACT
+	"""
+	Per-region, as `transformConfig` spells out.
+	"""
+	CUSTOM
+}
+
+"""
+What a checkpoint does when nobody is watching.
+"""
+enum UnattendedPolicy {
+	"""
+	Taken as approved, and the run carries on.
+	"""
+	AUTO_APPROVE
+	"""
+	The run holds for a person even under a yolo profile. For the checkpoint
+	whose whole purpose is a human decision.
+	"""
+	ASK
 }
 
 """
@@ -3295,6 +5077,20 @@ type ValidationReport {
 	What is worth knowing about it anyway.
 	"""
 	warnings: [String!]!
+}
+
+"""
+What happens when the validator refuses a submitted output.
+"""
+enum ValidatorErrorPolicy {
+	"""
+	The output is refused and the stage is asked again with the reason.
+	"""
+	REJECT
+	"""
+	The output is taken anyway, and the refusal is a warning.
+	"""
+	ACCEPT
 }
 
 """
@@ -3364,6 +5160,20 @@ enum WaitReasonKind {
 	Something on the machine has to change before this run can go on.
 	"""
 	NEEDS_SETUP
+}
+
+"""
+What happens to a fan-out when one worker fails.
+"""
+enum WorkerFailurePolicy {
+	"""
+	The others finish, and the merge stage sees what came back.
+	"""
+	CONTINUE
+	"""
+	The whole fan-out fails with the worker.
+	"""
+	FAIL_ALL
 }
 
 """
