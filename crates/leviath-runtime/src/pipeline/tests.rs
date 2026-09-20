@@ -5066,8 +5066,8 @@ fn run_rescan(world: &mut World) {
 /// the tool that appeared since its turn began.
 ///
 /// The advertised set is what dispatch refuses an unoffered call against, so
-/// this is the difference between a tool written and called in one turn being
-/// refused and being run.
+/// rewriting it here is the difference between a tool that arrived mid-turn
+/// being callable in this batch and being refused until the next one.
 #[test]
 fn a_stale_scan_is_re_advertised_before_the_batch() {
     let mut world = World::new();

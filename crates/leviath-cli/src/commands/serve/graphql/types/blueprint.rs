@@ -67,9 +67,13 @@ pub(crate) enum ToolRescan {
     /// The run also scans its workdir's `tools/`, and looks again before its
     /// next turn once a script is written there.
     RescanAfterWrites,
-    /// As `RESCAN_AFTER_WRITES`, and the run looks again before each batch of
-    /// tool calls. The difference is one turn: a tool the model writes and
-    /// calls in the same turn is refused as unoffered without this.
+    /// As `RESCAN_AFTER_WRITES`, and the run looks at the scanned directories
+    /// before each batch of tool calls.
+    ///
+    /// `RESCAN_AFTER_WRITES` is told about a tool only when the agent writes one
+    /// with `write_file`, `edit_file` or `install_tool`. This notices one that
+    /// arrived any other way: from a shell command, from a script tool, or from
+    /// another agent sharing the workdir.
     RescanBeforeDispatch,
 }
 

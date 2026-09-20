@@ -167,14 +167,17 @@ same list.
 
 - A blueprint says when its runs look for tools again, with a third answer that
   did not exist: `[agent] tool_rescan` takes `at_spawn` (the default),
-  `after_writes`, or the new `before_dispatch`, which looks again before each
-  batch of tool calls as well as before each turn. That buys exactly one turn,
-  and it is the turn that matters: a call is checked against the set the turn was
-  built from, so an agent that writes a script and calls it immediately used to
-  be told the tool was not offered and had to try again. The check is a `stat`
-  per scanned directory per batch, and re-reads only what changed.
-  `dynamic_tools = true` is the older spelling of `after_writes` and still reads
-  as it, so no blueprint has to change.
+  `after_writes`, or the new `before_dispatch`, which looks at the scanned
+  directories before each batch of tool calls as well as before each turn.
+
+  What that catches is a tool nobody told the daemon about. `after_writes` fires
+  on a flag the agent's own `write_file`, `edit_file` or `install_tool` sets, so
+  a tool written by a shell command, by a script tool, or by a sub-agent sharing
+  the workdir stayed invisible for the whole run. `before_dispatch` looks at the
+  directories instead of waiting to be told, and notices a tool that was edited
+  or removed as well. The check is a `stat` per scanned directory per batch, and
+  re-reads only what changed. `dynamic_tools = true` is the older spelling of
+  `after_writes` and still reads as it, so no blueprint has to change.
 
 - `addMcpServer` takes the `headers` the REST route has always taken. An HTTP
   MCP server that authenticates with an `Authorization` header could be added
