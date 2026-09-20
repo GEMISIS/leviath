@@ -256,6 +256,8 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+| `GET /api/exports/{id}` | Collect a bulk export. Signed, five minutes, no bearer token. See [below](#exporting-the-whole-store) |
+| `POST /graphql` · `GET /ws/graphql` | The same server answered field by field, and the same events over a subscription. See [GraphQL](/docs/graphql) |
 
 Several routes in that table take more explaining than a cell allows.
 
