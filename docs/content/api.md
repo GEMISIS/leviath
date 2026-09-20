@@ -1178,8 +1178,10 @@ client can answer for itself. Every entry carries a `source`:
 | `agent` | A `.rhai` in that agent's own `tools/`. Only that agent has it |
 | `global` | A `.rhai` in `~/.leviath/tools/`. Every agent on the machine has it |
 
-Pass `?agent=<name>` to include the fourth. Script-backed entries also carry the `path` they came
-from. A separate `skipped` list carries the `.rhai` files that were found and cannot be offered,
+Pass `?agent=<name>` to include the fourth. Every entry also carries the `description` and the
+`arguments` schema the model is given, so a picker shows what a tool takes without compiling
+anything. Script-backed entries carry the `path` they came from and the capabilities they
+`requires`. A separate `skipped` list carries the `.rhai` files that were found and cannot be offered,
 with the reason each was passed over. A file with a syntax error is then told apart from a file
 nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
 anything installed, and `/api/mcp/servers/{name}` already answers for them.

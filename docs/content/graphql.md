@@ -434,7 +434,14 @@ up, so they are plain lists with no paging.
 {
   models { id provider maxContextTokens limitsSource pricing { inputPerMtok } }
   providers { id display enabled signedIn account }
-  tools { tools { name source } groups { name description } skipped { path reason } }
+  tools {
+    tools {
+      name origin description arguments
+      ... on ScriptTool { path agent requires }
+    }
+    groups { name description }
+    skipped { path reason }
+  }
 }
 ```
 
@@ -445,6 +452,11 @@ up, so they are plain lists with no paging.
 * `enabled` and `signedIn` are different questions. A provider can be turned on
   with no credential stored, and a credential can outlive the config entry that
   used it.
+* `Tool` is an interface: `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
+  script always has a file, and a built-in never does, so the file is a field
+  on the one that has it rather than a null on both. MCP tools are in none of
+  them: they depend on a server being reachable rather than on anything
+  installed here.
 * `config` is the whole server settings view, with every secret left out:
   `configuredProviders` names which providers have a key, never the keys. Read
   `capabilities` there before choosing a code path.

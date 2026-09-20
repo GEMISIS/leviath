@@ -165,6 +165,14 @@ same list.
 
 ### Changed
 
+- `Tool` is an interface over `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
+  script always has a file and a built-in never does, so the file, the owning
+  agent and the declared capabilities are fields on the one that has them rather
+  than nulls on all three. Every entry now also carries the tool's description
+  and the JSON Schema of its arguments, on both surfaces: the inventory had them
+  and dropped them, so a picker showing what a tool takes had to compile the
+  script itself.
+
 - `install_tool` is two tools, because it only ever did the wide one.
   `install_self_tool` writes into the calling blueprint's own `tools/`, where
   only that blueprint's runs see it; `install_global_tool` writes into

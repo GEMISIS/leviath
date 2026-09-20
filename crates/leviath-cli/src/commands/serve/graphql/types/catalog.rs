@@ -153,17 +153,127 @@ impl From<&super::super::super::providers::ProviderInfo> for Provider {
     }
 }
 
-/// Where a tool comes from.
+/// One tool an agent on this machine can be given.
+///
+/// An interface rather than one type with nullable extras: a script tool always
+/// has a file and a built-in never does, and a schema that says so lets a client
+/// read the file without checking whether it is there.
+#[derive(Debug, async_graphql::Interface)]
+#[graphql(field(
+    name = "name",
+    ty = "&String",
+    desc = "The name the model calls it by."
+))]
+// Spelled the long way because clippy reads two `ty = "&String"` in one
+// `#[graphql]` as a duplicated attribute, and this repo allows no `#[allow]`.
+#[graphql(field(
+    name = "description",
+    ty = "&std::string::String",
+    desc = "What it does, in the words the model is given."
+))]
+#[graphql(field(
+    name = "arguments",
+    ty = "&super::super::scalars::Json",
+    desc = "The JSON Schema of its arguments, as the model is given it."
+))]
+#[graphql(field(
+    name = "origin",
+    ty = "&ToolOrigin",
+    desc = "What kind of thing offers it, for a client that would rather branch \
+            on a value than on a type."
+))]
+pub(crate) enum Tool {
+    /// Compiled into this build.
+    Builtin(BuiltinTool),
+    /// A sub-agent tool.
+    Subagent(SubagentTool),
+    /// A `.rhai` script.
+    Script(ScriptTool),
+}
+
+/// A tool compiled into this build of Leviath.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct Tool {
+pub(crate) struct BuiltinTool {
     /// The name the model calls it by.
     pub(crate) name: String,
-    /// What kind of thing offers it.
+    /// What it does, in the words the model is given.
+    pub(crate) description: String,
+    /// The JSON Schema of its arguments.
+    pub(crate) arguments: super::super::scalars::Json,
+    /// Always `BUILTIN`.
     pub(crate) origin: ToolOrigin,
-    /// The file behind it, for a script tool.
-    pub(crate) path: Option<String>,
+}
+
+/// A sub-agent tool, offered to an agent that may spawn children.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct SubagentTool {
+    /// The name the model calls it by.
+    pub(crate) name: String,
+    /// What it does, in the words the model is given.
+    pub(crate) description: String,
+    /// The JSON Schema of its arguments.
+    pub(crate) arguments: super::super::scalars::Json,
+    /// Always `SUBAGENT`.
+    pub(crate) origin: ToolOrigin,
+}
+
+/// A tool backed by a `.rhai` script on this machine.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ScriptTool {
+    /// The name the model calls it by.
+    pub(crate) name: String,
+    /// What it does, taken from the script's `@description`.
+    pub(crate) description: String,
+    /// The JSON Schema of its arguments, built from its `@param` lines.
+    pub(crate) arguments: super::super::scalars::Json,
+    /// `AGENT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
+    /// tool one agent has and one every agent here has.
+    pub(crate) origin: ToolOrigin,
+    /// The file behind it.
+    pub(crate) path: String,
     /// The agent whose directory it came from, for an agent-scoped script.
     pub(crate) agent: Option<String>,
+    /// Platform capabilities it declares with `@requires`. A tool the platform
+    /// cannot satisfy is not offered at all, so an entry here is one this
+    /// machine meets.
+    pub(crate) requires: Vec<String>,
+}
+
+impl Tool {
+    /// Read one inventory entry as the kind of tool it is.
+    ///
+    /// A script entry without a path cannot happen - discovery only makes one
+    /// from a file it read - and is carried as a built-in rather than dropped,
+    /// because a tool missing from the listing is worse than one in the wrong
+    /// arm of it.
+    pub(crate) fn of(entry: crate::tool_inventory::ToolEntry) -> Self {
+        use crate::tool_inventory::ToolSource;
+        let origin = ToolOrigin::from(entry.source);
+        let arguments = super::super::scalars::Json(entry.arguments);
+        match (entry.source, entry.path) {
+            (ToolSource::Agent | ToolSource::Global, Some(path)) => Self::Script(ScriptTool {
+                name: entry.name,
+                description: entry.description,
+                arguments,
+                origin,
+                path: path.display().to_string(),
+                agent: entry.agent,
+                requires: entry.requires,
+            }),
+            (ToolSource::Subagent, _) => Self::Subagent(SubagentTool {
+                name: entry.name,
+                description: entry.description,
+                arguments,
+                origin,
+            }),
+            _ => Self::Builtin(BuiltinTool {
+                name: entry.name,
+                description: entry.description,
+                arguments,
+                origin,
+            }),
+        }
+    }
 }
 
 /// What kind of thing offers a tool.
