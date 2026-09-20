@@ -57,6 +57,33 @@ pub(crate) struct PersistJob {
     pub interactions: Option<String>,
 }
 
+/// What became of one append.
+///
+/// An ack used to be a bare signal, which meant a dispatch could wait for its
+/// journal record and learn nothing about it. The three states are different
+/// facts about the run: one says where the record is, one says this world keeps
+/// no journal at all, and one says a write was attempted and lost. Only the last
+/// is a problem, and telling it apart from the second is why this is not a
+/// `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Appended {
+    /// On disk, at this byte offset in the run's journal. Monotonic within a
+    /// run: the journal is only ever appended to, so a later record always has
+    /// a higher position, and the position of a record never changes.
+    Landed {
+        /// The byte offset of the record's frame.
+        position: u64,
+    },
+    /// Nothing was written, and nothing is wrong. Either this world keeps no
+    /// journal (an in-memory world), or the run has no archive yet, or the run
+    /// was deleted from under the lane.
+    NoJournal,
+    /// The write was attempted and failed. The record is lost: the next
+    /// snapshot re-records what it carried, and until then a reader of the
+    /// journal cannot see what this record said.
+    Failed,
+}
+
 /// One message on the persistence lane.
 pub(crate) enum PersistMsg {
     /// A whole-agent snapshot (`meta.json` + `context.json` + the archive step).
@@ -71,11 +98,12 @@ pub(crate) enum PersistMsg {
         /// The record to append. Boxed like `Snapshot`'s job: `RunRecord`'s
         /// checkpoint variants are large and the channel moves these by value.
         record: Box<leviath_core::run_archive::RunRecord>,
-        /// Fired once the append has been attempted (written, skipped, or
-        /// failed) - the dispatch-side barrier that keeps a batch record ahead
-        /// of the batch's side effects. `None` for fire-and-forget appends
-        /// (per-call results).
-        ack: Option<tokio::sync::oneshot::Sender<()>>,
+        /// Carries what became of the append: the dispatch-side barrier that
+        /// keeps a batch record ahead of the batch's side effects, and now also
+        /// tells the dispatcher whether the record is really there. Fired
+        /// exactly once however the append went. `None` for fire-and-forget
+        /// appends (per-call results).
+        ack: Option<tokio::sync::oneshot::Sender<Appended>>,
     },
     /// Buffered per-stage output/log lines with nothing else to report. The
     /// dispatch system sends this instead of a full [`PersistMsg::Snapshot`]
@@ -114,7 +142,7 @@ pub(crate) async fn persistence_worker(
     let Some(runs_dir) = runs_dir else {
         while let Some(msg) = jobs.recv().await {
             if let PersistMsg::Append { ack: Some(ack), .. } = msg {
-                let _ = ack.send(());
+                let _ = ack.send(Appended::NoJournal);
             }
         }
         return;
@@ -229,14 +257,18 @@ pub(crate) async fn persistence_worker(
                     record,
                     ack,
                 } => {
-                    if may_write(&runs_dir, &run_id, &mut staked) {
-                        append_record(&runs_dir, &run_id, &record).await;
-                    }
+                    let landed = if may_write(&runs_dir, &run_id, &mut staked) {
+                        append_record(&runs_dir, &run_id, &record).await
+                    } else {
+                        Appended::NoJournal
+                    };
                     // Ack unconditionally - persistence is best-effort and the
                     // dispatch-side barrier must never stall on a failed append,
-                    // or on a run that has been deleted out from under it.
+                    // or on a run that has been deleted out from under it. What
+                    // the ack now carries is which of those happened, so the
+                    // waiter can say so instead of assuming the record landed.
                     if let Some(ack) = ack {
-                        let _ = ack.send(());
+                        let _ = ack.send(landed);
                     }
                 }
                 PersistMsg::StageLines {
@@ -337,34 +369,46 @@ async fn open_private_append(path: &Path) -> std::io::Result<tokio::fs::File> {
         .map(tokio::fs::File::from_std)
 }
 
-/// Append a single record to an *existing* run archive. A run whose first
-/// snapshot hasn't landed yet has no `run.lvr` (and no preamble/Header), so the
-/// append is skipped rather than corrupting the file - the single-worker lane
-/// makes that ordering all but impossible in practice, since the spawn tick's
-/// snapshot is queued before any batch can dispatch. Best-effort like the rest
-/// of the lane.
+/// Append a single record to an *existing* run archive, reporting where it
+/// landed. A run whose first snapshot hasn't landed yet has no `run.lvr` (and no
+/// preamble/Header), so the append is skipped rather than corrupting the file -
+/// the single-worker lane makes that ordering all but impossible in practice,
+/// since the spawn tick's snapshot is queued before any batch can dispatch.
+/// Best-effort like the rest of the lane: a failure is reported back rather than
+/// raised.
+///
+/// The position is the archive's length before the write, which is where this
+/// record's frame begins. One writer per run is what makes that true, and the
+/// lane is that writer.
 async fn append_record(
     runs_dir: &Path,
     run_id: &str,
     record: &leviath_core::run_archive::RunRecord,
-) {
+) -> Appended {
     let path = runs_dir
         .join(run_id)
         .join(leviath_core::files::ARCHIVE_FILE);
-    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+    let Ok(existing) = tokio::fs::metadata(&path).await else {
         tracing::warn!(run_id = %run_id, "persistence: record append skipped, no archive yet");
-        return;
-    }
+        return Appended::NoJournal;
+    };
+    let position = existing.len();
     let mut buf: Vec<u8> = Vec::new();
     leviath_core::run_archive::write_record(&mut buf, record)
         .expect("writing to a Vec never fails");
     match open_private_append(&path).await {
         Ok(mut file) => {
-            let _ = file.write_all(&buf).await;
-            let _ = file.flush().await;
+            let written = file.write_all(&buf).await;
+            let flushed = file.flush().await;
+            if let Err(e) = written.and(flushed) {
+                tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
+                return Appended::Failed;
+            }
+            Appended::Landed { position }
         }
         Err(e) => {
             tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
+            Appended::Failed
         }
     }
 }
@@ -1387,7 +1431,9 @@ mod tests {
         .unwrap();
         drop(tx);
         persistence_worker(None, rx).await;
-        assert_eq!(ack_rx.await, Ok(()));
+        // A world with no runs dir has no journal, and the ack says exactly
+        // that rather than reporting a record that was never written.
+        assert_eq!(ack_rx.await, Ok(Appended::NoJournal));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -1456,7 +1502,11 @@ mod tests {
             ack: Some(settled_tx),
         })
         .unwrap();
-        settled_rx.await.expect("the first snapshot is written");
+        let settled = settled_rx.await.expect("the first snapshot is written");
+        assert!(
+            matches!(settled, Appended::Landed { .. }),
+            "the record went into a real archive: {settled:?}"
+        );
         let run_dir = runs.join("run-1");
         assert!(
             run_dir.join("meta.json").exists(),
@@ -1486,10 +1536,15 @@ mod tests {
         })
         .unwrap();
         // The ack still fires. A dropped append that never answered would park
-        // the tool lane's dispatch barrier for the rest of the run.
-        ack_rx
-            .await
-            .expect("a dropped append is still acknowledged");
+        // the tool lane's dispatch barrier for the rest of the run. It reports
+        // no journal rather than a failure: the run is gone, which is not the
+        // same as a write that broke.
+        assert_eq!(
+            ack_rx
+                .await
+                .expect("a dropped append is still acknowledged"),
+            Appended::NoJournal
+        );
 
         // A different run is unaffected: this is one run being forgotten, not
         // the lane giving up.
@@ -1514,6 +1569,91 @@ mod tests {
             runs.join("run-2").join("meta.json").exists(),
             "another run still writes"
         );
+    }
+
+    /// Each record's position is where its frame starts, and positions climb.
+    ///
+    /// This is what lets a debugger name a record: a position identifies one
+    /// record in one run's journal forever, because the journal is only
+    /// appended to. Derived from the file's length rather than counted, so a
+    /// reader seeking there finds the frame this ack described.
+    #[tokio::test]
+    async fn an_append_reports_where_the_record_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx));
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
+            .unwrap();
+
+        let mut positions = Vec::new();
+        for call in ["c1", "c2", "c3"] {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            tx.send(PersistMsg::Append {
+                run_id: "run-1".to_string(),
+                record: Box::new(batch_record(0, call)),
+                ack: Some(ack_tx),
+            })
+            .unwrap();
+            match ack_rx.await.expect("acked") {
+                Appended::Landed { position } => positions.push(position),
+                other => panic!("expected a landing, got {other:?}"),
+            }
+        }
+        drop(tx);
+        worker.await.unwrap();
+
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "positions climb: {positions:?}"
+        );
+        // The last position plus its frame is the whole file, so nothing was
+        // written past where the ack said the record began.
+        let written = std::fs::metadata(runs.join("run-1").join("run.lvr"))
+            .unwrap()
+            .len();
+        assert!(
+            positions.last().is_some_and(|last| *last < written),
+            "{positions:?} inside {written} bytes"
+        );
+        // Reading from that offset finds the record the ack described.
+        use std::io::{Read, Seek};
+        let mut file = std::fs::File::open(runs.join("run-1").join("run.lvr")).unwrap();
+        file.seek(std::io::SeekFrom::Start(*positions.last().unwrap()))
+            .unwrap();
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).unwrap();
+        let record = run_archive::read_record(&mut tail.as_slice())
+            .unwrap()
+            .expect("a whole record sits at that position");
+        let run_archive::RunRecord::ToolBatch { calls, .. } = record else {
+            panic!("expected the batch this test appended");
+        };
+        assert_eq!(calls.first().map(|c| c.id.as_str()), Some("c3"));
+    }
+
+    /// A write that fails is reported as a failure, not as a landing.
+    ///
+    /// The difference matters at the dispatch barrier: a batch whose record was
+    /// lost runs with nothing in the journal to say it ever started, and the
+    /// only way anyone learns that is this answer.
+    #[tokio::test]
+    async fn a_failed_append_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        // A directory where the archive belongs: it exists, so the append is
+        // attempted, and opening it for writing cannot work.
+        std::fs::create_dir_all(runs.join("run-1").join("run.lvr")).unwrap();
+        let landed = append_record(&runs, "run-1", &batch_record(0, "c1")).await;
+        assert_eq!(landed, Appended::Failed);
+    }
+
+    /// A run with no archive yet has nowhere to append, and says so.
+    #[tokio::test]
+    async fn an_append_before_the_first_snapshot_has_no_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let landed = append_record(dir.path(), "run-1", &batch_record(0, "c1")).await;
+        assert_eq!(landed, Appended::NoJournal);
     }
 
     fn batch_record(iteration: usize, call_id: &str) -> leviath_core::run_archive::RunRecord {

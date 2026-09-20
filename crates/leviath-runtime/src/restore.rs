@@ -274,6 +274,54 @@ fn interrupted_result(tool_name: &str, children: &[String]) -> String {
     }
 }
 
+/// Write the outcome of every execution this resume gave up on.
+///
+/// A call in the pending batch with no journaled result is one nobody ever saw
+/// the end of. The resume does not re-run it: it lands a stand-in result and
+/// carries on, so that execution's real outcome is unobservable from here on.
+/// Recording it is the only moment the fact is knowable, and leaving the journal
+/// silent is what made a crashed batch look like one that never started.
+///
+/// The record carries the stand-in as its result, because that is what the run
+/// went on to reason about. The outcome is what says the tool did not produce
+/// it, and a reader must not take the text for the tool's answer.
+///
+/// Fire and forget, like every other per-call append: a resume must not wait on
+/// the persistence lane, and a record lost here costs the same as any other lost
+/// completion record.
+fn record_abandoned_executions(
+    world: &World,
+    entity: Entity,
+    batch: &leviath_core::run_archive::PendingToolBatch,
+    merged: &[crate::tool_bridge::ToolResult],
+) {
+    let (Some(persist), Some(md)) = (
+        world.get_resource::<crate::pipeline::PersistenceStage>(),
+        world.get::<crate::persistence::RunMetadata>(entity),
+    ) else {
+        return;
+    };
+    for call in batch.calls.iter().filter(|c| c.result.is_none()) {
+        let Some((_, stood_in)) = merged.iter().find(|(id, _)| id == &call.id) else {
+            continue;
+        };
+        let _ = persist
+            .0
+            .send(crate::persistence_bridge::PersistMsg::Append {
+                run_id: md.run_id.clone(),
+                record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
+                    iteration: batch.iteration,
+                    call_id: call.id.clone(),
+                    execution_id: call.execution_id.clone(),
+                    result: stood_in.clone(),
+                    outcome: Some(leviath_core::execution::ToolOutcome::Indeterminate),
+                    at: chrono::Utc::now().timestamp(),
+                }),
+                ack: None,
+            });
+    }
+}
+
 /// Replay a tool batch that was dispatched but never applied before the crash
 /// (folded from the run journal as a
 /// [`PendingToolBatch`](leviath_core::run_archive::PendingToolBatch)): land the
@@ -292,6 +340,10 @@ fn interrupted_result(tool_name: &str, children: &[String]) -> String {
 /// (modification counters, telemetry, file tracking, log lines) is deliberately
 /// skipped: totals and outcome flags are already restored from the persisted
 /// metadata, and the dead process's calls have no live stage to report to.
+///
+/// One thing is written: every call that got a stand-in is journaled as an
+/// execution whose outcome nobody observed, since the resume is the last moment
+/// that fact is knowable.
 pub fn restore_pending_batch(
     world: &mut World,
     entity: Entity,
@@ -323,6 +375,7 @@ pub fn restore_pending_batch(
             (c.id.clone(), result)
         })
         .collect();
+    record_abandoned_executions(world, entity, batch, &merged);
     let routing = world
         .get::<crate::components::ToolResultRoutingComponent>(entity)
         .map(|c| c.routing.clone());
@@ -676,7 +729,7 @@ mod tests {
         result: Option<&str>,
     ) -> leviath_core::run_archive::ToolCallRecord {
         leviath_core::run_archive::ToolCallRecord {
-            execution_id: String::new(),
+            execution_id: format!("x-{id}"),
             id: id.to_string(),
             name: name.to_string(),
             arguments: r#"{"path":"x.txt"}"#.to_string(),
@@ -759,6 +812,117 @@ mod tests {
         assert_eq!(result_of("c1"), "Wrote 42 bytes to x.txt");
         assert!(result_of("c2").contains("interrupted"));
         assert!(result_of("c2").contains("Verify whether it took effect"));
+    }
+
+    /// The run this test's agent belongs to, for the paths that name it.
+    fn run_metadata() -> crate::persistence::RunMetadata {
+        crate::persistence::RunMetadata {
+            run_id: "run-1".to_string(),
+            agent_name: "a".to_string(),
+            agent_path: "/p".to_string(),
+            task: "t".to_string(),
+            model: None,
+            workdir: "/w".to_string(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            callback_secret: None,
+            title: None,
+            title_error: None,
+            blueprint_digest: None,
+            unattended: false,
+            yolo_profile: None,
+            read_paths: None,
+            output_request: None,
+            model_override: None,
+        }
+    }
+
+    /// The journal learns which executions the resume gave up on.
+    ///
+    /// A call with a journaled result finished, and nothing more is written
+    /// about it. A call without one is an attempt whose ending nobody observed,
+    /// and the resume is the last moment that is knowable: after it the run has
+    /// moved on with a stand-in and the real outcome is gone. Without this
+    /// record the two look identical to anybody reading the journal afterwards,
+    /// which is the question a run debugger exists to answer.
+    #[test]
+    fn a_resume_records_the_executions_it_gave_up_on() {
+        let (mut world, entity) = agent_world();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        world.insert_resource(crate::pipeline::PersistenceStage(tx));
+        world.entity_mut(entity).insert(run_metadata());
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![
+                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
+                pending_call("c2", "shell", None),
+            ]),
+            &[],
+        );
+
+        let mut recorded = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg {
+                recorded.push(*record);
+            }
+        }
+        assert_eq!(recorded.len(), 1, "only the unfinished call: {recorded:?}");
+        let leviath_core::run_archive::RunRecord::ToolCallDone {
+            iteration,
+            call_id,
+            execution_id,
+            result,
+            outcome,
+            ..
+        } = &recorded[0]
+        else {
+            panic!("expected a completion record, got {:?}", recorded[0]);
+        };
+        assert_eq!(call_id, "c2");
+        // The attempt, as dispatch minted it before the crash. Naming the call
+        // alone would leave a later attempt at the same call indistinguishable.
+        assert_eq!(execution_id, "x-c2");
+        assert_eq!(*iteration, 7);
+        assert_eq!(
+            *outcome,
+            Some(leviath_core::execution::ToolOutcome::Indeterminate)
+        );
+        // The stand-in the run went on to reason about, recorded as what was in
+        // the window rather than as something the tool returned.
+        assert!(result.contains("interrupted"), "{result:?}");
+    }
+
+    /// A resume with no journal behind it records nothing and still replays.
+    ///
+    /// An embedded world keeps no run directory, so there is no journal to tell
+    /// anything. The replay itself is unaffected: the stand-in still lands in
+    /// the window, because that is what the next inference has to see.
+    #[test]
+    fn a_resume_with_no_journal_records_nothing() {
+        let (mut world, entity) = agent_world();
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![pending_call("c2", "shell", None)]),
+            &[],
+        );
+        let entries = conv_entries(&world, entity);
+        assert!(
+            entries.iter().any(|e| e.content.contains("interrupted")),
+            "the stand-in still landed: {entries:?}"
+        );
     }
 
     #[test]

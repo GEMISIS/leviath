@@ -223,16 +223,47 @@ pub(crate) fn unoffered_tool_refusal(stage: &StageInference, name: &str) -> Opti
 pub(crate) const BATCH_JOURNAL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Wrap a tool-execution closure so it first waits (bounded) for the batch's
-/// journal-record ack. Both outcomes - acked, or timeout/dropped sender -
-/// proceed to run the batch.
+/// journal-record ack. Every outcome - landed, no journal, failed, timed out or
+/// a dropped sender - proceeds to run the batch.
+///
+/// What changes with the outcome is what gets said about it. A batch that runs
+/// after its record failed to land has side effects the journal does not
+/// mention, and a run debugger reading that journal would show the batch as
+/// never dispatched. That is worth a line in the log, and telling it apart from
+/// a world that keeps no journal at all is why the ack carries a state rather
+/// than a signal.
 pub(crate) fn barrier_then(
     exec: BoxedToolExec,
-    ack: tokio::sync::oneshot::Receiver<()>,
+    ack: tokio::sync::oneshot::Receiver<crate::persistence_bridge::Appended>,
     timeout: std::time::Duration,
+    run_id: String,
 ) -> BoxedToolExec {
+    use crate::persistence_bridge::Appended;
     Box::new(move || {
         Box::pin(async move {
-            let _ = tokio::time::timeout(timeout, ack).await;
+            match tokio::time::timeout(timeout, ack).await {
+                Ok(Ok(Appended::Landed { position })) => {
+                    tracing::debug!(run_id = %run_id, position, "tool batch record landed");
+                }
+                // No journal to land in, which is what an in-memory world is.
+                Ok(Ok(Appended::NoJournal)) => {}
+                Ok(Ok(Appended::Failed)) => {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        "tool batch runs with no record of it: the journal append failed"
+                    );
+                }
+                // A dropped sender is the lane shutting down mid-dispatch.
+                Ok(Err(_)) => {
+                    tracing::debug!(run_id = %run_id, "tool batch record abandoned by the lane");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        "tool batch dispatched before its record: the journal lane is behind"
+                    );
+                }
+            }
             exec().await
         })
     })
@@ -879,7 +910,10 @@ pub(crate) fn dispatch_tools(
                         ack: None,
                     });
                 });
-                (progress, Some(ack_rx))
+                // The run id travels with the ack: an ack only exists when the
+                // batch was journaled for a known run, so pairing them here
+                // leaves the waiter below no impossible case to handle.
+                (progress, Some((ack_rx, md.run_id.clone())))
             }
             _ => (noop_progress(), None),
         };
@@ -916,7 +950,7 @@ pub(crate) fn dispatch_tools(
         service.0.offer_parts(entity, offered);
         let exec = service.0.exec_for(entity, lane_calls, progress);
         let exec = match ack {
-            Some(ack) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT),
+            Some((ack, run_id)) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT, run_id),
             None => exec,
         };
         let cancel = crate::cancel::CancelToken::new();

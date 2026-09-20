@@ -5238,7 +5238,7 @@ fn append_msg(
 ) -> (
     String,
     leviath_core::run_archive::RunRecord,
-    Option<tokio::sync::oneshot::Sender<()>>,
+    Option<tokio::sync::oneshot::Sender<crate::persistence_bridge::Appended>>,
 ) {
     match msg {
         PersistMsg::Append {
@@ -5304,7 +5304,9 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     assert_eq!(calls[1].result, None, "lane call pending");
     // Ack the record (standing in for the persistence worker) so the barrier
     // releases immediately instead of timing out.
-    ack.expect("dispatch requests an ack").send(()).unwrap();
+    ack.expect("dispatch requests an ack")
+        .send(crate::persistence_bridge::Appended::Landed { position: 128 })
+        .unwrap();
 
     // Running the batch reports the lane call's completion as a ToolCallDone.
     let job = jrx.try_recv().expect("lane job enqueued");
@@ -5516,17 +5518,60 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
 async fn barrier_then_runs_after_the_ack() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let exec: BoxedToolExec = Box::new(|| Box::pin(async { vec![("c".to_string(), "r".into())] }));
-    tx.send(()).unwrap();
-    let wrapped = barrier_then(exec, rx, std::time::Duration::from_secs(5));
+    tx.send(crate::persistence_bridge::Appended::Landed { position: 4096 })
+        .unwrap();
+    let wrapped = barrier_then(
+        exec,
+        rx,
+        std::time::Duration::from_secs(5),
+        "run-1".to_string(),
+    );
     assert_eq!(wrapped().await, vec![("c".to_string(), "r".into())]);
+}
+
+/// Each answer the lane can give lets the batch run.
+///
+/// The batch running is not in question: the barrier is there to order the
+/// record ahead of the side effects, not to veto them. What each answer changes
+/// is what gets said about the run afterwards, and a world with no journal must
+/// stay as quiet as one whose record landed.
+#[tokio::test]
+async fn barrier_then_runs_the_batch_whatever_the_lane_answers() {
+    use crate::persistence_bridge::Appended;
+    for answer in [
+        Appended::Landed { position: 0 },
+        Appended::NoJournal,
+        Appended::Failed,
+    ] {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(answer).unwrap();
+        let exec: BoxedToolExec =
+            Box::new(|| Box::pin(async { vec![("c".to_string(), "r".into())] }));
+        let wrapped = barrier_then(
+            exec,
+            rx,
+            std::time::Duration::from_secs(5),
+            "run-1".to_string(),
+        );
+        assert_eq!(
+            wrapped().await,
+            vec![("c".to_string(), "r".into())],
+            "{answer:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn barrier_then_proceeds_when_the_sender_is_dropped() {
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::persistence_bridge::Appended>();
     drop(tx); // worker gone (shutdown) - the batch must still run
     let exec: BoxedToolExec = Box::new(|| Box::pin(async { Vec::new() }));
-    let wrapped = barrier_then(exec, rx, std::time::Duration::from_secs(5));
+    let wrapped = barrier_then(
+        exec,
+        rx,
+        std::time::Duration::from_secs(5),
+        "run-1".to_string(),
+    );
     assert!(wrapped().await.is_empty());
 }
 
@@ -5534,9 +5579,14 @@ async fn barrier_then_proceeds_when_the_sender_is_dropped() {
 async fn barrier_then_proceeds_on_timeout() {
     // The sender stays alive but never fires (a wedged persistence lane): the
     // bounded wait lapses and the batch runs anyway.
-    let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (_tx, rx) = tokio::sync::oneshot::channel::<crate::persistence_bridge::Appended>();
     let exec: BoxedToolExec = Box::new(|| Box::pin(async { Vec::new() }));
-    let wrapped = barrier_then(exec, rx, std::time::Duration::from_millis(5));
+    let wrapped = barrier_then(
+        exec,
+        rx,
+        std::time::Duration::from_millis(5),
+        "run-1".to_string(),
+    );
     assert!(wrapped().await.is_empty());
 }
 
