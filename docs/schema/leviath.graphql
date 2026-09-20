@@ -258,6 +258,110 @@ type Artifact {
 }
 
 """
+Arguments for the `ask_user_choice` tool.
+"""
+type AskUserChoiceArgs {
+	"""
+	The question asked.
+	"""
+	prompt: String!
+	"""
+	The options offered. The tool refuses fewer than two, so a call recorded
+	with one is a call that never ran.
+	"""
+	options: [String!]!
+}
+
+"""
+One `ask_user_choice` call.
+"""
+type AskUserChoiceCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: AskUserChoiceArgs!
+}
+
+"""
+Arguments for the `ask_user_confirm` tool.
+"""
+type AskUserConfirmArgs {
+	"""
+	The yes or no question asked.
+	"""
+	prompt: String!
+}
+
+"""
+One `ask_user_confirm` call.
+"""
+type AskUserConfirmCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: AskUserConfirmArgs!
+}
+
+"""
+Arguments for the `ask_user_text` tool.
+"""
+type AskUserTextArgs {
+	"""
+	The question asked.
+	"""
+	prompt: String!
+}
+
+"""
+One `ask_user_text` call.
+"""
+type AskUserTextCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: AskUserTextArgs!
+}
+
+"""
 A 64-bit integer, serialized as a JSON number. GraphQL's `Int` is 32-bit:
 it cannot hold a 2 GiB file size or a large aggregate token count. Every
 magnitude this API produces is well under 2^53, so it round-trips through
@@ -629,6 +733,39 @@ type BulkExport {
 }
 
 """
+Arguments for the `check_agent` tool.
+"""
+type CheckAgentArgs {
+	"""
+	The agent asked about, by its live id.
+	"""
+	agentId: String!
+}
+
+"""
+One `check_agent` call.
+"""
+type CheckAgentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: CheckAgentArgs!
+}
+
+"""
 One page of a run's direct children.
 """
 type ChildConnection {
@@ -956,6 +1093,185 @@ input ConfigInput {
 }
 
 """
+Arguments for the `context_append` tool.
+"""
+type ContextAppendArgs {
+	"""
+	The region appended to, by name.
+	"""
+	region: String!
+	"""
+	A name for this entry, which is what lets it be released later.
+	"""
+	key: String
+	"""
+	What was appended.
+	"""
+	content: String!
+}
+
+"""
+One `context_append` call.
+"""
+type ContextAppendCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextAppendArgs!
+}
+
+"""
+Arguments for the `context_attach` tool.
+"""
+type ContextAttachArgs {
+	"""
+	The region the part goes in, by name.
+	"""
+	region: String!
+	"""
+	The file, relative to the working directory.
+	"""
+	path: String!
+	"""
+	The entry's key. An entry of the same key is replaced.
+	"""
+	key: String
+	"""
+	Text stored beside the part, describing it.
+	"""
+	caption: String
+	"""
+	The mime type the model named, for a file whose bytes and name do not say.
+	"""
+	type: String
+	"""
+	How the part reaches the model: `native`, `text` or `stand_in`. Kept as
+	the word the model sent rather than a checked value, because a model that
+	invents a fourth one is a thing worth being able to see.
+	"""
+	deliver: String
+}
+
+"""
+One `context_attach` call.
+"""
+type ContextAttachCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextAttachArgs!
+}
+
+"""
+Arguments for the `context_delete` tool.
+"""
+type ContextDeleteArgs {
+	"""
+	The region released from, by name.
+	"""
+	region: String!
+	"""
+	The entry's key, where it has one.
+	"""
+	key: String
+	"""
+	The entry's position instead, counting from 0 as the oldest.
+	"""
+	index: Int
+	"""
+	Release this many of the oldest entries, instead of naming one.
+	"""
+	oldest: Int
+}
+
+"""
+One `context_delete` call.
+"""
+type ContextDeleteCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextDeleteArgs!
+}
+
+"""
+Arguments for the `context_export` tool.
+"""
+type ContextExportArgs {
+	"""
+	The part's file name, or the start of its sha256.
+	"""
+	name: String!
+	"""
+	Where it was written, relative to the working directory. Left out means
+	the part's own file name.
+	"""
+	path: String
+}
+
+"""
+One `context_export` call.
+"""
+type ContextExportCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextExportArgs!
+}
+
+"""
 A paged history of one run's context window.
 """
 type ContextHistoryConnection {
@@ -985,6 +1301,80 @@ type ContextHistoryEdge {
 	Cursor for this edge.
 	"""
 	cursor: Cursor!
+}
+
+"""
+Arguments for the `context_list` tool.
+"""
+type ContextListArgs {
+	"""
+	One region to list, or left out for all of them.
+	"""
+	region: String
+}
+
+"""
+One `context_list` call.
+"""
+type ContextListCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextListArgs!
+}
+
+"""
+Arguments for the `context_read` tool.
+"""
+type ContextReadArgs {
+	"""
+	The region read, by name.
+	"""
+	region: String!
+	"""
+	One entry's key, where the model asked for a single entry.
+	"""
+	key: String
+	"""
+	One entry's position instead, counting from the oldest.
+	"""
+	index: Int
+}
+
+"""
+One `context_read` call.
+"""
+type ContextReadCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextReadArgs!
 }
 
 type ContextRegion {
@@ -1110,6 +1500,47 @@ type ContextWindow {
 }
 
 """
+Arguments for the `context_write` tool.
+"""
+type ContextWriteArgs {
+	"""
+	The region written to, by name.
+	"""
+	region: String!
+	"""
+	The entry's key. An entry of the same key is replaced.
+	"""
+	key: String
+	"""
+	What was stored.
+	"""
+	content: String!
+}
+
+"""
+One `context_write` call.
+"""
+type ContextWriteCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ContextWriteArgs!
+}
+
+"""
 Spend for a run, a stage, or a subtree roll-up.
 """
 type CostBreakdown {
@@ -1147,6 +1578,26 @@ type CurrentStage {
 	How many stages the blueprint has.
 	"""
 	of: Int!
+}
+
+"""
+One `current_time` call, which takes nothing.
+"""
+type CurrentTimeCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
 }
 
 """
@@ -1396,6 +1847,84 @@ type DoctorReport {
 }
 
 """
+Arguments for the `edit_document` tool.
+"""
+type EditDocumentArgs {
+	"""
+	The document handed over for editing.
+	"""
+	content: String!
+	"""
+	The instruction shown above the editable field.
+	"""
+	prompt: String
+}
+
+"""
+One `edit_document` call.
+"""
+type EditDocumentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: EditDocumentArgs!
+}
+
+"""
+Arguments for the `edit_file` tool.
+"""
+type EditFileArgs {
+	"""
+	Path to the file, relative to the working directory.
+	"""
+	path: String!
+	"""
+	The exact string to replace, which must appear once in the file.
+	"""
+	oldStr: String!
+	"""
+	What replaces it.
+	"""
+	newStr: String!
+}
+
+"""
+One `edit_file` call.
+"""
+type EditFileCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: EditFileArgs!
+}
+
+"""
 What the nudge resolves to for this stage.
 """
 type EffectiveNudge {
@@ -1485,6 +2014,26 @@ input EnvEntryInput {
 }
 
 """
+One `environment_info` call, which takes nothing.
+"""
+type EnvironmentInfoCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
+}
+
+"""
 This subscription fell behind, and frames were dropped.
 
 The daemon's broadcast is bounded, and a subscriber that cannot keep up is
@@ -1557,6 +2106,64 @@ type FanOut {
 	own region and its own budget.
 	"""
 	resultsRegion: String
+}
+
+"""
+Arguments for the `fan_out` tool.
+"""
+type FanOutArgs {
+	"""
+	The blueprint each item runs. Left out inside a fan-out stage, which
+	names its worker itself.
+	"""
+	agent: String
+	"""
+	One entry per unit of work. An empty list is a valid answer: it says
+	there was nothing to hand out.
+	"""
+	items: [FanOutItem!]!
+	"""
+	How many run at once, where the model capped it.
+	"""
+	maxWorkers: Int
+}
+
+"""
+One `fan_out` call.
+"""
+type FanOutCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: FanOutArgs!
+}
+
+"""
+One unit of work handed to a fan-out worker.
+"""
+type FanOutItem {
+	"""
+	The item's own id, which names its child run.
+	"""
+	id: String!
+	"""
+	Everything the worker gets, which the blueprint's author defines. Raw
+	JSON because nothing here knows its shape.
+	"""
+	context: JSON!
 }
 
 """
@@ -1882,6 +2489,47 @@ enum InstallMethod {
 }
 
 """
+Arguments for the `install_tool` tool.
+"""
+type InstallToolArgs {
+	"""
+	The tool's name, which must match the script's own `@tool` directive.
+	"""
+	name: String!
+	"""
+	The whole Rhai source of the script.
+	"""
+	source: String!
+	"""
+	Replace a script of the same name. Left out means no.
+	"""
+	overwrite: Boolean
+}
+
+"""
+One `install_tool` call.
+"""
+type InstallToolCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: InstallToolArgs!
+}
+
+"""
 What kind of answer a parked run is waiting for.
 """
 enum InteractionKind {
@@ -2071,6 +2719,93 @@ type KeyVerdict {
 	What is wrong with it, when something is.
 	"""
 	message: String
+}
+
+"""
+Arguments for the `kill_agent` tool.
+"""
+type KillAgentArgs {
+	"""
+	The agent killed, by its live id.
+	"""
+	agentId: String!
+}
+
+"""
+One `kill_agent` call.
+"""
+type KillAgentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: KillAgentArgs!
+}
+
+"""
+Arguments for the `list_dir` tool.
+"""
+type ListDirArgs {
+	"""
+	Path to the directory, relative to the working directory. Left out means
+	the working directory itself.
+	"""
+	path: String
+}
+
+"""
+One `list_dir` call.
+"""
+type ListDirCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ListDirArgs!
+}
+
+"""
+One `locale_info` call, which takes nothing.
+"""
+type LocaleInfoCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
 }
 
 """
@@ -3267,6 +4002,43 @@ type PageInfo {
 }
 
 """
+Arguments for the `present_for_review` tool.
+"""
+type PresentForReviewArgs {
+	"""
+	The short title shown above the review prompt.
+	"""
+	title: String!
+	"""
+	The document presented, as markdown.
+	"""
+	markdown: String!
+}
+
+"""
+One `present_for_review` call.
+"""
+type PresentForReviewCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: PresentForReviewArgs!
+}
+
+"""
 One provider this machine can reach.
 """
 type Provider {
@@ -3503,6 +4275,72 @@ type Query {
 		"""
 		ids: [String!]
 	): RunConnection!
+}
+
+"""
+Arguments for the `read_file` tool.
+"""
+type ReadFileArgs {
+	"""
+	Path to the file, relative to the working directory.
+	"""
+	path: String!
+}
+
+"""
+One `read_file` call.
+"""
+type ReadFileCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ReadFileArgs!
+}
+
+"""
+Arguments for the `read_files` tool.
+"""
+type ReadFilesArgs {
+	"""
+	The file paths, relative to the working directory.
+	"""
+	paths: [String!]!
+}
+
+"""
+One `read_files` call.
+"""
+type ReadFilesCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ReadFilesArgs!
 }
 
 type Region {
@@ -4110,6 +4948,24 @@ type Run {
 		offset: Int! = 0
 	): FileWindow!
 	"""
+	What this run did: every attempt at every tool call, in order, paged.
+	
+	Read from the run's journal, so it holds the attempts a context window no
+	longer shows: a call a gate refused, one that failed and was reissued, one
+	a restart cut off. Results are not on the page; each execution fetches its
+	own, because one result can be a whole file.
+	"""
+	executions(
+		"""
+		Page size.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page.
+		"""
+		after: Cursor
+	): ToolExecutionConnection!
+	"""
 	How this run's context window changed over the run, paged.
 	
 	Each point carries a whole window, so this is paged harder than the run
@@ -4531,6 +5387,26 @@ type RunTreeStatus {
 }
 
 """
+One `runtime_info` call, which takes nothing.
+"""
+type RuntimeInfoCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
+}
+
+"""
 What the blueprint would like to run without being asked.
 
 A request rather than a grant: the machine's own policy decides, and this is
@@ -4815,6 +5691,47 @@ type SeedToolCall {
 }
 
 """
+Arguments for the `send_to_agent` tool.
+"""
+type SendToAgentArgs {
+	"""
+	The agent written to, by its live id.
+	"""
+	agentId: String!
+	"""
+	What was sent.
+	"""
+	message: String!
+	"""
+	The region it was delivered to. Left out means the conversation.
+	"""
+	targetRegion: String
+}
+
+"""
+One `send_to_agent` call.
+"""
+type SendToAgentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: SendToAgentArgs!
+}
+
+"""
 What the server will and will not do, in numbers.
 
 Published so a client never hardcodes a cap. Reading the limit is how a
@@ -4903,6 +5820,39 @@ enum SetupBlocker {
 }
 
 """
+Arguments for the `shell` tool.
+"""
+type ShellArgs {
+	"""
+	The command, as the model wrote it.
+	"""
+	command: String!
+}
+
+"""
+One `shell` call.
+"""
+type ShellCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: ShellArgs!
+}
+
+"""
 A provider sign-in that is waiting for the person to finish it.
 """
 type SignInStarted {
@@ -4947,6 +5897,69 @@ type SkippedTool {
 	Why it could not be offered.
 	"""
 	reason: String!
+}
+
+"""
+Arguments for the `spawn_agent` tool.
+"""
+type SpawnAgentArgs {
+	"""
+	The blueprint to run, by name.
+	"""
+	blueprint: String!
+	"""
+	The task handed to it.
+	"""
+	task: String!
+	"""
+	Whether the caller blocked until it finished. Left out means no, which is
+	also what the tool's own default says.
+	"""
+	wait: Boolean
+	"""
+	Context put in the child's first pinned region.
+	"""
+	seedContext: String
+	"""
+	Stored parts of this run handed to the child, each by name or by the
+	start of its sha256.
+	"""
+	parts: [String!]
+	"""
+	A depth limit for the child's own children.
+	"""
+	maxChildDepth: Int
+	"""
+	The shape the child was asked to answer in, overriding its blueprint's.
+	"""
+	outputFormat: String
+	"""
+	Extra guidance about that shape.
+	"""
+	outputInstructions: String
+}
+
+"""
+One `spawn_agent` call.
+"""
+type SpawnAgentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: SpawnAgentArgs!
 }
 
 """
@@ -5508,6 +6521,45 @@ type StuckThresholds {
 	afterToolCalls: Int
 }
 
+"""
+Arguments for the `submit_output` tool.
+"""
+type SubmitOutputArgs {
+	"""
+	The final answer, in full.
+	"""
+	content: String!
+	"""
+	Files produced alongside it. Each entry is raw JSON because the tool
+	takes either a bare path or an object, and a debugger showing what was
+	submitted must show whichever of the two the model chose.
+	"""
+	artifacts: [JSON!]
+}
+
+"""
+One `submit_output` call: the run's own answer.
+"""
+type SubmitOutputCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: SubmitOutputArgs!
+}
+
 type Subscription {
 	"""
 	The daemon broadcast, filtered server-side.
@@ -5544,6 +6596,26 @@ type Subscription {
 }
 
 """
+One `system_info` call, which takes nothing.
+"""
+type SystemInfoCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
+}
+
+"""
 Whether taint tracking runs.
 
 Two states, not three: a manifest can ask for tracking, and it cannot ask for
@@ -5565,6 +6637,121 @@ Unix epoch seconds, as the daemon stores them. No string dates, so no
 timezone maths over a number that never had a timezone.
 """
 scalar Timestamp
+
+"""
+Arguments for the `todo_add` tool.
+"""
+type TodoAddArgs {
+	"""
+	The checklist region, by name.
+	"""
+	region: String!
+	"""
+	What needs doing, in one line.
+	"""
+	item: String!
+}
+
+"""
+One `todo_add` call.
+"""
+type TodoAddCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: TodoAddArgs!
+}
+
+"""
+Arguments for the `todo_done` tool.
+"""
+type TodoDoneArgs {
+	"""
+	The checklist region, by name.
+	"""
+	region: String!
+	"""
+	The item's id, as `todo_add` gave it.
+	"""
+	id: Int!
+}
+
+"""
+One `todo_done` call.
+"""
+type TodoDoneCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: TodoDoneArgs!
+}
+
+"""
+Arguments for the `todo_note` tool.
+"""
+type TodoNoteArgs {
+	"""
+	The checklist region, by name.
+	"""
+	region: String!
+	"""
+	The item's id.
+	"""
+	id: Int!
+	"""
+	The note recorded against it.
+	"""
+	note: String!
+}
+
+"""
+One `todo_note` call.
+"""
+type TodoNoteCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: TodoNoteArgs!
+}
 
 """
 Token counts for a run, a stage, or a subtree roll-up.
@@ -5660,6 +6847,27 @@ type ToolAcceptRule {
 }
 
 """
+One tool call: the tool plus its arguments, paired.
+
+Ask for `__typename` to find out which tool it is, then select that
+type's `args`. The shared fields answer without knowing the tool.
+"""
+interface ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, where this build knows the tool.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched.
+	"""
+	rawArguments: JSON!
+}
+
+"""
 A tool call finished.
 """
 type ToolCallFinished {
@@ -5747,6 +6955,105 @@ enum ToolDiscovery {
 	RESCAN_AFTER_WRITES
 }
 
+type ToolExecution {
+	"""
+	This attempt's own id, minted when it was dispatched.
+	
+	Null in a journal written before executions had identity, where the
+	provider's call id is the only handle there is. A client that needs a key
+	for a list can use `journalPosition` and `callId` together, which every
+	journal supports.
+	"""
+	id: String
+	"""
+	The call this attempt was carrying out, typed by its tool.
+	"""
+	call: ToolCall!
+	"""
+	The provider's own id for the call, kept as correlation.
+	
+	Not an identity: a provider may reuse one across a retry or a reissue. It
+	is what matches this execution to what the provider says about it.
+	"""
+	callId: String!
+	"""
+	How it ended.
+	
+	Null means one of three things, and a client must not flatten them: it is
+	still running, it ended before this build recorded outcomes, or it ended
+	in a way only the result text describes. `endedAt` tells the first apart
+	from the other two.
+	"""
+	outcome: ToolOutcome
+	"""
+	The stage it was dispatched in, by index.
+	"""
+	stageIndex: Int!
+	"""
+	The stage-local iteration whose turn asked for it.
+	"""
+	iteration: Int!
+	"""
+	When it was dispatched.
+	"""
+	dispatchedAt: Timestamp!
+	"""
+	When it ended. Null while it is still running, and on an attempt whose
+	ending was never recorded.
+	"""
+	endedAt: Timestamp
+	"""
+	Where in the run's journal the record that dispatched it sits.
+	
+	A byte offset. It only climbs within a run and never changes, so it orders
+	executions and names one for as long as the run exists.
+	"""
+	journalPosition: BigInt!
+	"""
+	What the tool answered, read from the journal on demand.
+	
+	Its own field rather than part of the execution, because a result can be a
+	whole file and a page of executions must not carry every one of them. Null
+	when the attempt has no recorded result: still running, or cut off.
+	
+	For an indeterminate outcome this is the stand-in the resume put in the
+	window, not something the tool returned.
+	"""
+	result: ToolResult
+}
+
+"""
+One page of what a run did.
+"""
+type ToolExecutionConnection {
+	"""
+	The executions on this page, in dispatch order.
+	"""
+	edges: [ToolExecutionEdge!]!
+	"""
+	Where the next page starts.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many the run's journal holds altogether.
+	"""
+	total: Int!
+}
+
+"""
+One execution and its cursor.
+"""
+type ToolExecutionEdge {
+	"""
+	Where to resume from after this one.
+	"""
+	cursor: Cursor!
+	"""
+	The execution.
+	"""
+	node: ToolExecution!
+}
+
 """
 One group token an `available_tools` list may name in place of tool names.
 """
@@ -5783,6 +7090,34 @@ type ToolInventory {
 }
 
 """
+How one attempt to execute a tool call ended.
+"""
+enum ToolOutcome {
+	"""
+	The tool ran and answered.
+	"""
+	SUCCEEDED
+	"""
+	The tool ran and failed.
+	"""
+	FAILED
+	"""
+	A gate refused it before it ran: the taint gate, a permission rule.
+	"""
+	BLOCKED
+	"""
+	A person refused it.
+	"""
+	DENIED
+	"""
+	Nobody observed how it ended, and nobody ever will. A daemon that died
+	between dispatch and completion leaves this, and the resume that carried
+	the run on is what recorded it.
+	"""
+	INDETERMINATE
+}
+
+"""
 What a stage does with one tool.
 """
 enum ToolPermissionPolicy {
@@ -5813,6 +7148,29 @@ type ToolPermissionRule {
 	daemon does not recognise, which is a rule that grants nothing.
 	"""
 	policy: ToolPermissionPolicy
+}
+
+"""
+What a tool answered, as far as it fits in an answer.
+"""
+type ToolResult {
+	"""
+	The text, cut to the head where the whole thing is large.
+	"""
+	text: String!
+	"""
+	How many bytes the whole result is.
+	"""
+	bytes: BigInt!
+	"""
+	Whether `text` is only the head of it.
+	"""
+	truncated: Boolean!
+	"""
+	The stored parts it carried, by name. Their bytes are fetched from the
+	run's own parts, where they already live.
+	"""
+	parts: [String!]!
 }
 
 """
@@ -6084,6 +7442,47 @@ enum UnattendedPolicy {
 }
 
 """
+Why a call came back untyped.
+
+The two are different situations and a client should treat them differently.
+An MCP or script tool has no type here and never will, which is ordinary. A
+built-in whose arguments did not fit its own schema is a call that the model
+got wrong or that a later build changed, and it is worth looking at.
+"""
+enum UntypedCallReason {
+	"""
+	This build has no type for this tool: an MCP tool, or a script one.
+	"""
+	NO_TYPE_FOR_THIS_TOOL
+	"""
+	The tool is known, and the recorded arguments did not fit its shape.
+	"""
+	ARGUMENTS_DID_NOT_MATCH
+}
+
+"""
+One call whose arguments stay as they were recorded.
+"""
+type UntypedToolCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, where this build knows the tool.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched.
+	"""
+	rawArguments: JSON!
+	"""
+	Why this call is not one of the typed ones.
+	"""
+	reason: UntypedCallReason!
+}
+
+"""
 One bundled blueprint, and what an update would do to it.
 """
 type UpdateAgentEntry {
@@ -6321,6 +7720,39 @@ enum ValidatorErrorPolicy {
 }
 
 """
+Arguments for the `wait_for_agent` tool.
+"""
+type WaitForAgentArgs {
+	"""
+	The agent waited for, by its live id.
+	"""
+	agentId: String!
+}
+
+"""
+One `wait_for_agent` call.
+"""
+type WaitForAgentCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: WaitForAgentArgs!
+}
+
+"""
 Why a run is parked, and what would unblock it.
 
 Present only while the run is in `WAITING_INPUT`. A run waiting on a person
@@ -6390,6 +7822,39 @@ enum WaitReasonKind {
 }
 
 """
+Arguments for the `which_command` tool.
+"""
+type WhichCommandArgs {
+	"""
+	The program name to look up, such as `git` or `python3`.
+	"""
+	command: String!
+}
+
+"""
+One `which_command` call.
+"""
+type WhichCommandCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: WhichCommandArgs!
+}
+
+"""
 What happens to a fan-out when one worker fails.
 """
 enum WorkerFailurePolicy {
@@ -6415,6 +7880,47 @@ type WorkingClock {
 	When the span in progress began; null while the clock is stopped.
 	"""
 	since: Timestamp
+}
+
+"""
+Arguments for the `write_file` tool.
+"""
+type WriteFileArgs {
+	"""
+	Path to the file, relative to the working directory.
+	"""
+	path: String!
+	"""
+	The content to write: the whole file, or with `append` the part to add.
+	"""
+	content: String!
+	"""
+	Add to the end of the file instead of replacing it. Left out means no.
+	"""
+	append: Boolean
+}
+
+"""
+One `write_file` call.
+"""
+type WriteFileCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: WriteFileArgs!
 }
 
 """

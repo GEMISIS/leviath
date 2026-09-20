@@ -7,11 +7,17 @@
 
 pub(crate) mod blueprint;
 pub(crate) mod catalog;
+pub(crate) mod execution;
 pub(crate) mod machine;
 pub(crate) mod manifest;
 pub(crate) mod run;
 pub(crate) mod run_detail;
+pub(crate) mod tool_calls;
 pub(crate) mod update;
+
+#[cfg(test)]
+#[path = "execution_tests.rs"]
+mod execution_tests;
 
 #[cfg(test)]
 #[path = "run_files_tests.rs"]

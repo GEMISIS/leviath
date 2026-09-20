@@ -142,13 +142,62 @@ pub fn read_frame(r: &mut dyn Read) -> io::Result<Option<Frame>> {
     let Some(payload) = read_framed_payload(r)? else {
         return Ok(None);
     };
-    match serde_json::from_slice(&payload) {
-        Ok(record) => Ok(Some(Frame::Record(Box::new(record)))),
-        // Deliberately not an error: the frame was intact and has been
-        // consumed, so the only question is whether the caller wants to know.
-        Err(_) => Ok(Some(Frame::Unreadable {
+    Ok(Some(parse_frame(&payload)))
+}
+
+/// One consumed payload as a frame.
+///
+/// An unparseable payload is deliberately not an error: the frame was intact and
+/// has been consumed, so the only question is whether the caller wants to know.
+fn parse_frame(payload: &[u8]) -> Frame {
+    match serde_json::from_slice(payload) {
+        Ok(record) => Frame::Record(Box::new(record)),
+        Err(_) => Frame::Unreadable {
             bytes: payload.len(),
-        })),
+        },
+    }
+}
+
+/// How many bytes a frame's length prefix takes.
+const LENGTH_PREFIX_BYTES: u64 = 8;
+
+/// A frame reader that knows where each frame began.
+///
+/// A record's position is the byte offset of its frame, which is what makes it
+/// nameable: the journal is only ever appended to, so a position identifies one
+/// record in one run forever and a reader can seek straight back to it. The
+/// alternative, counting records, breaks the moment a reader skips a kind it does
+/// not understand.
+///
+/// The persistence lane reports the same number when it writes a record, and the
+/// two agree because both mean the length of the file before that frame.
+pub struct Frames<'r> {
+    /// Where the frames come from.
+    reader: &'r mut dyn Read,
+    /// The offset the next frame begins at.
+    at: u64,
+}
+
+impl<'r> Frames<'r> {
+    /// Validate the preamble and start reading, reporting the format version.
+    pub fn open(reader: &'r mut dyn Read) -> io::Result<(u16, Self)> {
+        let version = read_archive_start(reader)?;
+        let at = RUN_ARCHIVE_MAGIC.len() as u64 + 2;
+        Ok((version, Self { reader, at }))
+    }
+
+    /// The next frame and the position it began at, or `None` at a clean end.
+    ///
+    /// Errors only on a torn frame, like [`read_frame`]: a payload this build
+    /// cannot parse comes back as [`Frame::Unreadable`] with the position still
+    /// advancing over it.
+    pub fn next_frame(&mut self) -> io::Result<Option<(u64, Frame)>> {
+        let position = self.at;
+        let Some(payload) = read_framed_payload(self.reader)? else {
+            return Ok(None);
+        };
+        self.at += LENGTH_PREFIX_BYTES + payload.len() as u64;
+        Ok(Some((position, parse_frame(&payload))))
     }
 }
 
