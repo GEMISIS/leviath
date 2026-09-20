@@ -1676,4 +1676,70 @@ fn every_write_input_refuses_what_it_cannot_read() {
     assert!(YoloTestInput::parse(scalar()).is_err());
     assert!(YoloTestInput::parse(None).is_err());
     assert!(YoloTestInput::parse(one("profile", number())).is_err());
+
+    // A first field that reads and a later one that does not. Each field is read
+    // in turn, so a request that gets the last one wrong has to be refused just
+    // as squarely as one that gets the first wrong.
+    let text = |s: &str| Value::String(s.to_string());
+    assert!(
+        MetadataEntryInput::parse(one("key", text("k"))).is_err(),
+        "no value"
+    );
+    assert!(
+        RegionSeedInput::parse(one("region", text("plan"))).is_err(),
+        "no text"
+    );
+    assert!(
+        SpawnAgentInput::parse(one("blueprint", text("coder"))).is_err(),
+        "no task"
+    );
+    assert!(
+        AnswerChoiceInput::parse(one("requestId", text("a"))).is_err(),
+        "no choice"
+    );
+    assert!(
+        AnswerTextInput::parse(one("requestId", text("a"))).is_err(),
+        "no answer"
+    );
+    assert!(
+        AnswerApprovalInput::parse(one("requestId", text("a"))).is_err(),
+        "no verdict"
+    );
+    assert!(
+        YoloTestInput::parse(one("profile", text("cautious"))).is_err(),
+        "no tool"
+    );
+    // The one-of reads the answer it was given, so a broken answer inside it is
+    // a broken request, whichever of the three it names.
+    assert!(
+        AnswerInteractionInput::parse(one("text", Value::Object(IndexMap::new()))).is_err(),
+        "an answer with nothing in it"
+    );
+    assert!(
+        AnswerInteractionInput::parse(one("approval", Value::Object(IndexMap::new()))).is_err(),
+        "an approval with nothing in it"
+    );
+    assert!(
+        AnswerInteractionInput::parse(one("choice", Value::Object(IndexMap::new()))).is_err(),
+        "a choice with nothing in it"
+    );
+
+    // And the last field of each, which is read after every other one.
+    let mut spawn = IndexMap::new();
+    spawn.insert(Name::new("blueprint"), text("coder"));
+    spawn.insert(Name::new("task"), text("fix it"));
+    spawn.insert(Name::new("callbackSecret"), number());
+    assert!(SpawnAgentInput::parse(Some(Value::Object(spawn))).is_err());
+
+    let mut approval = IndexMap::new();
+    approval.insert(Name::new("requestId"), text("a"));
+    approval.insert(Name::new("approved"), Value::Boolean(true));
+    approval.insert(Name::new("feedback"), number());
+    assert!(AnswerApprovalInput::parse(Some(Value::Object(approval))).is_err());
+
+    let mut yolo = IndexMap::new();
+    yolo.insert(Name::new("profile"), text("cautious"));
+    yolo.insert(Name::new("tool"), text("shell"));
+    yolo.insert(Name::new("allowed"), number());
+    assert!(YoloTestInput::parse(Some(Value::Object(yolo))).is_err());
 }
