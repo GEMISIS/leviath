@@ -978,7 +978,7 @@
           "agents"
         ],
         "summary": "A workdir file's bytes, under its own content type",
-        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. A path the directory does not hold but the run's result lists as an artifact is served from the run's blob store, so a file a model made and nothing wrote to disk answers here too. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body.",
+        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. A path the directory does not hold but the run's result lists as an artifact is served from the run's blob store, so a file a model made and nothing wrote to disk answers here too. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
         "parameters": [
           {
             "name": "path",
@@ -1114,7 +1114,7 @@
           "agents"
         ],
         "summary": "The bytes of one stored part",
-        "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body.",
+        "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
         "parameters": [
           {
             "name": "download",
@@ -1200,7 +1200,7 @@
           "agents"
         ],
         "summary": "The bytes of one file the run handed back",
-        "description": "Follows the artifact the way the runtime does: the run's blob store by hash first, so a file a model made and nothing wrote to the working directory is served, then the working directory. Served under the artifact's own mime type; `download=1` adds a `Content-Disposition: attachment` carrying its file name. A run that has not handed back a result, or one with no artifact of that name, is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body.",
+        "description": "Follows the artifact the way the runtime does: the run's blob store by hash first, so a file a model made and nothing wrote to the working directory is served, then the working directory. Served under the artifact's own mime type; `download=1` adds a `Content-Disposition: attachment` carrying its file name. A run that has not handed back a result, or one with no artifact of that name, is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
         "parameters": [
           {
             "name": "download",

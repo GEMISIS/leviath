@@ -35,6 +35,7 @@ mod runs;
 mod scripts;
 mod scripts_mime;
 mod search;
+mod signed_url;
 #[cfg(test)]
 mod testutil;
 mod tls;
@@ -431,6 +432,7 @@ async fn execute_with_shutdown(
 
     let state = AppState {
         caches: Default::default(),
+        signer: Default::default(),
         update_check: Default::default(),
         update_jobs: update_job::UpdateJobs::with_runner(upgrade),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
@@ -596,7 +598,10 @@ async fn execute_with_shutdown(
         // Require a valid token on every route; CORS stays outermost so browser
         // preflight (OPTIONS) is answered before the auth check.
         .layer(axum::middleware::from_fn_with_state(
-            auth_token,
+            auth::AuthState {
+                token: auth_token,
+                signer: std::sync::Arc::clone(&state.signer),
+            },
             auth::require_auth,
         ))
         .with_state(state);
@@ -1492,6 +1497,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -1598,6 +1604,83 @@ mod tests {
                 .contains("noSuchField"),
             "{json}"
         );
+    }
+
+    /// A signed URL fetches bytes with no token at all, and nothing else.
+    ///
+    /// This is the whole point of minting one: a browser cannot put a header on
+    /// an `<img src>`, so the link has to carry its own permission. What it must
+    /// not do is carry permission to anything else, which is the second half of
+    /// this test.
+    #[tokio::test]
+    async fn a_signed_url_fetches_bytes_without_a_token() {
+        crate::runstate::with_isolated_runs_dir_async("signed-url-bytes", |_d| async move {
+            let workdir = tempfile::tempdir().expect("a workdir");
+            std::fs::write(workdir.path().join("out.txt"), "the bytes").expect("file written");
+            let mut meta = crate::runstate::RunMeta::new(
+                "run-signed".to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                workdir.path().to_string_lossy().to_string(),
+                1,
+            );
+            meta.status = crate::runstate::RunStatus::Complete;
+            crate::runstate::create_run(&meta).expect("run written");
+
+            let state = test_state();
+            let auth = auth::AuthState {
+                token: Arc::new("secret".to_string()),
+                signer: Arc::clone(&state.signer),
+            };
+            let app = crate::commands::serve::mcp::scoped(
+                api_router()
+                    .layer(axum::middleware::from_fn_with_state(
+                        auth,
+                        auth::require_auth,
+                    ))
+                    .with_state(state.clone()),
+                test_paths(),
+            );
+
+            let now = leviath_core::duration::now_secs();
+            let url = signed_url::signed_path(
+                &state.signer,
+                "/api/agents/run-signed/files/raw",
+                &[("path", "out.txt")],
+                now,
+            );
+            let signed = Request::builder()
+                .uri(&url)
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.clone().oneshot(signed).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("the bytes");
+            assert_eq!(&body[..], b"the bytes");
+
+            // The same grant, pointed at a listing: refused. A signed URL opens
+            // one file, not the API.
+            let query = url.split_once('?').expect("a query").1;
+            let elsewhere = Request::builder()
+                .uri(format!("/api/runs?{query}"))
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.clone().oneshot(elsewhere).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            // And without any grant at all: refused.
+            let bare = Request::builder()
+                .uri("/api/agents/run-signed/files/raw?path=out.txt")
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.oneshot(bare).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]

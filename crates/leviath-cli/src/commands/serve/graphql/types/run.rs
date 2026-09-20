@@ -17,7 +17,9 @@ use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
 use super::super::scalars::{BigInt, Decimal, Timestamp};
 use super::blueprint::Blueprint;
-use super::run_detail::{ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason};
+use super::run_detail::{
+    Artifact, BlobEntry, ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason,
+};
 use crate::runstate::RunMeta;
 
 /// The lifecycle states a run moves through.
@@ -493,6 +495,102 @@ impl Run {
         Ok(
             blocking(move || crate::runstate::tail_run_logs(&run_id, selector, stream, bytes))
                 .await,
+        )
+    }
+
+    /// The binary parts this run holds.
+    ///
+    /// Metadata only: the bytes are behind each entry's `url`, a short-lived
+    /// signed link the byte route verifies. Bytes never ride a query answer,
+    /// and a page can put that link straight into an `<img src>`.
+    async fn blobs(&self, ctx: &Context<'_>) -> Option<Vec<BlobEntry>> {
+        let state = ctx.data_unchecked::<AppState>();
+        let run_id = self.meta.run_id.clone();
+        let stored = blocking(move || crate::blobs::list(&run_id)).await?;
+        let now = leviath_core::duration::now_secs();
+        Some(
+            stored
+                .into_iter()
+                .map(|blob| {
+                    let url = blob.stored.then(|| {
+                        super::super::super::signed_url::signed_path(
+                            &state.signer,
+                            &format!("/api/agents/{}/blobs/{}", self.meta.run_id, blob.sha256),
+                            &[],
+                            now,
+                        )
+                    });
+                    BlobEntry {
+                        sha256: blob.sha256,
+                        mime_type: blob.mime_type,
+                        name: blob.name,
+                        size: BigInt(blob.size as i64),
+                        width: blob.width.and_then(|w| i32::try_from(w).ok()),
+                        height: blob.height.and_then(|h| i32::try_from(h).ok()),
+                        duration_ms: blob.duration_ms.and_then(|d| i32::try_from(d).ok()),
+                        tokens: as_i32(blob.tokens),
+                        regions: blob.regions,
+                        stored: blob.stored,
+                        url,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// The files this run handed back beside its answer.
+    ///
+    /// Same as `blobs`: metadata here, bytes behind a signed link.
+    async fn artifacts(&self, ctx: &Context<'_>) -> Vec<Artifact> {
+        let state = ctx.data_unchecked::<AppState>();
+        let now = leviath_core::duration::now_secs();
+        self.meta
+            .final_output
+            .as_ref()
+            .map(|output| output.artifacts.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|artifact| Artifact {
+                url: super::super::super::signed_url::signed_path(
+                    &state.signer,
+                    &format!(
+                        "/api/agents/{}/artifacts/{}",
+                        self.meta.run_id, artifact.name
+                    ),
+                    &[],
+                    now,
+                ),
+                name: artifact.name,
+                mime_type: artifact.mime_type.to_string(),
+                size: Some(BigInt(artifact.size as i64)),
+                sha256: Some(artifact.sha256).filter(|hash| !hash.is_empty()),
+            })
+            .collect()
+    }
+
+    /// A short-lived signed link to one file in this run's working directory.
+    ///
+    /// The byte route verifies the signature, so this works in an `<img src>` or
+    /// a download link, where a header cannot be set. It is good for a few
+    /// minutes and for that one path.
+    async fn file_url(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The file, relative to the run's working directory.")] path: String,
+        #[graphql(desc = "Offer it as a download rather than inline.", default = false)]
+        download: bool,
+    ) -> String {
+        let state = ctx.data_unchecked::<AppState>();
+        let route = format!("/api/agents/{}/files/raw", self.meta.run_id);
+        let mut query = vec![("path", path.as_str())];
+        if download {
+            query.push(("download", "1"));
+        }
+        super::super::super::signed_url::signed_path(
+            &state.signer,
+            &route,
+            &query,
+            leviath_core::duration::now_secs(),
         )
     }
 

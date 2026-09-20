@@ -74,21 +74,46 @@ fn is_websocket_route(path: &str) -> bool {
     path == "/ws" || path.starts_with("/ws/")
 }
 
+/// What the auth layer needs: the token to compare against, and the key this
+/// process signs byte URLs with.
+#[derive(Clone)]
+pub(super) struct AuthState {
+    /// The expected API token.
+    pub(super) token: Arc<String>,
+    /// The signer, for the byte routes that a signed URL may open.
+    pub(super) signer: Arc<super::signed_url::UrlSigner>,
+}
+
 /// Middleware: allow the request through only when it presents the expected
-/// token; otherwise respond `401 Unauthorized`.
+/// token, or carries a valid signature for a byte route it is allowed to open.
+/// Otherwise respond `401 Unauthorized`.
+///
+/// The signed-URL path exists because a browser cannot put a header on an
+/// `<img src>`. It is deliberately narrow: bytes only, one path per signature,
+/// and minutes rather than forever. See [`super::signed_url`].
 pub(super) async fn require_auth(
-    State(expected): State<Arc<String>>,
+    State(auth): State<AuthState>,
     req: Request,
     next: Next,
 ) -> Response {
-    match presented_token(&req) {
-        Some(token) if constant_time_eq(&token, &expected) => next.run(req).await,
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            "unauthorized: missing or invalid API token",
-        )
-            .into_response(),
+    if let Some(token) = presented_token(&req)
+        && constant_time_eq(&token, &auth.token)
+    {
+        return next.run(req).await;
     }
+    let path = req.uri().path();
+    if super::signed_url::is_signable(path)
+        && auth
+            .signer
+            .verify(path, req.uri().query(), leviath_core::duration::now_secs())
+    {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        "unauthorized: missing or invalid API token",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -195,10 +220,13 @@ mod tests {
         use axum::{Router, middleware};
         use tower::ServiceExt;
 
-        let expected = Arc::new("secret".to_string());
+        let auth = AuthState {
+            token: Arc::new("secret".to_string()),
+            signer: Default::default(),
+        };
         let app: Router = Router::new()
             .route("/api/agents", get(|| async { "ok" }))
-            .layer(middleware::from_fn_with_state(expected, require_auth));
+            .layer(middleware::from_fn_with_state(auth, require_auth));
 
         // Valid bearer token ⇒ 200.
         let ok = app

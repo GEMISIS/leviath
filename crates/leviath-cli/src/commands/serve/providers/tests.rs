@@ -76,6 +76,7 @@ fn state_with_quota(
         mcp: crate::commands::serve::mcp::McpAdmin::default(),
         providers: admin,
         limits: Default::default(),
+        signer: Default::default(),
     }
 }
 

@@ -447,6 +447,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // console watching one run of five thousand should not be handed the
     // fleet's frames to sort through.
     "graphql.subscriptions",
+    // Short-lived signed URLs on the byte routes, which is what lets a browser
+    // put a run's picture in an `<img src>`. Announced because the alternative
+    // a client writes without it - fetch with the token, hold the bytes, mint a
+    // blob URL - is real work it can skip entirely when this is here.
+    "bytes.signed_urls",
 ];
 
 /// The server's numeric limits.

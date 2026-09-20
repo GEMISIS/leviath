@@ -226,12 +226,93 @@ enum ApprovalScope {
 }
 
 """
+One file a run handed back beside its answer.
+"""
+type Artifact {
+	"""
+	What the submission called it.
+	"""
+	name: String!
+	"""
+	Its declared mime type.
+	"""
+	mimeType: String!
+	"""
+	Size in bytes, when the record has it.
+	"""
+	size: BigInt
+	"""
+	Content hash, when it was computed.
+	"""
+	sha256: String
+	"""
+	A short-lived signed link to the bytes.
+	"""
+	url: String!
+}
+
+"""
 A 64-bit integer, serialized as a JSON number. GraphQL's `Int` is 32-bit:
 it cannot hold a 2 GiB file size or a large aggregate token count. Every
 magnitude this API produces is well under 2^53, so it round-trips through
 a browser without loss.
 """
 scalar BigInt
+
+"""
+One stored part a run holds.
+
+The bytes are not here. They are behind `url`, which is a short-lived signed
+link the byte route verifies: bytes never ride a query answer, and a page can
+put that link straight in an `<img src>`.
+"""
+type BlobEntry {
+	"""
+	The store's key: the bytes' SHA-256.
+	"""
+	sha256: String!
+	"""
+	The type the bytes were stored as.
+	"""
+	mimeType: String!
+	"""
+	The name the part carries, when its context gave it one.
+	"""
+	name: String
+	"""
+	Size in bytes.
+	"""
+	size: BigInt!
+	"""
+	Pixel width, for an image or a video.
+	"""
+	width: Int
+	"""
+	Pixel height, for an image or a video.
+	"""
+	height: Int
+	"""
+	Duration in milliseconds, for audio or video.
+	"""
+	durationMs: Int
+	"""
+	What the part is budgeted at in context.
+	"""
+	tokens: Int!
+	"""
+	Every region holding an entry that names this part.
+	"""
+	regions: [String!]!
+	"""
+	Whether the bytes are still on disk. A context can name a part whose
+	file was too large to keep, or that a pruned run directory lost.
+	"""
+	stored: Boolean!
+	"""
+	A short-lived signed link to the bytes. Null when they are not on disk.
+	"""
+	url: String
+}
 
 type Blueprint {
 	"""
@@ -1501,6 +1582,37 @@ type Run {
 		Bytes to read from the end of each stream.
 		"""
 		tail: Int
+	): String!
+	"""
+	The binary parts this run holds.
+	
+	Metadata only: the bytes are behind each entry's `url`, a short-lived
+	signed link the byte route verifies. Bytes never ride a query answer,
+	and a page can put that link straight into an `<img src>`.
+	"""
+	blobs: [BlobEntry!]
+	"""
+	The files this run handed back beside its answer.
+	
+	Same as `blobs`: metadata here, bytes behind a signed link.
+	"""
+	artifacts: [Artifact!]!
+	"""
+	A short-lived signed link to one file in this run's working directory.
+	
+	The byte route verifies the signature, so this works in an `<img src>` or
+	a download link, where a header cannot be set. It is good for a few
+	minutes and for that one path.
+	"""
+	fileUrl(
+		"""
+		The file, relative to the run's working directory.
+		"""
+		path: String!,
+		"""
+		Offer it as a download rather than inline.
+		"""
+		download: Boolean! = false
 	): String!
 	"""
 	Caller-supplied metadata from spawn. Values are always strings.

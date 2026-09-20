@@ -520,6 +520,7 @@ mod tests {
         (
             AppState {
                 caches: Default::default(),
+                signer: Default::default(),
                 update_check: Default::default(),
                 update_jobs: Default::default(),
                 config: crate::commands::serve::testutil::fixed_config(Config::default()),
