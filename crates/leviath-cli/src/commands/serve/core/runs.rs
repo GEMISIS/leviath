@@ -478,3 +478,170 @@ impl RunSelection {
         })
     }
 }
+
+/// Whether a run may be removed, or the reason it may not.
+///
+/// One definition for the single and bulk routes, so a run that 409s on its own
+/// cannot be silently deleted as part of a sweep.
+///
+/// `force` covers only the last case below, and only the single-run route ever
+/// passes it.
+pub(crate) fn deletable(id: &str, force: bool) -> Result<(), super::error::ServeError> {
+    let dir = runstate::run_dir(id);
+    if !dir.exists() {
+        return Err(super::error::ServeError::NotFound(format!(
+            "Run '{id}' not found"
+        )));
+    }
+    // Judged from the run's own record, not by asking the daemon: a daemon that
+    // is down must not make every run undeletable.
+    match runstate::read_meta(id) {
+        Ok(meta) if runstate::is_terminal_status(&meta.status) => Ok(()),
+        Ok(meta) => Err(super::error::ServeError::Conflict(format!(
+            "Run '{id}' is {}; cancel it before deleting it",
+            meta.status
+        ))),
+        // A run whose `meta.json` will not parse says nothing about whether it
+        // is finished, and "cannot read it" must not quietly read as "finished".
+        // An unparseable record is what a *live* run looks like to a binary
+        // whose `RunMeta` has moved on, and the failure mode there is deleting a
+        // running agent's directory and answering 204 - which is precisely what
+        // this route refuses to do for a run it *can* see is live.
+        //
+        // Such a run is still skipped by `list_runs`, which would leave it both
+        // invisible and permanent, so the escape hatch stays - as something the
+        // caller types rather than something that happens to them.
+        Err(_) if force => Ok(()),
+        Err(e) => Err(super::error::ServeError::Conflict(format!(
+            "Run '{id}' has no readable record ({e}), so it cannot be shown \
+             to be finished; pass force=true to delete it anyway"
+        ))),
+    }
+}
+
+/// Remove a run's directory, having already decided it may go.
+pub(crate) fn remove_run(id: &str) -> Result<(), super::error::ServeError> {
+    runstate::forget_provider_files(id);
+    std::fs::remove_dir_all(runstate::run_dir(id)).map_err(|e| {
+        super::error::ServeError::Internal(format!("Failed to delete run '{id}': {e}"))
+    })
+}
+
+/// Whether every member of `ids` may go, or the reason one of them may not.
+///
+/// A live sub-agent blocks the whole delete rather than being skipped: half a
+/// tree is not a state anything downstream knows how to read, and removing the
+/// parent of a running agent is exactly what [`deletable`] refuses to do for
+/// the run named directly. The reason names the sub-agent, because "cancel it
+/// before deleting it" about a run the caller never mentioned is unactionable.
+pub(crate) fn deletable_family(
+    root: &str,
+    ids: &[String],
+    force: bool,
+) -> Result<(), super::error::ServeError> {
+    for id in ids {
+        deletable(id, force).map_err(|failure| match id == root {
+            true => failure,
+            // The same refusal, of the same kind, saying which sub-agent it is
+            // about: "cancel it before deleting it" of a run the caller never
+            // mentioned is not something anybody can act on.
+            false => failure.with_context(&format!(
+                "It is a sub-agent run of '{root}', deleted with it"
+            )),
+        })?;
+    }
+    Ok(())
+}
+
+/// Remove every run in `ids`, stopping at the first failure.
+pub(crate) fn remove_family(ids: &[String]) -> Result<(), super::error::ServeError> {
+    for id in ids {
+        remove_run(id)?;
+    }
+    Ok(())
+}
+
+/// One id a bulk delete passed over, and why.
+pub(crate) struct SkippedDelete {
+    /// The run that stayed.
+    pub(crate) id: String,
+    /// Why it did.
+    pub(crate) reason: String,
+}
+
+/// What a bulk delete removed, and what it left.
+///
+/// Partial success is the normal outcome, not an edge case: a sweep names runs
+/// by a predicate, and one of them being live or unreadable is not a reason to
+/// refuse the rest.
+pub(crate) struct DeleteOutcome {
+    /// The runs that were removed, sub-agents included.
+    pub(crate) deleted: Vec<String>,
+    /// The ones that stayed, each with its reason.
+    pub(crate) skipped: Vec<SkippedDelete>,
+}
+
+/// Which runs a delete is about.
+pub(crate) enum DeleteTargets {
+    /// Exactly these, named by the caller.
+    Ids(Vec<String>),
+    /// Every finished run last touched before this second.
+    Before(i64),
+}
+
+/// Delete run records.
+///
+/// Deleting a run takes its sub-agents with it: their records are only
+/// meaningful under the run that started them, and leaving them behind is how a
+/// listing fills with workers whose parent is gone.
+pub(crate) async fn delete(
+    state: &AppState,
+    targets: DeleteTargets,
+    force: bool,
+) -> Result<DeleteOutcome, super::error::ServeError> {
+    let ids = match targets {
+        DeleteTargets::Ids(ids) => {
+            if ids.len() > MAX_IDS {
+                return Err(super::error::ServeError::BadRequest(format!(
+                    "`ids` names {} runs; at most {MAX_IDS} may be deleted at once",
+                    ids.len()
+                )));
+            }
+            ids
+        }
+        // Scoped to finished runs at selection time as well as in the check
+        // below, so a sweep does not report every live run on the machine as
+        // skipped.
+        DeleteTargets::Before(before) => state
+            .caches
+            .run_index
+            .snapshot()
+            .await
+            .into_runs()
+            .into_iter()
+            .filter(|meta| runstate::is_terminal_status(&meta.status) && meta.updated_at < before)
+            .map(|meta| meta.run_id.clone())
+            .collect(),
+    };
+
+    let mut deleted: Vec<String> = Vec::new();
+    let mut skipped = Vec::new();
+    for id in ids {
+        // A sweep selects a parent and its children independently, and naming a
+        // parent already took its children; either way the second mention is of
+        // a run this request just removed, which is a deletion rather than the
+        // "no such run" the check would report.
+        if deleted.contains(&id) {
+            continue;
+        }
+        let family = runstate::family_of(&id);
+        match deletable_family(&id, &family, force).and_then(|()| remove_family(&family)) {
+            Ok(()) => deleted.extend(family),
+            Err(reason) => skipped.push(SkippedDelete {
+                id,
+                reason: reason.to_string(),
+            }),
+        }
+    }
+    Ok(DeleteOutcome { deleted, skipped })
+}

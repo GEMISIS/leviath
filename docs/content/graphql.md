@@ -302,6 +302,23 @@ mutation { pauseAgent(runId: "coder-1788924523-abc123") { run { id status } } }
 * A run that does not take messages says that, rather than reading as missing:
   a stage can declare `accepts_messages = false`.
 
+## Deleting records
+
+```graphql
+mutation { deleteRuns(before: 1788000000) { deleted skipped { id reason } } }
+```
+
+Takes exactly one of `ids` or `before`. Neither is a client that failed to build
+its query, and both is two predicates for one act, so each is refused.
+
+Deleting a run takes its sub-agents with it: their records only mean anything
+under the run that started them. A run that is still going is skipped with its
+reason rather than removed, so read `skipped` when `deleted` is shorter than you
+expected. Partial success is the normal outcome, not a failure.
+
+Deleting a record is not editing a run, so a finished run is fair game here even
+though the lifecycle mutations refuse it.
+
 ## Answering a prompt
 
 `openInteractions` is the approval inbox: every open ask, each naming the run it

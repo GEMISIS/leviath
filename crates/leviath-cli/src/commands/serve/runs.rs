@@ -355,92 +355,6 @@ pub(super) struct DeleteRunsQuery {
     pub(super) ids: Option<String>,
 }
 
-/// Whether a run may be removed, or the reason it may not.
-///
-/// One definition for the single and bulk routes, so a run that 409s on its own
-/// cannot be silently deleted as part of a sweep.
-///
-/// `force` covers only the last case below, and only the single-run route ever
-/// passes it.
-fn deletable(id: &str, force: bool) -> Result<(), (StatusCode, String)> {
-    let dir = runstate::run_dir(id);
-    if !dir.exists() {
-        return Err((StatusCode::NOT_FOUND, format!("Run '{id}' not found")));
-    }
-    // Judged from the run's own record, not by asking the daemon: a daemon that
-    // is down must not make every run undeletable.
-    match runstate::read_meta(id) {
-        Ok(meta) if runstate::is_terminal_status(&meta.status) => Ok(()),
-        Ok(meta) => Err((
-            StatusCode::CONFLICT,
-            format!(
-                "Run '{id}' is {}; cancel it before deleting it",
-                meta.status
-            ),
-        )),
-        // A run whose `meta.json` will not parse says nothing about whether it
-        // is finished, and "cannot read it" must not quietly read as "finished".
-        // An unparseable record is what a *live* run looks like to a binary
-        // whose `RunMeta` has moved on, and the failure mode there is deleting a
-        // running agent's directory and answering 204 - which is precisely what
-        // this route refuses to do for a run it *can* see is live.
-        //
-        // Such a run is still skipped by `list_runs`, which would leave it both
-        // invisible and permanent, so the escape hatch stays - as something the
-        // caller types rather than something that happens to them.
-        Err(_) if force => Ok(()),
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            format!(
-                "Run '{id}' has no readable record ({e}), so it cannot be shown \
-                 to be finished; pass force=true to delete it anyway"
-            ),
-        )),
-    }
-}
-
-/// Remove a run's directory, having already decided it may go.
-fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
-    runstate::forget_provider_files(id);
-    std::fs::remove_dir_all(runstate::run_dir(id)).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to delete run '{id}': {e}"),
-        )
-    })
-}
-
-/// Whether every member of `ids` may go, or the reason one of them may not.
-///
-/// A live sub-agent blocks the whole delete rather than being skipped: half a
-/// tree is not a state anything downstream knows how to read, and removing the
-/// parent of a running agent is exactly what [`deletable`] refuses to do for
-/// the run named directly. The reason names the sub-agent, because "cancel it
-/// before deleting it" about a run the caller never mentioned is unactionable.
-fn deletable_family(root: &str, ids: &[String], force: bool) -> Result<(), (StatusCode, String)> {
-    for id in ids {
-        deletable(id, force).map_err(|(code, msg)| {
-            if id == root {
-                (code, msg)
-            } else {
-                (
-                    code,
-                    format!("{msg}. It is a sub-agent run of '{root}', deleted with it"),
-                )
-            }
-        })?;
-    }
-    Ok(())
-}
-
-/// Remove every run in `ids`, stopping at the first failure.
-fn remove_family(ids: &[String]) -> Result<(), (StatusCode, String)> {
-    for id in ids {
-        remove_run(id)?;
-    }
-    Ok(())
-}
-
 /// `DELETE /api/runs/{id}`: remove a finished run's record from disk.
 ///
 /// Separate from `DELETE /api/agents/{id}`, which cancels. The two verbs mean
@@ -472,9 +386,9 @@ pub(super) async fn delete_run(
     // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
     // attempt arrives here as an ordinary miss rather than a removed directory.
     let ids = runstate::family_of(&id);
-    deletable_family(&id, &ids, query.force.unwrap_or(false))
-        .map_err(|(code, msg)| err(code, msg))?;
-    remove_family(&ids).map_err(|(code, msg)| err(code, msg))?;
+    run_core::deletable_family(&id, &ids, query.force.unwrap_or(false))
+        .map_err(|e| as_api_error(&e))?;
+    run_core::remove_family(&ids).map_err(|e| as_api_error(&e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -499,58 +413,30 @@ pub(super) async fn delete_runs(
     State(state): State<AppState>,
     Query(query): Query<DeleteRunsQuery>,
 ) -> Result<Json<DeleteRunsResp>, ApiError> {
-    let targets: Vec<String> = match (&query.ids, query.before) {
-        (Some(ids), _) => {
-            let ids = comma_list(ids);
-            if ids.len() > MAX_IDS {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "`ids` names {} runs; at most {MAX_IDS} may be deleted at once",
-                        ids.len()
-                    ),
-                ));
-            }
-            ids
-        }
-        // Scoped to terminal runs at selection time as well as in `deletable`,
-        // so a sweep does not report every live run on the machine as skipped.
-        (None, Some(before)) => state
-            .caches
-            .run_index
-            .snapshot()
-            .await
-            .into_runs()
-            .into_iter()
-            .filter(|m| runstate::is_terminal_status(&m.status) && m.updated_at < before)
-            .map(|m| m.run_id.clone())
-            .collect(),
+    let targets = match (&query.ids, query.before) {
+        (Some(ids), _) => run_core::DeleteTargets::Ids(comma_list(ids)),
+        (None, Some(before)) => run_core::DeleteTargets::Before(before),
         (None, None) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
+            return Err(as_api_error(&ServeError::BadRequest(
                 "a bulk delete needs `before` or `ids`; refusing to delete every run".to_string(),
-            ));
+            )));
         }
     };
-
-    let mut deleted: Vec<String> = Vec::new();
-    let mut skipped = Vec::new();
-    for id in targets {
-        // A sweep by `before` selects a parent and its children independently,
-        // and naming a parent already took its children; either way the second
-        // mention is of a run this request has just removed, which is a
-        // deletion rather than the 404 `deletable` would report.
-        if deleted.contains(&id) {
-            continue;
-        }
-        let ids = runstate::family_of(&id);
-        // Never forced. A sweep names runs by a predicate rather than one at a
-        // time, so an unreadable record inside it is far likelier to be
-        // collateral than the thing the operator meant to clear.
-        match deletable_family(&id, &ids, false).and_then(|()| remove_family(&ids)) {
-            Ok(()) => deleted.extend(ids),
-            Err((_, reason)) => skipped.push(SkippedRun { id, reason }),
-        }
-    }
-    Ok(Json(DeleteRunsResp { deleted, skipped }))
+    // Never forced. A sweep names runs by a predicate rather than one at a
+    // time, so an unreadable record inside it is far likelier to be collateral
+    // than the thing the operator meant to clear.
+    let outcome = run_core::delete(&state, targets, false)
+        .await
+        .map_err(|e| as_api_error(&e))?;
+    Ok(Json(DeleteRunsResp {
+        deleted: outcome.deleted,
+        skipped: outcome
+            .skipped
+            .into_iter()
+            .map(|skipped| SkippedRun {
+                id: skipped.id,
+                reason: skipped.reason,
+            })
+            .collect(),
+    }))
 }
