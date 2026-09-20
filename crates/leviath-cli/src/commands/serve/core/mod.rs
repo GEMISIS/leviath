@@ -15,6 +15,7 @@
 pub(super) mod blueprints;
 pub(super) mod config;
 pub(super) mod error;
+pub(super) mod executions;
 pub(super) mod export;
 pub(super) mod files;
 pub(super) mod history;

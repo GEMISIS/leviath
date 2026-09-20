@@ -661,11 +661,13 @@ pub fn apply_delta(base: &mut ContextSnapshot, delta: &ContextDelta) {
 }
 
 mod codec;
+mod executions;
 
 pub use codec::{
-    Frame, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
+    Frame, Frames, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
     read_archive_start, read_frame, read_record, write_archive_start, write_record,
 };
+pub use executions::{Execution, read_archive_executions, read_result_at};
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 

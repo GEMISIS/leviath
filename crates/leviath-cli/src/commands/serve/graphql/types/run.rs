@@ -704,6 +704,20 @@ impl Run {
         }
     }
 
+    /// What this run did: every attempt at every tool call, in order, paged.
+    ///
+    /// Read from the run's journal, so it holds the attempts a context window no
+    /// longer shows: a call a gate refused, one that failed and was reissued, one
+    /// a restart cut off. Results are not on the page; each execution fetches its
+    /// own, because one result can be a whole file.
+    async fn executions(
+        &self,
+        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<super::execution::ToolExecutionConnection> {
+        super::execution::page(self.meta.run_id.clone(), first, after).await
+    }
+
     /// How this run's context window changed over the run, paged.
     ///
     /// Each point carries a whole window, so this is paged harder than the run

@@ -115,7 +115,10 @@ impl ScalarType for Cursor {
 }
 
 /// Arbitrary JSON. The schema description is on the impl below.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Deserializes so it can sit inside a recorded tool call's arguments, where a
+/// tool's own schema leaves part of the shape to whoever wrote the blueprint.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct Json(pub(crate) serde_json::Value);
 
 /// Arbitrary JSON, for the few places where the shape is the caller's rather
