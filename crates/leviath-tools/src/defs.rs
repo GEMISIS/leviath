@@ -52,7 +52,8 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "environment_info",
     "which_command",
     "runtime_info",
-    "install_tool",
+    "install_global_tool",
+    "install_self_tool",
     crate::SUBMIT_OUTPUT_TOOL,
     crate::FAN_OUT_TOOL,
 ];
@@ -675,8 +676,30 @@ impl BuiltinTools {
                 }),
             },
             Tool {
-                name: "install_tool".to_string(),
-                description: "Compile a Rhai tool script and install it into the global tools directory so every future agent run can call it. Refuses a script that does not compile, lacks `// @tool <name>` or `// @description`, or collides with an existing tool name. Use for repeatable mechanical steps, never for judgement.".to_string(),
+                name: "install_self_tool".to_string(),
+                description: "Compile a Rhai tool script and install it into this agent's own tools directory, so this agent's future runs can call it and no other agent sees it. Prefer this over install_global_tool: what you learned is usually about your own job. Refuses a script that does not compile, lacks `// @tool <name>` or `// @description`, or collides with an existing tool name. Use for repeatable mechanical steps, never for judgement.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The tool's name. Must equal the script's `// @tool` directive and be a plain file stem: letters, digits, '.', '_' or '-' only"
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "The complete .rhai source, starting with `// @tool <name>` and `// @description <text>`, then `// @param <name> <type> <required|optional> \"<description>\"` per parameter and an optional `// @requires <network|shell|filesystem>`. Arguments arrive in `params`; the script's value is the tool result"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Replace an existing script of the same name (default false)"
+                        }
+                    },
+                    "required": ["name", "source"]
+                }),
+            },
+            Tool {
+                name: "install_global_tool".to_string(),
+                description: "Compile a Rhai tool script and install it into the machine-wide tools directory, so every agent on this machine that asks for script tools can call it. Use install_self_tool instead unless the tool is genuinely useful to agents other than this one. Refuses a script that does not compile, lacks `// @tool <name>` or `// @description`, or collides with an existing tool name. Use for repeatable mechanical steps, never for judgement.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

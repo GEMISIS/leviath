@@ -250,10 +250,12 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         // *values*: a credential-shaped name comes back listed, not read.
         "current_time" | "system_info" | "locale_info" | "environment_info" | "which_command"
         | "runtime_info" => ToolPolicy::Allow,
-        // `install_tool` is listed rather than left to the fall-through because
+        // The installers are listed rather than left to the fall-through because
         // it is the persistence primitive: an unprompted install puts
         // model-authored code in front of every future run on this machine.
-        "write_file" | "edit_file" | "shell" | "install_tool" => ToolPolicy::Ask,
+        "write_file" | "edit_file" | "shell" | "install_self_tool" | "install_global_tool" => {
+            ToolPolicy::Ask
+        }
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
         //
@@ -631,7 +633,7 @@ pub(crate) fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Valu
         // the free-space probe (which looks at the workdir's volume) is an
         // approximation when the two are on different disks. The byte ceiling
         // is exact either way.
-        "install_tool" => "source",
+        "install_self_tool" | "install_global_tool" => "source",
         _ => return None,
     };
     arguments

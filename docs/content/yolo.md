@@ -50,7 +50,7 @@ gate        = "auto"    # ask | auto: taint-gate prompts, where taint tracking i
 
 [careful.tools]
 allow = ["@builtin"]
-ask   = ["web_fetch", "install_tool"]
+ask   = ["web_fetch", "install_global_tool"]
 deny  = []
 
 [[careful.shell.allow]]

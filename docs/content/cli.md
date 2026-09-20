@@ -325,7 +325,7 @@ prompt rather than being denied. The shell arrives with `@builtin` as surely as 
 grant with no `shell` policy is reported too.
 
 **`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
-`write_file`, `edit_file`, `install_tool`) silences `implicit-shell-policy`. A downloaded blueprint
+`write_file`, `edit_file`, `install_global_tool`) silences `implicit-shell-policy`. A downloaded blueprint
 is not allowed to grant itself write or shell access. The runtime clamps the policy back to the
 stricter of it and the built-in default, so the tool still asks. The line looks like a
 decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions

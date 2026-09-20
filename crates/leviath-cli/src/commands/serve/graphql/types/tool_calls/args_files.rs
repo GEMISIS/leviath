@@ -68,9 +68,24 @@ pub(crate) struct WhichCommandArgs {
     pub(crate) command: String,
 }
 
-/// Arguments for the `install_tool` tool.
+/// Arguments for `install_self_tool`, which writes into the blueprint's own
+/// `tools/` directory.
 #[derive(Debug, Deserialize, SimpleObject)]
-pub(crate) struct InstallToolArgs {
+pub(crate) struct InstallSelfToolArgs {
+    /// The tool's name, which must match the script's own `@tool` directive.
+    pub(crate) name: String,
+    /// The whole Rhai source of the script.
+    pub(crate) source: String,
+    /// Replace a script of the same name. Left out means no.
+    #[serde(default)]
+    pub(crate) overwrite: Option<bool>,
+}
+
+/// Arguments for `install_global_tool`, which writes into the machine-wide
+/// tools directory. The same three arguments; what differs is who sees the
+/// result.
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct InstallGlobalToolArgs {
     /// The tool's name, which must match the script's own `@tool` directive.
     pub(crate) name: String,
     /// The whole Rhai source of the script.

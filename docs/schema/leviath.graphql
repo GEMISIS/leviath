@@ -2490,6 +2490,49 @@ type InstallCommand {
 }
 
 """
+Arguments for `install_global_tool`, which writes into the machine-wide
+tools directory. The same three arguments; what differs is who sees the
+result.
+"""
+type InstallGlobalToolArgs {
+	"""
+	The tool's name, which must match the script's own `@tool` directive.
+	"""
+	name: String!
+	"""
+	The whole Rhai source of the script.
+	"""
+	source: String!
+	"""
+	Replace a script of the same name. Left out means no.
+	"""
+	overwrite: Boolean
+}
+
+"""
+One `install_global_tool` call.
+"""
+type InstallGlobalToolCall implements ToolCall {
+	"""
+	Tool name, exactly as the model called it.
+	"""
+	toolName: String!
+	"""
+	What the tool does, as this build describes it.
+	"""
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"""
+	The call's arguments.
+	"""
+	args: InstallGlobalToolArgs!
+}
+
+"""
 How this copy of Leviath was installed, which decides how it upgrades.
 """
 enum InstallMethod {
@@ -2517,9 +2560,10 @@ enum InstallMethod {
 }
 
 """
-Arguments for the `install_tool` tool.
+Arguments for `install_self_tool`, which writes into the blueprint's own
+`tools/` directory.
 """
-type InstallToolArgs {
+type InstallSelfToolArgs {
 	"""
 	The tool's name, which must match the script's own `@tool` directive.
 	"""
@@ -2535,9 +2579,9 @@ type InstallToolArgs {
 }
 
 """
-One `install_tool` call.
+One `install_self_tool` call.
 """
-type InstallToolCall implements ToolCall {
+type InstallSelfToolCall implements ToolCall {
 	"""
 	Tool name, exactly as the model called it.
 	"""
@@ -2554,7 +2598,7 @@ type InstallToolCall implements ToolCall {
 	"""
 	The call's arguments.
 	"""
-	args: InstallToolArgs!
+	args: InstallSelfToolArgs!
 }
 
 """
