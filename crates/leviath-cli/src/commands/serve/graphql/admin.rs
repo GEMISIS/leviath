@@ -384,10 +384,7 @@ impl AdminMutation {
     ) -> async_graphql::Result<McpLoginStatus> {
         let state = ctx.data_unchecked::<AppState>();
         let status = super::super::mcp::signed_in(state, &name).await.gql()?;
-        Ok(match status {
-            super::super::mcp::LoginStatus::Authenticated => McpLoginStatus::Authenticated,
-            super::super::mcp::LoginStatus::NotRequired => McpLoginStatus::NotRequired,
-        })
+        Ok(McpLoginStatus::from(status))
     }
 
     /// Ask an OpenAI-compatible endpoint what models it serves.
@@ -543,4 +540,15 @@ pub(crate) enum McpLoginStatus {
     /// The server wants no OAuth, so there was nothing to store. A success: the
     /// question was whether a sign-in was needed.
     NotRequired,
+}
+impl From<super::super::mcp::LoginStatus> for McpLoginStatus {
+    /// Its own impl rather than a match inside the resolver: reaching that
+    /// resolver means completing an OAuth handshake against a real server, and
+    /// the mapping is worth checking without one.
+    fn from(status: super::super::mcp::LoginStatus) -> Self {
+        match status {
+            super::super::mcp::LoginStatus::Authenticated => Self::Authenticated,
+            super::super::mcp::LoginStatus::NotRequired => Self::NotRequired,
+        }
+    }
 }

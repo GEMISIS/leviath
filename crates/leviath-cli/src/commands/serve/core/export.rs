@@ -105,7 +105,11 @@ impl Exports {
     }
 
     /// Update one job in place.
-    fn update(&self, id: &str, edit: impl FnOnce(&mut ExportJob)) {
+    ///
+    /// The edit is a trait object rather than a type parameter: a generic here is
+    /// compiled once per call site, and no single copy sees both a job that is
+    /// still listed and one the reaper has taken.
+    fn update(&self, id: &str, edit: &mut dyn FnMut(&mut ExportJob)) {
         if let Some(job) = leviath_core::sync::lock(&self.jobs).get_mut(id) {
             edit(job);
         }
@@ -205,13 +209,15 @@ pub(crate) async fn start(
     // buffered file, and doing it on the async runtime would hold a worker for
     // as long as the store is large.
     tokio::task::spawn_blocking(move || {
-        exports.update(&id, |job| job.status = ExportStatus::Running);
+        exports.update(&id, &mut |job: &mut ExportJob| {
+            job.status = ExportStatus::Running
+        });
         match write_file(&path, &rows) {
-            Ok(written) => exports.update(&id, |job| {
+            Ok(written) => exports.update(&id, &mut |job: &mut ExportJob| {
                 job.status = ExportStatus::Complete;
                 job.written = written;
             }),
-            Err(e) => exports.update(&id, |job| {
+            Err(e) => exports.update(&id, &mut |job: &mut ExportJob| {
                 job.status = ExportStatus::Failed;
                 job.error = Some(e.to_string());
             }),
@@ -224,7 +230,7 @@ pub(crate) async fn start(
 /// Write the rows to a file as JSONL.
 fn write_file(path: &std::path::Path, rows: &[serde_json::Value]) -> std::io::Result<usize> {
     let file = std::fs::File::create(path)?;
-    write_rows(std::io::BufWriter::new(file), rows)
+    write_rows(&mut std::io::BufWriter::new(file), rows)
 }
 
 /// Write the rows as JSONL, one run per line.
@@ -233,9 +239,13 @@ fn write_file(path: &std::path::Path, rows: &[serde_json::Value]) -> std::io::Re
 /// and a reader can start on it before the writer has finished. Taking the
 /// writer rather than opening one is what makes a failed write testable, which
 /// matters because a client only ever learns about it from the job.
-fn write_rows(mut out: impl Write, rows: &[serde_json::Value]) -> std::io::Result<usize> {
+///
+/// A trait object rather than a type parameter: a generic here is compiled once
+/// per writer, and the real file never fails where the test doubles only fail,
+/// so no copy would ever walk every arm.
+fn write_rows(out: &mut dyn Write, rows: &[serde_json::Value]) -> std::io::Result<usize> {
     for row in rows {
-        serde_json::to_writer(&mut out, row)?;
+        serde_json::to_writer(&mut *out, row)?;
         out.write_all(b"\n")?;
     }
     out.flush()?;
@@ -266,12 +276,15 @@ pub(crate) fn test_job_with(
 ) -> String {
     let now = leviath_core::duration::now_secs();
     let job = state.caches.exports.enqueue(now);
-    state.caches.exports.update(&job.id, |job| {
-        job.status = status;
-        if status == ExportStatus::Failed {
-            job.error = reason.map(str::to_string);
-        }
-    });
+    state
+        .caches
+        .exports
+        .update(&job.id, &mut |job: &mut ExportJob| {
+            job.status = status;
+            if status == ExportStatus::Failed {
+                job.error = reason.map(str::to_string);
+            }
+        });
     if status == ExportStatus::Complete {
         std::fs::create_dir_all(exports_dir()).expect("the exports directory");
         std::fs::write(export_path(&job.id), contents).expect("the export's file");

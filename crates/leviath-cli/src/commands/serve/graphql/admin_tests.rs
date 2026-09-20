@@ -11,6 +11,19 @@ use super::{MimeRowInput, MimeTokensInput};
 use crate::commands::serve::graphql::mutation::Mutation;
 use crate::commands::serve::graphql::query::Query;
 
+/// The `extensions.code` of a refusal, as the schema sends it.
+fn refusal_code(answer: &async_graphql::Response) -> String {
+    answer
+        .errors
+        .first()
+        .expect("a refusal")
+        .extensions
+        .as_ref()
+        .and_then(|e| e.get("code"))
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}
+
 /// A schema built for a server with or without the flag.
 fn schema(allow_admin: bool) -> Schema<Query, Mutation, EmptySubscription> {
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
@@ -1628,4 +1641,116 @@ fn an_input_object_refuses_what_it_cannot_read() {
         .is_err(),
         "the gateways to remove are a list"
     );
+}
+
+/// A second live doctor run is refused while one is going.
+///
+/// Two of them would race two throwaway runs and four billed calls against one
+/// config, and a double-clicked button means one check. The refusal is a conflict
+/// rather than a failure: the caller's request was fine, the timing was not.
+#[tokio::test]
+async fn a_second_live_doctor_run_is_a_conflict() {
+    let _running = crate::commands::serve::doctor::hold_live_run().await;
+    let answer = schema(true)
+        .execute(Request::new(
+            "mutation { runDoctorLive { checks { name } } }",
+        ))
+        .await;
+    let error = answer.errors.first().expect("a refusal");
+    assert_eq!(refusal_code(&answer), "\"CONFLICT\"");
+    assert!(
+        error.message.contains("already in progress"),
+        "{}",
+        error.message
+    );
+}
+
+/// A sign-out whose grant store cannot be written says so.
+///
+/// The store is a file this server rewrites, and a caller that was told the
+/// sign-out worked would go on believing the provider is forgotten while the
+/// grant is still on disk.
+#[tokio::test]
+async fn a_sign_out_that_cannot_write_the_store_is_reported() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        // A directory where the grants file belongs: it exists, so the write is
+        // attempted, and it cannot be a file.
+        let grants = home.join("grants.json");
+        std::fs::create_dir_all(&grants).expect("a directory in the way");
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants,
+        };
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let answer = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { providerSignOut(provider: "codex") }"#,
+                    ))
+                    .await;
+                assert_eq!(refusal_code(&answer), "\"INTERNAL\"");
+            })
+            .await;
+    })
+    .await;
+}
+
+/// Both answers a sign-in question can have.
+///
+/// Neither is a failure: one says a grant was stored, the other says the server
+/// wanted none. A client that read the second as an error would show a red mark
+/// against a server that is working.
+#[test]
+fn both_mcp_login_answers_map_across() {
+    use crate::commands::serve::mcp::LoginStatus;
+    assert_eq!(
+        super::McpLoginStatus::from(LoginStatus::Authenticated),
+        super::McpLoginStatus::Authenticated
+    );
+    assert_eq!(
+        super::McpLoginStatus::from(LoginStatus::NotRequired),
+        super::McpLoginStatus::NotRequired
+    );
+}
+
+/// A sign-in that cannot take its loopback port is reported, not left waiting.
+///
+/// The flow binds the port its client id is registered against before it has a
+/// URL to announce, so a port already taken is the failure that happens before
+/// any browser is involved. The caller is told; it does not sit waiting for a URL
+/// that is never coming.
+#[tokio::test]
+async fn a_sign_in_that_cannot_take_its_port_is_reported() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        // Held for the whole test: this is the port the flow will ask for.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a port to hold");
+        let taken = held.local_addr().expect("its number").port();
+
+        let mut state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+        state.providers.ports = Some(vec![taken]);
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .data(super::AdminAccess(true))
+            .finish();
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants: home.join("grants.json"),
+        };
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let answer = schema
+                    .execute(Request::new(
+                        r#"mutation { providerSignIn(provider: "codex") { authorizeUrl } }"#,
+                    ))
+                    .await;
+                assert!(
+                    !answer.errors.is_empty(),
+                    "a port already taken cannot carry a sign-in"
+                );
+            })
+            .await;
+    })
+    .await;
 }

@@ -50,6 +50,15 @@ pub(super) async fn offline_report() -> DoctorResp {
 /// means one check.
 static LIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Hold the live-doctor lock, so a test can ask what a second run answers.
+///
+/// The refusal is the whole point of the lock, and it cannot be provoked by
+/// calling twice: the first call finishes before the second starts.
+#[cfg(test)]
+pub(super) async fn hold_live_run() -> tokio::sync::MutexGuard<'static, ()> {
+    LIVE.lock().await
+}
+
 /// `POST /api/doctor/live`: the whole chain, billed calls included. Admin only.
 ///
 /// Live-call behavior is `lev doctor`'s own, bounded by its own deadlines:
