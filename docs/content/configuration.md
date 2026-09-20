@@ -758,7 +758,7 @@ image          = "debian:bookworm-slim"
 engine         = "docker"      # docker | podman | nerdctl | finch; auto-detected when unset
 network        = true
 mounts         = ["/opt/toolchain:ro"]
-persist        = false
+keep_warm      = false         # keep one container warm across the stages of a run
 on_unavailable = "error"       # error | warn
 ```
 

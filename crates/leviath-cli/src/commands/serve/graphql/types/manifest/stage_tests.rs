@@ -144,7 +144,7 @@ request_timeout_secs = 300
 
 [stages.plan.tool_routing]
 default_region = "notes"
-persist = false
+keep_results = false
 max_result_tokens = 4000
 overrides = { shell = "env" }
 max_result_tokens_per_tool = { read_file = 2000 }
@@ -285,7 +285,7 @@ async fn a_stage_carries_what_its_tools_may_do() {
              toolAccepts { tool patterns }
              outputRouting { pattern region }
              toolRouting {
-               defaultRegion persist maxResultTokens
+               defaultRegion keepResults maxResultTokens
                overrides { tool region }
                maxResultTokensPerTool { tool maxResultTokens }
              }
@@ -304,7 +304,7 @@ async fn a_stage_carries_what_its_tools_may_do() {
     assert_eq!(stage["outputRouting"][0]["region"], "notes");
     let routing = &stage["toolRouting"];
     assert_eq!(routing["defaultRegion"], "notes");
-    assert_eq!(routing["persist"], false);
+    assert_eq!(routing["keepResults"], false);
     assert_eq!(routing["maxResultTokens"], 4000);
     assert_eq!(routing["overrides"][0]["tool"], "shell");
     assert_eq!(routing["maxResultTokensPerTool"][0]["tool"], "read_file");
@@ -419,7 +419,7 @@ async fn declared_and_effective_settings_are_both_answered() {
              effective {
                includesBatchHint shellHintEligible tracksTaint
                nudge { nudges max text }
-               sandbox { kind image network mounts persist onUnavailable }
+               sandbox { kind image network mounts keepWarm onUnavailable }
              }
            } }"#)
     .await;

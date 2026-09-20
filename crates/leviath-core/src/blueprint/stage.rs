@@ -63,8 +63,12 @@ pub struct ToolResultRouting {
     pub default_region: String,
     /// Per-tool overrides: tool_name → region_name
     pub tool_overrides: HashMap<String, String>,
-    /// Whether to keep tool results (true) or discard after use (false)
-    pub persist: bool,
+    /// Whether a tool's result stays in the region it was routed to (true), or
+    /// goes to `scratch` instead (false), where the stage can drop it.
+    ///
+    /// Written `persist` before it was renamed; both spellings parse.
+    #[serde(alias = "persist")]
+    pub keep_results: bool,
     /// Max tokens per tool result (truncate if larger)
     pub max_result_tokens: Option<usize>,
     /// Per-tool ceilings, by canonical tool name, overriding
@@ -84,7 +88,7 @@ impl Default for ToolResultRouting {
         Self {
             default_region: "tool_results".to_string(),
             tool_overrides: HashMap::new(),
-            persist: true,
+            keep_results: true,
             max_result_tokens: None,
             tool_max_result_tokens: HashMap::new(),
         }

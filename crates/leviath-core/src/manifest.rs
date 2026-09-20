@@ -194,6 +194,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
 mod model;
 mod read;
 mod regions;
+pub mod renamed;
 mod sections;
 mod stage;
 

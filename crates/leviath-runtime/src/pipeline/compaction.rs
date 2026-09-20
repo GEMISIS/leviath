@@ -367,10 +367,7 @@ pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
         leviath_core::RegionKind::Pinned
             | leviath_core::RegionKind::CompactHistory { .. }
             | leviath_core::RegionKind::HashMap { .. }
-            | leviath_core::RegionKind::Custom {
-                persistent: true,
-                ..
-            }
+            | leviath_core::RegionKind::Custom { pinned: true, .. }
     )
 }
 

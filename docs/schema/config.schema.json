@@ -19,6 +19,11 @@
       "type": "string",
       "description": "The model a stage falls back to when none of the models it names is configured here, tried after all of them and before [providers] fallback_order: a bare model id on default_provider. Never moves a stage off a model its blueprint names."
     },
+    "default_model": {
+      "type": "string",
+      "deprecated": true,
+      "description": "Renamed to `fallback_model`, which is what it loads as. Still read, and rewritten by `lev update`."
+    },
     "agent_paths": {
       "type": "array",
       "description": "Extra directories to scan for blueprints. Read by `lev list` and the serve API, but not by `lev run <name>`, which resolves installed names and paths only.",
@@ -623,8 +628,14 @@
             "type": "string"
           }
         },
+        "keep_warm": {
+          "type": "boolean",
+          "description": "Keep one container warm across the run's stages instead of building one per call. It is torn down when the run ends."
+        },
         "persist": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Renamed to `keep_warm`. Still read, and rewritten by `lev update`."
         },
         "on_unavailable": {
           "enum": [

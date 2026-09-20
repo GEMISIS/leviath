@@ -461,7 +461,7 @@ fn parse_manifest_custom_region_kind() {
 name = "custom-region-test"
 
 [context.regions]
-brain = { kind = "custom", script = "context_hooks/brain.rhai", persistent = true, max_tokens = 5000 }
+brain = { kind = "custom", script = "context_hooks/brain.rhai", pinned = true, max_tokens = 5000 }
 scratch = { kind = "custom", script = "context_hooks/scratch.rhai", max_tokens = 2000 }
 "#;
     let bp = parse_manifest(toml).unwrap();
@@ -475,10 +475,10 @@ scratch = { kind = "custom", script = "context_hooks/scratch.rhai", max_tokens =
         brain.kind,
         RegionKind::Custom {
             script: "context_hooks/brain.rhai".to_string(),
-            persistent: true,
+            pinned: true,
         }
     );
-    // persistent defaults to false when omitted.
+    // pinned defaults to false when omitted.
     let scratch = bp
         .context_layout
         .regions
@@ -489,7 +489,7 @@ scratch = { kind = "custom", script = "context_hooks/scratch.rhai", max_tokens =
         scratch.kind,
         RegionKind::Custom {
             script: "context_hooks/scratch.rhai".to_string(),
-            persistent: false,
+            pinned: false,
         }
     );
 }
@@ -583,7 +583,7 @@ condition = "always"
     let layout = plan.context_layout.as_ref().unwrap();
     assert!(layout.regions.iter().any(|r| matches!(
         &r.kind,
-        RegionKind::Custom { script, persistent: false } if script == "hooks/plan.rhai"
+        RegionKind::Custom { script, pinned: false } if script == "hooks/plan.rhai"
     )));
     // Sibling stage inherits the global layout (no per-stage override).
     let implement = bp.stages.iter().find(|s| s.name == "implement").unwrap();
@@ -3947,7 +3947,7 @@ mode = "autonomous"
 
 [stages.main.tool_routing]
 default_region = "my_results"
-persist = true
+keep_results = true
 max_result_tokens = 4096
 
 [stages.main.tool_routing.overrides]
@@ -3961,7 +3961,7 @@ read_file = "file_contents"
         .as_ref()
         .expect("tool_result_routing should be Some");
     assert_eq!(routing.default_region, "my_results");
-    assert!(routing.persist);
+    assert!(routing.keep_results);
     assert_eq!(routing.max_result_tokens, Some(4096));
     assert_eq!(routing.tool_overrides.len(), 2);
     assert_eq!(routing.tool_overrides.get("bash").unwrap(), "bash_output");
@@ -3991,7 +3991,7 @@ default_region = "custom_region"
         .expect("tool_result_routing should be Some");
     assert_eq!(routing.default_region, "custom_region");
     // defaults from ToolResultRouting::default()
-    assert!(routing.persist);
+    assert!(routing.keep_results);
     assert!(routing.max_result_tokens.is_none());
     assert!(routing.tool_overrides.is_empty());
 }
@@ -4282,16 +4282,16 @@ compile = "build_output"
 }
 
 #[test]
-fn parse_stage_tool_routing_persist_false() {
+fn parse_stage_tool_routing_keep_results_false() {
     let toml = r#"
 [agent]
-name = "persist-false"
+name = "keep-results-false"
 
 [stages.main]
 mode = "autonomous"
 
 [stages.main.tool_routing]
-persist = false
+keep_results = false
 "#;
     let bp = parse_manifest(toml).unwrap();
     let main = bp.find_stage("main").unwrap();
@@ -4299,7 +4299,7 @@ persist = false
         .tool_result_routing
         .as_ref()
         .expect("tool_result_routing should be Some");
-    assert!(!routing.persist);
+    assert!(!routing.keep_results);
     // other fields keep defaults
     assert_eq!(routing.default_region, "tool_results");
     assert!(routing.max_result_tokens.is_none());
@@ -4327,7 +4327,7 @@ max_result_tokens = 8192
     assert_eq!(routing.max_result_tokens, Some(8192));
     // other fields keep defaults
     assert_eq!(routing.default_region, "tool_results");
-    assert!(routing.persist);
+    assert!(routing.keep_results);
     assert!(routing.tool_overrides.is_empty());
 }
 
@@ -4457,7 +4457,7 @@ image = "node:22-slim"
 engine = "podman"
 network = false
 mount = ["/data", "/cache"]
-persist = true
+keep_warm = true
 on_unavailable = "warn"
 "#;
     let bp = parse_manifest(toml).unwrap();
@@ -4473,7 +4473,7 @@ on_unavailable = "warn"
     assert_eq!(sb.engine.as_deref(), Some("podman"));
     assert!(!sb.network);
     assert_eq!(sb.mounts, vec!["/data".to_string(), "/cache".to_string()]);
-    assert!(sb.persist);
+    assert!(sb.keep_warm);
     assert_eq!(sb.on_unavailable, crate::OnUnavailable::Warn);
 }
 
@@ -6773,4 +6773,83 @@ fn empty_kind_fields_fail_validate() {
         let err = bp.validate().unwrap_err().to_string();
         assert!(err.contains(expect), "{err}");
     }
+}
+
+/// Every key that was renamed is still read under the name it used to have.
+///
+/// This is the promise the rename was made on: a blueprint written before it
+/// runs exactly as it did, and nobody has to touch a file to upgrade. The
+/// three settings are checked together because they are one promise, and
+/// because a rename added later with no parser change would leave this test
+/// passing on the two that still work.
+#[test]
+fn a_blueprint_written_before_the_renames_still_parses_the_same() {
+    let manifest = |routing: &str, sandbox: &str, region: &str| {
+        format!(
+            r#"
+[agent]
+name = "old-spelling"
+
+[sandbox]
+kind = "container"
+image = "debian:stable-slim"
+{sandbox} = true
+
+[context.regions]
+brain = {{ kind = "custom", script = "b.rhai", {region} = true }}
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+{routing} = false
+"#
+        )
+    };
+    let old = parse_manifest(&manifest("persist", "persist", "persistent")).expect("the old names");
+    let new = parse_manifest(&manifest("keep_results", "keep_warm", "pinned")).expect("the new");
+    assert_eq!(format!("{old:#?}"), format!("{new:#?}"));
+
+    // And the setting really is the one that was read, not a default that
+    // happens to match: `keep_results` defaults to true, so `false` is only
+    // there because the old key was read.
+    let routing = old
+        .find_stage("main")
+        .unwrap()
+        .tool_result_routing
+        .as_ref()
+        .expect("the stage routes tool results");
+    assert!(!routing.keep_results);
+    assert!(old.sandbox.as_ref().expect("a sandbox").keep_warm);
+}
+
+/// Written both ways, the current name wins.
+///
+/// A file part-way through a rewrite reads as the author's newer intent, and
+/// `lev validate` reports the dead line rather than the parser silently
+/// picking whichever came first.
+#[test]
+fn the_current_name_wins_over_the_old_one() {
+    let bp = parse_manifest(
+        r#"
+[agent]
+name = "both"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+persist = false
+keep_results = true
+"#,
+    )
+    .expect("both spellings at once still parse");
+    assert!(
+        bp.find_stage("main")
+            .unwrap()
+            .tool_result_routing
+            .as_ref()
+            .expect("the stage routes tool results")
+            .keep_results
+    );
 }

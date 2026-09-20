@@ -1345,6 +1345,7 @@ fn a_config_that_cannot_be_written_is_an_error() {
             method: InstallMethod::Cargo,
             binary: binary_step(&InstallMethod::Cargo),
             agents: Vec::new(),
+            rewrites: Vec::new(),
             migrations: SAMPLE.iter().take(1).collect(),
             config: ConfigState::Loaded(Box::default()),
         };
@@ -1913,4 +1914,193 @@ fn the_applying_environment_asks_nothing_and_checks_nothing() {
         "nothing is looked up"
     );
     assert_eq!(env.migrations.len(), MIGRATIONS.len());
+}
+
+// ─── Renamed keys in the user's own blueprints ────────────────────────────────
+
+/// A blueprint of the user's own, spelling two settings the way they used to
+/// be spelled.
+const THEIR_BLUEPRINT: &str = r#"[agent]
+name = "mine"
+version = "0.1.0"
+
+[sandbox]
+kind = "container"
+persist = true   # warm between stages
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+persist = false
+"#;
+
+/// Put a blueprint of the user's own in the agents directory.
+fn install_their_blueprint(fixture: &Fixture, name: &str, text: &str) -> std::path::PathBuf {
+    let dir = fixture.dir.path().join("agents").join(name);
+    std::fs::create_dir_all(&dir).expect("the agent directory");
+    let path = dir.join("agent.leviath");
+    std::fs::write(&path, text).expect("the manifest");
+    path
+}
+
+/// The report names the blueprints and how many keys each would change,
+/// before anything is asked.
+#[test]
+fn the_report_names_the_blueprints_whose_keys_would_be_respelled() {
+    let fixture = Fixture::new();
+    install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+    let plan = plan_for(&fixture, "/opt/homebrew/bin/lev", &UpdateArgs::default());
+
+    let report = format_plan(&plan, "0.3.4");
+
+    assert!(
+        report.contains("keys     2 renamed key(s) in 1 of your own blueprint(s)"),
+        "{report}"
+    );
+    assert!(report.contains("mine - 2"), "{report}");
+}
+
+/// An install whose blueprints are all current says nothing about keys, rather
+/// than printing a heading with nothing under it.
+#[test]
+fn the_report_is_silent_when_no_key_needs_respelling() {
+    let fixture = Fixture::new();
+    install_their_blueprint(&fixture, "mine", "[sandbox]\nkeep_warm = true\n");
+    let plan = plan_for(&fixture, "/opt/homebrew/bin/lev", &UpdateArgs::default());
+
+    assert!(!format_plan(&plan, "0.3.4").contains("renamed key"));
+}
+
+/// The JSON carries the same answer, key by key, for a caller that is not
+/// reading prose.
+#[test]
+fn the_json_carries_every_key_that_would_be_respelled() {
+    let fixture = Fixture::new();
+    let path = install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+    let plan = plan_for(&fixture, "/opt/homebrew/bin/lev", &UpdateArgs::default());
+
+    let json = plan_json(&plan, "0.3.4", &latest::LatestCheck::default());
+    let rows = json["renamed_keys"].as_array().expect("an array");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "mine");
+    assert_eq!(rows[0]["path"], serde_json::json!(path));
+    let changes = rows[0]["changes"].as_array().expect("an array");
+    assert_eq!(changes.len(), 2);
+    assert!(
+        changes[0]
+            .as_str()
+            .expect("a line")
+            .contains("`[sandbox] persist` becomes `keep_warm`"),
+        "{changes:?}"
+    );
+}
+
+/// Said yes to, the file is rewritten in place and parses to the same
+/// blueprint it did before.
+#[test]
+fn a_yes_respells_the_keys_and_leaves_everything_else_alone() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let path = install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+        let env = fixture.env("/opt/homebrew/bin/lev", true, true);
+
+        execute_with(&UpdateArgs::default(), &env, "0.3.4").expect("the flow succeeds");
+
+        let after = std::fs::read_to_string(&path).expect("the manifest is still there");
+        assert!(
+            after.contains("keep_warm = true   # warm between stages"),
+            "{after}"
+        );
+        assert!(after.contains("keep_results = false"), "{after}");
+        assert!(!after.contains("persist"), "{after}");
+        let before = leviath_core::manifest::parse_manifest(THEIR_BLUEPRINT).expect("the old");
+        let now = leviath_core::manifest::parse_manifest(&after).expect("the new");
+        assert_eq!(format!("{before:#?}"), format!("{now:#?}"));
+    });
+}
+
+/// Said no to, nothing is written. The blueprint runs either way, so a
+/// refusal costs the user nothing.
+#[test]
+fn a_no_leaves_the_blueprints_exactly_as_they_were() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let path = install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+        let env = fixture.env("/opt/homebrew/bin/lev", false, true);
+
+        execute_with(&UpdateArgs::default(), &env, "0.3.4").expect("declining is not a failure");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            THEIR_BLUEPRINT
+        );
+        assert!(
+            fixture
+                .recorder
+                .asked()
+                .iter()
+                .any(|q| q == "Rewrite 1 blueprint(s)?"),
+            "{:?}",
+            fixture.recorder.asked()
+        );
+    });
+}
+
+/// `--dry-run` walks the step, prompt and all, and writes nothing.
+#[test]
+fn a_dry_run_asks_about_the_blueprints_and_writes_none_of_them() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let path = install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+        let args = UpdateArgs {
+            dry_run: true,
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let env = fixture.env("/opt/homebrew/bin/lev", true, true);
+
+        execute_with(&args, &env, "0.3.4").expect("a dry run succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            THEIR_BLUEPRINT
+        );
+    });
+}
+
+/// A manifest that cannot be written is reported and the command carries on:
+/// the blueprint still runs, so there is nothing here to stop for.
+#[test]
+fn a_manifest_that_cannot_be_written_is_a_warning_not_a_failure() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let path = install_their_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+        // A directory where the file was: every platform refuses to write it.
+        std::fs::remove_file(&path).expect("the manifest");
+        let plan = UpdatePlan {
+            method: InstallMethod::Cargo,
+            binary: binary_step(&InstallMethod::Cargo),
+            agents: Vec::new(),
+            rewrites: vec![blueprints::BlueprintRewrite {
+                path: path.parent().expect("the agent dir").to_path_buf(),
+                name: "mine".to_string(),
+                rewritten: "[sandbox]\nkeep_warm = true\n".to_string(),
+                changes: vec!["`[sandbox] persist` becomes `keep_warm`.".to_string()],
+            }],
+            migrations: Vec::new(),
+            config: ConfigState::Unreadable("no config here".to_string()),
+        };
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let env = fixture.env("/opt/homebrew/bin/lev", true, true);
+
+        // Returns nothing, so the only assertion available is that it does not
+        // panic and the directory is still a directory.
+        rewrite_blueprints(&args, &env, &plan);
+        assert!(path.parent().expect("the agent dir").is_dir());
+    });
 }

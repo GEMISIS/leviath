@@ -38,7 +38,7 @@ Only `render` is required.
 [context.regions.brain]
 kind       = "custom"
 script     = "context_hooks/brain.rhai"   # required, relative to the agent dir
-persistent = false                        # optional, default false
+pinned     = false                        # optional, default false
 budget     = "40%"                        # budgets work exactly as on built-ins
 min_tokens = 10000
 ```
@@ -46,7 +46,7 @@ min_tokens = 10000
 `script` resolves relative to the directory holding `agent.leviath`, so it travels with the agent
 through `lev add` and through bundles.
 
-`persistent` decides how the region behaves under budget pressure:
+`pinned` decides how the region behaves under budget pressure:
 
 | Value | Behaves like | What it means for your script |
 |---|---|---|
@@ -222,7 +222,7 @@ refuses it only if the whole request would overflow the model.
 
 The point of the escape hatch is that you could write the built-ins yourself, and mostly you can:
 
-- **pinned**: `persistent = true` with a render that joins entries. Exact.
+- **pinned**: `pinned = true` with a render that joins entries. Exact.
 - **temporary** and **clearable**: the defaults plus a `[name]:`-style render. Exact.
 - **sliding_window**: `on_overflow` implementing your retention window, with a render emitting
   typed messages. Exact, and the reason typed message emission exists.
@@ -243,7 +243,7 @@ parses and defines `render`.
 
 - Stage-instruction injection targets the first `pinned` region, never a custom one, and
   `[context.file_tracking]` requires a `hashmap` region.
-- The per-render cache hint is fixed by `persistent` (always, versus until-changed). `render`
+- The per-render cache hint is fixed by `pinned` (always, versus until-changed). `render`
   cannot override it per call.
 - Reordering or reshaping content between inferences can cost you provider prompt-cache hits. The
   script owns that tradeoff.

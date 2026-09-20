@@ -278,10 +278,7 @@ impl ContextLayout {
                     RegionKind::Pinned
                         | RegionKind::HashMap { .. }
                         | RegionKind::CompactHistory { .. }
-                        | RegionKind::Custom {
-                            persistent: true,
-                            ..
-                        }
+                        | RegionKind::Custom { pinned: true, .. }
                 )
             })
             .fold(0usize, |acc, r| acc.saturating_add(r.max_tokens));
@@ -962,10 +959,10 @@ mod tests {
         });
     }
 
-    fn custom_kind(script: &str, persistent: bool) -> RegionKind {
+    fn custom_kind(script: &str, pinned: bool) -> RegionKind {
         RegionKind::Custom {
             script: script.to_string(),
-            persistent,
+            pinned,
         }
     }
 
@@ -1047,7 +1044,7 @@ mod tests {
         assert_eq!(resolved.regions[0].max_tokens, 80_000);
         assert!(matches!(
             resolved.regions[0].kind,
-            RegionKind::Custom { ref script, persistent: false } if script == "b.rhai"
+            RegionKind::Custom { ref script, pinned: false } if script == "b.rhai"
         ));
         // The min floor wins on a small window.
         let small = layout.resolved(8_192);

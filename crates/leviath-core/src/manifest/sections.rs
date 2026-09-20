@@ -478,7 +478,10 @@ pub(super) const SANDBOX_KEYS: &[&str] = &[
     "mount",
     "mounts",
     "network",
+    "keep_warm",
     "on_unavailable",
+    // The name `keep_warm` used to carry. Still read, still listed, so a
+    // blueprint written before the rename is not told it has a typo.
     "persist",
 ];
 
@@ -520,8 +523,8 @@ pub(super) fn parse_sandbox_config(
     if let Some(network) = bool_of(table, "network") {
         sc.network = network;
     }
-    if let Some(persist) = bool_of(table, "persist") {
-        sc.persist = persist;
+    if let Some(keep_warm) = renamed_bool_of(table, &renamed::KEEP_WARM) {
+        sc.keep_warm = keep_warm;
     }
     // Both spellings: the published schema lists both, and `config.toml`'s own
     // `[sandbox]` table (a different parser) documents `mounts`, so a blueprint

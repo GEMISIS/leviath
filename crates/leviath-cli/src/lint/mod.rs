@@ -527,6 +527,7 @@ pub(crate) fn lint_manifest(
         );
     }
 
+    findings.extend(lint_renamed_keys(content));
     findings.extend(lint_dropped_seeds(&declared, blueprint));
     findings.extend(lint_command_seeds(blueprint));
     findings.extend(lint_tool_seeds(blueprint));
@@ -706,10 +707,12 @@ mod checks;
 mod fanout;
 mod mime;
 mod pricing;
+mod renamed;
 use checks::*;
 use fanout::*;
 use mime::*;
 use pricing::*;
+use renamed::*;
 mod security;
 use security::*;
 

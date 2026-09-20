@@ -112,6 +112,9 @@ pub(crate) struct UpdatePlan {
     pub binary: BinaryStep,
     /// Every bundled blueprint and what would happen to it.
     pub agents: Vec<(&'static BundledAgent, AgentAction)>,
+    /// Installed blueprints still spelling a key the way it used to be
+    /// spelled, and the rewrite that would fix each.
+    pub rewrites: Vec<blueprints::BlueprintRewrite>,
     /// The migrations that apply to the config as it stands.
     pub migrations: Vec<&'static Migration>,
     /// What reading the config found.
@@ -192,6 +195,7 @@ pub(crate) fn plan(args: &UpdateArgs, env: &UpdateEnv) -> UpdatePlan {
     );
     let binary = binary_step(&method);
     let agents = plan_agent_actions(&env.agents_dir);
+    let rewrites = blueprints::plan_blueprints(&env.agents_dir);
 
     // A config that will not parse is reported, not fatal: the binary step is
     // the part of this command that matters most and it does not need one.
@@ -210,6 +214,7 @@ pub(crate) fn plan(args: &UpdateArgs, env: &UpdateEnv) -> UpdatePlan {
         method,
         binary,
         agents,
+        rewrites,
         migrations,
         config,
     }
@@ -258,6 +263,21 @@ pub(crate) fn format_plan(plan: &UpdatePlan, version: &str) -> String {
                     action.label(agent.version)
                 ));
             }
+        }
+    }
+
+    if !plan.rewrites.is_empty() {
+        let keys: usize = plan.rewrites.iter().map(|r| r.changes.len()).sum();
+        out.push_str(&format!(
+            "  keys     {keys} renamed key(s) in {} of your own blueprint(s)\n",
+            plan.rewrites.len()
+        ));
+        for rewrite in &plan.rewrites {
+            out.push_str(&format!(
+                "             {} - {}\n",
+                rewrite.name,
+                rewrite.changes.len()
+            ));
         }
     }
 
@@ -314,6 +334,17 @@ pub(crate) fn plan_json(
             })
         })
         .collect();
+    let rewrites: Vec<serde_json::Value> = plan
+        .rewrites
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "path": r.path,
+                "changes": r.changes,
+            })
+        })
+        .collect();
     let migrations: Vec<serde_json::Value> = plan
         .migrations
         .iter()
@@ -332,6 +363,7 @@ pub(crate) fn plan_json(
         "checked_at": latest.checked_at,
         "binary": binary,
         "agents": agents,
+        "renamed_keys": rewrites,
         "migrations": migrations,
         "config_error": match &plan.config {
             ConfigState::Unreadable(e) => serde_json::Value::String(e.clone()),
@@ -695,6 +727,52 @@ fn update_agents(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) {
     }
 }
 
+/// Step three: renamed keys in the user's own blueprints.
+///
+/// Asked about once for the whole set, after the lines are printed, like the
+/// config migration and for the same reason: the list above is the detail, and
+/// a prompt per file is how somebody stops reading them.
+///
+/// A file that cannot be written is a warning rather than an abort. The
+/// blueprint still runs - both spellings parse - so there is nothing here
+/// worth stopping the command over, and the next `lev update` will offer
+/// again.
+fn rewrite_blueprints(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) {
+    if plan.rewrites.is_empty() {
+        println!("  your blueprints all use the current key names");
+        return;
+    }
+
+    // Seen before agreed to, always.
+    for rewrite in &plan.rewrites {
+        println!("    {}", rewrite.name);
+        for line in &rewrite.changes {
+            println!("      - {line}");
+        }
+    }
+    println!(
+        "  Both spellings are read, so nothing is broken either way - this only makes the \
+         files say what the docs say."
+    );
+
+    let n = plan.rewrites.len();
+    if !agreed(args, env, &format!("Rewrite {n} blueprint(s)?")) {
+        println!("  left your blueprints as they are");
+        return;
+    }
+    for rewrite in &plan.rewrites {
+        let path = rewrite.path.display();
+        if args.dry_run {
+            println!("  would rewrite {path}");
+            continue;
+        }
+        match std::fs::write(&rewrite.path, &rewrite.rewritten) {
+            Ok(()) => println!("  rewrote {path}"),
+            Err(e) => println!("  could not rewrite {path}: {e}"),
+        }
+    }
+}
+
 /// A fetcher that does not look anything up.
 ///
 /// Used both by the path that must not touch the network and by an install that
@@ -759,11 +837,14 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
     }
     println!("\nblueprints");
     update_agents(args, env, &plan);
+    println!("\nrenamed keys");
+    rewrite_blueprints(args, env, &plan);
     println!("\nconfig");
     migrate_config(args, env, &plan)?;
     Ok(())
 }
 
+pub(crate) mod blueprints;
 pub(crate) mod detect;
 pub(crate) mod latest;
 mod migrate;

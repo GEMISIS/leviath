@@ -20,6 +20,7 @@ fn plan_with(method: InstallMethod) -> UpdatePlan {
         method,
         binary,
         agents: Vec::new(),
+        rewrites: Vec::new(),
         migrations: Vec::new(),
         config: ConfigState::Unreadable("no config here".to_string()),
     }

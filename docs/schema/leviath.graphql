@@ -4461,9 +4461,9 @@ type Region {
 	script: String
 	"""
 	Whether a custom region is never evicted, like a pinned one, rather than
-	first out, like a temporary one.
+	first out, like a temporary one. Null for every other kind.
 	"""
-	persistent: Boolean
+	pinned: Boolean
 }
 
 """
@@ -5456,9 +5456,10 @@ type SandboxConfig {
 	"""
 	mounts: [String!]!
 	"""
-	Whether one sandbox is kept for the whole run rather than one per call.
+	Whether one container is kept warm across the run's stages rather than
+	built per call. It is still torn down when the run ends.
 	"""
-	persist: Boolean!
+	keepWarm: Boolean!
 	"""
 	What happens when it cannot be established.
 	"""
@@ -7207,9 +7208,10 @@ type ToolRouting {
 	"""
 	overrides: [ToolRouteOverride!]!
 	"""
-	Whether results stay in the context after the turn that produced them.
+	Whether a tool's result stays in the region it was routed to, rather
+	than going to `scratch` where the stage can drop it.
 	"""
-	persist: Boolean!
+	keepResults: Boolean!
 	"""
 	The most tokens any one result may take, before truncation.
 	"""

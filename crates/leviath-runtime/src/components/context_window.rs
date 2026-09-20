@@ -859,12 +859,12 @@ impl ContextWindow {
                 // hook; a missing script or any hook failure falls back to
                 // the Temporary-style block inside `render_custom_region`,
                 // so a custom region is never silently dropped.
-                leviath_core::RegionKind::Custom { script, persistent } => {
+                leviath_core::RegionKind::Custom { script, pinned } => {
                     crate::custom_region::render_custom_region(
                         crate::custom_region::RegionRender {
                             region,
                             script: self.region_scripts.get(script),
-                            persistent: *persistent,
+                            pinned: *pinned,
                             meta,
                             window_current: self.current_tokens,
                             window_max: self.max_tokens,

@@ -1205,7 +1205,7 @@ mod tests {
             "brain".to_string(),
             RegionKind::Custom {
                 script: "b.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             100,
         ));

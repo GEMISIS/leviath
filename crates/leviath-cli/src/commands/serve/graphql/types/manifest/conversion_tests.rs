@@ -355,7 +355,7 @@ fn tool_routing_carries_its_tables() {
             ("shell".to_string(), "logs".to_string()),
             ("read_file".to_string(), "files".to_string()),
         ]),
-        persist: true,
+        keep_results: true,
         max_result_tokens: Some(4_000),
         tool_max_result_tokens: std::collections::HashMap::from([
             ("shell".to_string(), 500usize),

@@ -515,8 +515,14 @@
             "default_region": {
               "type": "string"
             },
+            "keep_results": {
+              "type": "boolean",
+              "description": "Whether a tool's result stays in the region it was routed to. False sends it to `scratch` instead, where the stage can drop it."
+            },
             "persist": {
-              "type": "boolean"
+              "type": "boolean",
+              "deprecated": true,
+              "description": "Renamed to `keep_results`. Still read; `lev update` rewrites it."
             },
             "max_result_tokens": {
               "type": "integer",
@@ -831,8 +837,14 @@
           "type": "string",
           "description": "For `kind = \"custom\"`: the Rhai script under context_hooks/."
         },
+        "pinned": {
+          "type": "boolean",
+          "description": "Make a custom region behave like a pinned one: never evicted, immune to a `clear` transform, counted as fixed budget."
+        },
         "persistent": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Renamed to `pinned`. Still read; `lev update` rewrites it."
         },
         "accepts": {
           "type": "array",
@@ -1181,8 +1193,14 @@
             "type": "string"
           }
         },
+        "keep_warm": {
+          "type": "boolean",
+          "description": "Keep one container warm across the run's stages rather than building one per call. It is still torn down when the run ends."
+        },
         "persist": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Renamed to `keep_warm`. Still read; `lev update` rewrites it."
         },
         "on_unavailable": {
           "enum": [

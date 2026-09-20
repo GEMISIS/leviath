@@ -80,7 +80,7 @@ The sandbox bind-mounts the run's workdir, so sandboxed commands and host-side f
 same files.
 
 A `[sandbox]` table, at the agent or the stage level, accepts only the keys shown here (`kind`,
-`image`, `engine`, `network`, `mount` or `mounts`, `persist`, `on_unavailable`). Anything else
+`image`, `engine`, `network`, `mount` or `mounts`, `keep_warm`, `on_unavailable`). Anything else
 fails the load and the error names it, so a misspelled `netwrok = false` cannot leave the sandbox
 looser than the file reads.
 

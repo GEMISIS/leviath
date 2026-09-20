@@ -123,8 +123,8 @@ pub const MIGRATIONS: &[Migration] = &[
                 .map(|r| {
                     format!(
                         "`{old} = {value}` becomes `{new} = {value}`. {note}",
-                        old = r.key.old,
-                        new = r.key.new,
+                        old = r.key.old_path(),
+                        new = r.key.new_path(),
                         value = r.value,
                         note = r.key.note,
                     )
