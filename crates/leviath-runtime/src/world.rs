@@ -481,8 +481,9 @@ impl PipelineWorld {
                 // calls, so a hook can narrow what runs and never widen it.
                 // The rescan is ahead of both: dispatch refuses a call the
                 // advertised set does not offer, so an agent that asked to look
-                // again before each batch has to be looked at here or the tool
-                // it just wrote is refused for another turn.
+                // again before each batch has to be looked at here, or a tool
+                // that arrived since its turn was built is refused for another
+                // one.
                 (rescan_before_dispatch, run_tool_call_hooks, dispatch_tools).chain(),
                 collect_tools,
                 // Apply any resolved stage-boundary interaction-point answers

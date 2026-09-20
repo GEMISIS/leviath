@@ -40,14 +40,19 @@ pub enum ToolRescan {
     /// A `.rhai` written into a scanned directory makes the run look again
     /// before its next turn, so the tool is advertised to the model.
     AfterWrites,
-    /// As `AfterWrites`, and the run also looks again before each batch of tool
-    /// calls it dispatches.
+    /// As `AfterWrites`, and the run also looks at the scanned directories
+    /// themselves before each batch of tool calls it dispatches.
     ///
-    /// The difference is one turn: a tool the model writes and then calls in
-    /// the same turn is refused as unoffered under `AfterWrites`, because the
-    /// set it is checked against is the one the turn started with. The cost is
-    /// a `stat` per scanned directory per batch, and a re-scan only when one of
-    /// them changed.
+    /// The difference is *what* it notices. `AfterWrites` is told about a tool
+    /// only when this agent writes one with `write_file`, `edit_file` or
+    /// `install_tool`. A tool that appears any other way - written by a shell
+    /// command, by a script tool, by a sub-agent or fan-out worker sharing this
+    /// workdir, or by a person - is invisible to it for the rest of the run.
+    /// This value looks at the directories instead of waiting to be told, so it
+    /// sees all of those, and sees a tool that was edited or removed too.
+    ///
+    /// The cost is a `stat` per scanned directory per batch, and a re-scan only
+    /// when one of them changed.
     BeforeDispatch,
 }
 

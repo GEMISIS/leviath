@@ -86,9 +86,15 @@ fn advertise_refreshed(
 /// blueprint asks for it.
 ///
 /// Runs between the response that named the calls and the dispatch that sends
-/// them, which is the only place it can pay off: the advertised set is what
-/// dispatch refuses an unoffered call against, so a tool written and then called
-/// in the same turn is refused without this and callable with it.
+/// them, because the advertised set is what dispatch refuses an unoffered call
+/// against: a tool that arrived since this turn was built is callable in it only
+/// if the set is rewritten here.
+///
+/// Note what it cannot do. Every call in one batch is checked before any of them
+/// runs, so a batch that writes a tool and calls it still has the call refused -
+/// the write has not happened yet. What this catches is a tool that arrived
+/// without the service being told: from a shell command, a script tool, or
+/// another agent sharing the workdir.
 ///
 /// Gated on [`ToolService::scan_stale`], so the ordinary batch costs a `stat`
 /// per scanned directory and nothing else. No marker is consumed: the agent

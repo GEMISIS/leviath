@@ -20,13 +20,16 @@ pub(crate) struct ToolsNeedRefresh;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DynamicTools;
 
-/// Marker: this agent's blueprint asks for a look before *each* batch of tool
-/// calls, on top of the one before its next turn.
+/// Marker: this agent's blueprint asks for the scanned directories to be looked
+/// at before *each* batch of tool calls, on top of the refresh before its next
+/// turn.
 ///
-/// It buys exactly one turn. The set a call is checked against is the one the
-/// turn was built from, so a tool the model writes and then calls in the same
-/// turn is refused as unoffered without this. Carried by `rescan_before_dispatch`
-/// only, and its cost is a `stat` per scanned directory per batch.
+/// What it buys is noticing a tool nobody told the service about. The
+/// between-turns refresh fires on a dirty flag this agent's own `write_file`,
+/// `edit_file` or `install_tool` sets; a tool written by a shell command, by a
+/// script tool, or by another agent sharing the workdir sets nothing. Read by
+/// `rescan_before_dispatch` only, and its cost is a `stat` per scanned
+/// directory per batch.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RescanBeforeDispatch;
 

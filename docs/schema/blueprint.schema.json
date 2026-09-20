@@ -287,7 +287,7 @@
             "before_dispatch"
           ],
           "default": "at_spawn",
-          "description": "When a run looks for tools again. `at_spawn` fixes the set when the run starts. `after_writes` adds the workdir's tools/ to the scan set and looks again before the next turn once a script is written there. `before_dispatch` also looks again before each batch of tool calls, so a tool written and called in the same turn is not refused."
+          "description": "When a run looks for tools again. `at_spawn` fixes the set when the run starts. `after_writes` adds the workdir's tools/ to the scan set and looks again before the next turn, when the agent itself writes or installs a script. `before_dispatch` also looks at those directories before each batch of tool calls, which is how a tool that arrived any other way is noticed."
         },
         "dynamic_tools": {
           "type": "boolean",

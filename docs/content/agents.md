@@ -491,19 +491,26 @@ invisible to it. `tool_rescan` says when a run looks again:
 tool_rescan = "after_writes"   # at_spawn | after_writes | before_dispatch
 ```
 
-| Value | When it looks | What that buys |
+| Value | When it looks | What that catches |
 |---|---|---|
 | `at_spawn` | Once, at spawn | The default. An agent cannot grow its own capabilities mid-run |
-| `after_writes` | Before the next turn, once a script is written | A tool written this turn is callable next turn |
-| `before_dispatch` | Also before each batch of calls | A tool written and called in the same turn is not refused |
+| `after_writes` | Before the next turn, when the agent writes a script | A tool this agent installed, from its next turn on |
+| `before_dispatch` | Also at the directories, before each batch | A tool that arrived without this agent writing it |
 
 Anything but `at_spawn` puts the run's own `tools/` directory in the scan set. The directory is the
 workdir's, so anything else running there sees the same tools and a sub-agent inherits it.
 
-`before_dispatch` buys exactly one turn. A call is checked against the set the turn was built from,
-so under `after_writes` a model that writes a script and calls it immediately is told the tool is
-not offered, and has to try again. The cost is one `stat` per scanned directory per batch, and a
-re-scan only when something changed.
+The difference between the last two is what they notice. `after_writes` is told about a tool when
+the agent writes one with `write_file` or `edit_file`, or installs one. A tool that arrives any
+other way sets nothing, and stays invisible for the rest of the run: one written by a shell command,
+one written by a script tool, one dropped in by a sub-agent or fan-out worker sharing the workdir,
+or one a person adds while the run is going. `before_dispatch` looks at the directories rather than
+waiting to be told, so it sees those, and sees a tool that was edited or removed too. The cost is
+one `stat` per scanned directory per batch, and a re-scan only when something changed.
+
+Neither value makes a tool callable in the batch that creates it. Every call in a batch is checked
+before any of them runs, so a batch that writes a script and calls it has the call refused either
+way.
 
 `dynamic_tools = true` is the older spelling of `after_writes` and still reads as it.
 
