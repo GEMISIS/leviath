@@ -342,6 +342,11 @@ pub enum RunRecord {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         execution_id: String,
         /// The result: text and any stored parts.
+        ///
+        /// For an indeterminate outcome this is the stand-in a resume put in the
+        /// window, not something the tool returned. The outcome is what tells
+        /// the two apart, and a reader showing this text as the tool's answer
+        /// would be inventing one.
         result: crate::region::EntryContent,
         /// How the attempt ended.
         ///
@@ -349,6 +354,10 @@ pub enum RunRecord {
         /// completion record said only that the call finished and a failure was
         /// text inside the result. A reader must not invent one of the five
         /// states for such a record.
+        ///
+        /// Recorded so far only where it cannot be read off the result at all:
+        /// an execution a resume gave up on, which no later reader could
+        /// distinguish from one that finished.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<crate::execution::ToolOutcome>,
         /// Unix seconds.
