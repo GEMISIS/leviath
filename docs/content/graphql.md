@@ -534,6 +534,10 @@ Behind `--allow-admin`, the mutations that change the machine rather than a run:
 | `runDoctorLive` | Nothing. It asks a provider and the daemon, which costs seconds |
 | `makeDirectory` | One directory, so a picker can offer "New Folder" |
 | `startUpdate` | Runs a package manager and rewrites the agents directory |
+| `providerSignIn`, `providerSignOut`, `checkProvider` | A subscription's stored sign-in |
+| `testMcpServer`, `loginMcpServer` | Nothing. They connect to a server and report |
+| `probeModels` | Nothing. It asks an endpoint what it serves |
+| `putYoloProfiles` | The profiles file, whole |
 
 `updateConfig` is a partial edit with three states per setting, which is why the
 keys take `null` rather than an empty string:
@@ -550,6 +554,25 @@ A field left out leaves the setting alone. `null` clears it. A value sets it. An
 empty string is refused rather than read as a clear, because a form that posts its
 empty box should be told rather than obeyed. Every refusal happens before anything
 is written, so a request that is going to fail leaves the file as it was.
+
+A sign-in answers as soon as there is a URL to go to, because what happens after
+that is the person's business:
+
+```graphql
+mutation { providerSignIn(provider: "anthropic") { authorizeUrl alreadyWaiting } }
+```
+
+The browser has to be on the serving host. The flow listens on a loopback port
+there, so a browser anywhere else cannot finish it, and one sign-in runs at a time
+because a second could not bind that port. Asking again while one is waiting
+answers the same URL with `alreadyWaiting: true` rather than refusing, since that
+URL is what the client needs either way. Read `providers` to see whether it landed.
+
+`putYoloProfiles` takes the whole file rather than one profile. The file is the
+unit: `--yolo=<name>` names a profile inside it, and the profiles refer to each
+other, so writing one at a time would let a save leave the set inconsistent. It is
+parsed before it is written, so a file that would not load is refused rather than
+saved and found at the next spawn.
 
 `startUpdate` answers before the work is done, because the work is a download and
 an install. Poll `updateJob(id:)` or watch the live frames. One update runs at a

@@ -49,6 +49,19 @@ pub(crate) enum ServeError {
     #[error("This server needs a restart: {0}")]
     DaemonIncompatible(String),
 
+    /// Something this server depends on answered badly: an MCP server that
+    /// refused the OAuth handshake, a model endpoint that would not say what it
+    /// serves. Nothing here is wrong, and retrying may well work.
+    #[error("{0}")]
+    Upstream(String),
+
+    /// The request is well formed and the thing it names cannot answer as it
+    /// stands: a yolo profiles file on disk that will not parse. Nothing the
+    /// caller sends differently fixes it, and nothing about the run store is
+    /// missing, so it is neither a bad request nor a miss.
+    #[error("{0}")]
+    Unprocessable(String),
+
     /// The window asked for is not in the thing: an offset past the end of a
     /// file. A different window of the same file is fine, which is what tells
     /// this apart from a bad request.
@@ -81,6 +94,8 @@ impl ServeError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::DaemonUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::DaemonIncompatible(_) => StatusCode::BAD_GATEWAY,
+            Self::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RangeNotSatisfiable(_) => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -99,6 +114,8 @@ impl ServeError {
             Self::Forbidden(_) => "FORBIDDEN",
             Self::DaemonUnavailable(_) => "DAEMON_UNAVAILABLE",
             Self::DaemonIncompatible(_) => "DAEMON_INCOMPATIBLE",
+            Self::Upstream(_) => "UPSTREAM",
+            Self::Unprocessable(_) => "UNPROCESSABLE",
             Self::RangeNotSatisfiable(_) => "RANGE_NOT_SATISFIABLE",
             Self::UnsupportedMedia(_) => "UNSUPPORTED_MEDIA_TYPE",
             Self::Internal(_) => "INTERNAL",
@@ -118,6 +135,8 @@ impl ServeError {
             Self::Forbidden(_) => Self::Forbidden(said),
             Self::DaemonUnavailable(_) => Self::DaemonUnavailable(said),
             Self::DaemonIncompatible(_) => Self::DaemonIncompatible(said),
+            Self::Upstream(_) => Self::Upstream(said),
+            Self::Unprocessable(_) => Self::Unprocessable(said),
             Self::RangeNotSatisfiable(_) => Self::RangeNotSatisfiable(said),
             Self::UnsupportedMedia(_) => Self::UnsupportedMedia(said),
             Self::Internal(_) => Self::Internal(said),

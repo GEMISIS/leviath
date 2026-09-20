@@ -13,10 +13,9 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use super::types::{ApiError, AppState, err};
+use super::types::{ApiError, AppState};
 use crate::commands::yolo::TestArgs;
 use crate::yolo::{ProfileSummary, YoloError, YoloFile, yolo_path};
 
@@ -57,16 +56,23 @@ pub(super) fn listing() -> YoloListing {
 
 /// The status a profile lookup failure answers with: the name is the
 /// caller's (404), the file is the operator's (422).
-fn lookup_error(e: YoloError) -> ApiError {
-    let code = match e {
-        YoloError::UnknownProfile { .. } | YoloError::NoFile { .. } => StatusCode::NOT_FOUND,
-        _ => StatusCode::UNPROCESSABLE_ENTITY,
-    };
-    err(code, e.to_string())
+fn lookup_error(e: YoloError) -> super::core::error::ServeError {
+    use super::core::error::ServeError;
+
+    match e {
+        YoloError::UnknownProfile { .. } | YoloError::NoFile { .. } => {
+            ServeError::NotFound(e.to_string())
+        }
+        // The file is there and will not load. Sending the request differently
+        // does not help, and nothing is missing, so it is neither of those.
+        _ => ServeError::Unprocessable(e.to_string()),
+    }
 }
 
 /// Load the file and resolve `name` in it.
-fn profile_named(name: &str) -> Result<std::sync::Arc<crate::yolo::YoloProfile>, ApiError> {
+fn profile_named(
+    name: &str,
+) -> Result<std::sync::Arc<crate::yolo::YoloProfile>, super::core::error::ServeError> {
     let path = yolo_path();
     let file = YoloFile::load_from(&path).map_err(lookup_error)?;
     file.resolve(Some(name), &path).map_err(lookup_error)
@@ -83,7 +89,7 @@ pub(super) async fn get_profile(
     State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let profile = profile_named(&name)?;
+    let profile = profile_named(&name).map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(serde_json::json!({
         "name": profile.name,
         "spec": profile.spec,
@@ -126,6 +132,21 @@ pub(super) async fn test_profile(
     State(state): State<AppState>,
     Json(req): Json<TestReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    decided(&state, req)
+        .map(Json)
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// What one profile would do with one call, for whichever surface asked.
+///
+/// The same code path `lev yolo test` runs, so the command and the API cannot
+/// disagree about a call.
+pub(super) fn decided(
+    state: &AppState,
+    req: TestReq,
+) -> Result<serde_json::Value, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let profile = profile_named(&req.profile)?;
     let args = TestArgs {
         name: req.profile,
@@ -140,10 +161,9 @@ pub(super) async fn test_profile(
     };
     let config = state.config.current();
     let configured = crate::commands::yolo::configured_policy(&args, Some(&config))
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let decision = crate::commands::yolo::decision_json(&profile, &args, configured)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(decision))
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    crate::commands::yolo::decision_json(&profile, &args, configured)
+        .map_err(|e| ServeError::BadRequest(e.to_string()))
 }
 
 /// `PUT /api/yolo` (admin-only): replace the file's text.
@@ -160,24 +180,33 @@ pub(super) async fn put_profiles(
     State(_state): State<AppState>,
     Json(req): Json<WriteYoloReq>,
 ) -> Result<Json<YoloListing>, ApiError> {
-    YoloFile::from_toml(&req.text).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    write_profiles(&req.text)
+        .map(|()| Json(listing()))
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// Replace the profiles file, for whichever surface asked.
+///
+/// The file is the unit: `--yolo=<name>` names a profile inside it, and the
+/// profiles refer to each other, so writing one at a time would let a save leave
+/// the set inconsistent. Parsed before it is written, so a file that would not
+/// load is refused rather than saved and discovered at the next spawn.
+pub(super) fn write_profiles(text: &str) -> Result<(), super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    YoloFile::from_toml(text).map_err(|e| ServeError::BadRequest(e.to_string()))?;
     let path = yolo_path();
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(parent)
-        .and_then(|()| std::fs::write(&path, &req.text))
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write {}: {e}", path.display()),
-            )
-        })?;
-    Ok(Json(listing()))
+        .and_then(|()| std::fs::write(&path, text))
+        .map_err(|e| ServeError::Internal(format!("failed to write {}: {e}", path.display())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::yolo::EXAMPLE_TOML;
+    use axum::http::StatusCode;
 
     fn state() -> AppState {
         super::super::testutil::state_with_agent_paths(Vec::new())

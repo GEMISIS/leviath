@@ -123,6 +123,15 @@ same list.
   than flattening them, and `putMimeRow` now takes the whole row, including its
   token rule and magic bytes, which until now were REST-only.
 
+- The rest of the admin surface over GraphQL: `providerSignIn`,
+  `providerSignOut` and `checkProvider` for a subscription's stored sign-in,
+  `testMcpServer` and `loginMcpServer` for a server, `probeModels` for an
+  OpenAI-compatible endpoint, and `putYoloProfiles` for the profiles file. Each
+  goes through the same code its REST route goes through, which meant lifting six
+  more handlers into the service layer; asking for a sign-in that is already
+  waiting now answers with that sign-in's URL rather than only refusing, on both
+  surfaces, because the URL is what a client needs either way.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the
