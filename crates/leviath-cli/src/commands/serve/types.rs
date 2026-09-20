@@ -670,7 +670,8 @@ pub(super) struct FileQuery {
     /// absolute paths are accepted but must still land inside it. Absent means
     /// "list", and a directory lists rather than erroring.
     pub(super) path: Option<String>,
-    /// `modified` (default) or `workdir`. See [`FileSource`].
+    /// `modified` (default) or `workdir`. See
+    /// [`FileSource`](super::core::files::FileSource).
     pub(super) source: Option<String>,
     /// Include dot-prefixed entries when listing a directory. Off by default,
     /// mirroring `DirsQuery`.
@@ -687,29 +688,6 @@ pub(super) struct FileQuery {
 /// Whether a count is zero, for `skip_serializing_if`.
 fn is_zero(n: &u64) -> bool {
     *n == 0
-}
-
-/// Which question a listing answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FileSource {
-    /// What the run recorded modifying. Free, but a claim about the run rather
-    /// than about the disk, and capped at record time.
-    Modified,
-    /// What is in the run's working directory now, one level at a time.
-    Workdir,
-}
-
-impl FileQuery {
-    /// Resolve `source`, or report the bad value.
-    pub(super) fn file_source(&self) -> Result<FileSource, String> {
-        match self.source.as_deref() {
-            None | Some("modified") => Ok(FileSource::Modified),
-            Some("workdir") => Ok(FileSource::Workdir),
-            Some(other) => Err(format!(
-                "Invalid source '{other}': expected 'modified' or 'workdir'"
-            )),
-        }
-    }
 }
 
 /// Response of `GET /api/agents/{id}/files`: either one file's contents, or a
@@ -829,7 +807,7 @@ pub(super) struct FileContentResp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) next_offset: Option<u64>,
     /// This window's bytes as UTF-8, capped at
-    /// [`MAX_FILE_READ_BYTES`](super::agents::MAX_FILE_READ_BYTES).
+    /// [`MAX_FILE_READ_BYTES`](super::core::files::MAX_FILE_READ_BYTES).
     pub(super) content: String,
     /// Whether the file continues past this window. Read on from `next_offset`.
     pub(super) truncated: bool,

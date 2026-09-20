@@ -829,6 +829,38 @@ type ConfigHealthChanged {
 	configMtime: Timestamp
 }
 
+"""
+A paged history of one run's context window.
+"""
+type ContextHistoryConnection {
+	"""
+	This page's points, in the order asked for.
+	"""
+	edges: [ContextHistoryEdge!]!
+	"""
+	Where the next page starts.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many points the run's journal holds altogether.
+	"""
+	total: Int!
+}
+
+"""
+One point with its cursor.
+"""
+type ContextHistoryEdge {
+	"""
+	The point.
+	"""
+	node: ContextSnapshotPoint!
+	"""
+	Cursor for this edge.
+	"""
+	cursor: Cursor!
+}
+
 type ContextRegion {
 	"""
 	The region's name, matching the blueprint's declaration.
@@ -862,6 +894,25 @@ type ContextRegion {
 	stand-in the registry gives it, which is what the model sees too.
 	"""
 	content: String!
+}
+
+"""
+One point in a run's history: the whole context window, as it stood.
+"""
+type ContextSnapshotPoint {
+	"""
+	When the window looked like this.
+	"""
+	at: Timestamp!
+	"""
+	The stage the run was in. Empty before the first stage is entered.
+	"""
+	stage: String!
+	"""
+	The window itself. Region contents are their own field, so asking for the
+	shape of a hundred windows does not read a hundred windows' text.
+	"""
+	window: ContextWindow!
 }
 
 """
@@ -952,6 +1003,24 @@ type CostBreakdown {
 	Calls no provider priced.
 	"""
 	unpricedCalls: Int!
+}
+
+"""
+Where a run is, in its blueprint's own terms.
+"""
+type CurrentStage {
+	"""
+	The stage's name, as the blueprint spells it.
+	"""
+	name: String!
+	"""
+	Its position, counting from zero.
+	"""
+	index: Int!
+	"""
+	How many stages the blueprint has.
+	"""
+	of: Int!
 }
 
 """
@@ -1308,6 +1377,101 @@ type FanOut {
 }
 
 """
+One entry of a run's file listing.
+"""
+type FileEntry {
+	"""
+	The entry's own name.
+	"""
+	name: String!
+	"""
+	Relative to the run's working directory where possible, so it can be
+	passed straight back as `path`.
+	"""
+	path: String!
+	"""
+	Whether it is a directory. List it by passing its path back to `files`.
+	"""
+	isDir: Boolean!
+	"""
+	Its size. Null when it could not be stat-ed.
+	"""
+	size: BigInt
+	"""
+	False for a recorded path that has since been deleted.
+	"""
+	exists: Boolean!
+	"""
+	True for a recorded path outside the working directory, which happens
+	when a tool was handed an absolute path. Reported rather than hidden.
+	"""
+	outsideWorkdir: Boolean!
+	"""
+	What the run's own mime registry makes of the name. By extension, never
+	sniffed: a listing must not read every file. Empty for a directory.
+	"""
+	mimeType: String!
+}
+
+"""
+A run's files, one directory level at a time.
+"""
+type FileListing {
+	"""
+	Which question this answers.
+	"""
+	source: FileSource!
+	"""
+	The directory listed, or the working directory for a recorded listing.
+	"""
+	path: String!
+	"""
+	Where "up one level" goes. Null at the working directory's root: a client
+	is never led above the fence.
+	"""
+	parent: String
+	"""
+	The run's working directory, which the paths are relative to.
+	"""
+	workdir: String!
+	"""
+	The entries, directories first and then by name.
+	"""
+	entries: [FileEntry!]!
+	"""
+	Whether this listing stops short of the directory's real contents.
+	"""
+	truncated: Boolean!
+	"""
+	Whether the run hit the tracked-file cap, so its record is a prefix and
+	the rest of the names were never stored anywhere. Read `WORKDIR` for the
+	truth when this is true.
+	"""
+	modifiedFilesTruncated: Boolean!
+	"""
+	Successful modifying tool calls, which is not a file count: a run that
+	edits one file three times records three.
+	"""
+	modifyingToolCalls: Int!
+}
+
+"""
+Which question a file listing answers.
+"""
+enum FileSource {
+	"""
+	What the run recorded modifying. Free, and a claim about the run rather
+	than about the disk: it is capped at record time, and `modifiedFilesTruncated`
+	says when that cap was hit.
+	"""
+	MODIFIED
+	"""
+	What is in the run's working directory now, one level per request.
+	"""
+	WORKDIR
+}
+
+"""
 Keeping the files a run reads and writes in one region.
 
 So a tool result can point at the region rather than repeating a file the
@@ -1332,6 +1496,37 @@ type FileTrackingConfig {
 	The most tokens one file may take in the region before it is truncated.
 	"""
 	maxFileTokens: Int
+}
+
+"""
+One window of one file's text.
+"""
+type FileWindow {
+	"""
+	The resolved absolute path that was read.
+	"""
+	path: String!
+	"""
+	The file's whole size, which is larger than this window when truncated.
+	"""
+	size: BigInt!
+	"""
+	Where this window starts. Not always the offset asked for: one landing
+	mid-character is moved forward, so the windows of a file line up.
+	"""
+	offset: BigInt!
+	"""
+	Where to start the next read. Null when this window reached the end.
+	"""
+	nextOffset: BigInt
+	"""
+	This window's text.
+	"""
+	content: String!
+	"""
+	Whether the file continues past this window.
+	"""
+	truncated: Boolean!
 }
 
 """
@@ -3207,6 +3402,89 @@ type Run {
 		"""
 		download: Boolean! = false
 	): String!
+	"""
+	The run that started this one. Null for a run nobody started.
+	
+	A lookup in the index's own map rather than a read: the parent is already
+	in memory, so walking up a fan-out costs nothing per level.
+	"""
+	parent: Run
+	"""
+	The stage the run is in, by name and position. Null before the first
+	stage is entered.
+	"""
+	currentStage: CurrentStage
+	"""
+	What the run is parked on, if anything. Null when nothing is waiting.
+	
+	The daemon holds these in memory, so this is one round trip to it rather
+	than a read of the run store. A run in `WAITING_INPUT` whose ask has just
+	been answered by somebody else answers null, which is the truth by then.
+	"""
+	interaction: InteractionRequest
+	"""
+	The run's files: what it recorded changing, or what is in its working
+	directory now.
+	
+	Two different questions. `MODIFIED` is the run's own record, which is
+	free but capped at record time and a claim about the run rather than about
+	the disk. `WORKDIR` is the truth, one directory level per request: that
+	bound is the answer to a repository with a `node_modules` in it.
+	"""
+	files(
+		"""
+		The directory to list. Null lists the working directory's root.
+		"""
+		path: String,
+		"""
+		Which question to answer.
+		"""
+		source: FileSource! = MODIFIED,
+		"""
+		Include dot-prefixed entries.
+		"""
+		hidden: Boolean! = false
+	): FileListing!
+	"""
+	One window of one of the run's files, as text.
+	
+	At most a megabyte per read, because the answer travels inside this one.
+	A larger file is read a window at a time: pass `nextOffset` back as
+	`offset`, and the windows concatenate into the file. For bytes rather than
+	text, and for anything that is not text at all, mint a `fileUrl` instead.
+	"""
+	fileContent(
+		"""
+		The file, relative to the run's working directory.
+		"""
+		path: String!,
+		"""
+		Byte offset to start at.
+		"""
+		offset: Int! = 0
+	): FileWindow!
+	"""
+	How this run's context window changed over the run, paged.
+	
+	Each point carries a whole window, so this is paged harder than the run
+	listing is: ask for the regions you render rather than every point's
+	every region. Chronological by default, which is also the cheaper
+	direction to read.
+	"""
+	contextHistory(
+		"""
+		Page size.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page.
+		"""
+		after: Cursor,
+		"""
+		Newest first instead of chronological.
+		"""
+		descending: Boolean! = false
+	): ContextHistoryConnection!
 	"""
 	Caller-supplied metadata from spawn. Values are always strings.
 	

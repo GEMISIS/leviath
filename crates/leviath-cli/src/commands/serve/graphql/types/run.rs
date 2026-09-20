@@ -13,9 +13,10 @@ use async_graphql::{Context, Enum, Object, SimpleObject};
 use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
 use super::super::super::core::error::ServeError;
+use super::super::super::core::{files, history};
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
-use super::super::scalars::{BigInt, Decimal, Timestamp};
+use super::super::scalars::{BigInt, Cursor, Decimal, Timestamp};
 use super::blueprint::Blueprint;
 use super::run_detail::{
     Artifact, BlobEntry, ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason,
@@ -594,6 +595,182 @@ impl Run {
         )
     }
 
+    /// The run that started this one. Null for a run nobody started.
+    ///
+    /// A lookup in the index's own map rather than a read: the parent is already
+    /// in memory, so walking up a fan-out costs nothing per level.
+    async fn parent(&self, ctx: &Context<'_>) -> Option<Run> {
+        let state = ctx.data_unchecked::<AppState>();
+        let parent_id = self.meta.parent_run_id.as_deref()?;
+        let snapshot = state.caches.run_index.snapshot().await;
+        snapshot.get(parent_id).map(|meta| Run {
+            meta: Arc::clone(meta),
+            now: self.now,
+        })
+    }
+
+    /// The stage the run is in, by name and position. Null before the first
+    /// stage is entered.
+    async fn current_stage(&self) -> Option<CurrentStage> {
+        let name = self.meta.current_stage.clone();
+        (!name.is_empty()).then(|| CurrentStage {
+            name,
+            index: i32::try_from(self.meta.stage_index).unwrap_or(i32::MAX),
+            of: i32::try_from(self.meta.num_stages).unwrap_or(i32::MAX),
+        })
+    }
+
+    /// What the run is parked on, if anything. Null when nothing is waiting.
+    ///
+    /// The daemon holds these in memory, so this is one round trip to it rather
+    /// than a read of the run store. A run in `WAITING_INPUT` whose ask has just
+    /// been answered by somebody else answers null, which is the truth by then.
+    async fn interaction(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Option<super::super::events::InteractionRequest>> {
+        let state = ctx.data_unchecked::<AppState>();
+        let open = super::super::super::core::spawn::open_interactions(state)
+            .await
+            .gql()?;
+        Ok(open
+            .into_iter()
+            .find(|(run_id, _)| run_id == &self.meta.run_id)
+            .map(|(_, request)| super::super::events::InteractionRequest::from(request)))
+    }
+
+    /// The run's files: what it recorded changing, or what is in its working
+    /// directory now.
+    ///
+    /// Two different questions. `MODIFIED` is the run's own record, which is
+    /// free but capped at record time and a claim about the run rather than about
+    /// the disk. `WORKDIR` is the truth, one directory level per request: that
+    /// bound is the answer to a repository with a `node_modules` in it.
+    async fn files(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The directory to list. Null lists the working directory's root.")]
+        path: Option<String>,
+        #[graphql(
+            desc = "Which question to answer.",
+            default_with = "FileSource::Modified"
+        )]
+        source: FileSource,
+        #[graphql(desc = "Include dot-prefixed entries.", default = false)] hidden: bool,
+    ) -> async_graphql::Result<FileListing> {
+        let state = ctx.data_unchecked::<AppState>();
+        let registry = state.current_config().mime_registry_or_defaults();
+        let meta = Arc::clone(&self.meta);
+        let dir = path.map(std::path::PathBuf::from);
+        let listed = blocking(move || {
+            files::listing(&meta, source.into(), dir.as_deref(), hidden, &registry)
+        })
+        .await
+        .gql()?;
+        Ok(FileListing::from(listed))
+    }
+
+    /// One window of one of the run's files, as text.
+    ///
+    /// At most a megabyte per read, because the answer travels inside this one.
+    /// A larger file is read a window at a time: pass `nextOffset` back as
+    /// `offset`, and the windows concatenate into the file. For bytes rather than
+    /// text, and for anything that is not text at all, mint a `fileUrl` instead.
+    async fn file_content(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The file, relative to the run's working directory.")] path: String,
+        #[graphql(desc = "Byte offset to start at.", default = 0)] offset: i32,
+    ) -> async_graphql::Result<FileWindow> {
+        let state = ctx.data_unchecked::<AppState>();
+        let registry = state.current_config().mime_registry_or_defaults();
+        let offset = u64::try_from(offset)
+            .map_err(|_| ServeError::BadRequest("`offset` cannot be negative".to_string()))
+            .gql()?;
+        let meta = Arc::clone(&self.meta);
+        let read = blocking(move || files::read(&meta, &path, offset, false, &registry))
+            .await
+            .gql()?;
+        match read {
+            files::FileRead::Window(window) => Ok(FileWindow::from(window)),
+            // A directory has no text to return, and this field promises text.
+            // `files` is the field that answers what is in one.
+            files::FileRead::Listing(listed) => Err(ServeError::BadRequest(format!(
+                "'{}' is a directory; read `files` for what is in it",
+                listed.path
+            )))
+            .gql(),
+        }
+    }
+
+    /// How this run's context window changed over the run, paged.
+    ///
+    /// Each point carries a whole window, so this is paged harder than the run
+    /// listing is: ask for the regions you render rather than every point's
+    /// every region. Chronological by default, which is also the cheaper
+    /// direction to read.
+    async fn context_history(
+        &self,
+        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+        #[graphql(desc = "Newest first instead of chronological.", default = false)]
+        descending: bool,
+    ) -> async_graphql::Result<ContextHistoryConnection> {
+        let limit = usize::try_from(first)
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
+            .gql()?;
+        if limit > history::HISTORY_MAX_LIMIT {
+            return Err(ServeError::BadRequest(format!(
+                "`first` may be at most {}, the history page cap: each point carries a whole \
+                 context window",
+                history::HISTORY_MAX_LIMIT
+            )))
+            .gql();
+        }
+        let order = match descending {
+            true => "desc",
+            false => "asc",
+        };
+        let run_id = self.meta.run_id.clone();
+        let cursor = after.map(|cursor| cursor.0);
+        let page = blocking(move || {
+            let spec = history::HistorySpec::resolve(
+                &run_id,
+                Some(limit),
+                Some(order),
+                cursor.as_deref(),
+            )?;
+            history::page(&run_id, &spec)
+        })
+        .await
+        .gql()?;
+        let total = i32::try_from(page.total).unwrap_or(i32::MAX);
+        let end_cursor = page.next_cursor.clone().map(Cursor);
+        Ok(ContextHistoryConnection {
+            edges: page
+                .points
+                .into_iter()
+                .map(|point| ContextHistoryEdge {
+                    cursor: Cursor(format!("{}", point.at)),
+                    node: ContextSnapshotPoint {
+                        at: Timestamp(point.at),
+                        stage: point.meta.current_stage.clone(),
+                        window: ContextWindow {
+                            snapshot: Arc::new(point.context),
+                        },
+                    },
+                })
+                .collect(),
+            page_info: super::super::connection::PageInfo {
+                end_cursor: end_cursor.clone(),
+                has_next_page: end_cursor.is_some(),
+            },
+            total,
+        })
+    }
+
     /// Caller-supplied metadata from spawn. Values are always strings.
     ///
     /// Sorted by key: the daemon keeps these in a hash map, and a listing
@@ -669,3 +846,174 @@ fn as_i32(value: usize) -> i32 {
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
+
+/// Where a run is, in its blueprint's own terms.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct CurrentStage {
+    /// The stage's name, as the blueprint spells it.
+    pub(crate) name: String,
+    /// Its position, counting from zero.
+    pub(crate) index: i32,
+    /// How many stages the blueprint has.
+    pub(crate) of: i32,
+}
+
+/// Which question a file listing answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum FileSource {
+    /// What the run recorded modifying. Free, and a claim about the run rather
+    /// than about the disk: it is capped at record time, and `modifiedFilesTruncated`
+    /// says when that cap was hit.
+    Modified,
+    /// What is in the run's working directory now, one level per request.
+    Workdir,
+}
+
+impl From<FileSource> for files::FileSource {
+    fn from(source: FileSource) -> Self {
+        match source {
+            FileSource::Modified => Self::Modified,
+            FileSource::Workdir => Self::Workdir,
+        }
+    }
+}
+
+/// One entry of a run's file listing.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct FileEntry {
+    /// The entry's own name.
+    pub(crate) name: String,
+    /// Relative to the run's working directory where possible, so it can be
+    /// passed straight back as `path`.
+    pub(crate) path: String,
+    /// Whether it is a directory. List it by passing its path back to `files`.
+    pub(crate) is_dir: bool,
+    /// Its size. Null when it could not be stat-ed.
+    pub(crate) size: Option<BigInt>,
+    /// False for a recorded path that has since been deleted.
+    pub(crate) exists: bool,
+    /// True for a recorded path outside the working directory, which happens
+    /// when a tool was handed an absolute path. Reported rather than hidden.
+    pub(crate) outside_workdir: bool,
+    /// What the run's own mime registry makes of the name. By extension, never
+    /// sniffed: a listing must not read every file. Empty for a directory.
+    pub(crate) mime_type: String,
+}
+
+/// A run's files, one directory level at a time.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct FileListing {
+    /// Which question this answers.
+    pub(crate) source: FileSource,
+    /// The directory listed, or the working directory for a recorded listing.
+    pub(crate) path: String,
+    /// Where "up one level" goes. Null at the working directory's root: a client
+    /// is never led above the fence.
+    pub(crate) parent: Option<String>,
+    /// The run's working directory, which the paths are relative to.
+    pub(crate) workdir: String,
+    /// The entries, directories first and then by name.
+    pub(crate) entries: Vec<FileEntry>,
+    /// Whether this listing stops short of the directory's real contents.
+    pub(crate) truncated: bool,
+    /// Whether the run hit the tracked-file cap, so its record is a prefix and
+    /// the rest of the names were never stored anywhere. Read `WORKDIR` for the
+    /// truth when this is true.
+    pub(crate) modified_files_truncated: bool,
+    /// Successful modifying tool calls, which is not a file count: a run that
+    /// edits one file three times records three.
+    pub(crate) modifying_tool_calls: i32,
+}
+
+impl From<files::FileListing> for FileListing {
+    fn from(listed: files::FileListing) -> Self {
+        Self {
+            source: match listed.source {
+                files::FileSource::Modified => FileSource::Modified,
+                files::FileSource::Workdir => FileSource::Workdir,
+            },
+            path: listed.path,
+            parent: listed.parent,
+            workdir: listed.workdir,
+            entries: listed
+                .entries
+                .into_iter()
+                .map(|entry| FileEntry {
+                    name: entry.name,
+                    path: entry.path,
+                    is_dir: entry.is_dir,
+                    size: entry.size.map(|size| BigInt(size as i64)),
+                    exists: entry.exists,
+                    outside_workdir: entry.outside_workdir,
+                    mime_type: entry.mime_type,
+                })
+                .collect(),
+            truncated: listed.truncated,
+            modified_files_truncated: listed.modified_files_truncated,
+            modifying_tool_calls: i32::try_from(listed.modifying_tool_calls).unwrap_or(i32::MAX),
+        }
+    }
+}
+
+/// One window of one file's text.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct FileWindow {
+    /// The resolved absolute path that was read.
+    pub(crate) path: String,
+    /// The file's whole size, which is larger than this window when truncated.
+    pub(crate) size: BigInt,
+    /// Where this window starts. Not always the offset asked for: one landing
+    /// mid-character is moved forward, so the windows of a file line up.
+    pub(crate) offset: BigInt,
+    /// Where to start the next read. Null when this window reached the end.
+    pub(crate) next_offset: Option<BigInt>,
+    /// This window's text.
+    pub(crate) content: String,
+    /// Whether the file continues past this window.
+    pub(crate) truncated: bool,
+}
+
+impl From<files::FileWindow> for FileWindow {
+    fn from(window: files::FileWindow) -> Self {
+        Self {
+            path: window.path,
+            size: BigInt(window.size as i64),
+            offset: BigInt(window.offset as i64),
+            next_offset: window.next_offset.map(|at| BigInt(at as i64)),
+            content: window.content,
+            truncated: window.truncated,
+        }
+    }
+}
+
+/// One point in a run's history: the whole context window, as it stood.
+#[derive(SimpleObject)]
+pub(crate) struct ContextSnapshotPoint {
+    /// When the window looked like this.
+    pub(crate) at: Timestamp,
+    /// The stage the run was in. Empty before the first stage is entered.
+    pub(crate) stage: String,
+    /// The window itself. Region contents are their own field, so asking for the
+    /// shape of a hundred windows does not read a hundred windows' text.
+    pub(crate) window: ContextWindow,
+}
+
+/// One point with its cursor.
+#[derive(SimpleObject)]
+pub(crate) struct ContextHistoryEdge {
+    /// The point.
+    pub(crate) node: ContextSnapshotPoint,
+    /// Cursor for this edge.
+    pub(crate) cursor: Cursor,
+}
+
+/// A paged history of one run's context window.
+#[derive(SimpleObject)]
+pub(crate) struct ContextHistoryConnection {
+    /// This page's points, in the order asked for.
+    pub(crate) edges: Vec<ContextHistoryEdge>,
+    /// Where the next page starts.
+    pub(crate) page_info: super::super::connection::PageInfo,
+    /// How many points the run's journal holds altogether.
+    pub(crate) total: i32,
+}
