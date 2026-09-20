@@ -7,5 +7,6 @@
 
 pub(crate) mod blueprint;
 pub(crate) mod catalog;
+pub(crate) mod machine;
 pub(crate) mod run;
 pub(crate) mod run_detail;

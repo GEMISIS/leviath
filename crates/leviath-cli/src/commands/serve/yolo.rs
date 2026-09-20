@@ -37,7 +37,7 @@ pub(super) struct YoloListing {
 }
 
 /// The listing for the file as it stands.
-fn listing() -> YoloListing {
+pub(super) fn listing() -> YoloListing {
     let path = yolo_path();
     match YoloFile::load_from(&path) {
         Ok(file) => YoloListing {

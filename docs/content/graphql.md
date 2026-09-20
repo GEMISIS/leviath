@@ -252,6 +252,18 @@ up, so they are plain lists with no paging.
 * `enabled` and `signedIn` are different questions. A provider can be turned on
   with no credential stored, and a credential can outlive the config entry that
   used it.
+* `config` is the whole server settings view, with every secret left out:
+  `configuredProviders` names which providers have a key, never the keys. Read
+  `capabilities` there before choosing a code path.
+* `doctor` runs the environment checks. A failing check is `ok: false` inside a
+  healthy answer, never an error: the request succeeded, and what it found is
+  the answer.
+* `mcpServers`, `yoloProfiles`, `mime` and `scripts` are what is installed.
+  `yoloProfiles` says which file it read and whether that file exists, so "no
+  profiles yet" reads differently from "the file is broken".
+* `directories(path:)` is the file picker. It is confined to `--workdir-root`
+  when the operator set one, which is why `parent` is null at that fence rather
+  than leading above it.
 * `tools(agent: "coder")` scopes the inventory to one blueprint's own tools
   directory, which is what an editor offering an `available_tools` list wants.
   `skipped` names scripts that were found and could not be offered, with the

@@ -27,6 +27,11 @@ use crate::commands::run::session::build_provider_registry_from_config;
 /// re-read per request (not taken from [`AppState`]) so the button reflects an
 /// edit the user just made.
 pub(super) async fn run_doctor(State(_state): State<AppState>) -> Json<DoctorResp> {
+    Json(offline_report().await)
+}
+
+/// The checks, run offline. Both surfaces call this.
+pub(super) async fn offline_report() -> DoctorResp {
     let args = DoctorArgs {
         offline: true,
         ..DoctorArgs::default()
@@ -37,7 +42,7 @@ pub(super) async fn run_doctor(State(_state): State<AppState>) -> Json<DoctorRes
         DaemonTarget::Skip,
     )
     .await;
-    Json(report(checks))
+    report(checks)
 }
 
 /// One live doctor at a time. Two of them would race two throwaway runs and

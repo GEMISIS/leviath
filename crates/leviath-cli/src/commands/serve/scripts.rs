@@ -993,10 +993,29 @@ pub(super) async fn list_scripts(
     Query(q): Query<ListScriptsQuery>,
 ) -> Result<Json<ScriptsResp>, ApiError> {
     let candidates = wants_candidates(q.include.as_deref())?;
+    let scripts = registered_with(&state, q.agent.as_deref(), candidates)
+        .map_err(|e| super::core::error::as_api_error(&e))?;
+    Ok(Json(ScriptsResp { scripts }))
+}
+
+/// The registered scripts, optionally scoped to one blueprint's own directory.
+pub(super) fn registered(
+    state: &AppState,
+    agent: Option<&str>,
+) -> Result<Vec<ScriptItem>, super::core::error::ServeError> {
+    registered_with(state, agent, false)
+}
+
+/// [`registered`], with the "what could be a script but is not registered"
+/// pass the REST route can ask for.
+fn registered_with(
+    state: &AppState,
+    agent: Option<&str>,
+    candidates: bool,
+) -> Result<Vec<ScriptItem>, super::core::error::ServeError> {
     let mut scripts = Vec::new();
-    if let Some(name) = q.agent.as_deref() {
-        let dir = agent_dir(&state.current_config(), name)
-            .map_err(|e| super::core::error::as_api_error(&e))?;
+    if let Some(name) = agent {
+        let dir = agent_dir(&state.current_config(), name)?;
         collect_tools(&dir.join("tools"), "agent", Some(name), &mut scripts);
         collect_declared(&dir, name, &mut scripts);
         if candidates {
@@ -1006,7 +1025,7 @@ pub(super) async fn list_scripts(
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
     collect_mime_checks(&state.current_config(), &mut scripts);
     collect_providers(&global_providers_dir(), &mut scripts);
-    Ok(Json(ScriptsResp { scripts }))
+    Ok(scripts)
 }
 
 /// `GET /api/scripts/{kind}/{name}[?agent=<name>]`: the source text.
