@@ -184,8 +184,11 @@ impl Run {
         as_i32(self.meta.iteration)
     }
 
-    /// Tool calls across the whole run.
-    async fn tool_calls(&self) -> i32 {
+    /// How many tool calls the run has made.
+    ///
+    /// A count, not the calls themselves: `executions` is the list, with what
+    /// each one was and how it ended.
+    async fn tool_call_count(&self) -> i32 {
         as_i32(self.meta.tool_calls)
     }
 
@@ -460,7 +463,7 @@ impl Run {
             default = false
         )]
         operational: bool,
-        #[graphql(desc = "Bytes to read from the end of each stream.")] tail: Option<i32>,
+        #[graphql(desc = "Bytes to read from the end of each stream.")] tail_bytes: Option<i32>,
     ) -> async_graphql::Result<String> {
         let selector = match (stage_index, all_stages) {
             (Some(_), true) => {
@@ -485,10 +488,10 @@ impl Run {
             true => crate::runstate::LogStream::Operational,
             false => crate::runstate::LogStream::Output,
         };
-        let bytes = match tail {
+        let bytes = match tail_bytes {
             None => DEFAULT_LOG_TAIL_BYTES,
             Some(asked) => u64::try_from(asked)
-                .map_err(|_| ServeError::BadRequest("`tail` cannot be negative".to_string()))
+                .map_err(|_| ServeError::BadRequest("`tailBytes` cannot be negative".to_string()))
                 .gql()?
                 .min(MAX_LOG_TAIL_BYTES),
         };

@@ -141,7 +141,7 @@ async fn an_mcp_server_can_be_added_and_removed() {
                 .await;
             let json = serde_json::to_value(&listed.data).expect("data serializes");
             assert_eq!(json["mcpServers"][0]["name"], "docs");
-            assert_eq!(json["mcpServers"][0]["transport"], "stdio");
+            assert_eq!(json["mcpServers"][0]["transport"], "STDIO");
 
             // The same name twice is a conflict: the second would replace a
             // command the operator already approved.
@@ -885,11 +885,11 @@ mod doing_the_work {
                 .as_str()
                 .expect("an id")
                 .to_string();
-            // Three rows whatever was asked for, so a client renders the same
-            // table and reads `skipped` rather than an absence.
+            // The same rows whatever was asked for, so a client renders one
+            // table and reads `SKIPPED` rather than an absence.
             assert_eq!(
                 json["startUpdate"]["steps"].as_array().map(Vec::len),
-                Some(3)
+                Some(4)
             );
 
             // The same job, read back through the field a client polls.

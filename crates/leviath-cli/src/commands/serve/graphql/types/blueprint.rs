@@ -131,6 +131,29 @@ pub(crate) enum RegionKind {
     Custom,
 }
 
+impl RegionKind {
+    /// The kind a run's snapshot recorded, read from its stored spelling.
+    ///
+    /// `None` for a word this build does not know, which is a snapshot from a
+    /// newer one: a null beside a region that is plainly there beats refusing
+    /// the whole window. Two spellings are older builds' own
+    /// (`sliding`, `history`), and those files are still on disk.
+    pub(crate) fn from_snapshot(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "pinned" => Self::Pinned,
+            "temporary" => Self::Temporary,
+            "clearable" => Self::Clearable,
+            "sliding_window" | "sliding" => Self::SlidingWindow,
+            "compacting" => Self::Compacting,
+            "compact_history" | "history" => Self::CompactHistory,
+            "hashmap" => Self::Hashmap,
+            "checklist" => Self::Checklist,
+            "custom" => Self::Custom,
+            _ => return None,
+        })
+    }
+}
+
 impl From<&leviath_core::region::RegionKind> for RegionKind {
     fn from(kind: &leviath_core::region::RegionKind) -> Self {
         use leviath_core::region::RegionKind as Core;

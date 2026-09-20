@@ -165,6 +165,25 @@ same list.
 
 ### Changed
 
+- Names on the GraphQL surface say what they answer. `Run.toolCalls` is
+  `toolCallCount`, because it is a number and the calls themselves are
+  `executions`. `Run.logs(tail:)` is `tailBytes`, which is what it counts.
+  `StageVisit.active` is `inProgress`, so it stops sharing a name with the two
+  `active` fields that are clocks. `Script.source` is `foundAt`, leaving
+  "source" to mean one thing.
+
+  Seven fields that carried a word now carry a value: a tool's `origin`, an MCP
+  server's `transport` and `auth`, an update job's `status` and each step's
+  `step` and `status`, a context region's `kind`, and what a yolo profile does
+  with tools, questions, checkpoints and the gate. The REST routes still carry
+  exactly the words they always did. An MCP server also answers `configError`
+  now: `transport: INVALID` said a server was broken and nothing about why,
+  which left reading the config by hand as the only way to find out.
+
+- `lev update` and `POST /api/update` grew a fourth step, `keys`, which
+  respells renamed blueprint keys in the blueprints you wrote. The bundled ones
+  are replaced wholesale by the step before it, so they need nothing.
+
 - Three settings are spelled the way they behave. `[sandbox] persist` is
   `keep_warm`: it keeps one container warm across a run's stages, and the
   container is torn down when the run ends either way, so `persist` promised a

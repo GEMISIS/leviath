@@ -8,7 +8,9 @@
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
-use super::super::update::{DaemonStatus, UpdateInfo, UpdateJob};
+use super::super::update::{
+    DaemonStatus, UpdateInfo, UpdateJob, UpdateJobStatus, UpdateStep, UpdateStepStatus,
+};
 use crate::commands::update::detect::InstallMethod;
 use crate::commands::update::latest::LatestCheck;
 use crate::commands::update::{ConfigState, UpdatePlan};
@@ -323,10 +325,83 @@ async fn an_update_job_carries_its_steps() {
     let started = jobs.start().expect("nothing else is running");
     let job = UpdateJob::from(started.clone());
     assert_eq!(job.id, started.id);
-    assert_eq!(job.status, "running");
-    // Three steps, always: a step that was not asked for reads as skipped rather
+    assert_eq!(job.status, UpdateJobStatus::Running);
+    // Every step, always: one that was not asked for reads as skipped rather
     // than being absent, so a client renders the same rows whatever was asked.
-    assert_eq!(job.steps.len(), 3);
-    assert!(job.steps.iter().all(|step| !step.step.is_empty()));
-    assert!(job.steps.iter().all(|step| !step.status.is_empty()));
+    assert_eq!(
+        job.steps.iter().map(|step| step.step).collect::<Vec<_>>(),
+        vec![
+            UpdateStep::Binary,
+            UpdateStep::Agents,
+            UpdateStep::Keys,
+            UpdateStep::Migrations
+        ]
+    );
+    assert!(
+        job.steps
+            .iter()
+            .all(|step| step.status == UpdateStepStatus::Pending)
+    );
+}
+
+/// Every step, status and job status the registry can record has a value here.
+///
+/// The registry's enums and this schema's are two lists of the same thing, and
+/// a value missing from this one would be a job a client could not be told
+/// about at all.
+#[test]
+fn every_recorded_value_has_an_answer() {
+    use crate::commands::serve::update_job::UpdateStep as RecordedStep;
+    use crate::commands::serve::update_job::{JobStatus, Step, StepStatus, UpdateJob as Recorded};
+
+    let recorded = |status: JobStatus, step: Step, step_status: StepStatus| Recorded {
+        id: "update-1".to_string(),
+        status,
+        steps: vec![RecordedStep {
+            step,
+            status: step_status,
+            detail: String::new(),
+        }],
+        restart_required: false,
+        restart_hint: None,
+        started_at: 0,
+        finished_at: None,
+    };
+
+    let steps = [
+        (Step::Binary, UpdateStep::Binary),
+        (Step::Agents, UpdateStep::Agents),
+        (Step::Keys, UpdateStep::Keys),
+        (Step::Migrations, UpdateStep::Migrations),
+    ];
+    for (recorded_step, answered) in steps {
+        let job = UpdateJob::from(recorded(
+            JobStatus::Running,
+            recorded_step,
+            StepStatus::Pending,
+        ));
+        assert_eq!(job.steps[0].step, answered);
+    }
+
+    let statuses = [
+        (StepStatus::Pending, UpdateStepStatus::Pending),
+        (StepStatus::Running, UpdateStepStatus::Running),
+        (StepStatus::Done, UpdateStepStatus::Done),
+        (StepStatus::Skipped, UpdateStepStatus::Skipped),
+        (StepStatus::Advised, UpdateStepStatus::Advised),
+        (StepStatus::Failed, UpdateStepStatus::Failed),
+    ];
+    for (recorded_status, answered) in statuses {
+        let job = UpdateJob::from(recorded(JobStatus::Running, Step::Binary, recorded_status));
+        assert_eq!(job.steps[0].status, answered);
+    }
+
+    for (recorded_status, answered) in [
+        (JobStatus::Running, UpdateJobStatus::Running),
+        (JobStatus::Complete, UpdateJobStatus::Complete),
+        (JobStatus::Failed, UpdateJobStatus::Failed),
+    ] {
+        let job = UpdateJob::from(recorded(recorded_status, Step::Binary, StepStatus::Done));
+        assert_eq!(job.status, answered);
+    }
 }

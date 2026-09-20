@@ -1384,8 +1384,11 @@ type ContextRegion {
 	name: String!
 	"""
 	What the region does when it fills, as the snapshot recorded it.
+	
+	Null for a kind this build does not have a name for, which is a run
+	written by a newer one.
 	"""
-	kind: String!
+	kind: RegionKind
 	"""
 	Tokens it holds right now.
 	"""
@@ -2917,6 +2920,33 @@ type MaxTokensRegionPercent {
 }
 
 """
+Where a server stands on credentials.
+"""
+enum McpAuth {
+	"""
+	A stdio server, which has nobody to log in to.
+	"""
+	NOT_APPLICABLE
+	"""
+	An HTTP server with no credential of any kind.
+	"""
+	NONE
+	"""
+	An `Authorization` header from the config. A credential, so no login is
+	offered for it.
+	"""
+	HEADER
+	"""
+	Signed in, and the token has not expired.
+	"""
+	AUTHENTICATED
+	"""
+	Signed in once; the token has expired and the server needs another.
+	"""
+	EXPIRED
+}
+
+"""
 What signing in to an MCP server ended as.
 """
 enum McpLoginStatus {
@@ -2940,19 +2970,23 @@ type McpServer {
 	"""
 	name: String!
 	"""
-	How it is reached: `stdio`, `http`, or `invalid` when the configured
-	transport did not resolve.
+	How it is reached.
 	"""
-	transport: String!
+	transport: McpServerTransport!
 	"""
 	The command for a stdio server, the URL for an HTTP one. Empty when the
-	transport is invalid.
+	configuration does not resolve.
 	"""
 	endpoint: String!
 	"""
-	Its one-word auth state.
+	Why the configuration does not resolve, when it does not. Null for a
+	server that does.
 	"""
-	auth: String!
+	configError: String
+	"""
+	Where it stands on credentials.
+	"""
+	auth: McpAuth!
 }
 
 """
@@ -2988,6 +3022,29 @@ type McpServerTemplate {
 	Headers sent with every request, for an HTTP server.
 	"""
 	headers: [EnvEntry!]!
+}
+
+"""
+How a configured MCP server on this machine is reached.
+
+Its own type rather than the manifest's `McpTransport`: a blueprint
+declares what it wants, and this answers what a configuration on this
+machine resolved to - including `INVALID`, which no blueprint can declare.
+`configError` says why it did not resolve.
+"""
+enum McpServerTransport {
+	"""
+	A command this daemon spawns and talks to over its pipes.
+	"""
+	STDIO
+	"""
+	A URL this daemon calls.
+	"""
+	HTTP
+	"""
+	Neither: the configuration did not resolve.
+	"""
+	INVALID
 }
 
 """
@@ -3660,6 +3717,10 @@ type Mutation {
 		"""
 		agents: Boolean! = true,
 		"""
+		Respell keys that changed name in your own blueprints.
+		"""
+		keys: Boolean! = true,
+		"""
 		Apply the config migrations.
 		"""
 		migrations: Boolean! = true
@@ -4110,7 +4171,7 @@ type Query {
 		"""
 		provider: String,
 		"""
-		Reload the provider listings before answering.
+		Refresh this server's catalogue from the providers before answering, instead of answering from what it already holds. Slower, and it changes nothing a later request would not see anyway.
 		"""
 		refresh: Boolean! = false
 	): [Model!]!
@@ -4699,9 +4760,12 @@ type Run {
 	"""
 	iteration: Int!
 	"""
-	Tool calls across the whole run.
+	How many tool calls the run has made.
+	
+	A count, not the calls themselves: `executions` is the list, with what
+	each one was and how it ended.
 	"""
-	toolCalls: Int!
+	toolCallCount: Int!
 	"""
 	Unix epoch seconds, as the daemon stores it.
 	"""
@@ -4859,7 +4923,7 @@ type Run {
 		"""
 		Bytes to read from the end of each stream.
 		"""
-		tail: Int
+		tailBytes: Int
 	): String!
 	"""
 	The binary parts this run holds.
@@ -5511,9 +5575,9 @@ type Script {
 	"""
 	name: String!
 	"""
-	Where it was found.
+	Where it was found: the directory kind this script was read from.
 	"""
-	source: String!
+	foundAt: String!
 	"""
 	The agent whose directory it came from, for an agent-scoped script.
 	"""
@@ -6487,9 +6551,10 @@ type StageVisit {
 	leftAt: Timestamp
 	"""
 	Whether this is the visit in progress. The same fact as `leftAt` being
-	null, said the way a list is filtered on.
+	null, said the way a list is filtered on. Not a clock: the `active` on
+	a run and on a stage is how long each has been working.
 	"""
-	active: Boolean!
+	inProgress: Boolean!
 	"""
 	Tokens burned on this visit.
 	"""
@@ -6821,10 +6886,9 @@ type Tool {
 	"""
 	name: String!
 	"""
-	Which source offers it: a built-in, a sub-agent tool, a script, or an
-	MCP server.
+	What kind of thing offers it.
 	"""
-	source: String!
+	origin: ToolOrigin!
 	"""
 	The file behind it, for a script tool.
 	"""
@@ -7094,6 +7158,34 @@ type ToolInventory {
 	silently is not there is the failure this prevents.
 	"""
 	skipped: [SkippedTool!]!
+}
+
+"""
+What kind of thing offers a tool.
+
+A closed set, and the whole of it: this inventory is what an agent on this
+machine can be given, and an MCP server's tools are not in it. Read
+`mcpServers` for those.
+"""
+enum ToolOrigin {
+	"""
+	Compiled into this build. Every agent has it.
+	"""
+	BUILTIN
+	"""
+	A sub-agent tool, offered to an agent that may spawn children.
+	"""
+	SUBAGENT
+	"""
+	A `.rhai` script in one agent's own `tools/`, so it travels with that
+	agent and no other.
+	"""
+	AGENT_SCRIPT
+	"""
+	A `.rhai` script in the machine-wide tools directory, so every agent
+	here gets it.
+	"""
+	GLOBAL_SCRIPT
 }
 
 """
@@ -7596,15 +7688,33 @@ type UpdateJob {
 	"""
 	id: String!
 	"""
-	Where the run as a whole got to: `running`, `complete` or `failed`.
+	Where the run as a whole got to.
 	"""
-	status: String!
+	status: UpdateJobStatus!
 	"""
 	Each step, in the order they run. A step that was not asked for is
-	`skipped` rather than absent, so a client renders the same three rows
+	`SKIPPED` rather than absent, so a client renders the same rows
 	whatever the request was.
 	"""
 	steps: [UpdateJobStep!]!
+}
+
+"""
+Where an update run as a whole got to.
+"""
+enum UpdateJobStatus {
+	"""
+	Still going.
+	"""
+	RUNNING
+	"""
+	Every step finished and none failed.
+	"""
+	COMPLETE
+	"""
+	At least one step failed.
+	"""
+	FAILED
 }
 
 """
@@ -7612,14 +7722,13 @@ One step of an update run.
 """
 type UpdateJobStep {
 	"""
-	Which step: the binary, the blueprints, or the migrations.
+	Which step this is.
 	"""
-	step: String!
+	step: UpdateStep!
 	"""
-	Where it got to: `pending`, `running`, `done`, `skipped`, `failed` or
-	`advised`.
+	Where it got to.
 	"""
-	status: String!
+	status: UpdateStepStatus!
 	"""
 	What happened, in words.
 	"""
@@ -7660,6 +7769,60 @@ type UpdateProgress {
 	One line about what just happened, ready to print.
 	"""
 	detail: String!
+}
+
+"""
+The steps an update runs, in order.
+"""
+enum UpdateStep {
+	"""
+	Leviath itself. First, because what the other steps do is decided by
+	what the new binary ships.
+	"""
+	BINARY
+	"""
+	The bundled blueprints in the agents directory.
+	"""
+	AGENTS
+	"""
+	Keys in the reader's own blueprints that changed name.
+	"""
+	KEYS
+	"""
+	The config file.
+	"""
+	MIGRATIONS
+}
+
+"""
+Where one step of an update got to.
+"""
+enum UpdateStepStatus {
+	"""
+	Not reached yet.
+	"""
+	PENDING
+	"""
+	Happening now.
+	"""
+	RUNNING
+	"""
+	Did what it set out to.
+	"""
+	DONE
+	"""
+	The request did not ask for it, or it had nothing to do.
+	"""
+	SKIPPED
+	"""
+	The reader's to carry out, with the reason in `detail`. Neither success
+	nor failure: nothing was done and nothing went wrong.
+	"""
+	ADVISED
+	"""
+	Tried, and did not manage it.
+	"""
+	FAILED
 }
 
 """
@@ -7958,6 +8121,20 @@ type YoloDecision {
 }
 
 """
+Whether one human-in-the-loop mechanism still reaches a person.
+"""
+enum YoloHuman {
+	"""
+	Reaches a person and waits.
+	"""
+	ASK
+	"""
+	Answers itself and carries on.
+	"""
+	AUTO
+}
+
+"""
 One named yolo profile, summarised.
 
 The counts rather than the rules: a settings list shows how much a profile
@@ -7971,19 +8148,19 @@ type YoloProfile {
 	"""
 	What tools with no explicit rule do.
 	"""
-	default: String!
+	default: YoloWaiver!
 	"""
 	What happens to the agent's own questions.
 	"""
-	questions: String!
+	questions: YoloHuman!
 	"""
 	What happens at blueprint checkpoints.
 	"""
-	checkpoints: String!
+	checkpoints: YoloHuman!
 	"""
 	What happens at the taint gate.
 	"""
-	gate: String!
+	gate: YoloHuman!
 	"""
 	How many tool rules it carries: allow, ask, deny.
 	"""
@@ -8056,6 +8233,24 @@ input YoloTestInput {
 	Decide as if the tool had been named in `--allow`.
 	"""
 	allowed: Boolean
+}
+
+"""
+What a profile does with a tool no rule names.
+
+Two values, not three: a profile waives prompts, it never adds a refusal.
+A tool a profile does not reach is decided by the config's own permissions,
+which can still deny it.
+"""
+enum YoloWaiver {
+	"""
+	Runs without asking.
+	"""
+	ALLOW
+	"""
+	Stops and asks, as it would with no profile.
+	"""
+	ASK
 }
 
 """

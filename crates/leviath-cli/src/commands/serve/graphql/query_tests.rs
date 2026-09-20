@@ -659,7 +659,7 @@ async fn the_catalogue_answers_for_an_unconfigured_machine() {
 async fn the_tool_inventory_lists_tools_and_groups() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
-            "{ tools { tools { name source } groups { name description } skipped { path reason } } }",
+            "{ tools { tools { name origin } groups { name description } skipped { path reason } } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1039,7 +1039,8 @@ async fn logs_read_one_stage_or_every_stage() {
         );
 
         let every =
-            run_query("{ runs { edges { node { logs(allStages: true, tail: 100) } } } }").await;
+            run_query("{ runs { edges { node { logs(allStages: true, tailBytes: 100) } } } }")
+                .await;
         assert!(every.errors.is_empty(), "{:?}", every.errors);
     })
     .await;
@@ -1076,7 +1077,7 @@ async fn the_log_selectors_refuse_a_contradiction() {
             negative.errors
         );
 
-        let window = run_query("{ runs { edges { node { logs(tail: -1) } } } }").await;
+        let window = run_query("{ runs { edges { node { logs(tailBytes: -1) } } } }").await;
         assert!(
             window
                 .errors
@@ -1265,7 +1266,7 @@ async fn the_machine_listings_answer_for_a_bare_install() {
             "{ mcpServers { name transport endpoint auth }
                yoloProfiles { path exists error profiles { name default } }
                mime { mimeType source family text extensions }
-               scripts { kind name source agent } }",
+               scripts { kind name foundAt agent } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1530,7 +1531,7 @@ mod machine_listings {
             )
             .expect("a tool");
 
-            let answer = run_query("{ scripts { kind name source agent } }").await;
+            let answer = run_query("{ scripts { kind name foundAt agent } }").await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
             let scripts = json["scripts"].as_array().expect("the scripts");
@@ -1539,7 +1540,7 @@ mod machine_listings {
                 .find(|script| script["name"] == "summarize")
                 .expect("the tool that was just written");
             assert_eq!(tool["kind"], "tool");
-            assert_eq!(tool["source"], "global");
+            assert_eq!(tool["foundAt"], "global");
             assert!(tool["agent"].is_null(), "a global tool belongs to nobody");
 
             // An agent nothing knows about is not a refusal: the global scripts
@@ -1556,7 +1557,7 @@ mod machine_listings {
     async fn the_tools_listing_carries_the_group_tokens() {
         crate::commands::serve::testutil::with_home(|_home| async move {
             let answer = run_query(
-                "{ tools { tools { name source path agent } groups { name description }
+                "{ tools { tools { name origin path agent } groups { name description }
                      skipped { path reason } } }",
             )
             .await;
@@ -1595,11 +1596,15 @@ mod machine_listings {
             .expect("a config file");
             crate::commands::serve::mcp::TEST_PATHS
                 .scope(paths, async {
-                    let answer = run_query("{ mcpServers { name transport endpoint auth } }").await;
+                    let answer =
+                        run_query("{ mcpServers { name transport endpoint configError auth } }")
+                            .await;
                     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
                     let json = serde_json::to_value(&answer.data).expect("data serializes");
                     assert_eq!(json["mcpServers"][0]["name"], "docs");
-                    assert_eq!(json["mcpServers"][0]["transport"], "stdio");
+                    assert_eq!(json["mcpServers"][0]["transport"], "STDIO");
+                    assert_eq!(json["mcpServers"][0]["auth"], "NOT_APPLICABLE");
+                    assert!(json["mcpServers"][0]["configError"].is_null());
                     assert_eq!(json["mcpServers"][0]["endpoint"], "docs-mcp");
                 })
                 .await;
@@ -1625,8 +1630,8 @@ mod machine_listings {
             assert_eq!(json["yoloProfiles"]["exists"], true);
             let profile = &json["yoloProfiles"]["profiles"][0];
             assert!(
-                ["allow", "ask"].contains(&profile["default"].as_str().expect("a word")),
-                "the default is one of the two words: {profile}"
+                ["ALLOW", "ASK"].contains(&profile["default"].as_str().expect("a value")),
+                "the default is one of the two waivers: {profile}"
             );
             // Three counts each: allow, ask, deny, so a settings list can show
             // how much a profile waives without reading the rules.
@@ -1828,7 +1833,7 @@ mod the_awkward_shapes {
             .expect("a tool");
 
             let answer =
-                run_query(r#"{ tools(agent: "coder") { tools { name source path agent } } }"#)
+                run_query(r#"{ tools(agent: "coder") { tools { name origin path agent } } }"#)
                     .await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
@@ -1869,10 +1874,10 @@ mod the_awkward_shapes {
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
             let profile = &json["yoloProfiles"]["profiles"][0];
-            assert_eq!(profile["default"], "ask");
-            assert_eq!(profile["questions"], "ask");
-            assert_eq!(profile["checkpoints"], "ask");
-            assert_eq!(profile["gate"], "ask");
+            assert_eq!(profile["default"], "ASK");
+            assert_eq!(profile["questions"], "ASK");
+            assert_eq!(profile["checkpoints"], "ASK");
+            assert_eq!(profile["gate"], "ASK");
         })
         .await;
     }
@@ -2022,14 +2027,21 @@ fn the_run_filter_refuses_what_it_cannot_read() {
     assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
 }
 
-/// Both words a profile's default can be.
+/// Both values a profile's default can be.
 ///
-/// The word is the one the config file uses, so a console showing a profile and
-/// the file it came from agree. Two values, and neither is a bare on or off.
+/// Two, and neither is a bare on or off: a profile waives a prompt, it never
+/// adds a refusal, so there is no third value for denying anything.
 #[test]
-fn a_profiles_default_reads_as_the_word_the_file_uses() {
-    assert_eq!(waiver_word(crate::yolo::rules::Waiver::Allow), "allow");
-    assert_eq!(waiver_word(crate::yolo::rules::Waiver::Ask), "ask");
+fn a_profiles_default_is_one_of_two_waivers() {
+    use super::super::types::machine::YoloWaiver;
+    assert_eq!(
+        waiver_word(crate::yolo::rules::Waiver::Allow),
+        YoloWaiver::Allow
+    );
+    assert_eq!(
+        waiver_word(crate::yolo::rules::Waiver::Ask),
+        YoloWaiver::Ask
+    );
 }
 
 /// The configured blueprint directories come back as text.

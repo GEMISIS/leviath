@@ -103,24 +103,32 @@ pub(super) struct McpServerInfo {
     pub(super) transport: String,
     pub(super) endpoint: String,
     pub(super) auth: String,
+    /// Why the configuration does not resolve to a transport, when it does not.
+    ///
+    /// `transport: "invalid"` on its own says a server is broken and nothing
+    /// about how to fix it, which leaves reading the config file by hand as the
+    /// only way to find out. Null for a server that resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) config_error: Option<String>,
 }
 
 impl McpServerInfo {
     fn describe(server: &MCPServerConfig, store: &AuthStore, now: u64) -> Self {
-        let (transport, endpoint) = match server.resolve() {
+        let (transport, endpoint, config_error) = match server.resolve() {
             Ok(leviath_mcp::ResolvedTransport::Stdio { command, .. }) => {
-                ("stdio".to_string(), command.to_string())
+                ("stdio".to_string(), command.to_string(), None)
             }
             Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => {
-                ("http".to_string(), url.to_string())
+                ("http".to_string(), url.to_string(), None)
             }
-            Err(_) => ("invalid".to_string(), String::new()),
+            Err(e) => ("invalid".to_string(), String::new(), Some(e.to_string())),
         };
         Self {
             name: server.name.clone(),
             transport,
             endpoint,
             auth: auth_status(server, store, now),
+            config_error,
         }
     }
 }

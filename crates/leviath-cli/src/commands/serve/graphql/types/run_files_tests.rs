@@ -821,7 +821,7 @@ async fn a_stage_record_carries_its_region_peaks() {
         let json = data(
             meta,
             "{ run { stages { name regionPeaks { region tokens }
-                 visits { enteredAt leftAt active } } } }",
+                 visits { enteredAt leftAt inProgress } } } }",
         )
         .await;
         let stage = &json["run"]["stages"][0];
@@ -830,7 +830,7 @@ async fn a_stage_record_carries_its_region_peaks() {
         assert_eq!(stage["regionPeaks"][0]["tokens"], 120);
         // The visit in progress says so, which is the same fact as `leftAt`
         // being null said the way a list is filtered on.
-        assert_eq!(stage["visits"][0]["active"], true);
+        assert_eq!(stage["visits"][0]["inProgress"], true);
         assert!(stage["visits"][0]["leftAt"].is_null());
     })
     .await;

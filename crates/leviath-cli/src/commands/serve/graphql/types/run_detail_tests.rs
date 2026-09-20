@@ -282,7 +282,7 @@ async fn a_context_window_reports_its_regions() {
     assert_eq!(window["stageName"], "build");
     let plan = &window["regions"][0];
     assert_eq!(plan["name"], "plan");
-    assert_eq!(plan["kind"], "pinned");
+    assert_eq!(plan["kind"], "PINNED");
     assert_eq!(plan["tokens"], 500);
     assert_eq!(plan["entryCount"], 2);
     assert_eq!(plan["description"], "the plan");

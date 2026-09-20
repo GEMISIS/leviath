@@ -230,13 +230,55 @@ impl UpdateInfo {
 /// One step of an update run.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateJobStep {
-    /// Which step: the binary, the blueprints, or the migrations.
-    pub(crate) step: String,
-    /// Where it got to: `pending`, `running`, `done`, `skipped`, `failed` or
-    /// `advised`.
-    pub(crate) status: String,
+    /// Which step this is.
+    pub(crate) step: UpdateStep,
+    /// Where it got to.
+    pub(crate) status: UpdateStepStatus,
     /// What happened, in words.
     pub(crate) detail: String,
+}
+
+/// The steps an update runs, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum UpdateStep {
+    /// Leviath itself. First, because what the other steps do is decided by
+    /// what the new binary ships.
+    Binary,
+    /// The bundled blueprints in the agents directory.
+    Agents,
+    /// Keys in the reader's own blueprints that changed name.
+    Keys,
+    /// The config file.
+    Migrations,
+}
+
+/// Where one step of an update got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum UpdateStepStatus {
+    /// Not reached yet.
+    Pending,
+    /// Happening now.
+    Running,
+    /// Did what it set out to.
+    Done,
+    /// The request did not ask for it, or it had nothing to do.
+    Skipped,
+    /// The reader's to carry out, with the reason in `detail`. Neither success
+    /// nor failure: nothing was done and nothing went wrong.
+    Advised,
+    /// Tried, and did not manage it.
+    Failed,
+}
+
+/// Where an update run as a whole got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum UpdateJobStatus {
+    /// Still going.
+    Running,
+    /// Every step finished and none failed.
+    Complete,
+    /// At least one step failed.
+    Failed,
 }
 
 /// One update run.
@@ -244,25 +286,42 @@ pub(crate) struct UpdateJobStep {
 pub(crate) struct UpdateJob {
     /// The job's id.
     pub(crate) id: String,
-    /// Where the run as a whole got to: `running`, `complete` or `failed`.
-    pub(crate) status: String,
+    /// Where the run as a whole got to.
+    pub(crate) status: UpdateJobStatus,
     /// Each step, in the order they run. A step that was not asked for is
-    /// `skipped` rather than absent, so a client renders the same three rows
+    /// `SKIPPED` rather than absent, so a client renders the same rows
     /// whatever the request was.
     pub(crate) steps: Vec<UpdateJobStep>,
 }
 
 impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
     fn from(job: super::super::super::update_job::UpdateJob) -> Self {
+        use super::super::super::update_job::{JobStatus, Step, StepStatus};
         Self {
             id: job.id,
-            status: job.status.to_string(),
+            status: match job.status {
+                JobStatus::Running => UpdateJobStatus::Running,
+                JobStatus::Complete => UpdateJobStatus::Complete,
+                JobStatus::Failed => UpdateJobStatus::Failed,
+            },
             steps: job
                 .steps
                 .into_iter()
                 .map(|step| UpdateJobStep {
-                    step: step.step.to_string(),
-                    status: step.status.to_string(),
+                    step: match step.step {
+                        Step::Binary => UpdateStep::Binary,
+                        Step::Agents => UpdateStep::Agents,
+                        Step::Keys => UpdateStep::Keys,
+                        Step::Migrations => UpdateStep::Migrations,
+                    },
+                    status: match step.status {
+                        StepStatus::Pending => UpdateStepStatus::Pending,
+                        StepStatus::Running => UpdateStepStatus::Running,
+                        StepStatus::Done => UpdateStepStatus::Done,
+                        StepStatus::Skipped => UpdateStepStatus::Skipped,
+                        StepStatus::Advised => UpdateStepStatus::Advised,
+                        StepStatus::Failed => UpdateStepStatus::Failed,
+                    },
                     detail: step.detail,
                 })
                 .collect(),

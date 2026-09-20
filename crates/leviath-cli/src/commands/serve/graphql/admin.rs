@@ -277,12 +277,18 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "Upgrade the binary.", default = true)] binary: bool,
         #[graphql(desc = "Install the bundled blueprints.", default = true)] agents: bool,
+        #[graphql(
+            desc = "Respell keys that changed name in your own blueprints.",
+            default = true
+        )]
+        keys: bool,
         #[graphql(desc = "Apply the config migrations.", default = true)] migrations: bool,
     ) -> async_graphql::Result<super::types::update::UpdateJob> {
         let state = ctx.data_unchecked::<AppState>();
         let request = super::super::update_job::ApplyRequest {
             binary,
             agents,
+            keys,
             migrations,
         };
         // The record the registry wrote, rather than an id read back from it:

@@ -527,7 +527,7 @@ mod tests {
             .iter()
             .map(|step| step["step"].as_str().expect("a step names itself"))
             .collect();
-        assert_eq!(steps, vec!["binary", "agents", "migrations"]);
+        assert_eq!(steps, vec!["binary", "agents", "keys", "migrations"]);
     }
 
     /// An id nobody minted is a 404 that names it, not an empty 200 a client
