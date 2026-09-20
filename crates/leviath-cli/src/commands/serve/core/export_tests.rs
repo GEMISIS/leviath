@@ -236,7 +236,9 @@ fn the_registry_describes_itself() {
 #[test]
 fn updating_a_job_that_is_gone_does_nothing() {
     let exports = Exports::default();
-    exports.update("export-never", |job| job.status = ExportStatus::Complete);
+    exports.update("export-never", &mut |job: &mut super::ExportJob| {
+        job.status = ExportStatus::Complete
+    });
     assert!(exports.get("export-never").is_none());
 }
 
@@ -415,15 +417,18 @@ fn a_writer_that_gives_up_is_reported() {
     let rows: Vec<serde_json::Value> = (0..4)
         .map(|i| serde_json::json!({ "run_id": format!("run-{i}") }))
         .collect();
-    let failed =
-        super::write_rows(OneLine { written: 0 }, &rows).expect_err("the writer gave up partway");
+    let failed = super::write_rows(&mut OneLine { written: 0 }, &rows)
+        .expect_err("the writer gave up partway");
     assert_eq!(failed.to_string(), "no space left");
 
     // The separator is its own write, so a disk that fills between the row and
     // the newline leaves a file whose last line is not a line. One row short
     // enough to fit, whose newline does not.
-    let failed = super::write_rows(OneLine { written: 0 }, &[serde_json::json!({ "ab": 1 })])
-        .expect_err("the separator did not fit");
+    let failed = super::write_rows(
+        &mut OneLine { written: 0 },
+        &[serde_json::json!({ "ab": 1 })],
+    )
+    .expect_err("the separator did not fit");
     assert_eq!(failed.to_string(), "no space left");
 }
 
@@ -446,7 +451,7 @@ fn a_flush_that_fails_is_reported() {
         }
     }
 
-    let failed = super::write_rows(NeverFlushes, &[serde_json::json!({ "run_id": "a" })])
+    let failed = super::write_rows(&mut NeverFlushes, &[serde_json::json!({ "run_id": "a" })])
         .expect_err("the flush failed");
     assert_eq!(failed.to_string(), "the disk went away");
 }
