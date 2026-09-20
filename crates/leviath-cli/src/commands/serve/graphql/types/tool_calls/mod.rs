@@ -38,8 +38,8 @@ use args_context::{
     ContextReadArgs, ContextWriteArgs, TodoAddArgs, TodoDoneArgs, TodoNoteArgs,
 };
 use args_files::{
-    EditFileArgs, InstallToolArgs, ListDirArgs, ReadFileArgs, ReadFilesArgs, ShellArgs,
-    WhichCommandArgs, WriteFileArgs,
+    EditFileArgs, InstallGlobalToolArgs, InstallSelfToolArgs, ListDirArgs, ReadFileArgs,
+    ReadFilesArgs, ShellArgs, WhichCommandArgs, WriteFileArgs,
 };
 use args_rest::{
     AskUserChoiceArgs, AskUserConfirmArgs, AskUserTextArgs, CheckAgentArgs, EditDocumentArgs,
@@ -211,7 +211,8 @@ tool_calls! {
         "One `read_files` call.", ReadFiles, ReadFilesCall, ReadFilesArgs, "read_files";
         "One `shell` call.", Shell, ShellCall, ShellArgs, "shell";
         "One `which_command` call.", WhichCommand, WhichCommandCall, WhichCommandArgs, "which_command";
-        "One `install_tool` call.", InstallTool, InstallToolCall, InstallToolArgs, "install_tool";
+        "One `install_self_tool` call.", InstallSelfTool, InstallSelfToolCall, InstallSelfToolArgs, "install_self_tool";
+        "One `install_global_tool` call.", InstallGlobalTool, InstallGlobalToolCall, InstallGlobalToolArgs, "install_global_tool";
         "One `present_for_review` call.", PresentForReview, PresentForReviewCall, PresentForReviewArgs, "present_for_review";
         "One `ask_user_text` call.", AskUserText, AskUserTextCall, AskUserTextArgs, "ask_user_text";
         "One `ask_user_choice` call.", AskUserChoice, AskUserChoiceCall, AskUserChoiceArgs, "ask_user_choice";

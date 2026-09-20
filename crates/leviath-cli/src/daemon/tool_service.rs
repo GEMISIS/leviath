@@ -568,7 +568,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
 }
 
 /// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
-/// file (via `write_file`/`edit_file`) or installs one (via `install_tool`), so
+/// file (via `write_file`/`edit_file`) or installs one, so
 /// the next tick re-scans + re-advertises. A no-op for static agents. The path
 /// lives in the tool args; the actual discovery is workdir-confined, so an
 /// off-`tools/` write just yields a no-op re-scan. An install always lands in
@@ -576,7 +576,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
 fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
     let Some(ctx) = &state.dynamic else { return };
     let canonical = leviath_tools::canonical_tool_name(&tc.name);
-    let installs = canonical == "install_tool";
+    let installs = matches!(canonical, "install_self_tool" | "install_global_tool");
     let writes = matches!(canonical, "write_file" | "edit_file");
     let is_rhai = tc
         .arguments

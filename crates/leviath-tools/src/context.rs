@@ -28,12 +28,20 @@ pub struct ToolContext {
     /// Resolved from `[security]` at spawn; the default withholds
     /// credential-shaped names.
     pub(crate) shell_env: ShellEnvPolicy,
-    /// Where `install_tool` writes: the global tools directory every agent
-    /// scans at spawn, [`leviath_core::tools_dir`] by default. `None` when no
-    /// home directory resolves, in which case `install_tool` refuses. Not the
-    /// workdir and not under the workdir fence: this is the one built-in that
-    /// legitimately writes outside the run.
+    /// Where `install_global_tool` writes: the machine-wide tools directory
+    /// every agent scans at spawn, [`leviath_core::tools_dir`] by default.
+    /// `None` when no home directory resolves, in which case the tool refuses.
+    /// Not the workdir and not under the workdir fence: this is the one
+    /// built-in that legitimately writes outside the run.
     pub tools_dir: Option<PathBuf>,
+    /// Where `install_self_tool` writes: this blueprint's own `tools/`
+    /// directory, which only its own runs scan.
+    ///
+    /// `None` for a context with no blueprint behind it - a seed command, a
+    /// one-off - where that tool refuses rather than falling back to the
+    /// machine-wide directory. Falling back is the whole thing the pair exists
+    /// to stop: an agent asking to arm itself must never arm every agent.
+    pub agent_tools_dir: Option<PathBuf>,
     /// Names `install_tool` refuses on top of this platform's built-ins and the
     /// sub-agent tools: the MCP tools the run offers, filled at spawn. A script
     /// under any of these is dropped at discovery, so installing one would
@@ -105,6 +113,7 @@ impl ToolContext {
             file_locks: Arc::new(Mutex::new(HashMap::new())),
             shell_env: ShellEnvPolicy::default(),
             tools_dir: leviath_core::tools_dir(),
+            agent_tools_dir: None,
             reserved_names: Vec::new(),
             mime: None,
         }
@@ -116,7 +125,14 @@ impl ToolContext {
         self
     }
 
-    /// Point `install_tool` at a directory other than the data root's
+    /// Where `install_self_tool` writes: this blueprint's own `tools/`.
+    /// Builder-style.
+    pub fn with_agent_tools_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.agent_tools_dir = dir;
+        self
+    }
+
+    /// Point `install_global_tool` at a directory other than the data root's
     /// `tools/`, or at nothing at all. Builder-style. Tests use it to install
     /// into a temporary directory and to reach the no-home refusal without
     /// touching the environment.
@@ -192,6 +208,11 @@ impl ToolContext {
 pub const TOOL_ALIASES: &[(&str, &str)] = &[
     // `bash` is the familiar name for the general shell tool.
     ("bash", "shell"),
+    // `install_tool` wrote to the machine-wide directory, so that is what it
+    // still means. Kept so an installed blueprint that grants it by name, and a
+    // model that learned the name, both keep working - and the two current
+    // names say which blast radius they carry.
+    ("install_tool", "install_global_tool"),
 ];
 
 /// Resolve `name` through [`TOOL_ALIASES`] to its canonical built-in name.

@@ -165,6 +165,18 @@ same list.
 
 ### Changed
 
+- `install_tool` is two tools, because it only ever did the wide one.
+  `install_self_tool` writes into the calling blueprint's own `tools/`, where
+  only that blueprint's runs see it; `install_global_tool` writes into
+  `~/.leviath/tools/`, where every agent on the machine that asks for script
+  tools does. The old name still works and still means the wide one, so nothing
+  that grants or calls it changes.
+
+  One agent learning something armed every agent with it, and the name said
+  nothing about that. Neither half falls back to the other: an agent with no
+  blueprint directory to write to is told so rather than quietly installing
+  machine-wide, which is the mistake the split exists to make impossible.
+
 - A blueprint says when its runs look for tools again, with a third answer that
   did not exist: `[agent] tool_rescan` takes `at_spawn` (the default),
   `after_writes`, or the new `before_dispatch`, which looks at the scanned

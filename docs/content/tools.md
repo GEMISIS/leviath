@@ -28,14 +28,15 @@ Read and modify files relative to the agent's working directory.
 | `write_file` | Write content to a file, creating parent directories as needed. With `append`, add to the end instead of replacing. | `path`, `content`, `append` (optional) |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
-| `install_tool` | Compile a Rhai tool script and install it into `~/.leviath/tools/`, for every future run on the machine. | `name`, `source`, `overwrite` (optional, default false) |
+| `install_self_tool` | Compile a Rhai tool script and install it into this agent's own `tools/`, where only its own runs see it. | `name`, `source`, `overwrite` (optional, default false) |
+| `install_global_tool` | The same, into `~/.leviath/tools/`, for every future run on the machine. | `name`, `source`, `overwrite` (optional, default false) |
 
 `read_file` stores a file that is not text (an image, a PDF, a model) as a typed
 [part](/docs/mime) on the result rather than inlining it. A model that takes the type sees the
 bytes, and one that does not sees a one-line stand-in.
 
-`write_file` with `append` lets a file too large for one reply be written in parts. `install_tool`
-refuses a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing
+`write_file` with `append` lets a file too large for one reply be written in parts. Both installers
+refuse a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing
 tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run).
 
 > [!TIP]
@@ -435,7 +436,8 @@ With nothing configured, tools fall back to these:
 |---|---|
 | `read_file`, `read_files`, `list_dir` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
-| `install_tool` | `ask` |
+| `install_self_tool` | `ask` |
+| `install_global_tool` | `ask` |
 | `context_read`, `context_write`, `context_append`, `context_delete`, `context_list`, `context_attach`, `context_export` | `allow` |
 | `todo_add`, `todo_done`, `todo_note` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |

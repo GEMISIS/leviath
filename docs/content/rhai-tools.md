@@ -21,7 +21,7 @@ Per-agent tools live in that agent's own `tools/` directory instead, and are che
 > [!WARNING]
 > The directory is `~/.leviath/tools/`, inside Leviath's data root next to `providers/` and
 > `agents/`. It is not `$HOME/tools/`. Every `.rhai` file here becomes a tool for every agent, and
-> not every file in it was written by you: once a run uses the `install_tool` built-in, the
+> not every file in it was written by you: once a run uses `install_global_tool`, the
 > directory holds model-authored code as well. Each installed file starts with a
 > `// installed by leviath: agent run in <workdir> at <unix seconds>` line naming where it came
 > from, and every call to any tool here is still gated by the tool policy (`ask` by default, waived
@@ -176,11 +176,26 @@ schema   = { type = "string", enum = ["json", "yaml"], description = "output for
 
 ## Installing a tool from a run
 
-A running agent can add to the global inventory itself with the `install_tool` built-in. It takes
-the tool's `name`, the complete `.rhai` `source`, and an optional `overwrite` flag, compiles the
-script, and writes it to `~/.leviath/tools/<name>.rhai`. This is the persist path for mechanical
-learnings. A step an agent worked out by hand once, such as a parsing routine, a repeated lookup or
-a fixed transformation, becomes a tool. Every later run can call it instead of rediscovering it.
+A running agent can add a tool itself. Both built-ins take the tool's `name`, the complete `.rhai`
+`source`, and an optional `overwrite` flag, compile the script, and write it out. This is the
+persist path for mechanical learnings. A step an agent worked out by hand once, such as a parsing
+routine, a repeated lookup or a fixed transformation, becomes a tool that later runs call instead of
+rediscovering it.
+
+What differs is who ends up with the tool:
+
+| Built-in | Writes to | Who sees it |
+|---|---|---|
+| `install_self_tool` | the agent's own `tools/` | that agent's runs, and nothing else |
+| `install_global_tool` | `~/.leviath/tools/` | every agent on the machine that asks for script tools |
+
+Reach for `install_self_tool`. What an agent learns is usually about its own job, and the wide one
+arms every agent that names `@scripts` or `@all` with code one agent wrote. `install_tool` is the
+name they were split out of, and it still works: it means `install_global_tool`, which is what it
+always did.
+
+Neither one falls back to the other. An agent with no blueprint directory to write to is told so,
+rather than quietly installing machine-wide.
 
 The install is refused, and nothing is written, when the script:
 
@@ -201,8 +216,8 @@ Three things keep the directory yours:
 - Every installed file starts with a `// installed by leviath: agent run in <workdir> at <unix
   seconds>` comment, so `cat` and `lev tools` show which run wrote it. The comment carries no `@`
   directive and compiles as an ordinary comment.
-- `install_tool` is `ask` by default, like `write_file` and `shell`. A blueprint or `config.toml`
-  can set `install_tool = "allow"` under `[tool_permissions]`, and `--yolo` waives the prompt for
+- Both are `ask` by default, like `write_file` and `shell`. A blueprint or `config.toml` can set
+  `install_self_tool = "allow"` under `[tool_permissions]`, and `--yolo` waives the prompt for
   an unattended run. See [Security](/docs/security) for what an unattended run can persist.
 - The script's own calls are still gated when it runs: an installed tool reads the same
   [`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) as a hand-written one.

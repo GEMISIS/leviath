@@ -497,13 +497,17 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
             ToolDirection::Inbound,
             TaintLevel::Public,
         ),
-        // `install_tool` writes one file to the local tools directory the way
+        // An installer writes one file to a tools directory the way
         // `write_file` writes one to the workdir; nothing leaves the machine.
-        "write_file" | "install_tool" => ToolClassification::new(
-            TaintLevel::Internal,
-            ToolDirection::Internal,
-            TaintLevel::Public,
-        ),
+        // The old installer name is here beside them because this is matched on
+        // the name as called, the way `bash` sits beside `shell`.
+        "write_file" | "install_self_tool" | "install_global_tool" | "install_tool" => {
+            ToolClassification::new(
+                TaintLevel::Internal,
+                ToolDirection::Internal,
+                TaintLevel::Public,
+            )
+        }
         // `edit_document` edits a draft the same way `edit_file` edits a
         // file, with a person at the other end instead of the disk.
         "edit_file" | "edit_document" => ToolClassification::new(

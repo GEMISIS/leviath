@@ -623,9 +623,16 @@ fn build_agent_inner(
     let mime_checks = resolve_mime_checks(&blueprint, &args.blueprint_path)?;
     let run_registry = run_mime_registry(world, &blueprint, mime_checks);
     let mime = Arc::new(tool_mime(world, &args.run_id, &run_registry));
+    // The blueprint's own `tools/`, which is where `install_self_tool` writes
+    // and the first directory discovery scans. Derived from the manifest this
+    // run was spawned from, so an agent can only ever arm itself.
+    let agent_tools_dir = std::path::Path::new(&args.blueprint_path)
+        .parent()
+        .map(|dir| dir.join("tools"));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy)
         .with_shell_env(shell_env_policy(deps.config))
+        .with_agent_tools_dir(agent_tools_dir)
         .with_mime(mime.clone());
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {

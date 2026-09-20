@@ -151,7 +151,8 @@ impl BuiltinTools {
             "shell" => self.shell(&args).await,
             // Synchronous like the environment tools: compile, then one
             // atomic write into the global tools directory (see `install.rs`).
-            "install_tool" => self.install_tool(&args),
+            "install_global_tool" => self.install_global_tool(&args),
+            "install_self_tool" => self.install_self_tool(&args),
             // Like the context tools, this one needs the live world: the stage,
             // iteration and token counts it reports exist only there.
             "runtime_info" => "[error] runtime_info must be handled by the runtime".to_string(),
