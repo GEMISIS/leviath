@@ -875,3 +875,102 @@ async fn validation_reports_rather_than_fails() {
     })
     .await;
 }
+
+/// An export is started, polled, and handed over as a signed link.
+///
+/// One schema for both halves on purpose: the job lives in this server's own
+/// registry, so starting it and polling it have to be the same server.
+#[tokio::test]
+async fn an_export_is_started_then_polled_for_its_link() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-export", |_d| async move {
+        create_run(&run_in("run-a", RunStatus::Complete)).expect("run written");
+        create_run(&run_in("run-b", RunStatus::Running)).expect("run written");
+        let state = state_with_agent_paths(Vec::new());
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .finish();
+
+        let started = schema
+            .execute(Request::new(
+                r#"mutation { bulkExportRuns(filter: { statusIn: [COMPLETE] },
+                     fields: ["run_id", "status"]) { id status written downloadUrl } }"#,
+            ))
+            .await;
+        assert!(started.errors.is_empty(), "{:?}", started.errors);
+        let json = serde_json::to_value(&started.data).expect("data serializes");
+        let id = json["bulkExportRuns"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+        assert!(
+            json["bulkExportRuns"]["downloadUrl"].is_null(),
+            "nothing to fetch before it is written"
+        );
+
+        // Poll until the worker has finished: the mutation answers before the
+        // file exists, which is the point of a job.
+        let mut link = None;
+        for _ in 0..200 {
+            let polled = schema
+                .execute(Request::new(format!(
+                    "{{ bulkExport(id: \"{id}\") {{ status written error downloadUrl }} }}"
+                )))
+                .await;
+            assert!(polled.errors.is_empty(), "{:?}", polled.errors);
+            let json = serde_json::to_value(&polled.data).expect("data serializes");
+            if json["bulkExport"]["status"] == "complete" {
+                assert_eq!(json["bulkExport"]["written"], 1, "the filter was applied");
+                assert!(json["bulkExport"]["error"].is_null());
+                link = json["bulkExport"]["downloadUrl"]
+                    .as_str()
+                    .map(str::to_string);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let link = link.expect("the export finished with a link");
+        assert!(link.starts_with(&format!("/api/exports/{id}?")), "{link}");
+        assert!(link.contains("exp=") && link.contains("sig="), "{link}");
+    })
+    .await;
+}
+
+/// An id nobody started is null rather than an error: an export that expired
+/// and one that never existed look the same, and both mean "ask again".
+#[tokio::test]
+async fn polling_an_unknown_export_answers_null() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-export-unknown", |_d| async move {
+        let answer = mutate(
+            no_daemon_client(),
+            "{ bulkExport(id: \"export-1-1\") { status } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert!(json["bulkExport"].is_null());
+    })
+    .await;
+}
+
+/// A field that no run carries is refused, and nothing is written.
+#[tokio::test]
+async fn an_export_of_an_unknown_field_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-export-field", |_d| async move {
+        let answer = mutate(
+            no_daemon_client(),
+            r#"mutation { bulkExportRuns(fields: ["run_id", "nope"]) { id } }"#,
+        )
+        .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(error.message.contains("nope"), "{}", error.message);
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+    })
+    .await;
+}

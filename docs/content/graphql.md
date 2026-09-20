@@ -319,6 +319,48 @@ expected. Partial success is the normal outcome, not a failure.
 Deleting a record is not editing a run, so a finished run is fair game here even
 though the lifecycle mutations refuse it.
 
+## Exporting everything
+
+Paging five thousand runs is a hundred requests. An export is one:
+
+```graphql
+mutation {
+  bulkExportRuns(filter: { statusIn: [COMPLETE] }, fields: ["run_id", "status", "cost_usd"]) {
+    id status downloadUrl
+  }
+}
+```
+
+It answers before the file exists, which is what makes it a job rather than a
+very large response. The request returns in milliseconds however large the store
+is. Poll it, and fetch it when it is ready:
+
+```graphql
+{ bulkExport(id: "export-1789865498-0") { status written error downloadUrl } }
+```
+
+`written` counts the runs on disk so far, so a progress bar has something to
+read. `downloadUrl` is null until `status` is `complete`, because there is
+nothing to fetch before then. It is then a signed link, the same kind the byte
+fields mint, so a download button can use it directly.
+
+The filter is the same `RunFilter` the `runs` connection takes. `fields` narrows
+each row to the top-level run fields you name, and a name no run carries is
+`BAD_USER_INPUT` rather than a column quietly missing from the file.
+
+What comes back is JSONL: one JSON object per line, not one array. A reader can
+start on it before the writer has finished, and neither side ever holds the whole
+store in memory.
+
+```
+{"run_id":"run-a","status":"complete","cost_usd":0.0142}
+{"run_id":"run-b","status":"complete","cost_usd":0.0071}
+```
+
+A file is kept for one hour, then removed along with its job record. Neither
+outlives the other, so an expired id and one that was never started both answer
+null. Ask again: an export is cheap, and the store has moved on anyway.
+
 ## Answering a prompt
 
 `openInteractions` is the approval inbox: every open ask, each naming the run it

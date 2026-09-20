@@ -176,7 +176,7 @@ fn fields_always_keeps_run_id_and_rejects_what_it_cannot_serve() {
 
 /// A field that only appears on runs that have it is still a field.
 ///
-/// `known_meta_fields` builds its allowlist by serializing a probe `RunMeta`,
+/// `known_fields` builds its allowlist by serializing a probe `RunMeta`,
 /// and several fields carry `skip_serializing_if = "Option::is_none"`. A probe
 /// left at its defaults omits those, so asking for one was refused as unknown
 /// even on a run that carried it. The probe fills every option to keep the
@@ -221,7 +221,7 @@ fn every_skip_if_none_option_on_run_meta_is_filled_by_the_probe() {
         .collect();
     assert!(declared.len() > 30, "found only {declared:?}");
 
-    let known = known_meta_fields();
+    let known = known_fields();
     let missing: Vec<&str> = declared
         .iter()
         .copied()

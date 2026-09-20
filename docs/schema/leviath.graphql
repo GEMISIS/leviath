@@ -428,6 +428,33 @@ enum BlueprintSource {
 }
 
 """
+An export job, as a client polls it.
+"""
+type BulkExport {
+	"""
+	The job's id.
+	"""
+	id: String!
+	"""
+	Where it has got to: `queued`, `running`, `complete` or `failed`.
+	"""
+	status: String!
+	"""
+	How many runs have been written.
+	"""
+	written: Int!
+	"""
+	Why it failed, when it did.
+	"""
+	error: String
+	"""
+	A short-lived signed link to the JSONL. Null until the export is
+	complete, because there is nothing to fetch before then.
+	"""
+	downloadUrl: String
+}
+
+"""
 One page of a run's direct children.
 """
 type ChildConnection {
@@ -1405,6 +1432,29 @@ type Mutation {
 		agent: String
 	): ValidationReport!
 	"""
+	Export the run store to a file, and hand back the job.
+	
+	Paging ten thousand runs through a connection is two hundred requests,
+	and a client that wants everything wants it once. This returns
+	immediately; poll `bulkExport(id:)` and fetch `downloadUrl` when it is
+	complete.
+	
+	The filter is the run listing's own, so a client builds the predicate
+	once and uses it for both. `fields` narrows each row, and an unknown name
+	is refused rather than dropped: a column quietly missing from an export
+	is discovered downstream, by somebody else.
+	"""
+	bulkExportRuns(
+		"""
+		Which runs to export. Omitted means all of them.
+		"""
+		filter: RunFilter,
+		"""
+		Which top-level run fields to keep in each row.
+		"""
+		fields: [String!]
+	): BulkExport!
+	"""
 	Delete run records.
 	
 	Takes exactly one of `ids` or `before`. Neither is a client that failed
@@ -1727,6 +1777,19 @@ type Query {
 		"""
 		agent: String
 	): ToolInventory!
+	"""
+	Poll an export this server started.
+	
+	Null when no export carries that id: it was never started, or it has
+	expired. An export's file is kept for an hour, and its record goes with
+	the file, so neither outlives the other.
+	"""
+	bulkExport(
+		"""
+		The export job's id.
+		"""
+		id: String!
+	): BulkExport
 	"""
 	Every open ask across every run: the approval inbox.
 	

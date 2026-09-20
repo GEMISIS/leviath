@@ -37,6 +37,65 @@ pub(super) struct BlobListing {
     pub(super) items: Vec<BlobEntry>,
 }
 
+/// `GET /api/exports/{id}`: the JSONL an export wrote.
+///
+/// A byte route like the others, which is why a signed link opens it: an export
+/// is downloaded by a browser, and a browser cannot put a header on a download.
+pub(super) async fn export_file(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    use super::core::error::ServeError;
+    use super::core::export::ExportStatus;
+
+    let job = state.caches.exports.get(&id).ok_or_else(|| {
+        super::core::error::as_api_error(&ServeError::NotFound(format!(
+            "no export '{id}': it was never started, or it has expired"
+        )))
+    })?;
+    match job.status {
+        ExportStatus::Complete => {}
+        // Not a failure of this request: the export is simply not ready, and
+        // the client polls the job rather than the file.
+        ExportStatus::Queued | ExportStatus::Running => {
+            return Err(super::core::error::as_api_error(&ServeError::Conflict(
+                format!("export '{id}' is still {}", job.status.wire()),
+            )));
+        }
+        ExportStatus::Failed => {
+            return Err(super::core::error::as_api_error(&ServeError::Conflict(
+                format!(
+                    "export '{id}' failed: {}",
+                    job.error
+                        .unwrap_or_else(|| "no reason recorded".to_string())
+                ),
+            )));
+        }
+    }
+    let bytes = tokio::fs::read(super::core::export::export_path(&id))
+        .await
+        .map_err(|e| {
+            super::core::error::as_api_error(&ServeError::Internal(format!(
+                "export '{id}' is complete, but its file cannot be read: {e}"
+            )))
+        })?;
+    let jsonl = MimeType::parse("application/jsonl").map_err(|e| {
+        super::core::error::as_api_error(&ServeError::Internal(format!(
+            "the export's own content type will not parse: {e}"
+        )))
+    })?;
+    bytes_response(
+        bytes,
+        &jsonl,
+        &format!("{id}.jsonl"),
+        true,
+        headers
+            .get(axum::http::header::RANGE)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 /// `GET /api/agents/{id}/blobs`: every stored part the run holds.
 pub(super) async fn list_blobs(
     AxumPath(id): AxumPath<String>,

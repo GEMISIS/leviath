@@ -228,6 +228,9 @@ fn api_router() -> Router<AppState> {
         .route("/api/config", get(config::get_config))
         .route("/api/config/validate", post(config::validate_config_key))
         .route("/api/models", get(config::get_models))
+        // The bytes an export wrote. A byte route, so a signed link opens it:
+        // an export is fetched by a browser, which cannot header a download.
+        .route("/api/exports/{id}", get(blobs::export_file))
         // GraphQL. One endpoint where the request body names the fields it
         // wants, over the same core the REST routes above call. Mounted here
         // rather than beside them in a module of its own so this file stays
@@ -1679,6 +1682,96 @@ mod tests {
                 .expect("a request");
             let resp = app.oneshot(bare).await.expect("a response");
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
+    }
+
+    /// The export route answers for each state a job can be in, and takes a
+    /// signed link the same way the byte routes do.
+    ///
+    /// The three answers are different on purpose: an id nobody knows is 404,
+    /// one that is not written yet is 409 with the state in the message, and a
+    /// finished one is the file. A client that cannot tell "not yet" from "never"
+    /// either gives up early or polls forever.
+    #[tokio::test]
+    async fn the_export_route_answers_for_each_state_of_a_job() {
+        crate::runstate::with_isolated_runs_dir_async("export-route", |_d| async move {
+            let state = test_state();
+            let auth = auth::AuthState {
+                token: Arc::new("secret".to_string()),
+                signer: Arc::clone(&state.signer),
+            };
+            let app = crate::commands::serve::mcp::scoped(
+                api_router()
+                    .layer(axum::middleware::from_fn_with_state(
+                        auth,
+                        auth::require_auth,
+                    ))
+                    .with_state(state.clone()),
+                test_paths(),
+            );
+            let fetch = |app: axum::Router, path: String| async move {
+                let req = Request::builder()
+                    .uri(path)
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("a request");
+                app.oneshot(req).await.expect("a response")
+            };
+
+            // Nobody started this one.
+            let resp = fetch(app.clone(), "/api/exports/export-1-1".to_string()).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+            // One that is written: the file, as JSONL.
+            let dir = core::export::exports_dir();
+            std::fs::create_dir_all(&dir).expect("the exports directory");
+            let done = core::export::test_job(
+                &state,
+                core::export::ExportStatus::Complete,
+                "{\"run_id\":\"run-a\"}\n",
+            );
+            let resp = fetch(app.clone(), format!("/api/exports/{done}")).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("the bytes");
+            assert_eq!(&body[..], b"{\"run_id\":\"run-a\"}\n");
+
+            // And a signed link opens it with no token at all, which is what a
+            // download button needs.
+            let url = signed_url::signed_path(
+                &state.signer,
+                &format!("/api/exports/{done}"),
+                &[],
+                leviath_core::duration::now_secs(),
+            );
+            let req = Request::builder()
+                .uri(&url)
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.clone().oneshot(req).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            // One still being written, and one that broke: both 409, because
+            // the job is where the answer is.
+            for status in [
+                core::export::ExportStatus::Queued,
+                core::export::ExportStatus::Running,
+                core::export::ExportStatus::Failed,
+            ] {
+                let id = core::export::test_job(&state, status, "");
+                let resp = fetch(app.clone(), format!("/api/exports/{id}")).await;
+                assert_eq!(resp.status(), StatusCode::CONFLICT, "{}", status.wire());
+            }
+
+            // Complete, with the file taken away underneath it: the record says
+            // there is something to fetch and there is not, which is this
+            // server's own fault rather than the client's.
+            let orphan = core::export::test_job(&state, core::export::ExportStatus::Complete, "x");
+            std::fs::remove_file(core::export::export_path(&orphan)).expect("the file goes");
+            let resp = fetch(app.clone(), format!("/api/exports/{orphan}")).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         })
         .await;
     }

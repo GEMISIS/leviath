@@ -452,6 +452,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // a client writes without it - fetch with the token, hold the bytes, mint a
     // blob URL - is real work it can skip entirely when this is here.
     "bytes.signed_urls",
+    // The `bulkExportRuns` mutation and `GET /api/exports/{id}`: the whole run
+    // store as one JSONL file. Announced because the alternative is two hundred
+    // paged requests, and a client that does not know this is here writes that
+    // loop and keeps it forever.
+    "runs.export",
 ];
 
 /// The server's numeric limits.

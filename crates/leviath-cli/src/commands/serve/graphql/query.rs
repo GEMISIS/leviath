@@ -133,7 +133,11 @@ impl RunFilter {
     /// Rejections happen here, before anything is read: a page size over the
     /// cap, a batch fetch combined with a filter, or more ids than one
     /// request may name.
-    fn selection(self, first: i32, ids: Option<Vec<String>>) -> Result<RunSelection, ServeError> {
+    pub(crate) fn selection(
+        self,
+        first: i32,
+        ids: Option<Vec<String>>,
+    ) -> Result<RunSelection, ServeError> {
         let limit = page_size(first)?;
         let parent = match (self.parent.as_deref(), self.top_level_only) {
             (Some(_), Some(true)) => {
@@ -206,6 +210,18 @@ impl RunFilter {
             since: self.since.map(|t| t.0),
             parent,
         })
+    }
+
+    /// The same selection, unpaged: every run the filter matches.
+    ///
+    /// For an export, whose answer is a file rather than a response, so the
+    /// page cap has nothing left to protect. It is built through the listing's
+    /// own path all the same, so every other bound the listing enforces still
+    /// holds.
+    pub(crate) fn everything(self) -> Result<RunSelection, ServeError> {
+        let mut selection = self.selection(1, None)?;
+        selection.limit = usize::MAX;
+        Ok(selection)
     }
 }
 
@@ -609,6 +625,24 @@ impl Query {
         })
     }
 
+    /// Poll an export this server started.
+    ///
+    /// Null when no export carries that id: it was never started, or it has
+    /// expired. An export's file is kept for an hour, and its record goes with
+    /// the file, so neither outlives the other.
+    async fn bulk_export(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The export job's id.")] id: String,
+    ) -> Option<BulkExport> {
+        let state = ctx.data_unchecked::<AppState>();
+        state
+            .caches
+            .exports
+            .get(&id)
+            .map(|job| BulkExport::from_job(state, &job))
+    }
+
     /// Every open ask across every run: the approval inbox.
     ///
     /// The daemon holds these in memory, so this is one read rather than a walk
@@ -726,6 +760,43 @@ fn human_word(human: crate::yolo::rules::Human) -> &'static str {
 /// Narrow a count to the 32 bits GraphQL's `Int` carries.
 fn count(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// An export job, as a client polls it.
+#[derive(async_graphql::SimpleObject)]
+pub(crate) struct BulkExport {
+    /// The job's id.
+    pub(crate) id: String,
+    /// Where it has got to: `queued`, `running`, `complete` or `failed`.
+    pub(crate) status: String,
+    /// How many runs have been written.
+    pub(crate) written: i32,
+    /// Why it failed, when it did.
+    pub(crate) error: Option<String>,
+    /// A short-lived signed link to the JSONL. Null until the export is
+    /// complete, because there is nothing to fetch before then.
+    pub(crate) download_url: Option<String>,
+}
+
+impl BulkExport {
+    /// Describe a job, minting its link once there is a file to fetch.
+    pub(crate) fn from_job(state: &AppState, job: &super::super::core::export::ExportJob) -> Self {
+        let complete = job.status == super::super::core::export::ExportStatus::Complete;
+        Self {
+            id: job.id.clone(),
+            status: job.status.wire().to_string(),
+            written: count(job.written),
+            error: job.error.clone(),
+            download_url: complete.then(|| {
+                super::super::signed_url::signed_path(
+                    &state.signer,
+                    &format!("/api/exports/{}", job.id),
+                    &[],
+                    leviath_core::duration::now_secs(),
+                )
+            }),
+        }
+    }
 }
 
 /// One open ask, with the run it is parked on.
