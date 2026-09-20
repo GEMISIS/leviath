@@ -3424,78 +3424,6 @@ type Mutation {
 		name: String!
 	): Boolean!
 	"""
-	Check a manifest without installing it.
-	
-	A failing check is a report, not an error: the request to validate
-	succeeded, and what it found is the answer.
-	"""
-	validateBlueprint(
-		"""
-		The manifest text to check.
-		"""
-		manifest: String!,
-		"""
-		Check it as this installed agent, so its own scripts resolve.
-		"""
-		agent: String
-	): ValidationReport!
-	"""
-	Whether a provider key looks like one of that provider's.
-	
-	Format only: nothing is dialled and nothing is written, which is what makes
-	it safe to run on every keystroke of a form. It is a mutation because it
-	belongs beside the config write it precedes, not because it changes
-	anything. `checkProvider` is the one that asks the account.
-	"""
-	validateConfigKey(
-		"""
-		The provider the key is for.
-		"""
-		provider: String!,
-		"""
-		The key to look at. Never stored, never logged.
-		"""
-		key: String!,
-		"""
-		A gateway's address, checked first when given.
-		"""
-		baseUrl: String
-	): KeyVerdict!
-	"""
-	Whether a script compiles, without writing it.
-	
-	The alternative was saving it and waiting for an agent to fail, which is
-	not much of an improvement on editing the file over SSH. Ungated:
-	compiling text in memory writes nothing and runs nothing, because every
-	compiler here stops at the syntax tree.
-	"""
-	validateScript(
-		"""
-		Which registry the script is for.
-		"""
-		kind: String!,
-		"""
-		The source to compile.
-		"""
-		content: String!,
-		"""
-		Hook functions it has to define, for a stage or region hook.
-		"""
-		hooks: [String!]
-	): ScriptVerdict!
-	"""
-	What one yolo profile would do with one call.
-	
-	The same code path `lev yolo test` runs, so the command and the API cannot
-	disagree about a call. Decides and reports; nothing is run.
-	"""
-	testYoloProfile(
-		"""
-		The call to decide about.
-		"""
-		call: YoloTestInput!
-	): YoloDecision!
-	"""
 	Export the run store to a file, and hand back the job.
 	
 	Paging ten thousand runs through a connection is two hundred requests,
@@ -4282,6 +4210,77 @@ type Query {
 		"""
 		ids: [String!]
 	): RunConnection!
+	"""
+	Check a manifest without installing it.
+	
+	A failing check is a report, not an error: the request to validate
+	succeeded, and what it found is the answer.
+	"""
+	validateBlueprint(
+		"""
+		The manifest text to check.
+		"""
+		manifest: String!,
+		"""
+		Check it as this installed agent, so its own scripts resolve.
+		"""
+		agent: String
+	): ValidationReport!
+	"""
+	Whether a provider key looks like one of that provider's.
+	
+	Format only: nothing is dialled and nothing is written, which is what
+	makes it safe to run on every keystroke of a form. `checkProvider` is
+	the one that asks the account.
+	"""
+	validateConfigKey(
+		"""
+		The provider the key is for.
+		"""
+		provider: String!,
+		"""
+		The key to look at. Never stored, never logged.
+		"""
+		key: String!,
+		"""
+		A gateway's address, checked first when given.
+		"""
+		baseUrl: String
+	): KeyVerdict!
+	"""
+	Whether a script compiles, without writing it.
+	
+	The alternative was saving it and waiting for an agent to fail, which is
+	not much of an improvement on editing the file over SSH. Ungated:
+	compiling text in memory writes nothing and runs nothing, because every
+	compiler here stops at the syntax tree.
+	"""
+	validateScript(
+		"""
+		Which registry the script is for.
+		"""
+		kind: String!,
+		"""
+		The source to compile.
+		"""
+		content: String!,
+		"""
+		Hook functions it has to define, for a stage or region hook.
+		"""
+		hooks: [String!]
+	): ScriptVerdict!
+	"""
+	What one yolo profile would do with one call.
+	
+	The same code path `lev yolo test` runs, so the command and the API cannot
+	disagree about a call. Decides and reports; nothing is run.
+	"""
+	testYoloProfile(
+		"""
+		The call to decide about.
+		"""
+		call: YoloTestInput!
+	): YoloDecision!
 }
 
 """

@@ -31,7 +31,9 @@ same list.
   docs](https://leviath.dev/docs/graphql).
 
 - Blueprint writes over GraphQL (`createBlueprint`, `updateBlueprint`,
-  `deleteBlueprint`, `validateBlueprint`), and the first of the admin mutations
+  `deleteBlueprint`), the four checks that write nothing as queries beside them
+  (`validateBlueprint`, `validateScript`, `validateConfigKey`,
+  `testYoloProfile`), and the first of the admin mutations
   (`addMcpServer`, `removeMcpServer`, `putMimeRow`, `deleteMimeRow`) behind
   `--allow-admin`. Without that flag they are invisible to introspection and
   refused with `FORBIDDEN`, which is the closest a single built schema comes to
