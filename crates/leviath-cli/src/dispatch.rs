@@ -388,6 +388,14 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Approvals(args) => commands::approvals::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Yolo(args) => commands::yolo::execute(args).await,
+        // Printing the schema serves nothing, so it answers here rather than in
+        // the executor: regenerating the checked-in copy has to work on a
+        // machine with no daemon, no token and no config, and everything the
+        // executor does first needs all three.
+        Commands::Serve(args) if args.print_graphql_schema => {
+            println!("{}", commands::serve::graphql_schema());
+            Ok(())
+        }
         Commands::Serve(args) => ex.serve(args).await,
         Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
@@ -443,7 +451,11 @@ mod tests {
     /// Test double for [`RiskyExecutors`]: every method is a no-op returning
     /// `Ok(())`, so `dispatch()`'s risky routing arms are exercised without
     /// touching a real terminal / stdin / port / subprocess.
-    struct MockRisky;
+    #[derive(Default)]
+    struct MockRisky {
+        /// Whether `serve` was reached, for the one route that must not reach it.
+        served: std::sync::atomic::AtomicBool,
+    }
 
     impl RiskyExecutors for MockRisky {
         async fn run(&self, _args: commands::run::RunArgs) -> anyhow::Result<()> {
@@ -477,6 +489,8 @@ mod tests {
             Ok(())
         }
         async fn serve(&self, _args: commands::serve::ServeArgs) -> anyhow::Result<()> {
+            self.served
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
         async fn agent_client(
@@ -541,7 +555,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_run_variant_is_routed_through_the_executor() {
-        let result = dispatch(Commands::Run(commands::run::RunArgs::default()), &MockRisky).await;
+        let result = dispatch(
+            Commands::Run(commands::run::RunArgs::default()),
+            &MockRisky::default(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -570,14 +588,14 @@ mod tests {
             meta_key: None,
             file_uploads: None,
         };
-        let result = dispatch(Commands::Setup(args), &MockRisky).await;
+        let result = dispatch(Commands::Setup(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn dispatch_dashboard_variant_is_routed_through_the_executor() {
         let args = commands::dashboard::DashboardArgs {};
-        let result = dispatch(Commands::Dashboard(args), &MockRisky).await;
+        let result = dispatch(Commands::Dashboard(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -588,7 +606,11 @@ mod tests {
             content: "c".to_string(),
             attach: Vec::new(),
         };
-        assert!(dispatch(Commands::Msg(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Msg(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -605,7 +627,11 @@ mod tests {
             json: false,
             attach: Vec::new(),
         };
-        assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Respond(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -613,7 +639,11 @@ mod tests {
         // Routed, not called directly: `lev doctor` bills two inferences and
         // auto-starts a daemon, so a unit test must never reach the real one.
         let args = commands::doctor::DoctorArgs::default();
-        assert!(dispatch(Commands::Doctor(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Doctor(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -621,7 +651,11 @@ mod tests {
         // Routed, not called directly: `lev rage` takes over the terminal and
         // reads the real data root.
         let args = commands::rage::RageArgs::default();
-        assert!(dispatch(Commands::Rage(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Rage(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -630,7 +664,11 @@ mod tests {
             run_id: "r".to_string(),
             force: false,
         };
-        assert!(dispatch(Commands::Cancel(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Cancel(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -638,7 +676,11 @@ mod tests {
         let args = commands::ctl::PauseArgs {
             run_id: "r".to_string(),
         };
-        assert!(dispatch(Commands::Pause(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Pause(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -646,12 +688,20 @@ mod tests {
         let args = commands::ctl::ResumeArgs {
             run_id: "r".to_string(),
         };
-        assert!(dispatch(Commands::Resume(args), &MockRisky).await.is_ok());
+        assert!(
+            dispatch(Commands::Resume(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn dispatch_ps_variant_is_routed_through_the_executor() {
-        let result = dispatch(Commands::Ps(commands::ps::PsArgs::default()), &MockRisky).await;
+        let result = dispatch(
+            Commands::Ps(commands::ps::PsArgs::default()),
+            &MockRisky::default(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -661,14 +711,14 @@ mod tests {
             action: None,
             socket: None,
         };
-        let result = dispatch(Commands::Daemon(args), &MockRisky).await;
+        let result = dispatch(Commands::Daemon(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn dispatch_auth_variant_is_routed_through_the_executor() {
         let args = commands::auth::AuthArgs::status_for_test();
-        let result = dispatch(Commands::Auth(args), &MockRisky).await;
+        let result = dispatch(Commands::Auth(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -678,14 +728,14 @@ mod tests {
         // package manager and blocks on stdin, so a unit test must never reach
         // it. Its own tests drive the command core against injected seams.
         let args = commands::update::UpdateArgs::default();
-        let result = dispatch(Commands::Update(args), &MockRisky).await;
+        let result = dispatch(Commands::Update(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn dispatch_mcp_variant_is_routed_through_the_executor() {
         let args = commands::mcp::McpArgs::list_for_test();
-        let result = dispatch(Commands::Mcp(args), &MockRisky).await;
+        let result = dispatch(Commands::Mcp(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -694,20 +744,20 @@ mod tests {
         // Routed, not called directly: the real command reads and rewrites the
         // config file, so a unit test must never reach it against the real one.
         let args = commands::providers::ProvidersArgs::list_for_test();
-        let result = dispatch(Commands::Providers(args), &MockRisky).await;
+        let result = dispatch(Commands::Providers(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn dispatch_serve_variant_is_routed_through_the_executor() {
-        let args = commands::serve::ServeArgs {
+    /// Arguments for `lev serve`, printing the schema or not.
+    fn serve_args(print_graphql_schema: bool) -> commands::serve::ServeArgs {
+        commands::serve::ServeArgs {
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
-            print_graphql_schema: false,
+            print_graphql_schema,
             workdir_root: None,
             no_remote_yolo: false,
             tls_cert: None,
@@ -715,15 +765,36 @@ mod tests {
             no_remote_seed_commands: false,
             max_concurrent_requests: None,
             request_timeout_secs: None,
-        };
-        let result = dispatch(Commands::Serve(args), &MockRisky).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_serve_variant_is_routed_through_the_executor() {
+        let result = dispatch(Commands::Serve(serve_args(false)), &MockRisky::default()).await;
         assert!(result.is_ok());
+    }
+
+    /// Printing the schema answers here rather than reaching the executor.
+    ///
+    /// It has to work on a machine with no daemon, no token and no config,
+    /// which is exactly what regenerating the checked-in copy runs on. The
+    /// executor sets up a log file and starts a daemon before it serves
+    /// anything, so reaching it at all would be the bug.
+    #[tokio::test]
+    async fn dispatch_prints_the_schema_without_starting_a_server() {
+        let mock = MockRisky::default();
+        let result = dispatch(Commands::Serve(serve_args(true)), &mock).await;
+        assert!(result.is_ok());
+        assert!(
+            !mock.served.load(std::sync::atomic::Ordering::Relaxed),
+            "printing the schema must not start a server"
+        );
     }
 
     #[tokio::test]
     async fn dispatch_agent_client_variant_is_routed_through_the_executor() {
         let args = commands::agent_client::AgentClientArgs::default();
-        let result = dispatch(Commands::AgentClient(args), &MockRisky).await;
+        let result = dispatch(Commands::AgentClient(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -738,7 +809,7 @@ mod tests {
             name: dir.path().to_str().unwrap().to_string(),
             ..create_args()
         };
-        let result = dispatch(Commands::Create(args), &MockRisky).await;
+        let result = dispatch(Commands::Create(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -751,7 +822,7 @@ mod tests {
                 filter: commands::list::ListFilter::All,
                 json: false,
             };
-            let result = dispatch(Commands::List(args), &MockRisky).await;
+            let result = dispatch(Commands::List(args), &MockRisky::default()).await;
             assert!(result.is_ok());
         })
         .await;
@@ -765,8 +836,9 @@ mod tests {
         // `add` loads the real config to report the `[read_paths]` grant status
         // of what it installs, so it needs the same isolation every other
         // config-touching test takes.
+        let mock = MockRisky::default();
         let result = crate::config::with_isolated_config_path_async("dispatch-add", |_| {
-            dispatch(Commands::Add(args), &MockRisky)
+            dispatch(Commands::Add(args), &mock)
         })
         .await;
         assert!(result.is_err());
@@ -777,7 +849,7 @@ mod tests {
         let args = commands::remove::RemoveArgs {
             name: "definitely-not-an-installed-agent-xyz".to_string(),
         };
-        let result = dispatch(Commands::Remove(args), &MockRisky).await;
+        let result = dispatch(Commands::Remove(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -789,7 +861,7 @@ mod tests {
             filter: None,
             dry_run: true,
         };
-        let result = dispatch(Commands::Test(args), &MockRisky).await;
+        let result = dispatch(Commands::Test(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -800,7 +872,7 @@ mod tests {
             path: Some(dir.path().to_str().unwrap().to_string()),
             output: None,
         };
-        let result = dispatch(Commands::Pack(args), &MockRisky).await;
+        let result = dispatch(Commands::Pack(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -818,7 +890,7 @@ mod tests {
                     produces: None,
                 }),
             };
-            let result = dispatch(Commands::Models(args), &MockRisky).await;
+            let result = dispatch(Commands::Models(args), &MockRisky::default()).await;
             assert!(result.is_ok());
         })
         .await;
@@ -843,7 +915,7 @@ mod tests {
                 graph: false,
                 width: 120,
             };
-            let result = dispatch(Commands::Validate(args), &MockRisky).await;
+            let result = dispatch(Commands::Validate(args), &MockRisky::default()).await;
             assert!(result.is_err());
         })
         .await;
@@ -858,7 +930,7 @@ mod tests {
                 agent: "x".to_string(),
             }),
         };
-        let result = dispatch(Commands::Deps(args), &MockRisky).await;
+        let result = dispatch(Commands::Deps(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -871,7 +943,7 @@ mod tests {
             [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
             async {
                 let args = commands::tools::ToolsArgs { json: false };
-                dispatch(Commands::Tools(args), &MockRisky).await
+                dispatch(Commands::Tools(args), &MockRisky::default()).await
             },
         )
         .await;
@@ -887,7 +959,7 @@ mod tests {
                 calls: false,
                 tree: false,
             }),
-            &MockRisky,
+            &MockRisky::default(),
         )
         .await;
         assert!(result.is_err(), "no journal for a run that never ran");
@@ -904,7 +976,7 @@ mod tests {
                 regions: false,
                 visits: false,
             }),
-            &MockRisky,
+            &MockRisky::default(),
         )
         .await;
         assert!(result.is_err(), "no ledger for a run that never ran");
@@ -918,7 +990,7 @@ mod tests {
             json: false,
             full: false,
         };
-        let result = dispatch(Commands::Context(args), &MockRisky).await;
+        let result = dispatch(Commands::Context(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -934,7 +1006,7 @@ mod tests {
             out: None,
             open: None,
         };
-        let result = dispatch(Commands::Result(args), &MockRisky).await;
+        let result = dispatch(Commands::Result(args), &MockRisky::default()).await;
         assert!(result.is_err());
     }
 
@@ -948,7 +1020,11 @@ mod tests {
             open: false,
             json: false,
         };
-        assert!(dispatch(Commands::Blobs(blobs), &MockRisky).await.is_err());
+        assert!(
+            dispatch(Commands::Blobs(blobs), &MockRisky::default())
+                .await
+                .is_err()
+        );
         // A file that is not there errors the same way, before any config is
         // consulted for anything the test would have to isolate.
         crate::config::with_isolated_config_path_async("dispatch-mime", |_dir| async move {
@@ -959,7 +1035,11 @@ mod tests {
                     json: false,
                 }),
             };
-            assert!(dispatch(Commands::Mime(mime), &MockRisky).await.is_err());
+            assert!(
+                dispatch(Commands::Mime(mime), &MockRisky::default())
+                    .await
+                    .is_err()
+            );
         })
         .await;
     }
@@ -986,7 +1066,7 @@ mod tests {
                         },
                     ),
                 };
-                dispatch(Commands::Approvals(args), &MockRisky).await
+                dispatch(Commands::Approvals(args), &MockRisky::default()).await
             },
         )
         .await;
@@ -1015,7 +1095,7 @@ mod tests {
                         },
                     ),
                 };
-                dispatch(Commands::Approvals(args), &MockRisky).await
+                dispatch(Commands::Approvals(args), &MockRisky::default()).await
             },
         )
         .await;
@@ -1027,7 +1107,7 @@ mod tests {
         let args = commands::policy::PolicyArgs {
             command: commands::policy::PolicyCommand::List(commands::policy::PolicyListArgs {}),
         };
-        let result = dispatch(Commands::Policy(args), &MockRisky).await;
+        let result = dispatch(Commands::Policy(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 
@@ -1038,7 +1118,7 @@ mod tests {
                 Commands::Yolo(commands::yolo::YoloArgs {
                     command: commands::yolo::YoloCommand::List(commands::yolo::ListArgs::default()),
                 }),
-                &MockRisky,
+                &MockRisky::default(),
             )
             .await
         })
@@ -1055,7 +1135,7 @@ mod tests {
                 taint: "public".to_string(),
             }),
         };
-        let result = dispatch(Commands::Policy(args), &MockRisky).await;
+        let result = dispatch(Commands::Policy(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
 }
