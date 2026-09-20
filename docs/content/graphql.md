@@ -510,7 +510,7 @@ an upgrade would do, and `updateJob(id:)` follows one that is running.
 
 ```graphql
 {
-  daemon { connected version build pid restarts restartAdvised }
+  daemon { reachable version build pid restarts restartAdvised }
   update {
     version installMethod channel latest updateAvailable
     binary { __typename ... on UpgradeByCommand { shell } }

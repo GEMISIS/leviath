@@ -10,12 +10,17 @@ use super::super::scalars::Timestamp;
 /// Who is on the other end of the control socket.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct DaemonStatus {
-    /// Whether this server is receiving the daemon's events right now.
+    /// Whether the last attempt to reach the daemon worked.
     ///
-    /// A request still works while this is false: the control client waits out a
-    /// restart, and the run store is read from disk either way. What stops while
-    /// it is false is the live frames.
-    pub(crate) connected: bool,
+    /// True before anything has been tried, which is the honest answer: this
+    /// server talks to the daemon when it has something to ask, so silence is not
+    /// evidence either way. False means a request failed and none has succeeded
+    /// since. Reads keep working through both, because the run store is on disk;
+    /// what needs the daemon is acting on a run.
+    ///
+    /// For whether the live frames are flowing, watch `daemonLink` on a
+    /// subscription: that one is reported by the stream itself.
+    pub(crate) reachable: bool,
     /// The daemon's version, once it has said. Null before any daemon has
     /// introduced itself.
     pub(crate) version: Option<String>,
@@ -37,7 +42,7 @@ impl DaemonStatus {
     pub(crate) fn of(control: &leviath_runtime::control_socket::ControlClient) -> Self {
         let link = control.link();
         Self {
-            connected: link.reachable,
+            reachable: link.reachable,
             version: link.daemon.as_ref().map(|daemon| daemon.version.clone()),
             build: link.daemon.as_ref().map(|daemon| daemon.build.clone()),
             pid: link
@@ -257,3 +262,7 @@ impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "update_tests.rs"]
+mod tests;

@@ -566,8 +566,8 @@ async fn making_a_directory_tells_its_refusals_apart() {
 #[tokio::test]
 async fn the_outward_reaching_mutations_are_gated() {
     let calls = [
-        r#"mutation { providerSignIn(provider: "anthropic") { authorizeUrl } }"#,
-        r#"mutation { providerSignOut(provider: "anthropic") }"#,
+        r#"mutation { providerSignIn(provider: "codex") { authorizeUrl } }"#,
+        r#"mutation { providerSignOut(provider: "codex") }"#,
         r#"mutation { checkProvider(provider: "anthropic") }"#,
         r#"mutation { testMcpServer(name: "docs") }"#,
         r#"mutation { loginMcpServer(name: "docs") }"#,
@@ -714,4 +714,574 @@ async fn the_yolo_file_is_written_whole_and_parse_checked() {
         );
     })
     .await;
+}
+
+/// The acts that do real work, driven through the seams the REST tests use.
+///
+/// Each of these opens a browser, runs a package manager or reaches a provider
+/// on a real machine, so a test that let them do that would be a test of the
+/// developer's laptop. What is asserted is the answer each one gives once its
+/// seam has stood in for the world.
+mod doing_the_work {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A schema over a state a test has arranged.
+    fn schema_over(
+        state: crate::commands::serve::types::AppState,
+    ) -> Schema<Query, Mutation, EmptySubscription> {
+        Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .data(super::super::AdminAccess(true))
+            .finish()
+    }
+
+    /// A sign-in answers with the URL as soon as there is one, and the second
+    /// ask answers the same URL rather than starting another.
+    #[tokio::test]
+    async fn a_sign_in_answers_with_its_url_and_says_when_it_is_the_same_one() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&opened);
+            let mut state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+            state.providers = crate::commands::serve::providers::ProviderAdmin {
+                // Nothing is really opened: the flow announces the URL, and that
+                // is what the mutation waits for.
+                opener: Arc::new(move |url: &str| {
+                    leviath_core::sync::lock(&seen).push(url.to_string());
+                    true
+                }),
+                // An issuer nothing listens on: the announce happens before the
+                // exchange, so the URL is answered and the flow then fails
+                // quietly behind it.
+                issuer: Some("http://127.0.0.1:1".to_string()),
+                ports: Some(vec![0]),
+                ..Default::default()
+            };
+            let paths = crate::commands::serve::mcp::AdminPaths {
+                config: home.join("config.toml"),
+                store: home.join("mcp-auth.json"),
+                grants: home.join("grants.json"),
+            };
+            std::fs::write(&paths.config, "").expect("a config file");
+            let schema = schema_over(state.clone());
+
+            crate::commands::serve::mcp::TEST_PATHS
+                .scope(paths, async {
+                    let started = schema
+                        .execute(Request::new(
+                            r#"mutation { providerSignIn(provider: "codex")
+                                 { provider authorizeUrl alreadyWaiting } }"#,
+                        ))
+                        .await;
+                    // Either the flow announced a URL or it refused before it got
+                    // one; both are answers this schema has to give, and neither
+                    // is a panic.
+                    match started.errors.first() {
+                        None => {
+                            let json =
+                                serde_json::to_value(&started.data).expect("data serializes");
+                            assert_eq!(json["providerSignIn"]["provider"], "codex");
+                            assert_eq!(json["providerSignIn"]["alreadyWaiting"], false);
+                            assert!(
+                                json["providerSignIn"]["authorizeUrl"]
+                                    .as_str()
+                                    .is_some_and(|url| !url.is_empty())
+                            );
+
+                            // Asking again while one is waiting answers the same
+                            // URL, flagged, rather than starting a second flow
+                            // that could not bind the port anyway.
+                            let again = schema
+                                .execute(Request::new(
+                                    r#"mutation { providerSignIn(provider: "codex")
+                                         { authorizeUrl alreadyWaiting } }"#,
+                                ))
+                                .await;
+                            assert!(again.errors.is_empty(), "{:?}", again.errors);
+                            let repeat =
+                                serde_json::to_value(&again.data).expect("data serializes");
+                            assert_eq!(repeat["providerSignIn"]["alreadyWaiting"], true);
+                            assert_eq!(
+                                repeat["providerSignIn"]["authorizeUrl"],
+                                json["providerSignIn"]["authorizeUrl"]
+                            );
+                        }
+                        Some(error) => {
+                            // Two refusals are possible here and both are
+                            // answers rather than panics: this build may not
+                            // offer a browser sign-in for this provider at all,
+                            // and a flow that never reached a URL is an upstream
+                            // failure.
+                            let code = error
+                                .extensions
+                                .as_ref()
+                                .and_then(|e| e.get("code"))
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
+                            assert!(
+                                code == "\"NOT_FOUND\"" || code == "\"UPSTREAM\"",
+                                "unexpected refusal {code}: {}",
+                                error.message
+                            );
+                        }
+                    }
+
+                    // Signing out forgets whatever is there, including a flow
+                    // left waiting, and says so even when there was nothing.
+                    let out = schema
+                        .execute(Request::new(
+                            r#"mutation { providerSignOut(provider: "codex") }"#,
+                        ))
+                        .await;
+                    assert!(out.errors.is_empty(), "{:?}", out.errors);
+                })
+                .await;
+        })
+        .await;
+    }
+
+    /// An update runs one at a time, and the second ask is a conflict rather
+    /// than a second package manager.
+    #[tokio::test]
+    async fn one_update_runs_at_a_time() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let mut state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+            // A runner that reports success without running anything, and an
+            // environment pointed at this test's own home.
+            let agents = home.join("agents");
+            state.update_jobs =
+                crate::commands::serve::update_job::UpdateJobs::with_env(Arc::new(move || {
+                    crate::commands::update::UpdateEnv {
+                        agents_dir: agents.clone(),
+                        // Nothing is spawned: the test is about what the job records,
+                        // not about what a package manager does.
+                        runner: Arc::new(|_argv: &[String]| Ok(())),
+                        ..crate::commands::update::UpdateEnv::for_planning_offline()
+                    }
+                }));
+            let schema = schema_over(state.clone());
+
+            let started = schema
+                .execute(Request::new(
+                    "mutation { startUpdate(binary: false, agents: false, migrations: false)
+                       { id status steps { step status detail } } }",
+                ))
+                .await;
+            assert!(started.errors.is_empty(), "{:?}", started.errors);
+            let json = serde_json::to_value(&started.data).expect("data serializes");
+            let id = json["startUpdate"]["id"]
+                .as_str()
+                .expect("an id")
+                .to_string();
+            // Three rows whatever was asked for, so a client renders the same
+            // table and reads `skipped` rather than an absence.
+            assert_eq!(
+                json["startUpdate"]["steps"].as_array().map(Vec::len),
+                Some(3)
+            );
+
+            // The same job, read back through the field a client polls.
+            let polled = schema
+                .execute(Request::new(format!(
+                    "{{ updateJob(id: \"{id}\") {{ id status }} }}"
+                )))
+                .await;
+            assert!(polled.errors.is_empty(), "{:?}", polled.errors);
+            let json = serde_json::to_value(&polled.data).expect("data serializes");
+            assert_eq!(json["updateJob"]["id"], id);
+
+            // An id nobody started is null rather than an error.
+            let missing = schema
+                .execute(Request::new("{ updateJob(id: \"nope\") { id } }"))
+                .await;
+            assert!(missing.errors.is_empty(), "{:?}", missing.errors);
+            let json = serde_json::to_value(&missing.data).expect("data serializes");
+            assert!(json["updateJob"].is_null());
+        })
+        .await;
+    }
+
+    /// The live doctor runs its checks and reports what they found, and a
+    /// failing check is a report rather than a failed request.
+    #[tokio::test]
+    async fn the_live_doctor_reports_what_it_found() {
+        crate::config::with_isolated_config_path_async("graphql-live-doctor", |_path| async move {
+            let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+            let answer = schema_over(state)
+                .execute(Request::new(
+                    "mutation { runDoctorLive { ok checks { name ok detail } } }",
+                ))
+                .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let checks = json["runDoctorLive"]["checks"]
+                .as_array()
+                .expect("the checks");
+            assert!(!checks.is_empty(), "it ran something");
+            assert!(
+                checks
+                    .iter()
+                    .all(|check| check["name"].as_str().is_some_and(|n| !n.is_empty())),
+                "each check says what it checked: {checks:?}"
+            );
+            // Nothing is configured in this home, so at least one check fails,
+            // and that is a report rather than an error.
+            assert_eq!(json["runDoctorLive"]["ok"], false);
+        })
+        .await;
+    }
+}
+
+/// Every config field a write can set travels into the config file.
+///
+/// A field the schema takes and the writer drops is a setting that saves and
+/// then does nothing, which is the failure mode this whole input object exists
+/// to avoid, so each one is asserted rather than sampled.
+#[tokio::test]
+async fn every_config_field_reaches_the_file() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants: home.join("grants.json"),
+        };
+        std::fs::write(&paths.config, "").expect("a config file");
+        let config_path = paths.config.clone();
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let written = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: {
+                             defaultProvider: "openai",
+                             providerOrder: ["openai"],
+                             overrideModel: "gpt-5.6",
+                             fallbackModel: "gpt-5.4",
+                             anthropicKey: "sk-ant-a",
+                             openaiKey: "sk-o",
+                             googleKey: "g",
+                             openrouterKey: "sk-or-r",
+                             bedrockKey: "b",
+                             xaiKey: "xai-x",
+                             metaKey: "m",
+                             bedrockRegion: "us-east-1",
+                             ollamaBaseUrl: "http://127.0.0.1:11434",
+                             ollamaEnabled: true,
+                             codexEnabled: true,
+                             grokEnabled: true,
+                             fileUploads: true,
+                             codexReasoningEffort: "high",
+                             codexVerbosity: "low",
+                             codexReplayReasoning: true,
+                             gateways: [{ name: "local", kind: "openai-compatible",
+                                 baseUrl: "http://127.0.0.1:1234/v1", apiKey: "sk-l",
+                                 models: ["llama"],
+                                 headers: [{ name: "X-Thing", value: "1" }] }]
+                           }) { defaultProvider overrideModel fallbackModel
+                                configuredProviders gateways { name kind hasApiKey } } }"#,
+                    ))
+                    .await;
+                assert!(written.errors.is_empty(), "{:?}", written.errors);
+                let json = serde_json::to_value(&written.data).expect("data serializes");
+                let config = &json["updateConfig"];
+                assert_eq!(config["defaultProvider"], "openai");
+                assert_eq!(config["overrideModel"], "gpt-5.6");
+                assert_eq!(config["fallbackModel"], "gpt-5.4");
+                let configured = config["configuredProviders"]
+                    .as_array()
+                    .expect("the providers with keys");
+                for expected in ["anthropic", "openai", "google", "openrouter", "xai", "meta"] {
+                    assert!(
+                        configured.iter().any(|name| name == expected),
+                        "{expected} has a key now: {configured:?}"
+                    );
+                }
+                assert_eq!(config["gateways"][0]["name"], "local");
+                assert_eq!(config["gateways"][0]["hasApiKey"], true);
+
+                // The file is the record, so the fields with no read-back field
+                // are asserted there: a setting the answer does not echo is
+                // still a setting that has to be saved.
+                let saved = std::fs::read_to_string(&config_path).expect("the config file");
+                for expected in ["us-east-1", "127.0.0.1:11434", "high", "llama", "X-Thing"] {
+                    assert!(saved.contains(expected), "{expected} was saved: {saved}");
+                }
+
+                // A gateway is removed by name, and removals run after the edits
+                // so one request that does both does not depend on the order.
+                let removed = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: { removeGateways: ["local"] })
+                             { gateways { name } } }"#,
+                    ))
+                    .await;
+                assert!(removed.errors.is_empty(), "{:?}", removed.errors);
+                let json = serde_json::to_value(&removed.data).expect("data serializes");
+                assert_eq!(
+                    json["updateConfig"]["gateways"].as_array().map(Vec::len),
+                    Some(0)
+                );
+
+                // A word the provider does not know is refused rather than
+                // saved: it would be saved and then ignored.
+                let refused = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: { codexVerbosity: "shouty" })
+                             { defaultProvider } }"#,
+                    ))
+                    .await;
+                assert!(
+                    refused
+                        .errors
+                        .first()
+                        .expect("a refusal")
+                        .message
+                        .contains("unknown Codex"),
+                    "{:?}",
+                    refused.errors
+                );
+
+                // And an empty region is refused rather than read as a clear.
+                let empty = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: { bedrockRegion: "" })
+                             { defaultProvider } }"#,
+                    ))
+                    .await;
+                assert!(
+                    empty
+                        .errors
+                        .first()
+                        .expect("a refusal")
+                        .message
+                        .contains("bedrock_region"),
+                    "{:?}",
+                    empty.errors
+                );
+            })
+            .await;
+    })
+    .await;
+}
+
+/// The acts that reach a real server, against one this test stands up.
+///
+/// A probe and an MCP login are requests to somebody else, so the somebody else
+/// is a listener bound to a loopback port here. That is the only way to assert
+/// what a client is told about an endpoint that answers, as against one that is
+/// not there.
+mod against_a_real_endpoint {
+    use super::*;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+
+    /// An OpenAI-compatible endpoint that serves two models.
+    async fn models_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let base = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "data": [{ "id": "small" }, { "id": "large" }],
+                }))
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        base
+    }
+
+    /// A probe reports what the endpoint says it serves, sorted.
+    #[tokio::test]
+    async fn a_probe_reports_what_the_endpoint_serves() {
+        let base = models_endpoint().await;
+        let answer = schema(true)
+            .execute(Request::new(format!(
+                r#"mutation {{ probeModels(baseUrl: "{base}",
+                     headers: [{{ name: "X-Thing", value: "1" }}]) }}"#
+            )))
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(
+            json["probeModels"],
+            serde_json::json!(["large", "small"]),
+            "sorted, so a picker's list does not reorder between two asks"
+        );
+    }
+
+    /// An endpoint nothing is listening on is an upstream failure rather than an
+    /// empty list: no models and "could not ask" are different answers.
+    #[tokio::test]
+    async fn a_probe_of_a_dead_endpoint_is_an_upstream_failure() {
+        let answer = schema(true)
+            .execute(Request::new(
+                r#"mutation { probeModels(baseUrl: "http://127.0.0.1:1/v1") }"#,
+            ))
+            .await;
+        assert_eq!(
+            answer
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"UPSTREAM\"".to_string())
+        );
+    }
+
+    /// A server whose headers already satisfy it needs no sign-in, and saying so
+    /// is a success: the question was whether one was needed.
+    #[tokio::test]
+    async fn a_server_that_needs_no_login_says_so() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let base = format!("http://{}", listener.local_addr().expect("an address"));
+        // Publishes no OAuth metadata, so a discovery would fail loudly.
+        let mcp = Router::new().route("/mcp", post(|| async { axum::http::StatusCode::OK }));
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, mcp,
+        )));
+
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let paths = crate::commands::serve::mcp::AdminPaths {
+                config: home.join("config.toml"),
+                store: home.join("mcp-auth.json"),
+                grants: home.join("grants.json"),
+            };
+            std::fs::write(&paths.config, "").expect("a config file");
+            crate::commands::serve::mcp::TEST_PATHS
+                .scope(paths, async {
+                    let added = schema(true)
+                        .execute(Request::new(format!(
+                            r#"mutation {{ addMcpServer(name: "hub", url: "{base}/mcp") }}"#
+                        )))
+                        .await;
+                    assert!(added.errors.is_empty(), "{:?}", added.errors);
+
+                    let logged_in = schema(true)
+                        .execute(Request::new(r#"mutation { loginMcpServer(name: "hub") }"#))
+                        .await;
+                    assert!(logged_in.errors.is_empty(), "{:?}", logged_in.errors);
+                    let json = serde_json::to_value(&logged_in.data).expect("data serializes");
+                    assert_eq!(json["loginMcpServer"], "NOT_REQUIRED");
+                })
+                .await;
+        })
+        .await;
+    }
+
+    /// A stdio server cannot be signed in to at all, and the refusal says why
+    /// rather than reporting a failed handshake.
+    #[tokio::test]
+    async fn a_stdio_server_cannot_be_signed_in_to() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let paths = crate::commands::serve::mcp::AdminPaths {
+                config: home.join("config.toml"),
+                store: home.join("mcp-auth.json"),
+                grants: home.join("grants.json"),
+            };
+            std::fs::write(&paths.config, "").expect("a config file");
+            crate::commands::serve::mcp::TEST_PATHS
+                .scope(paths, async {
+                    schema(true)
+                        .execute(Request::new(
+                            r#"mutation { addMcpServer(name: "local", command: "/bin/echo") }"#,
+                        ))
+                        .await;
+                    let answer = schema(true)
+                        .execute(Request::new(
+                            r#"mutation { loginMcpServer(name: "local") }"#,
+                        ))
+                        .await;
+                    let error = answer.errors.first().expect("a refusal");
+                    assert!(
+                        error.message.contains("HTTP transport"),
+                        "{}",
+                        error.message
+                    );
+                    assert_eq!(
+                        error
+                            .extensions
+                            .as_ref()
+                            .and_then(|e| e.get("code"))
+                            .map(ToString::to_string),
+                        Some("\"BAD_USER_INPUT\"".to_string())
+                    );
+                })
+                .await;
+        })
+        .await;
+    }
+
+    /// Testing a server that will not start reports the failure as the server's
+    /// rather than as this machine's.
+    #[tokio::test]
+    async fn testing_a_server_that_will_not_start_is_an_upstream_failure() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let paths = crate::commands::serve::mcp::AdminPaths {
+                config: home.join("config.toml"),
+                store: home.join("mcp-auth.json"),
+                grants: home.join("grants.json"),
+            };
+            std::fs::write(&paths.config, "").expect("a config file");
+            crate::commands::serve::mcp::TEST_PATHS
+                .scope(paths, async {
+                    schema(true)
+                        .execute(Request::new(
+                            r#"mutation { addMcpServer(name: "gone",
+                                 command: "/definitely/not/a/program") }"#,
+                        ))
+                        .await;
+                    let answer = schema(true)
+                        .execute(Request::new(r#"mutation { testMcpServer(name: "gone") }"#))
+                        .await;
+                    assert_eq!(
+                        answer
+                            .errors
+                            .first()
+                            .expect("a refusal")
+                            .extensions
+                            .as_ref()
+                            .and_then(|e| e.get("code"))
+                            .map(ToString::to_string),
+                        Some("\"UPSTREAM\"".to_string())
+                    );
+                })
+                .await;
+        })
+        .await;
+    }
+
+    /// Checking a provider asks the account, so a provider with no grant is an
+    /// upstream refusal rather than a green answer.
+    #[tokio::test]
+    async fn checking_a_provider_with_no_grant_is_refused() {
+        crate::config::with_isolated_config_path_async("graphql-check-provider", |_p| async move {
+            let answer = schema(true)
+                .execute(Request::new(
+                    r#"mutation { checkProvider(provider: "codex") }"#,
+                ))
+                .await;
+            let error = answer.errors.first().expect("a refusal");
+            assert_eq!(
+                error
+                    .extensions
+                    .as_ref()
+                    .and_then(|e| e.get("code"))
+                    .map(ToString::to_string),
+                Some("\"UPSTREAM\"".to_string()),
+                "{}",
+                error.message
+            );
+        })
+        .await;
+    }
 }
