@@ -9,9 +9,11 @@ use async_graphql::{Context, InputObject, Object, OneofObject, SimpleObject};
 
 use super::super::core::error::ServeError;
 use super::super::core::lifecycle::{self, Action};
+use super::super::core::runs as run_core;
 use super::super::core::spawn as spawn_core;
 use super::super::types::AppState;
 use super::error::{IntoGraphql, graphql_error};
+use super::scalars::Timestamp;
 use super::types::run::Run;
 use crate::runstate;
 
@@ -179,6 +181,28 @@ impl AnswerInteractionInput {
             }
         }
     }
+}
+
+/// One run a delete passed over, and why.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct SkippedDelete {
+    /// The run that stayed.
+    pub(crate) id: String,
+    /// Why it did: it is still going, or its record cannot be read.
+    pub(crate) reason: String,
+}
+
+/// What a delete removed, and what it left.
+///
+/// Partial success is the normal outcome rather than an edge case: a sweep
+/// names runs by a predicate, and one of them being live is no reason to refuse
+/// the rest. Read `skipped` when the list does not empty.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct DeletePayload {
+    /// The runs that were removed, sub-agents included.
+    pub(crate) deleted: Vec<String>,
+    /// The ones that stayed, each with its reason.
+    pub(crate) skipped: Vec<SkippedDelete>,
 }
 
 /// How answering an ask landed.
@@ -367,6 +391,60 @@ impl Mutation {
             .await
             .gql()?;
         read_back(&run_id, Vec::new()).gql()
+    }
+
+    /// Delete run records.
+    ///
+    /// Takes exactly one of `ids` or `before`. Neither is a client that failed
+    /// to build its query, and both at once is two predicates for one act, so
+    /// each is refused rather than resolved one way.
+    ///
+    /// Deleting a run takes its sub-agents with it: their records only mean
+    /// anything under the run that started them. A live run is skipped rather
+    /// than removed, and deleting a record is not editing a run, so a finished
+    /// one is fair game.
+    async fn delete_runs(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Exactly these runs.")] ids: Option<Vec<String>>,
+        #[graphql(desc = "Every finished run last touched before this second.")] before: Option<
+            Timestamp,
+        >,
+        #[graphql(
+            desc = "Delete a run whose record cannot be read, which cannot be shown to be finished.",
+            default = false
+        )]
+        force: bool,
+    ) -> async_graphql::Result<DeletePayload> {
+        let state = ctx.data_unchecked::<AppState>();
+        let targets = match (ids, before) {
+            (Some(ids), None) => run_core::DeleteTargets::Ids(ids),
+            (None, Some(before)) => run_core::DeleteTargets::Before(before.0),
+            (Some(_), Some(_)) => {
+                return Err(ServeError::BadRequest(
+                    "`ids` and `before` are two predicates for one delete; send one".to_string(),
+                ))
+                .gql();
+            }
+            (None, None) => {
+                return Err(ServeError::BadRequest(
+                    "a delete needs `ids` or `before`; refusing to delete every run".to_string(),
+                ))
+                .gql();
+            }
+        };
+        let outcome = run_core::delete(state, targets, force).await.gql()?;
+        Ok(DeletePayload {
+            deleted: outcome.deleted,
+            skipped: outcome
+                .skipped
+                .into_iter()
+                .map(|skipped| SkippedDelete {
+                    id: skipped.id,
+                    reason: skipped.reason,
+                })
+                .collect(),
+        })
     }
 
     /// Answer a pending ask.

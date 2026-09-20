@@ -89,6 +89,23 @@ impl ServeError {
         }
     }
 
+    /// The same failure, with a sentence added.
+    ///
+    /// The kind is kept: a missing thing stays missing and a refused one stays
+    /// refused, because those are different things for a caller to do about.
+    pub(crate) fn with_context(self, extra: &str) -> Self {
+        let said = format!("{self}. {extra}");
+        match self {
+            Self::BadRequest(_) => Self::BadRequest(said),
+            Self::NotFound(_) => Self::NotFound(said),
+            Self::Conflict(_) => Self::Conflict(said),
+            Self::Forbidden(_) => Self::Forbidden(said),
+            Self::DaemonUnavailable(_) => Self::DaemonUnavailable(said),
+            Self::DaemonIncompatible(_) => Self::DaemonIncompatible(said),
+            Self::Internal(_) => Self::Internal(said),
+        }
+    }
+
     /// The failure for a daemon that did not answer.
     ///
     /// The error's kind tells the two apart: `Unsupported` is the control
@@ -209,6 +226,31 @@ mod tests {
             ServeError::from_daemon_io(&broken).code(),
             "DAEMON_UNAVAILABLE"
         );
+    }
+
+    /// A sentence added to a failure keeps its kind: "not found" with more
+    /// detail is still not found, and a client branching on the code sees no
+    /// change.
+    #[test]
+    fn added_context_keeps_the_kind() {
+        let missing = ServeError::NotFound("Run 'worker-1' not found".to_string())
+            .with_context("It is a sub-agent run of 'root', deleted with it");
+        assert_eq!(missing.code(), "NOT_FOUND");
+        assert_eq!(
+            missing.to_string(),
+            "Run 'worker-1' not found. It is a sub-agent run of 'root', deleted with it"
+        );
+        for failure in [
+            ServeError::BadRequest("b".into()),
+            ServeError::Conflict("c".into()),
+            ServeError::Forbidden("f".into()),
+            ServeError::DaemonUnavailable("d".into()),
+            ServeError::DaemonIncompatible("i".into()),
+            ServeError::Internal("x".into()),
+        ] {
+            let code = failure.code();
+            assert_eq!(failure.with_context("and more").code(), code);
+        }
     }
 
     /// A daemon that is not there is a 503: try later, or restart it. A daemon

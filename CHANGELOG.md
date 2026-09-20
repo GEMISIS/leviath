@@ -30,6 +30,12 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- `deleteRuns` over GraphQL, taking exactly one of `ids` or `before`, and
+  reporting partial success rather than refusing a sweep because one run in it is
+  still going. The checks behind it moved into the service layer with the rest,
+  so a sub-agent's refusal now keeps its own kind (missing stays missing, live
+  stays a conflict) instead of being flattened on the way out.
+
 - The machine's own state over GraphQL: `config` (with every secret left out),
   `doctor`, `mcpServers`, `yoloProfiles`, `mime`, `scripts` and `directories`.
   Each REST handler behind these was split so both surfaces run the same read,

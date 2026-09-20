@@ -767,6 +767,24 @@ shortest round-tripping form rather than inventing precision.
 scalar Decimal
 
 """
+What a delete removed, and what it left.
+
+Partial success is the normal outcome rather than an edge case: a sweep
+names runs by a predicate, and one of them being live is no reason to refuse
+the rest. Read `skipped` when the list does not empty.
+"""
+type DeletePayload {
+	"""
+	The runs that were removed, sub-agents included.
+	"""
+	deleted: [String!]!
+	"""
+	The ones that stayed, each with its reason.
+	"""
+	skipped: [SkippedDelete!]!
+}
+
+"""
 One directory, for a file picker.
 """
 type Directory {
@@ -1303,6 +1321,32 @@ type Mutation {
 		"""
 		targetRegion: String
 	): AgentPayload!
+	"""
+	Delete run records.
+	
+	Takes exactly one of `ids` or `before`. Neither is a client that failed
+	to build its query, and both at once is two predicates for one act, so
+	each is refused rather than resolved one way.
+	
+	Deleting a run takes its sub-agents with it: their records only mean
+	anything under the run that started them. A live run is skipped rather
+	than removed, and deleting a record is not editing a run, so a finished
+	one is fair game.
+	"""
+	deleteRuns(
+		"""
+		Exactly these runs.
+		"""
+		ids: [String!],
+		"""
+		Every finished run last touched before this second.
+		"""
+		before: Timestamp,
+		"""
+		Delete a run whose record cannot be read, which cannot be shown to be finished.
+		"""
+		force: Boolean! = false
+	): DeletePayload!
 	"""
 	Answer a pending ask.
 	
@@ -2381,6 +2425,20 @@ enum SetupBlocker {
 	The provider failed.
 	"""
 	PROVIDER_FAILED
+}
+
+"""
+One run a delete passed over, and why.
+"""
+type SkippedDelete {
+	"""
+	The run that stayed.
+	"""
+	id: String!
+	"""
+	Why it did: it is still going, or its record cannot be read.
+	"""
+	reason: String!
 }
 
 """

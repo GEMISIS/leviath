@@ -541,3 +541,128 @@ async fn the_inbox_lists_every_open_ask_with_its_run() {
     assert_eq!(inbox["request"]["stageName"], "build");
     assert_eq!(inbox["request"]["required"], true);
 }
+
+/// A delete removes a run and its sub-agents, and says what it removed.
+#[tokio::test]
+async fn a_delete_takes_a_runs_sub_agents_with_it() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-delete", |_d| async move {
+        create_run(&run_in("root", RunStatus::Complete)).expect("run written");
+        let mut worker = run_in("worker", RunStatus::Complete);
+        worker.parent_run_id = Some("root".to_string());
+        create_run(&worker).expect("run written");
+
+        let answer = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteRuns(ids: ["root"]) { deleted skipped { id reason } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let deleted = json["deleteRuns"]["deleted"].as_array().expect("deleted");
+        assert_eq!(deleted.len(), 2, "the run and its worker: {deleted:?}");
+        assert_eq!(
+            json["deleteRuns"]["skipped"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            !crate::commands::serve::core::blueprints::run_dir("root").exists(),
+            "the record is gone"
+        );
+    })
+    .await;
+}
+
+/// A live run is skipped with its reason, and the rest of the sweep goes on.
+///
+/// Partial success is the normal outcome here, which is why it is a list rather
+/// than a failure.
+#[tokio::test]
+async fn a_live_run_is_skipped_rather_than_removed() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-delete-live", |_d| async move {
+        create_run(&run_in("finished", RunStatus::Complete)).expect("run written");
+        create_run(&run_in("still-going", RunStatus::Running)).expect("run written");
+
+        let answer = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteRuns(ids: ["finished", "still-going"]) {
+                 deleted skipped { id reason } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["deleteRuns"]["deleted"][0], "finished");
+        let skipped = &json["deleteRuns"]["skipped"][0];
+        assert_eq!(skipped["id"], "still-going");
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cancel it"),
+            "it says what to do: {skipped}"
+        );
+    })
+    .await;
+}
+
+/// A sweep by age takes the finished runs older than the mark, and leaves the
+/// rest.
+#[tokio::test]
+async fn a_sweep_by_age_takes_the_old_finished_runs() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-delete-sweep", |_d| async move {
+        let mut old = run_in("old", RunStatus::Complete);
+        old.updated_at = 100;
+        create_run(&old).expect("run written");
+        let mut recent = run_in("recent", RunStatus::Complete);
+        recent.updated_at = 5_000;
+        create_run(&recent).expect("run written");
+
+        let answer = mutate(
+            no_daemon_client(),
+            "mutation { deleteRuns(before: 1000) { deleted } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(
+            json["deleteRuns"]["deleted"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(json["deleteRuns"]["deleted"][0], "old");
+    })
+    .await;
+}
+
+/// A delete with no predicate, or with two, is refused. Neither is a request
+/// anybody meant to send.
+#[tokio::test]
+async fn a_delete_needs_exactly_one_predicate() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-delete-refused", |_d| async move {
+        let neither = mutate(no_daemon_client(), "mutation { deleteRuns { deleted } }").await;
+        assert!(
+            neither
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("refusing to delete every run"),
+            "{:?}",
+            neither.errors
+        );
+
+        let both = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteRuns(ids: ["a"], before: 1000) { deleted } }"#,
+        )
+        .await;
+        assert!(
+            both.errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("two predicates"),
+            "{:?}",
+            both.errors
+        );
+    })
+    .await;
+}
