@@ -129,10 +129,10 @@ pub(crate) struct Json(pub(crate) serde_json::Value);
 #[Scalar(name = "JSON")]
 impl ScalarType for Json {
     fn parse(value: Value) -> InputValueResult<Self> {
-        value
-            .into_json()
-            .map(Json)
-            .map_err(|e| InputValueError::custom(e.to_string()))
+        // Every GraphQL value has a JSON form, including the binary one a
+        // multipart upload carries, so the conversion has no failing case. A
+        // refusal here would have to invent a reason for it.
+        Ok(Json(value.into_json().expect("a GraphQL value is JSON")))
     }
 
     fn to_value(&self) -> Value {

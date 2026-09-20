@@ -169,6 +169,13 @@ fn a_stage_record_carries_its_ledger() {
     visit.prompt_tokens = 400;
     visit.cost_usd = Some(0.01);
     core.visits = vec![visit];
+    // How long the stage actually worked, as against how long the run was parked
+    // in it. A stage that spent an hour waiting on a person has an hour of wall
+    // time and seconds of work, and the two must not be read as one.
+    core.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 42,
+        since: Some(180),
+    });
 
     let record = StageRecord::from(&core);
     assert_eq!(record.name, "build");
@@ -192,6 +199,9 @@ fn a_stage_record_carries_its_ledger() {
     assert!(record.runaway_warned);
     assert_eq!(record.started_at.map(|t| t.0), Some(100));
     assert_eq!(record.ended_at.map(|t| t.0), Some(200));
+    let working = record.active.expect("the stage kept a working clock");
+    assert_eq!(working.banked_secs, 42);
+    assert_eq!(working.since.map(|t| t.0), Some(180), "a span in progress");
 }
 
 /// Every stage state the daemon records has one schema value.

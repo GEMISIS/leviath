@@ -424,3 +424,37 @@ fn a_mime_row_that_will_not_read_is_left_out() {
     assert_eq!(rows.len(), 1, "only the row that reads: {rows:?}");
     assert_eq!(rows[0].mime_type, "image/png");
 }
+
+/// A checkpoint's directives come back in a fixed order.
+///
+/// The manifest holds them in a hash map, so two reads of one blueprint would
+/// otherwise disagree about the order, and a console diffing them would show
+/// changes nobody made.
+#[test]
+fn a_checkpoints_directives_are_ordered() {
+    let point = leviath_core::blueprint::InteractionPoint {
+        name: "review".to_string(),
+        prompt: "ok?".to_string(),
+        required: true,
+        unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
+        style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+        options: vec!["ship".to_string(), "hold".to_string()],
+        directives: [
+            ("ship".to_string(), "go to the next stage".to_string()),
+            ("hold".to_string(), "ask again later".to_string()),
+            ("abort".to_string(), "stop the run".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        abort_options: Vec::new(),
+        edit_options: Vec::new(),
+        document_region: None,
+    };
+    let mapped = super::interaction::InteractionPoint::from(&point);
+    let options: Vec<&str> = mapped
+        .directives
+        .iter()
+        .map(|entry| entry.option.as_str())
+        .collect();
+    assert_eq!(options, vec!["abort", "hold", "ship"], "by option, always");
+}
