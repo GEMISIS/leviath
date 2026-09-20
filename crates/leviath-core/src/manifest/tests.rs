@@ -152,7 +152,7 @@ version = "2.0.0"
 description = "A fully configured agent"
 max_child_depth = 3
 entry_stage = "start"
-dynamic_tools = true
+tool_rescan = "before_dispatch"
 
 [stages.start]
 mode = "autonomous"
@@ -181,7 +181,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     assert_eq!(bp.description, "A fully configured agent");
     assert_eq!(bp.max_child_depth, Some(3));
     assert_eq!(bp.entry_stage, Some("start".to_string()));
-    assert!(bp.dynamic_tools);
+    assert_eq!(bp.tool_rescan, crate::blueprint::ToolRescan::BeforeDispatch);
     assert_eq!(bp.stages.len(), 2);
 
     let start = bp.find_stage("start").unwrap();
@@ -6852,4 +6852,80 @@ keep_results = true
             .expect("the stage routes tool results")
             .keep_results
     );
+}
+
+/// Every value of `tool_rescan`, the flag it grew out of, and a word nothing
+/// names.
+///
+/// `dynamic_tools = true` did exactly what `after_writes` does, so a blueprint
+/// carrying it runs unchanged. A misspelled value is refused rather than
+/// defaulted: quietly running at `at_spawn` because somebody typed
+/// `before_dispath` is the failure the strict key checks exist to prevent.
+#[test]
+fn tool_rescan_reads_every_value_and_the_flag_it_replaced() {
+    use crate::blueprint::ToolRescan;
+    let with = |line: &str| {
+        format!("[agent]\nname = \"a\"\n{line}\n\n[stages.main]\nmode = \"autonomous\"\n")
+    };
+    for value in ToolRescan::ALL {
+        let bp = parse_manifest(&with(&format!("tool_rescan = \"{}\"", value.wire())))
+            .expect("every value parses");
+        assert_eq!(bp.tool_rescan, value, "{}", value.wire());
+    }
+
+    assert_eq!(
+        parse_manifest(&with("dynamic_tools = true"))
+            .expect("the flag still parses")
+            .tool_rescan,
+        ToolRescan::AfterWrites
+    );
+    assert_eq!(
+        parse_manifest(&with("dynamic_tools = false"))
+            .expect("and so does the other half")
+            .tool_rescan,
+        ToolRescan::AtSpawn
+    );
+    // Nothing said at all.
+    assert_eq!(
+        parse_manifest(&with("description = \"d\""))
+            .expect("a blueprint need not mention it")
+            .tool_rescan,
+        ToolRescan::AtSpawn
+    );
+
+    // The new key wins where both are written.
+    assert_eq!(
+        parse_manifest(&with("dynamic_tools = true\ntool_rescan = \"at_spawn\""))
+            .expect("both is not an error")
+            .tool_rescan,
+        ToolRescan::AtSpawn
+    );
+
+    let err = parse_manifest(&with("tool_rescan = \"before_dispath\""))
+        .expect_err("a misspelling is refused")
+        .to_string();
+    assert!(err.contains("before_dispath"), "{err}");
+    assert!(
+        err.contains("before_dispatch"),
+        "it lists the real ones: {err}"
+    );
+}
+
+/// What each value turns on, said once so the daemon and the API agree.
+#[test]
+fn each_rescan_value_says_what_it_turns_on() {
+    use crate::blueprint::ToolRescan;
+    assert!(!ToolRescan::AtSpawn.rescans());
+    assert!(!ToolRescan::AtSpawn.before_dispatch());
+    assert!(ToolRescan::AfterWrites.rescans());
+    assert!(!ToolRescan::AfterWrites.before_dispatch());
+    // Strictly more eager, so it does everything the one before it does.
+    assert!(ToolRescan::BeforeDispatch.rescans());
+    assert!(ToolRescan::BeforeDispatch.before_dispatch());
+
+    // The word round-trips, which is what the manifest and the schema share.
+    for value in ToolRescan::ALL {
+        assert_eq!(ToolRescan::parse(value.wire()), Some(value));
+    }
+    assert_eq!(ToolRescan::parse("dynamic"), None);
 }

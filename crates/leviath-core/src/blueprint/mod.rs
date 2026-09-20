@@ -25,6 +25,69 @@ pub const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
     crate::layout::STAGE_INSTRUCTIONS_REGION,
 ];
 
+/// When a run looks for tools again after it started.
+///
+/// Discovery happens either way: what this decides is whether it happens more
+/// than once, and how eagerly. Each value is strictly more eager than the one
+/// before it, so a later value does everything an earlier one does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRescan {
+    /// The set is fixed when the run starts. The default, and the only value
+    /// where an agent cannot grow its own toolchain.
+    #[default]
+    AtSpawn,
+    /// A `.rhai` written into a scanned directory makes the run look again
+    /// before its next turn, so the tool is advertised to the model.
+    AfterWrites,
+    /// As `AfterWrites`, and the run also looks again before each batch of tool
+    /// calls it dispatches.
+    ///
+    /// The difference is one turn: a tool the model writes and then calls in
+    /// the same turn is refused as unoffered under `AfterWrites`, because the
+    /// set it is checked against is the one the turn started with. The cost is
+    /// a `stat` per scanned directory per batch, and a re-scan only when one of
+    /// them changed.
+    BeforeDispatch,
+}
+
+impl ToolRescan {
+    /// Whether a run on this setting looks for tools again at all.
+    ///
+    /// What decides whether the workdir's `tools/` joins the scan set, and
+    /// whether the runtime watches the agent for a pending re-scan.
+    pub fn rescans(self) -> bool {
+        !matches!(self, Self::AtSpawn)
+    }
+
+    /// Whether a run on this setting looks again before dispatching a batch.
+    pub fn before_dispatch(self) -> bool {
+        matches!(self, Self::BeforeDispatch)
+    }
+
+    /// The word a manifest writes for this value.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::AtSpawn => "at_spawn",
+            Self::AfterWrites => "after_writes",
+            Self::BeforeDispatch => "before_dispatch",
+        }
+    }
+
+    /// Read a manifest's word, or `None` for one nothing here names.
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "at_spawn" => Self::AtSpawn,
+            "after_writes" => Self::AfterWrites,
+            "before_dispatch" => Self::BeforeDispatch,
+            _ => return None,
+        })
+    }
+
+    /// Every value, in order of eagerness, for a refusal that lists them.
+    pub const ALL: [Self; 3] = [Self::AtSpawn, Self::AfterWrites, Self::BeforeDispatch];
+}
+
 /// An agent blueprint - the complete definition of an agent type.
 ///
 /// Includes stages, model selection, tools, AND context layout. A blueprint
@@ -98,17 +161,18 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
 
-    /// Opt-in escape hatch: when `true`, the run's workdir gains a `tools/`
-    /// directory in the scan set, so a script the agent writes there mid-run is
-    /// re-discovered and re-advertised for its next turn. **Off by default** -
-    /// tools are otherwise discovered once at spawn and an agent cannot grow
-    /// its own toolchain.
+    /// When a run looks for tools again after it started.
     ///
-    /// The directory is the *workdir's*, not the blueprint's: anything else
-    /// running in that workdir sees the same tools, and a sub-agent inherits
-    /// the workdir verbatim.
+    /// Anything but [`ToolRescan::AtSpawn`] puts the run workdir's `tools/`
+    /// directory in the scan set, so a script the agent writes there mid-run
+    /// can be found. The directory is the *workdir's*, not the blueprint's:
+    /// anything else running in that workdir sees the same tools, and a
+    /// sub-agent inherits the workdir verbatim.
+    ///
+    /// Defaults to [`ToolRescan::AtSpawn`], where the set is fixed when the run
+    /// starts and an agent cannot grow its own toolchain.
     #[serde(default)]
-    pub dynamic_tools: bool,
+    pub tool_rescan: ToolRescan,
 
     /// Read paths this agent *declares* beyond its workdir - directories a
     /// planner-style agent needs to see, like run archives or design docs.
@@ -371,7 +435,7 @@ impl Blueprint {
             repetition_detection: None,
             file_tracking: None,
             sandbox: None,
-            dynamic_tools: false,
+            tool_rescan: ToolRescan::AtSpawn,
             read_paths: None,
             safe_commands: None,
             output: None,

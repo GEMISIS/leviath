@@ -351,33 +351,41 @@ mod tests {
     /// answer `lev update --json` gives on the same machine. A route that
     /// drifted from the CLI would send people a command their own terminal
     /// disagrees with.
+    /// Both plans are built inside one scoped home, because both read the
+    /// machine and another test in this binary can change what "the machine" is
+    /// between them. The scope takes the same lock those tests take, so the two
+    /// readings are of one state and the assertion is about agreement rather
+    /// than about timing.
     #[tokio::test]
     async fn get_update_agrees_with_what_the_cli_would_print() {
-        let env = UpdateEnv::for_planning();
-        let args = UpdateArgs {
-            check: true,
-            ..UpdateArgs::default()
-        };
-        let from_cli = plan_json(&plan(&args, &env), API_VERSION, &LatestCheck::default());
+        super::super::testutil::with_home(|_home| async move {
+            let env = UpdateEnv::for_planning();
+            let args = UpdateArgs {
+                check: true,
+                ..UpdateArgs::default()
+            };
+            let from_cli = plan_json(&plan(&args, &env), API_VERSION, &LatestCheck::default());
 
-        let app = Router::new()
-            .route("/api/update", get(get_update))
-            .with_state(test_state());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/update")
-                    .body(Body::empty())
-                    .expect("a GET with no body always builds"),
-            )
-            .await
-            .expect("the router is infallible");
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("the body is a small JSON document");
-        let from_route: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("the handler serializes a plan");
-        assert_eq!(from_route, from_cli);
+            let app = Router::new()
+                .route("/api/update", get(get_update))
+                .with_state(test_state());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/update")
+                        .body(Body::empty())
+                        .expect("a GET with no body always builds"),
+                )
+                .await
+                .expect("the router is infallible");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("the body is a small JSON document");
+            let from_route: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("the handler serializes a plan");
+            assert_eq!(from_route, from_cli);
+        })
+        .await;
     }
 
     // ─── POST /api/update, and reading a job back ────────────────────────────

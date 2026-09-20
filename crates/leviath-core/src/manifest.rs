@@ -6,7 +6,7 @@
 
 use crate::blueprint::{
     ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
-    StageMode, StuckConfig, TransitionCondition, TransitionEdge,
+    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
 };
 use crate::error::{Error, Result};
 use crate::layout::{RegionDefinition, RegionSeed};
@@ -30,7 +30,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
 
     let entry_stage = str_of(agent, "entry_stage").map(|s| s.to_string());
 
-    let dynamic_tools = bool_of(agent, "dynamic_tools").unwrap_or(false);
+    let tool_rescan = parse_tool_rescan(agent)?;
 
     let mut stages = Vec::new();
     if let Some(stages_table) = table_of(&parsed, "stages") {
@@ -82,7 +82,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     blueprint.version = version;
     blueprint.max_child_depth = max_child_depth;
     blueprint.entry_stage = entry_stage;
-    blueprint.dynamic_tools = dynamic_tools;
+    blueprint.tool_rescan = tool_rescan;
 
     if let Some(compaction_table) = table_of(&parsed, "compaction") {
         blueprint.compaction_config = Some(parse_compaction_config(compaction_table)?);
@@ -192,6 +192,34 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
 }
 
 mod model;
+/// Read `[agent] tool_rescan`, or the `dynamic_tools` flag it grew out of.
+///
+/// `dynamic_tools = true` is `after_writes`, which is what it did; `false` is
+/// `at_spawn`. The new key wins where both are written, so a manifest part-way
+/// through a rewrite reads as the author's newer intent.
+///
+/// A word nothing names is refused rather than defaulted: silently running a
+/// blueprint at `at_spawn` because its author misspelled the eager setting is
+/// exactly the failure the strict key checks exist to prevent.
+fn parse_tool_rescan(agent: &toml::Value) -> Result<ToolRescan> {
+    if let Some(word) = str_of(agent, "tool_rescan") {
+        return ToolRescan::parse(word).ok_or_else(|| {
+            Error::Other(format!(
+                "[agent] tool_rescan = \"{word}\" is not a setting (valid: {})",
+                ToolRescan::ALL
+                    .iter()
+                    .map(|value| value.wire())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        });
+    }
+    Ok(match bool_of(agent, "dynamic_tools") {
+        Some(true) => ToolRescan::AfterWrites,
+        Some(false) | None => ToolRescan::AtSpawn,
+    })
+}
+
 mod read;
 mod regions;
 pub mod renamed;
@@ -214,6 +242,7 @@ const AGENT_KEYS: &[&str] = &[
     "batch_tool_hint",
     "description",
     "dynamic_tools",
+    "tool_rescan",
     "entry_stage",
     "max_child_depth",
     "name",

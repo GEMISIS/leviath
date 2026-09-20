@@ -43,15 +43,68 @@ pub(crate) fn refresh_advertised_tools(
     crate::tick_scope::clear();
     for (entity, cursor, mut si, mut sis) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        if let Some(tools) = service.0.refresh_tools(entity, cursor.index) {
-            si.tools = tools.clone();
-            // Keep the catalog entry in sync so re-entering this stage advertises
-            // the same refreshed set.
-            if let Some(slot) = sis.0.get_mut(cursor.index) {
-                slot.tools = tools;
-            }
-        }
+        advertise_refreshed(&service, entity, cursor.index, &mut si, &mut sis);
         commands.entity(entity).remove::<ToolsNeedRefresh>();
+    }
+}
+
+/// What a refreshing system needs off an agent: where it is, what it advertises
+/// now, and the catalog the set has to be written back into.
+///
+/// Named because two systems take exactly this, and spelling it twice is what
+/// the clippy complaint about it is really about.
+type Advertised<'a> = (
+    Entity,
+    &'a StageCursor,
+    Mut<'a, StageInference>,
+    Mut<'a, StageInferences>,
+);
+
+/// Ask the service for this stage's tools and write them where both the next
+/// request and a later revisit will read them.
+///
+/// One function for the two systems that refresh, because writing only the live
+/// `StageInference` is a bug that hides until the stage is re-entered: the
+/// catalog would still hold the set the run started with.
+fn advertise_refreshed(
+    service: &Res<ToolServiceRes>,
+    entity: Entity,
+    stage_index: usize,
+    si: &mut StageInference,
+    sis: &mut StageInferences,
+) {
+    let Some(tools) = service.0.refresh_tools(entity, stage_index) else {
+        return;
+    };
+    si.tools = tools.clone();
+    if let Some(slot) = sis.0.get_mut(stage_index) {
+        slot.tools = tools;
+    }
+}
+
+/// Look for tools again before a batch is dispatched, for an agent whose
+/// blueprint asks for it.
+///
+/// Runs between the response that named the calls and the dispatch that sends
+/// them, which is the only place it can pay off: the advertised set is what
+/// dispatch refuses an unoffered call against, so a tool written and then called
+/// in the same turn is refused without this and callable with it.
+///
+/// Gated on [`ToolService::scan_stale`], so the ordinary batch costs a `stat`
+/// per scanned directory and nothing else. No marker is consumed: the agent
+/// carries [`RescanBeforeDispatch`] for its whole run, and this runs once per
+/// batch it dispatches.
+pub(crate) fn rescan_before_dispatch(
+    service: Res<ToolServiceRes>,
+    mut agents: Query<Advertised, (With<ReadyForTools>, With<RescanBeforeDispatch>)>,
+) {
+    crate::tick_scope::clear();
+    for (entity, cursor, mut si, mut sis) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        if !service.0.scan_stale(entity) {
+            continue;
+        }
+        advertise_refreshed(&service, entity, cursor.index, &mut si, &mut sis);
     }
 }
 

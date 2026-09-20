@@ -14,11 +14,21 @@ pub(crate) struct AwaitingTools;
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct ToolsNeedRefresh;
 
-/// Marker: this agent opted into `dynamic_tools`. Only such agents
-/// are polled by `poll_dynamic_tool_refresh` for a pending tool re-scan, so the
-/// default (static) agent pays nothing.
+/// Marker: this agent's blueprint asks for tools to be looked for again after
+/// the run starts. Only such agents are polled by `poll_dynamic_tool_refresh`
+/// for a pending tool re-scan, so the default (fixed) agent pays nothing.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DynamicTools;
+
+/// Marker: this agent's blueprint asks for a look before *each* batch of tool
+/// calls, on top of the one before its next turn.
+///
+/// It buys exactly one turn. The set a call is checked against is the one the
+/// turn was built from, so a tool the model writes and then calls in the same
+/// turn is refused as unoffered without this. Carried by `rescan_before_dispatch`
+/// only, and its cost is a `stat` per scanned directory per batch.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RescanBeforeDispatch;
 
 /// Reports one tool call's result the moment it resolves, from inside the
 /// executor - `(tool_call_id, result)`. Dispatch builds one per batch to journal
@@ -72,10 +82,23 @@ pub trait ToolService: Send + Sync {
         None
     }
 
-    /// Whether `entity` (a `dynamic_tools` agent) has pending tool changes that
+    /// Whether `entity` (an agent that rescans) has pending tool changes that
     /// warrant a re-scan + re-advertise. Polled by `poll_dynamic_tool_refresh`;
     /// implementors return (and clear) a per-agent dirty flag. Default `false`.
     fn wants_refresh(&self, _entity: Entity) -> bool {
+        false
+    }
+
+    /// Whether `entity`'s scanned directories have changed since they were last
+    /// read, asked once per batch of a `before_dispatch` agent.
+    ///
+    /// Separate from [`wants_refresh`](Self::wants_refresh) because it answers a
+    /// cheaper question and must not consume anything: the dirty flag is drained
+    /// by the poll that runs before the turn, and this runs in the middle of
+    /// one. Implementors compare a stamp of the directories rather than
+    /// re-reading them, so the common answer costs a few `stat` calls.
+    /// Default `false`, which turns the mode off for a service without one.
+    fn scan_stale(&self, _entity: Entity) -> bool {
         false
     }
 }

@@ -47,9 +47,10 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, require_fan_out, require_final_output, resolve_transition,
-    run_after_inference_hooks, run_before_inference_hooks, run_stage_enter_hooks,
-    run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks, sync_tool_stages,
+    require_context_regions, require_fan_out, require_final_output, rescan_before_dispatch,
+    resolve_transition, run_after_inference_hooks, run_before_inference_hooks,
+    run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks,
+    sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -478,7 +479,11 @@ impl PipelineWorld {
                 crate::gate_prompt::collect_gate_prompt,
                 // `on_tool_call` before the policy and taint layers see the
                 // calls, so a hook can narrow what runs and never widen it.
-                (run_tool_call_hooks, dispatch_tools).chain(),
+                // The rescan is ahead of both: dispatch refuses a call the
+                // advertised set does not offer, so an agent that asked to look
+                // again before each batch has to be looked at here or the tool
+                // it just wrote is refused for another turn.
+                (rescan_before_dispatch, run_tool_call_hooks, dispatch_tools).chain(),
                 collect_tools,
                 // Apply any resolved stage-boundary interaction-point answers
                 // before the stage decides its transition.

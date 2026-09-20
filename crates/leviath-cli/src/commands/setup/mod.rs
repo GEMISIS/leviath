@@ -1097,12 +1097,27 @@ mod tests {
         );
     }
 
+    /// The environment is scoped for the first call, because "is any provider
+    /// configured" reads two things `SetupEnv` does not carry: the provider keys
+    /// in the environment, which the config overlay picks up, and the sign-in
+    /// grant store under the data root. Unscoped, whether the no-provider
+    /// warning fires depends on what the developer has exported.
     #[test]
     fn the_non_interactive_path_installs_agents_only_when_asked() {
         let dir = tempfile::tempdir().unwrap();
         let env = env_in(dir.path());
-
-        run_non_interactive(&args(), &env).unwrap();
+        // One combined list: `temp_env` holds a process-wide lock across the
+        // closure, so a second scope inside this one would deadlock.
+        let mut vars = crate::config::config_isolation_vars(dir.path());
+        vars.push((
+            "LEVIATH_HOME",
+            Some(dir.path().to_path_buf().into_os_string()),
+        ));
+        temp_env::with_vars(vars, || {
+            // No keys anywhere, so the scripted path says so rather than writing
+            // a config that cannot run an agent and saying nothing.
+            run_non_interactive(&args(), &env).unwrap();
+        });
         assert!(!env.agents_dir.exists(), "nothing was asked for");
 
         run_non_interactive(
