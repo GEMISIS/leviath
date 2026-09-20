@@ -299,33 +299,65 @@ pub(super) async fn login(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
+    match signed_in(&state, &name).await {
+        Ok(status) => {
+            Json(serde_json::json!({ "status": status.wire(), "server": name })).into_response()
+        }
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// What a sign-in to an MCP server ended as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoginStatus {
+    /// A grant was obtained and stored.
+    Authenticated,
+    /// The server wants no OAuth, so there was nothing to store. Not a failure:
+    /// the caller asked whether a login was needed, and the answer is no.
+    NotRequired,
+}
+
+impl LoginStatus {
+    /// The word this status goes out as.
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Authenticated => "authenticated",
+            Self::NotRequired => "not_required",
+        }
+    }
+}
+
+/// Sign in to one MCP server, for whichever surface asked.
+///
+/// Opens a browser on the host, which is why it is an act rather than a read: a
+/// server reached over SSH cannot do this, and the refusal says so.
+pub(super) async fn signed_in(
+    state: &AppState,
+    name: &str,
+) -> Result<LoginStatus, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let admin = &state.mcp;
     let paths = admin_paths();
-    let config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) else {
-        return err(
-            StatusCode::NOT_FOUND,
-            format!("no MCP server named '{name}'"),
-        )
-        .into_response();
-    };
+    let config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    let server = config
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?;
     let url = match server.resolve() {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
         _ => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                format!("server '{name}' does not use HTTP transport and cannot log in"),
-            )
-            .into_response();
+            return Err(ServeError::BadRequest(format!(
+                "server '{name}' does not use HTTP transport and cannot log in"
+            )));
         }
     };
 
     let mut store = AuthStore::load(&paths.store).unwrap_or_default();
-    let reuse = store.get(&name).map(|a| a.client_id.clone());
-    let outcome = match OAuthClient::new()
+    let reuse = store.get(name).map(|a| a.client_id.clone());
+    let outcome = OAuthClient::new()
         .login(
             &url,
             &server.headers,
@@ -335,22 +367,15 @@ pub(super) async fn login(
             reuse.as_deref(),
         )
         .await
-    {
-        Ok(outcome) => outcome,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    };
-    // A server that answered the probe wants no OAuth, so there is nothing to
-    // store. Reporting it as an error would be wrong: the caller asked whether a
-    // login was needed, and the answer is no.
+        .map_err(|e| ServeError::Upstream(e.to_string()))?;
     let LoginOutcome::Authenticated(auth) = outcome else {
-        return Json(serde_json::json!({ "status": "not_required", "server": name }))
-            .into_response();
+        return Ok(LoginStatus::NotRequired);
     };
-    store.set(&name, *auth);
-    if let Err(e) = store.save(&paths.store) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-    Json(serde_json::json!({ "status": "authenticated", "server": name })).into_response()
+    store.set(name, *auth);
+    store
+        .save(&paths.store)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    Ok(LoginStatus::Authenticated)
 }
 
 /// `GET /api/mcp/servers/{name}/status` - one server's transport and auth state.
@@ -380,31 +405,39 @@ pub(super) async fn test_server(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
+    match tools_of(&state, &name).await {
+        Ok(tools) => Json(serde_json::json!({ "server": name, "tools": tools })).into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// What one MCP server advertises, for whichever surface asked.
+///
+/// Connects and lists, which is the only honest answer to "does this server
+/// work": a config that parses proves nothing about a program that will not
+/// start.
+pub(super) async fn tools_of(
+    state: &AppState,
+    name: &str,
+) -> Result<Vec<String>, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let admin = &state.mcp;
     let paths = admin_paths();
-    let config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) else {
-        return err(
-            StatusCode::NOT_FOUND,
-            format!("no MCP server named '{name}'"),
-        )
-        .into_response();
-    };
-    let auth_header = match OAuthClient::new()
-        .authorization_header(&name, &paths.store, (admin.clock)())
+    let config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    let server = config
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?;
+    let auth_header = OAuthClient::new()
+        .authorization_header(name, &paths.store, (admin.clock)())
         .await
-    {
-        Ok(header) => header,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    };
-    let result = connect_and_list(server, auth_header, &config.security.allow_env_vars).await;
-    match result {
-        Ok(tools) => Json(serde_json::json!({ "server": name, "tools": tools })).into_response(),
-        Err(e) => err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    }
+        .map_err(|e| ServeError::Upstream(e.to_string()))?;
+    connect_and_list(server, auth_header, &config.security.allow_env_vars)
+        .await
+        .map_err(|e| ServeError::Upstream(e.to_string()))
 }
 
 /// The tools `server` advertises, for a caller with no request to answer:

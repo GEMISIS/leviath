@@ -37,7 +37,7 @@ use axum::response::{IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
 use super::quota_cache::{Accounts, Asked, QUOTA_AGE, QUOTA_COMPLETE};
-use super::types::{AppState, err};
+use super::types::AppState;
 use crate::commands::setup::signin::{LiveAuthorizer, ProviderAuthorizer};
 
 /// The seams and the shared state the provider routes need.
@@ -320,18 +320,23 @@ pub(super) async fn listing_with(
 /// The refusal is boxed because an axum response is a large value and this
 /// returns a small one beside it.
 fn resolve(name: &str) -> Result<&'static str, Box<axum::response::Response>> {
+    canonical(name).map_err(|e| Box::new(super::core::error::as_api_error(&e).into_response()))
+}
+
+/// The canonical name of a provider that can be signed in to in a browser.
+///
+/// The table's own id, not the caller's string: everything downstream keys on
+/// the id, and a caller's spelling that merely matched would key a grant under a
+/// name nothing reads back.
+pub(super) fn canonical(name: &str) -> Result<&'static str, super::core::error::ServeError> {
     signin_providers()
         .iter()
         .find(|(id, _)| *id == name)
         .map(|(id, _)| *id)
         .ok_or_else(|| {
-            Box::new(
-                err(
-                    StatusCode::NOT_FOUND,
-                    format!("no browser sign-in provider named '{name}'"),
-                )
-                .into_response(),
-            )
+            super::core::error::ServeError::NotFound(format!(
+                "no browser sign-in provider named '{name}'"
+            ))
         })
 }
 
@@ -347,19 +352,63 @@ pub(super) async fn login(
         Ok(id) => id,
         Err(response) => return *response,
     };
+    match sign_in_started(&state, name).await {
+        // Already waiting: the same 409 as before, carrying the URL, because a
+        // client that asked twice still needs the window it is waiting on.
+        Ok(started) if started.already_waiting => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("a sign-in to '{name}' is already waiting"),
+                "authorize_url": started.authorize_url,
+            })),
+        )
+            .into_response(),
+        Ok(started) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "waiting",
+                "provider": started.provider,
+                "authorize_url": started.authorize_url,
+            })),
+        )
+            .into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// A sign-in that is waiting for the person to finish it in a browser.
+#[derive(Debug, Clone)]
+pub(super) struct SignInStarted {
+    /// The provider, by its canonical name.
+    pub(super) provider: String,
+    /// Where the person has to go. On the serving host: the flow listens on a
+    /// loopback port there, so a browser anywhere else cannot complete it.
+    pub(super) authorize_url: String,
+    /// Whether this is the sign-in somebody already started rather than a new
+    /// one. One runs at a time, because the flow owns a fixed loopback port that
+    /// a second could not bind, and two browser windows asking the same question
+    /// help nobody.
+    pub(super) already_waiting: bool,
+}
+
+/// Start a sign-in, for whichever surface asked, and answer with the URL.
+///
+/// Returns as soon as there is a URL to go to. What happens after that is the
+/// person's business and the flow's: read `providers` to see whether it landed.
+pub(super) async fn sign_in_started(
+    state: &AppState,
+    name: &'static str,
+) -> Result<SignInStarted, super::core::error::ServeError> {
     // One at a time: the flow owns a fixed loopback port that a second could
     // not bind, and two browser windows asking the same question help nobody.
     if let Some(Progress::Waiting { authorize_url, .. }) =
         leviath_core::sync::lock(&state.providers.in_flight).get(name)
     {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("a sign-in to '{name}' is already waiting"),
-                "authorize_url": authorize_url,
-            })),
-        )
-            .into_response();
+        return Ok(SignInStarted {
+            provider: name.to_string(),
+            authorize_url: authorize_url.clone(),
+            already_waiting: true,
+        });
     }
 
     // One channel for both answers: the URL when the flow gets that far, and
@@ -433,17 +482,13 @@ pub(super) async fn login(
                     started_at: (state.providers.now)(),
                 },
             );
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({
-                    "status": "waiting",
-                    "provider": name,
-                    "authorize_url": url,
-                })),
-            )
-                .into_response()
+            Ok(SignInStarted {
+                provider: name.to_string(),
+                authorize_url: url,
+                already_waiting: false,
+            })
         }
-        Err(message) => err(StatusCode::BAD_GATEWAY, message).into_response(),
+        Err(message) => Err(super::core::error::ServeError::Upstream(message)),
     }
 }
 
@@ -460,13 +505,31 @@ pub(super) async fn logout(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    match state.providers.authorizer().sign_out(name).await {
+    match signed_out(&state, name).await {
         Ok(()) => {
-            leviath_core::sync::lock(&state.providers.in_flight).remove(name);
             Json(serde_json::json!({ "status": "signed_out", "provider": name })).into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
     }
+}
+
+/// Forget one provider's stored grant, for whichever surface asked.
+///
+/// The config is deliberately untouched, the same as `lev auth logout`: signing
+/// out is not turning the provider off, and doing both would surprise anybody who
+/// meant to sign in again.
+pub(super) async fn signed_out(
+    state: &AppState,
+    name: &str,
+) -> Result<(), super::core::error::ServeError> {
+    state
+        .providers
+        .authorizer()
+        .sign_out(name)
+        .await
+        .map_err(|e| super::core::error::ServeError::Internal(e.to_string()))?;
+    leviath_core::sync::lock(&state.providers.in_flight).remove(name);
+    Ok(())
 }
 
 /// `POST /api/providers/{name}/check` - prove the stored sign-in works.
@@ -482,6 +545,27 @@ pub(super) async fn check(
         Ok(id) => id,
         Err(response) => return *response,
     };
+    match checked(&state, name).await {
+        Ok(models) => Json(serde_json::json!({
+            "status": "ok",
+            "provider": name,
+            "models": models,
+        }))
+        .into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// Ask one provider whether the stored sign-in works, for whichever surface
+/// asked.
+///
+/// The same check `lev setup` runs, through the same code: it asks the account
+/// rather than reading a compiled table, so a green answer means the subscription
+/// really did agree. The models it names are what that account may use.
+pub(super) async fn checked(
+    state: &AppState,
+    name: &str,
+) -> Result<Vec<String>, super::core::error::ServeError> {
     let config = state.current_config();
     let mut options = crate::commands::run::session::signin_options(&config, name);
     // The authorizer's path, not the default one it usually resolves to: the
@@ -513,15 +597,10 @@ pub(super) async fn check(
     // `--no-verify` backend does, and that one is not wired here - so a
     // `Skipped` arm would be a branch nothing could reach.
     let outcome = crate::commands::setup::verify::verify_via_registry(&creds).await;
-    if outcome.is_failure() {
-        return err(StatusCode::BAD_GATEWAY, outcome.summary()).into_response();
+    match outcome.is_failure() {
+        true => Err(super::core::error::ServeError::Upstream(outcome.summary())),
+        false => Ok(outcome.models().to_vec()),
     }
-    Json(serde_json::json!({
-        "status": "ok",
-        "provider": name,
-        "models": outcome.models(),
-    }))
-    .into_response()
 }
 
 #[cfg(test)]

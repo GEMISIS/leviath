@@ -1,7 +1,7 @@
 //! Config and models endpoints.
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Json;
 
 use super::types::*;
@@ -142,12 +142,27 @@ pub(super) async fn probe_models_with(
     req: ProbeModelsReq,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Result<Json<ProbeModelsResp>, ApiError> {
+    probed(req, build_client)
+        .await
+        .map(|models| Json(ProbeModelsResp { models }))
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// What an OpenAI-compatible endpoint says it serves, for whichever surface
+/// asked.
+///
+/// Built the same way a written gateway would be, so the probe cannot succeed
+/// where the gateway then fails.
+pub(super) async fn probed(
+    req: ProbeModelsReq,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<Vec<String>, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let (valid, message) = validate_base_url(&req.base_url);
     if !valid {
-        return Err(err(StatusCode::BAD_REQUEST, message.unwrap_or_default()));
+        return Err(ServeError::BadRequest(message.unwrap_or_default()));
     }
-    // The same provider a written gateway would get, built the same way, so
-    // the probe cannot succeed where the gateway then fails.
     let mut creds = leviath_runtime::provider_creds::ProviderCreds::openai_compatible(
         "probe",
         req.base_url.trim(),
@@ -161,17 +176,17 @@ pub(super) async fn probe_models_with(
         std::slice::from_ref(&creds),
         build_client,
     )
-    .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    // Registered unconditionally under the name above: an endpoint cred
-    // needs neither a key nor a reachable port to register.
+    .map_err(|e| ServeError::Upstream(e.to_string()))?;
+    // Registered unconditionally under the name above: an endpoint cred needs
+    // neither a key nor a reachable port to register.
     let provider = registry.get("probe").expect("an endpoint cred registers");
     let models = provider
         .list_models()
         .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| ServeError::Upstream(e.to_string()))?;
     let mut ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
     ids.sort();
-    Ok(Json(ProbeModelsResp { models: ids }))
+    Ok(ids)
 }
 
 /// How long the probe waits on the server. A person is watching a form.

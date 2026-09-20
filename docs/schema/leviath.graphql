@@ -2143,6 +2143,21 @@ type MaxTokensRegionPercent {
 }
 
 """
+What signing in to an MCP server ended as.
+"""
+enum McpLoginStatus {
+	"""
+	A grant was obtained and stored.
+	"""
+	AUTHENTICATED
+	"""
+	The server wants no OAuth, so there was nothing to store. A success: the
+	question was whether a sign-in was needed.
+	"""
+	NOT_REQUIRED
+}
+
+"""
 One MCP server in the config.
 """
 type McpServer {
@@ -2891,6 +2906,110 @@ type Mutation {
 		"""
 		migrations: Boolean! = true
 	): UpdateJob!
+	"""
+	Sign in to a subscription provider.
+	
+	Answers as soon as there is a URL to go to, because what happens after
+	that is the person's business: they open it, approve, and the flow lands
+	the grant. Read `providers` to see whether it did.
+	
+	The browser has to be on the serving host. The flow listens on a loopback
+	port there, so a browser anywhere else cannot complete it, and one sign-in
+	runs at a time because a second could not bind that port.
+	"""
+	providerSignIn(
+		"""
+		The provider, by name.
+		"""
+		provider: String!
+	): SignInStarted!
+	"""
+	Forget a provider's stored sign-in.
+	
+	The config is untouched: signing out is not turning the provider off, and
+	doing both would surprise anybody who meant to sign in again.
+	"""
+	providerSignOut(
+		"""
+		The provider, by name.
+		"""
+		provider: String!
+	): Boolean!
+	"""
+	Ask a provider whether the stored sign-in works.
+	
+	It asks the account rather than reading a table, so a green answer means
+	the subscription really did agree, and the models are what that account may
+	use. That costs a request, which is why this is a mutation.
+	"""
+	checkProvider(
+		"""
+		The provider, by name.
+		"""
+		provider: String!
+	): [String!]!
+	"""
+	Connect to an MCP server and list what it advertises.
+	
+	The only honest answer to "does this server work": a config that parses
+	proves nothing about a program that will not start.
+	"""
+	testMcpServer(
+		"""
+		The server, by name.
+		"""
+		name: String!
+	): [String!]!
+	"""
+	Sign in to an MCP server that wants OAuth.
+	
+	`NOT_REQUIRED` is a success, not a failure: the question was whether a
+	sign-in was needed, and the answer is no. Opens a browser on the serving
+	host, like the provider sign-in.
+	"""
+	loginMcpServer(
+		"""
+		The server, by name.
+		"""
+		name: String!
+	): McpLoginStatus!
+	"""
+	Ask an OpenAI-compatible endpoint what models it serves.
+	
+	Makes this host open a connection to an address the caller names, which is
+	the same act as testing an MCP server, and it exists to precede writing a
+	gateway for it: a person picks a default from what the endpoint really
+	serves rather than typing a model id and hoping.
+	"""
+	probeModels(
+		"""
+		Where the endpoint is.
+		"""
+		baseUrl: String!,
+		"""
+		Its API key, when it wants one.
+		"""
+		apiKey: String,
+		"""
+		Extra headers the request carries.
+		"""
+		headers: [EnvEntryInput!]
+	): [String!]!
+	"""
+	Replace the yolo profiles file.
+	
+	The whole file, because the file is the unit: `--yolo=<name>` names a
+	profile inside it and the profiles refer to each other, so writing one at a
+	time would let a save leave the set inconsistent. Parsed before it is
+	written, so a file that would not load is refused rather than saved and
+	discovered at the next spawn.
+	"""
+	putYoloProfiles(
+		"""
+		The whole file, as TOML.
+		"""
+		text: String!
+	): YoloProfiles!
 }
 
 """
@@ -4624,6 +4743,25 @@ enum SetupBlocker {
 	The provider failed.
 	"""
 	PROVIDER_FAILED
+}
+
+"""
+A provider sign-in that is waiting for the person to finish it.
+"""
+type SignInStarted {
+	"""
+	The provider, by its canonical name.
+	"""
+	provider: String!
+	"""
+	Where the person has to go, on the serving host.
+	"""
+	authorizeUrl: String!
+	"""
+	Whether this is the sign-in somebody already started rather than a new
+	one. The URL is the same either way, which is what a client needs.
+	"""
+	alreadyWaiting: Boolean!
 }
 
 """

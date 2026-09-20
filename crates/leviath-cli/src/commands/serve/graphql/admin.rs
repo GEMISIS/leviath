@@ -299,6 +299,148 @@ impl AdminMutation {
             })
             .gql()
     }
+
+    /// Sign in to a subscription provider.
+    ///
+    /// Answers as soon as there is a URL to go to, because what happens after
+    /// that is the person's business: they open it, approve, and the flow lands
+    /// the grant. Read `providers` to see whether it did.
+    ///
+    /// The browser has to be on the serving host. The flow listens on a loopback
+    /// port there, so a browser anywhere else cannot complete it, and one sign-in
+    /// runs at a time because a second could not bind that port.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn provider_sign_in(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The provider, by name.")] provider: String,
+    ) -> async_graphql::Result<SignInStarted> {
+        let state = ctx.data_unchecked::<AppState>();
+        let name = super::super::providers::canonical(&provider).gql()?;
+        let started = super::super::providers::sign_in_started(state, name)
+            .await
+            .gql()?;
+        Ok(SignInStarted {
+            provider: started.provider,
+            authorize_url: started.authorize_url,
+            already_waiting: started.already_waiting,
+        })
+    }
+
+    /// Forget a provider's stored sign-in.
+    ///
+    /// The config is untouched: signing out is not turning the provider off, and
+    /// doing both would surprise anybody who meant to sign in again.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn provider_sign_out(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The provider, by name.")] provider: String,
+    ) -> async_graphql::Result<bool> {
+        let state = ctx.data_unchecked::<AppState>();
+        let name = super::super::providers::canonical(&provider).gql()?;
+        super::super::providers::signed_out(state, name)
+            .await
+            .gql()?;
+        Ok(true)
+    }
+
+    /// Ask a provider whether the stored sign-in works.
+    ///
+    /// It asks the account rather than reading a table, so a green answer means
+    /// the subscription really did agree, and the models are what that account may
+    /// use. That costs a request, which is why this is a mutation.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn check_provider(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The provider, by name.")] provider: String,
+    ) -> async_graphql::Result<Vec<String>> {
+        let state = ctx.data_unchecked::<AppState>();
+        let name = super::super::providers::canonical(&provider).gql()?;
+        super::super::providers::checked(state, name).await.gql()
+    }
+
+    /// Connect to an MCP server and list what it advertises.
+    ///
+    /// The only honest answer to "does this server work": a config that parses
+    /// proves nothing about a program that will not start.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn test_mcp_server(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The server, by name.")] name: String,
+    ) -> async_graphql::Result<Vec<String>> {
+        let state = ctx.data_unchecked::<AppState>();
+        super::super::mcp::tools_of(state, &name).await.gql()
+    }
+
+    /// Sign in to an MCP server that wants OAuth.
+    ///
+    /// `NOT_REQUIRED` is a success, not a failure: the question was whether a
+    /// sign-in was needed, and the answer is no. Opens a browser on the serving
+    /// host, like the provider sign-in.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn login_mcp_server(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The server, by name.")] name: String,
+    ) -> async_graphql::Result<McpLoginStatus> {
+        let state = ctx.data_unchecked::<AppState>();
+        let status = super::super::mcp::signed_in(state, &name).await.gql()?;
+        Ok(match status {
+            super::super::mcp::LoginStatus::Authenticated => McpLoginStatus::Authenticated,
+            super::super::mcp::LoginStatus::NotRequired => McpLoginStatus::NotRequired,
+        })
+    }
+
+    /// Ask an OpenAI-compatible endpoint what models it serves.
+    ///
+    /// Makes this host open a connection to an address the caller names, which is
+    /// the same act as testing an MCP server, and it exists to precede writing a
+    /// gateway for it: a person picks a default from what the endpoint really
+    /// serves rather than typing a model id and hoping.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn probe_models(
+        &self,
+        #[graphql(desc = "Where the endpoint is.")] base_url: String,
+        #[graphql(desc = "Its API key, when it wants one.")] api_key: Option<String>,
+        #[graphql(desc = "Extra headers the request carries.")] headers: Option<
+            Vec<super::config_input::EnvEntryInput>,
+        >,
+    ) -> async_graphql::Result<Vec<String>> {
+        super::super::config::probed(
+            super::super::config_types::ProbeModelsReq {
+                base_url,
+                api_key,
+                headers: headers.map(|headers| {
+                    headers
+                        .into_iter()
+                        .map(|entry| (entry.name, entry.value))
+                        .collect()
+                }),
+            },
+            &leviath_providers::provider::build_http_client,
+        )
+        .await
+        .gql()
+    }
+
+    /// Replace the yolo profiles file.
+    ///
+    /// The whole file, because the file is the unit: `--yolo=<name>` names a
+    /// profile inside it and the profiles refer to each other, so writing one at a
+    /// time would let a save leave the set inconsistent. Parsed before it is
+    /// written, so a file that would not load is refused rather than saved and
+    /// discovered at the next spawn.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn put_yolo_profiles(
+        &self,
+        #[graphql(desc = "The whole file, as TOML.")] text: String,
+    ) -> async_graphql::Result<super::types::machine::YoloProfiles> {
+        super::super::yolo::write_profiles(&text).gql()?;
+        Ok(super::query::yolo_profiles())
+    }
 }
 
 /// One row of the mime registry, as a write sends it.
@@ -384,3 +526,25 @@ pub(crate) struct MadeDirectory {
 #[cfg(test)]
 #[path = "admin_tests.rs"]
 mod tests;
+
+/// A provider sign-in that is waiting for the person to finish it.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct SignInStarted {
+    /// The provider, by its canonical name.
+    pub(crate) provider: String,
+    /// Where the person has to go, on the serving host.
+    pub(crate) authorize_url: String,
+    /// Whether this is the sign-in somebody already started rather than a new
+    /// one. The URL is the same either way, which is what a client needs.
+    pub(crate) already_waiting: bool,
+}
+
+/// What signing in to an MCP server ended as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum McpLoginStatus {
+    /// A grant was obtained and stored.
+    Authenticated,
+    /// The server wants no OAuth, so there was nothing to store. A success: the
+    /// question was whether a sign-in was needed.
+    NotRequired,
+}

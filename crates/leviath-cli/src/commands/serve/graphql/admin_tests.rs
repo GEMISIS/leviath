@@ -561,3 +561,157 @@ async fn making_a_directory_tells_its_refusals_apart() {
         .await;
     assert_eq!(code(&relative), "\"BAD_USER_INPUT\"");
 }
+
+/// The mutations that reach outside this machine are behind the gate too.
+#[tokio::test]
+async fn the_outward_reaching_mutations_are_gated() {
+    let calls = [
+        r#"mutation { providerSignIn(provider: "anthropic") { authorizeUrl } }"#,
+        r#"mutation { providerSignOut(provider: "anthropic") }"#,
+        r#"mutation { checkProvider(provider: "anthropic") }"#,
+        r#"mutation { testMcpServer(name: "docs") }"#,
+        r#"mutation { loginMcpServer(name: "docs") }"#,
+        r#"mutation { probeModels(baseUrl: "http://127.0.0.1:1") }"#,
+        r#"mutation { putYoloProfiles(text: "") { path } }"#,
+    ];
+    for call in calls {
+        let answer = schema(false).execute(Request::new(call)).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("--allow-admin"),
+            "{call} is gated: {}",
+            error.message
+        );
+    }
+}
+
+/// A provider nobody can sign in to in a browser is a miss, named as such.
+///
+/// Told apart from a provider that exists and refused: one is a client using the
+/// wrong name, the other is something to retry.
+#[tokio::test]
+async fn an_unknown_signin_provider_is_a_miss() {
+    for call in [
+        r#"mutation { providerSignIn(provider: "nope") { authorizeUrl } }"#,
+        r#"mutation { providerSignOut(provider: "nope") }"#,
+        r#"mutation { checkProvider(provider: "nope") }"#,
+    ] {
+        let answer = schema(true).execute(Request::new(call)).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string()),
+            "{call}"
+        );
+        assert!(
+            error.message.contains("browser sign-in"),
+            "it says what kind of name it wanted: {}",
+            error.message
+        );
+    }
+}
+
+/// An MCP server that is not in the config cannot be tested or signed in to.
+#[tokio::test]
+async fn an_unknown_mcp_server_cannot_be_tested() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants: home.join("grants.json"),
+        };
+        std::fs::write(&paths.config, "").expect("a config file");
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                for call in [
+                    r#"mutation { testMcpServer(name: "nope") }"#,
+                    r#"mutation { loginMcpServer(name: "nope") }"#,
+                ] {
+                    let answer = schema(true).execute(Request::new(call)).await;
+                    assert_eq!(
+                        answer
+                            .errors
+                            .first()
+                            .expect("a refusal")
+                            .extensions
+                            .as_ref()
+                            .and_then(|e| e.get("code"))
+                            .map(ToString::to_string),
+                        Some("\"NOT_FOUND\"".to_string()),
+                        "{call}"
+                    );
+                }
+            })
+            .await;
+    })
+    .await;
+}
+
+/// A probe of an address that is not a URL is refused before anything is dialled.
+#[tokio::test]
+async fn a_probe_of_something_that_is_not_a_url_is_refused() {
+    let answer = schema(true)
+        .execute(Request::new(
+            r#"mutation { probeModels(baseUrl: "not a url") }"#,
+        ))
+        .await;
+    assert_eq!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"BAD_USER_INPUT\"".to_string())
+    );
+}
+
+/// The yolo file is written whole, and a file that would not load is refused
+/// rather than saved and discovered at the next spawn.
+#[tokio::test]
+async fn the_yolo_file_is_written_whole_and_parse_checked() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let written = schema(true)
+            .execute(Request::new(format!(
+                r#"mutation {{ putYoloProfiles(text: {}) {{ path exists error
+                     profiles {{ name default }} }} }}"#,
+                serde_json::json!(crate::commands::yolo::EXAMPLE_TOML)
+            )))
+            .await;
+        assert!(written.errors.is_empty(), "{:?}", written.errors);
+        let json = serde_json::to_value(&written.data).expect("data serializes");
+        assert_eq!(json["putYoloProfiles"]["exists"], true);
+        assert!(json["putYoloProfiles"]["error"].is_null());
+        assert!(
+            !json["putYoloProfiles"]["profiles"]
+                .as_array()
+                .expect("profiles")
+                .is_empty(),
+            "the file it just wrote is read back"
+        );
+
+        let refused = schema(true)
+            .execute(Request::new(
+                r#"mutation { putYoloProfiles(text: "[[[ not toml") { path } }"#,
+            ))
+            .await;
+        assert_eq!(
+            refused
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+    })
+    .await;
+}

@@ -388,25 +388,7 @@ impl Query {
 
     /// The yolo profiles, and the file they are read from.
     async fn yolo_profiles(&self) -> YoloProfiles {
-        let listing = super::super::yolo::listing();
-        YoloProfiles {
-            path: listing.path,
-            exists: listing.exists,
-            error: listing.error,
-            profiles: listing
-                .profiles
-                .into_iter()
-                .map(|profile| YoloProfile {
-                    name: profile.name,
-                    default: waiver_word(profile.default).to_string(),
-                    questions: human_word(profile.questions).to_string(),
-                    checkpoints: human_word(profile.checkpoints).to_string(),
-                    gate: human_word(profile.gate).to_string(),
-                    tool_rules: profile.tool_rules.iter().map(|n| count(*n)).collect(),
-                    shell_rules: profile.shell_rules.iter().map(|n| count(*n)).collect(),
-                })
-                .collect(),
-        }
+        yolo_profiles()
     }
 
     /// The operator's mime registry, before any blueprint's own rows.
@@ -726,6 +708,32 @@ fn human_word(human: crate::yolo::rules::Human) -> &'static str {
     match human {
         crate::yolo::rules::Human::Ask => "ask",
         crate::yolo::rules::Human::Auto => "auto",
+    }
+}
+
+/// The yolo profiles as this schema describes them.
+///
+/// Shared by the field and the write, so "what is there now" is one shape
+/// whichever asked.
+pub(crate) fn yolo_profiles() -> YoloProfiles {
+    let listing = super::super::yolo::listing();
+    YoloProfiles {
+        path: listing.path,
+        exists: listing.exists,
+        error: listing.error,
+        profiles: listing
+            .profiles
+            .into_iter()
+            .map(|profile| YoloProfile {
+                name: profile.name,
+                default: waiver_word(profile.default).to_string(),
+                questions: human_word(profile.questions).to_string(),
+                checkpoints: human_word(profile.checkpoints).to_string(),
+                gate: human_word(profile.gate).to_string(),
+                tool_rules: profile.tool_rules.iter().map(|n| count(*n)).collect(),
+                shell_rules: profile.shell_rules.iter().map(|n| count(*n)).collect(),
+            })
+            .collect(),
     }
 }
 
