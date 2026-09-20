@@ -188,66 +188,107 @@ pub(super) struct AddServerRequest {
 
 /// `POST /api/mcp/servers` - add a server.
 pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoResponse {
-    let paths = admin_paths();
-    let server = MCPServerConfig {
-        name: req.name,
-        command: req.command,
-        url: req.url,
-        args: req.args,
-        headers: req.headers,
-        ..Default::default()
-    };
-    if let Err(e) = server.validate() {
-        return err(StatusCode::BAD_REQUEST, e.to_string()).into_response();
-    }
-
-    let mut config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    if config.mcp_servers.iter().any(|s| s.name == server.name) {
-        return err(
-            StatusCode::CONFLICT,
-            format!("an MCP server named '{}' already exists", server.name),
+    match install_server_with(req.name, req.command, req.url, req.args, req.headers) {
+        Ok(name) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "name": name })),
         )
-        .into_response();
+            .into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
     }
-    config.mcp_servers.push(server.clone());
-    if let Err(e) = config.save_to_path_public(&paths.config) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "name": server.name })),
-    )
-        .into_response()
 }
 
-/// `DELETE /api/mcp/servers/{name}` - remove a server and its credentials.
-pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+/// Write an MCP server into the config.
+///
+/// Remote code execution by construction: the command written here is what
+/// Leviath spawns, for this run and every future one. Both surfaces gate the
+/// act behind `--allow-admin`; this is what the act itself is.
+pub(super) fn install_server(
+    name: &str,
+    command: Option<&str>,
+    url: Option<&str>,
+    args: Vec<String>,
+) -> Result<String, super::core::error::ServeError> {
+    install_server_with(
+        name.to_string(),
+        command.map(str::to_string),
+        url.map(str::to_string),
+        args,
+        Default::default(),
+    )
+}
+
+/// [`install_server`], with the headers only the REST body carries today.
+fn install_server_with(
+    name: String,
+    command: Option<String>,
+    url: Option<String>,
+    args: Vec<String>,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<String, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let paths = admin_paths();
-    let mut config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let server = MCPServerConfig {
+        name,
+        command,
+        url,
+        args,
+        headers,
+        ..Default::default()
     };
+    server
+        .validate()
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+
+    let mut config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    if config.mcp_servers.iter().any(|s| s.name == server.name) {
+        return Err(ServeError::Conflict(format!(
+            "an MCP server named '{}' already exists",
+            server.name
+        )));
+    }
+    let name = server.name.clone();
+    config.mcp_servers.push(server);
+    config
+        .save_to_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    Ok(name)
+}
+
+pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    match uninstall_server(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// Take an MCP server out of the config, and its stored credential with it.
+pub(super) fn uninstall_server(name: &str) -> Result<(), super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    let paths = admin_paths();
+    let mut config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
     let before = config.mcp_servers.len();
-    config.mcp_servers.retain(|s| s.name != name);
+    config.mcp_servers.retain(|server| server.name != name);
     if config.mcp_servers.len() == before {
-        return err(
-            StatusCode::NOT_FOUND,
-            format!("no MCP server named '{name}'"),
-        )
-        .into_response();
+        return Err(ServeError::NotFound(format!(
+            "no MCP server named '{name}'"
+        )));
     }
-    if let Err(e) = config.save_to_path_public(&paths.config) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
+    config
+        .save_to_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    // The credential goes with the server it was for. Left behind, it would be
+    // silently reused by a later server that happened to take the same name.
     if let Ok(mut store) = AuthStore::load(&paths.store)
-        && store.remove(&name)
+        && store.remove(name)
     {
         let _ = store.save(&paths.store);
     }
-    StatusCode::NO_CONTENT.into_response()
+    Ok(())
 }
 
 /// `POST /api/mcp/servers/{name}/login` - run the OAuth browser flow.

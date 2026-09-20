@@ -7,6 +7,7 @@
 
 use async_graphql::{Context, InputObject, Object, OneofObject, SimpleObject};
 
+use super::super::core::blueprints as blueprint_core;
 use super::super::core::error::ServeError;
 use super::super::core::lifecycle::{self, Action};
 use super::super::core::runs as run_core;
@@ -14,6 +15,7 @@ use super::super::core::spawn as spawn_core;
 use super::super::types::AppState;
 use super::error::{IntoGraphql, graphql_error};
 use super::scalars::Timestamp;
+use super::types::blueprint::Blueprint;
 use super::types::run::Run;
 use crate::runstate;
 
@@ -183,6 +185,21 @@ impl AnswerInteractionInput {
     }
 }
 
+/// What a validation found.
+///
+/// `valid` is the verdict; the lists say why. A manifest can be valid and still
+/// carry warnings, which is the common case for an agent that works but names
+/// something the engine has retired.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ValidationReport {
+    /// Whether the manifest would install and run.
+    pub(crate) valid: bool,
+    /// What makes it invalid. Empty when it is.
+    pub(crate) errors: Vec<String>,
+    /// What is worth knowing about it anyway.
+    pub(crate) warnings: Vec<String>,
+}
+
 /// One run a delete passed over, and why.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SkippedDelete {
@@ -238,6 +255,25 @@ fn output_spec(input: &SpawnAgentInput) -> Option<leviath_core::output::OutputSp
     })
 }
 
+/// Write a blueprint and describe what was written.
+fn installed(
+    ctx: &Context<'_>,
+    name: &str,
+    manifest: String,
+    replacing: bool,
+) -> async_graphql::Result<Blueprint> {
+    let state = ctx.data_unchecked::<AppState>();
+    let written = blueprint_core::write_blueprint(name, manifest, replacing).gql()?;
+    // Into the parse cache by digest, so the listing that follows this
+    // mutation does not parse the same text again.
+    state.caches.blueprints.parse(&written.manifest).gql()?;
+    Ok(Blueprint {
+        parsed: written.parsed,
+        digest: written.manifest.digest,
+        source: blueprint_core::BlueprintSource::Installed.into(),
+    })
+}
+
 /// Read a run back after a mutation moved it.
 fn read_back(run_id: &str, warnings: Vec<String>) -> Result<AgentPayload, ServeError> {
     let meta = runstate::read_meta(run_id).map_err(|e| {
@@ -285,12 +321,13 @@ async fn act_and_read(
     })
 }
 
-/// The write side. A finished run is immutable: these reject it with
-/// `CONFLICT` rather than quietly doing nothing.
-pub(crate) struct Mutation;
+/// The acts on runs and blueprints. A finished run is immutable: these reject
+/// it with `CONFLICT` rather than quietly doing nothing.
+#[derive(Default)]
+pub(crate) struct RunMutation;
 
 #[Object]
-impl Mutation {
+impl RunMutation {
     /// Park a run.
     ///
     /// Read `run.status` on the way back: `PAUSED` means the pause landed.
@@ -393,6 +430,67 @@ impl Mutation {
         read_back(&run_id, Vec::new()).gql()
     }
 
+    /// Install a blueprint.
+    ///
+    /// A name that is already installed is a `CONFLICT`: replacing somebody's
+    /// agent is what `updateBlueprint` is for, and doing it silently here is
+    /// how an agent disappears without anybody asking for it.
+    async fn create_blueprint(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The name to install it under.")] name: String,
+        #[graphql(desc = "The manifest text.")] manifest: String,
+    ) -> async_graphql::Result<Blueprint> {
+        installed(ctx, &name, manifest, false)
+    }
+
+    /// Replace an installed blueprint.
+    ///
+    /// The name is the key and does not change. Runs already spawned keep their
+    /// own snapshot of what they executed, so this never rewrites history.
+    async fn update_blueprint(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which installed blueprint to replace.")] name: String,
+        #[graphql(desc = "The replacement manifest text.")] manifest: String,
+    ) -> async_graphql::Result<Blueprint> {
+        installed(ctx, &name, manifest, true)
+    }
+
+    /// Uninstall a blueprint.
+    ///
+    /// Runs that used it keep their own copy of the manifest, so their history
+    /// is unaffected: `run.blueprint` still answers.
+    async fn delete_blueprint(
+        &self,
+        #[graphql(desc = "The installed blueprint to remove.")] name: String,
+    ) -> async_graphql::Result<bool> {
+        blueprint_core::remove_blueprint(&name).gql()?;
+        Ok(true)
+    }
+
+    /// Check a manifest without installing it.
+    ///
+    /// A failing check is a report, not an error: the request to validate
+    /// succeeded, and what it found is the answer.
+    async fn validate_blueprint(
+        &self,
+        #[graphql(desc = "The manifest text to check.")] manifest: String,
+        #[graphql(desc = "Check it as this installed agent, so its own scripts resolve.")]
+        agent: Option<String>,
+    ) -> async_graphql::Result<ValidationReport> {
+        let dir = match agent.as_deref() {
+            Some(name) => blueprint_core::blueprint_dir(name).gql()?,
+            None => std::path::PathBuf::new(),
+        };
+        let report = super::super::blueprints::validate_manifest_text(&manifest, &dir);
+        Ok(ValidationReport {
+            valid: report.valid,
+            errors: report.errors.unwrap_or_default(),
+            warnings: report.warnings.unwrap_or_default(),
+        })
+    }
+
     /// Delete run records.
     ///
     /// Takes exactly one of `ids` or `before`. Neither is a client that failed
@@ -493,3 +591,12 @@ impl Mutation {
 #[cfg(test)]
 #[path = "mutation_tests.rs"]
 mod tests;
+
+/// The whole write side: the acts on runs and blueprints, plus the ones
+/// `--allow-admin` opens.
+///
+/// Merged rather than nested, so `mutation { addMcpServer(...) }` reads the
+/// same as every other mutation to a client that is allowed to use it, and does
+/// not exist to a client that is not.
+#[derive(async_graphql::MergedObject, Default)]
+pub(crate) struct Mutation(RunMutation, super::admin::AdminMutation);

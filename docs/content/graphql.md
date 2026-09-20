@@ -347,6 +347,28 @@ call, so it goes with a denial and is refused beside an approval. And the first
 answer wins: a second answer to the same request comes back `accepted: false`
 rather than as an error, because two people clicking one prompt is ordinary.
 
+## Blueprint writes and admin
+
+`createBlueprint`, `updateBlueprint`, `deleteBlueprint` and `validateBlueprint`
+are ordinary mutations. A name that is already installed is a `CONFLICT` on
+create: replacing somebody's agent is what an edit is for. Uninstalling one
+leaves every run that used it intact, because each run holds its own snapshot.
+
+`validateBlueprint` reports rather than fails. A manifest that will not install
+comes back `valid: false` with the reasons, because the request to check it
+succeeded.
+
+A second group changes the machine rather than a run, and `lev serve` opens it
+only with `--allow-admin`: `addMcpServer`, `removeMcpServer`, `putMimeRow` and
+`deleteMimeRow`. Adding an MCP server writes a command that Leviath then spawns,
+for this run and every future one, which is why it is behind a flag rather than
+behind the API token alone.
+
+Without the flag, those fields are invisible to introspection and refused with
+`FORBIDDEN` if you name one anyway. The hiding is a courtesy; the refusal is the
+boundary. The published schema file documents them either way, because it
+describes what the API is rather than what one server will do.
+
 ## Live frames
 
 `GET /ws/graphql` streams the same frames `/ws` carries, over

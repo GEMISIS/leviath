@@ -102,9 +102,9 @@ pub(super) struct MimeRowReq {
 #[derive(Debug, Serialize)]
 pub(super) struct MimeRowWritten {
     /// The type the row is for, as it was parsed.
-    mime_type: String,
+    pub(super) mime_type: String,
     /// Whether the row was new, rather than an update of one already there.
-    created: bool,
+    pub(super) created: bool,
 }
 
 /// Query for `DELETE /api/mime`: the type to take out.
@@ -128,8 +128,6 @@ fn mime_types_path() -> std::path::PathBuf {
 pub(super) async fn put_mime_row(
     Json(req): Json<MimeRowReq>,
 ) -> Result<Json<MimeRowWritten>, ApiError> {
-    let key = MimeType::parse(&req.mime_type)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{}: {e}", req.mime_type)))?;
     let tokens = match req.tokens {
         Some(t) => Some(t.into_spec().map_err(|e| err(StatusCode::BAD_REQUEST, e))?),
         None => None,
@@ -143,12 +141,49 @@ pub(super) async fn put_mime_row(
         stand_in: req.stand_in,
         check: req.check,
     };
-    let path = mime_types_path();
-    let added = add_row(&path, key.as_str(), &edit).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(MimeRowWritten {
+    write_edit(&req.mime_type, edit)
+        .map(Json)
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// Write one registry row: the fields both surfaces set.
+///
+/// The token rules and the magic bytes are REST-only for now, which is why
+/// this is the narrow door and [`write_edit`] is the wide one.
+pub(super) fn write_row(
+    mime_type: &str,
+    family: Option<String>,
+    text: Option<bool>,
+    extensions: Option<Vec<String>>,
+) -> Result<MimeRowWritten, super::core::error::ServeError> {
+    write_edit(
+        mime_type,
+        RowEdit {
+            family,
+            text,
+            tokens: None,
+            extensions,
+            magic: None,
+            stand_in: None,
+            check: None,
+        },
+    )
+}
+
+/// Write one registry row.
+fn write_edit(
+    mime_type: &str,
+    edit: RowEdit,
+) -> Result<MimeRowWritten, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    let key = MimeType::parse(mime_type)
+        .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
+    let added = add_row(&mime_types_path(), key.as_str(), &edit).map_err(ServeError::BadRequest)?;
+    Ok(MimeRowWritten {
         mime_type: key.as_str().to_string(),
         created: added == Added::Created,
-    }))
+    })
 }
 
 /// `DELETE /api/mime?mime_type=...` (admin-only): take a row out of
@@ -156,11 +191,23 @@ pub(super) async fn put_mime_row(
 pub(super) async fn delete_mime_row(
     Query(q): Query<DeleteMimeQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let key = MimeType::parse(&q.mime_type)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{}: {e}", q.mime_type)))?;
-    let path = mime_types_path();
-    remove_row(&path, key.as_str()).map_err(|e| err(StatusCode::NOT_FOUND, e))?;
-    Ok(StatusCode::NO_CONTENT)
+    match remove_row_named(&q.mime_type) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(super::core::error::as_api_error(
+            &super::core::error::ServeError::NotFound(format!("no row for '{}'", q.mime_type)),
+        )),
+        Err(e) => Err(super::core::error::as_api_error(&e)),
+    }
+}
+
+/// Remove one registry row. False when there was none to remove, which is a
+/// fact about the registry rather than a failed request.
+pub(super) fn remove_row_named(mime_type: &str) -> Result<bool, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    let key = MimeType::parse(mime_type)
+        .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
+    Ok(remove_row(&mime_types_path(), key.as_str()).is_ok())
 }
 
 #[cfg(test)]

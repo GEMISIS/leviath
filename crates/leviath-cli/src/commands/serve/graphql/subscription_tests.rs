@@ -49,7 +49,7 @@ fn spawned(run_id: &str, parent: Option<&str>) -> ServerEvent {
 async fn frames(query: &str, events: Vec<ServerEvent>, want: usize) -> Vec<serde_json::Value> {
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
     let tx = state.event_tx.clone();
-    let schema = Schema::build(Query, Mutation, Subscription_)
+    let schema = Schema::build(Query, Mutation::default(), Subscription_)
         .data(state)
         .finish();
 
@@ -291,7 +291,7 @@ async fn the_machine_frames_reach_an_unscoped_subscription() {
 async fn a_subscription_that_falls_behind_is_told() {
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
     let tx = state.event_tx.clone();
-    let schema = Schema::build(Query, Mutation, Subscription_)
+    let schema = Schema::build(Query, Mutation::default(), Subscription_)
         .data(state)
         .finish();
     let mut stream = schema.execute_stream(Request::new(

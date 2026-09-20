@@ -1149,6 +1149,20 @@ type MimeRow {
 }
 
 """
+What writing a mime row did.
+"""
+type MimeRowWritten {
+	"""
+	The row's key.
+	"""
+	mimeType: String!
+	"""
+	True when the row is new, false when an existing one was updated.
+	"""
+	created: Boolean!
+}
+
+"""
 One model this machine can route to.
 """
 type Model {
@@ -1259,6 +1273,14 @@ type ModelPricing {
 	outputPerMtok: Decimal!
 }
 
+"""
+The whole write side: the acts on runs and blueprints, plus the ones
+`--allow-admin` opens.
+
+Merged rather than nested, so `mutation { addMcpServer(...) }` reads the
+same as every other mutation to a client that is allowed to use it, and does
+not exist to a client that is not.
+"""
 type Mutation {
 	"""
 	Park a run.
@@ -1322,6 +1344,67 @@ type Mutation {
 		targetRegion: String
 	): AgentPayload!
 	"""
+	Install a blueprint.
+	
+	A name that is already installed is a `CONFLICT`: replacing somebody's
+	agent is what `updateBlueprint` is for, and doing it silently here is
+	how an agent disappears without anybody asking for it.
+	"""
+	createBlueprint(
+		"""
+		The name to install it under.
+		"""
+		name: String!,
+		"""
+		The manifest text.
+		"""
+		manifest: String!
+	): Blueprint!
+	"""
+	Replace an installed blueprint.
+	
+	The name is the key and does not change. Runs already spawned keep their
+	own snapshot of what they executed, so this never rewrites history.
+	"""
+	updateBlueprint(
+		"""
+		Which installed blueprint to replace.
+		"""
+		name: String!,
+		"""
+		The replacement manifest text.
+		"""
+		manifest: String!
+	): Blueprint!
+	"""
+	Uninstall a blueprint.
+	
+	Runs that used it keep their own copy of the manifest, so their history
+	is unaffected: `run.blueprint` still answers.
+	"""
+	deleteBlueprint(
+		"""
+		The installed blueprint to remove.
+		"""
+		name: String!
+	): Boolean!
+	"""
+	Check a manifest without installing it.
+	
+	A failing check is a report, not an error: the request to validate
+	succeeded, and what it found is the answer.
+	"""
+	validateBlueprint(
+		"""
+		The manifest text to check.
+		"""
+		manifest: String!,
+		"""
+		Check it as this installed agent, so its own scripts resolve.
+		"""
+		agent: String
+	): ValidationReport!
+	"""
 	Delete run records.
 	
 	Takes exactly one of `ids` or `before`. Neither is a client that failed
@@ -1373,6 +1456,73 @@ type Mutation {
 		"""
 		runId: String!
 	): AgentPayload!
+	"""
+	Add an MCP server to the config.
+	
+	Remote code execution by construction: the command written here is what
+	Leviath spawns, for this run and every future one. That is why the whole
+	group is behind a flag rather than behind the API token alone.
+	"""
+	addMcpServer(
+		"""
+		Unique server name.
+		"""
+		name: String!,
+		"""
+		The command, for a stdio server.
+		"""
+		command: String,
+		"""
+		The URL, for an HTTP server.
+		"""
+		url: String,
+		"""
+		Arguments for a stdio server.
+		"""
+		args: [String!]
+	): Boolean!
+	"""
+	Remove an MCP server from the config.
+	"""
+	removeMcpServer(
+		"""
+		The server to remove.
+		"""
+		name: String!
+	): Boolean!
+	"""
+	Add or update one row of the mime registry.
+	"""
+	putMimeRow(
+		"""
+		The type or pattern this row covers.
+		"""
+		mimeType: String!,
+		"""
+		The family providers key their encoders on.
+		"""
+		family: String,
+		"""
+		Whether the bytes are text, and may travel inline.
+		"""
+		text: Boolean,
+		"""
+		Extensions that imply this type, without the dot.
+		"""
+		extensions: [String!]
+	): MimeRowWritten!
+	"""
+	Remove a row from the mime registry.
+	
+	False when there was no such row, which is a fact about the registry
+	rather than a failed request.
+	"""
+	deleteMimeRow(
+		"""
+		The row to remove.
+		"""
+		mimeType: String!
+	): Boolean!
 }
 
 """
@@ -3060,6 +3210,28 @@ type UpdateProgress {
 	One line about what just happened, ready to print.
 	"""
 	detail: String!
+}
+
+"""
+What a validation found.
+
+`valid` is the verdict; the lists say why. A manifest can be valid and still
+carry warnings, which is the common case for an agent that works but names
+something the engine has retired.
+"""
+type ValidationReport {
+	"""
+	Whether the manifest would install and run.
+	"""
+	valid: Boolean!
+	"""
+	What makes it invalid. Empty when it is.
+	"""
+	errors: [String!]!
+	"""
+	What is worth knowing about it anyway.
+	"""
+	warnings: [String!]!
 }
 
 """

@@ -165,3 +165,84 @@ pub(crate) fn run_dir(run_id: &str) -> PathBuf {
 #[cfg(test)]
 #[path = "blueprints_tests.rs"]
 mod tests;
+
+/// Where an installed blueprint's directory is.
+///
+/// The name arrives from a client, and `Path::join` resists neither `..` nor an
+/// absolute path, so it is checked before it is joined: this is the gate
+/// between "install an agent" and "write a file anywhere".
+pub(crate) fn blueprint_dir(name: &str) -> Result<PathBuf, ServeError> {
+    if !leviath_core::is_safe_path_component(name) {
+        return Err(ServeError::BadRequest(format!(
+            "Invalid blueprint name '{name}': names may contain only letters, digits, \
+             '.', '_' and '-'"
+        )));
+    }
+    Ok(super::super::blueprints::agents_dir().join(name))
+}
+
+/// A blueprint as it was written to disk.
+pub(crate) struct WrittenBlueprint {
+    /// Its directory.
+    pub(crate) dir: PathBuf,
+    /// The manifest text, as written.
+    pub(crate) manifest: ManifestText,
+    /// The parse of it.
+    pub(crate) parsed: Arc<Blueprint>,
+}
+
+/// Install a blueprint, or replace the one under that name.
+///
+/// `replacing` decides which way a name that is already taken goes: a create
+/// refuses it, and an edit requires it. Saying so here rather than at each call
+/// site is what keeps "create" from quietly overwriting somebody's agent.
+pub(crate) fn write_blueprint(
+    name: &str,
+    manifest: String,
+    replacing: bool,
+) -> Result<WrittenBlueprint, ServeError> {
+    let parsed = leviath_core::manifest::parse_manifest(&manifest)
+        .map_err(|e| ServeError::BadRequest(format!("Invalid manifest: {e}")))?;
+    let dir = blueprint_dir(name)?;
+    let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
+    // `is_file`, not `exists`: a *directory* at the manifest's path is not a
+    // blueprint, and reporting one as "already installed" would hide the write
+    // failure that is actually coming.
+    match (replacing, path.is_file()) {
+        (true, false) => {
+            return Err(ServeError::NotFound(format!(
+                "Blueprint '{name}' not found"
+            )));
+        }
+        (false, true) => {
+            return Err(ServeError::Conflict(format!(
+                "Blueprint '{name}' already exists; edit it instead of creating it again"
+            )));
+        }
+        _ => {}
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| ServeError::Internal(format!("Failed to create directory: {e}")))?;
+    std::fs::write(&path, &manifest)
+        .map_err(|e| ServeError::Internal(format!("Failed to write manifest: {e}")))?;
+    Ok(WrittenBlueprint {
+        dir,
+        manifest: ManifestText::installed(manifest),
+        parsed: Arc::new(parsed),
+    })
+}
+
+/// Uninstall a blueprint.
+///
+/// Runs that used it keep their own snapshot of the manifest, so removing the
+/// installed copy does not take their history with it.
+pub(crate) fn remove_blueprint(name: &str) -> Result<(), ServeError> {
+    let dir = blueprint_dir(name)?;
+    if !dir.exists() {
+        return Err(ServeError::NotFound(format!(
+            "Blueprint '{name}' not found"
+        )));
+    }
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| ServeError::Internal(format!("Failed to delete blueprint: {e}")))
+}
