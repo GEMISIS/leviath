@@ -9,8 +9,9 @@ use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 
 use super::{
     AnswerApprovalInput, AnswerChoiceInput, AnswerInteractionInput, AnswerTextInput, ApprovalScope,
-    MetadataEntryInput, Mutation, RegionSeedInput, SpawnAgentInput, YoloTestInput,
+    MetadataEntryInput, Mutation, RegionSeedInput, SpawnAgentInput,
 };
+use crate::commands::serve::graphql::checks::YoloTestInput;
 use crate::commands::serve::graphql::query::Query;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
 use crate::runstate::{RunMeta, RunStatus, create_run};
@@ -888,46 +889,6 @@ async fn the_blueprint_writes_refuse_what_they_should() {
     .await;
 }
 
-/// Validation reports what it found. A manifest that will not install is a
-/// report with the reasons, not a failed request.
-#[tokio::test]
-async fn validation_reports_rather_than_fails() {
-    crate::commands::serve::testutil::with_home(|_home| async move {
-        let good = manifest_text("checked", "1.0.0").replace('\n', "\\n").replace('"', "\\\"");
-        let answer = mutate(
-            no_daemon_client(),
-            &format!(
-                r#"mutation {{ validateBlueprint(manifest: "{good}") {{ valid errors warnings }} }}"#
-            ),
-        )
-        .await;
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-        let json = serde_json::to_value(&answer.data).expect("data serializes");
-        assert_eq!(json["validateBlueprint"]["valid"], true);
-        assert_eq!(
-            json["validateBlueprint"]["errors"].as_array().map(Vec::len),
-            Some(0)
-        );
-
-        let bad = mutate(
-            no_daemon_client(),
-            r#"mutation { validateBlueprint(manifest: "not a manifest") { valid errors } }"#,
-        )
-        .await;
-        assert!(bad.errors.is_empty(), "a finding is not a request failure");
-        let json = serde_json::to_value(&bad.data).expect("data serializes");
-        assert_eq!(json["validateBlueprint"]["valid"], false);
-        assert!(
-            !json["validateBlueprint"]["errors"]
-                .as_array()
-                .expect("errors")
-                .is_empty(),
-            "it says why"
-        );
-    })
-    .await;
-}
-
 /// An export is started, polled, and handed over as a signed link.
 ///
 /// One schema for both halves on purpose: the job lives in this server's own
@@ -1026,149 +987,6 @@ async fn an_export_of_an_unknown_field_is_refused() {
     })
     .await;
 }
-
-/// The three checks that answer without changing anything.
-///
-/// Each is a mutation because it belongs beside the write it precedes, and none
-/// of them is gated: nothing is dialled, nothing is written, and a form that
-/// checks as somebody types should not need `--allow-admin`.
-#[tokio::test]
-async fn the_checks_that_change_nothing_need_no_flag() {
-    let good = mutate(
-        no_daemon_client(),
-        r#"mutation { validateConfigKey(provider: "anthropic", key: "sk-ant-abc")
-             { valid message } }"#,
-    )
-    .await;
-    assert!(good.errors.is_empty(), "{:?}", good.errors);
-    let json = serde_json::to_value(&good.data).expect("data serializes");
-    assert_eq!(json["validateConfigKey"]["valid"], true);
-    assert!(json["validateConfigKey"]["message"].is_null());
-
-    let wrong = mutate(
-        no_daemon_client(),
-        r#"mutation { validateConfigKey(provider: "anthropic", key: "nope") { valid message } }"#,
-    )
-    .await;
-    let json = serde_json::to_value(&wrong.data).expect("data serializes");
-    assert_eq!(json["validateConfigKey"]["valid"], false);
-    assert!(
-        json["validateConfigKey"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("sk-ant-")),
-        "it says what the format is"
-    );
-
-    // The address is judged before the key: a key cannot be judged beyond being
-    // present until there is somewhere to send it.
-    let bad_url = mutate(
-        no_daemon_client(),
-        r#"mutation { validateConfigKey(provider: "anthropic", key: "sk-ant-abc",
-             baseUrl: "not a url") { valid message } }"#,
-    )
-    .await;
-    let json = serde_json::to_value(&bad_url.data).expect("data serializes");
-    assert_eq!(json["validateConfigKey"]["valid"], false);
-
-    let compiles = mutate(
-        no_daemon_client(),
-        r#"mutation { validateScript(kind: "tool",
-             content: "// @tool summarize\n// @description sums up\n\"ok\"")
-             { valid error } }"#,
-    )
-    .await;
-    assert!(compiles.errors.is_empty(), "{:?}", compiles.errors);
-    let json = serde_json::to_value(&compiles.data).expect("data serializes");
-    assert_eq!(json["validateScript"]["valid"], true);
-
-    let broken = mutate(
-        no_daemon_client(),
-        r#"mutation { validateScript(kind: "tool", content: "fn (") { valid error } }"#,
-    )
-    .await;
-    let json = serde_json::to_value(&broken.data).expect("data serializes");
-    assert_eq!(json["validateScript"]["valid"], false);
-    assert!(json["validateScript"]["error"].as_str().is_some());
-
-    // An unknown registry is a refusal rather than a verdict: there is no
-    // compiler to have an opinion.
-    let unknown = mutate(
-        no_daemon_client(),
-        r#"mutation { validateScript(kind: "model_provider", content: "") { valid } }"#,
-    )
-    .await;
-    assert_eq!(
-        unknown
-            .errors
-            .first()
-            .expect("a refusal")
-            .extensions
-            .as_ref()
-            .and_then(|e| e.get("code"))
-            .map(ToString::to_string),
-        Some("\"BAD_USER_INPUT\"".to_string())
-    );
-}
-
-/// A yolo profile's decision about one call, through the same code path the
-/// command uses.
-#[tokio::test]
-async fn a_yolo_profile_decides_about_one_call() {
-    crate::commands::serve::testutil::with_home(|_home| async move {
-        let path = crate::yolo::yolo_path();
-        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
-        std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
-
-        let listed = mutate(no_daemon_client(), "{ yoloProfiles { profiles { name } } }").await;
-        let json = serde_json::to_value(&listed.data).expect("data serializes");
-        let name = json["yoloProfiles"]["profiles"][0]["name"]
-            .as_str()
-            .expect("a profile")
-            .to_string();
-
-        let decided = mutate(
-            no_daemon_client(),
-            &format!(
-                r#"mutation {{ testYoloProfile(call: {{ profile: "{name}", tool: "read_file" }})
-                     {{ profile tool configured policy reason }} }}"#
-            ),
-        )
-        .await;
-        assert!(decided.errors.is_empty(), "{:?}", decided.errors);
-        let json = serde_json::to_value(&decided.data).expect("data serializes");
-        assert_eq!(json["testYoloProfile"]["profile"], name);
-        assert_eq!(json["testYoloProfile"]["tool"], "read_file");
-        assert!(
-            ["allow", "ask", "deny"].contains(
-                &json["testYoloProfile"]["policy"]
-                    .as_str()
-                    .expect("a policy")
-            ),
-            "one of the three words: {json}"
-        );
-
-        // A profile that is not in the file is a miss.
-        let missing = mutate(
-            no_daemon_client(),
-            r#"mutation { testYoloProfile(call: { profile: "nope", tool: "read_file" })
-                 { policy } }"#,
-        )
-        .await;
-        assert_eq!(
-            missing
-                .errors
-                .first()
-                .expect("a refusal")
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"NOT_FOUND\"".to_string())
-        );
-    })
-    .await;
-}
-
 /// A temporary agents directory holding one blueprint by that name.
 ///
 /// A spawn checks the blueprint exists before it reaches the daemon, and with no
@@ -1349,30 +1167,6 @@ async fn a_cancel_reaches_the_daemon_as_a_cancel() {
     .await;
 }
 
-/// A manifest that will not parse is a report rather than a written blueprint.
-#[tokio::test]
-async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
-    crate::commands::serve::testutil::with_home(|_home| async move {
-        let report = mutate(
-            no_daemon_client(),
-            r#"mutation { validateBlueprint(manifest: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
-                 { valid errors warnings } }"#,
-        )
-        .await;
-        assert!(report.errors.is_empty(), "a finding is not a failure");
-        let json = serde_json::to_value(&report.data).expect("data serializes");
-        assert_eq!(json["validateBlueprint"]["valid"], false);
-        assert!(
-            !json["validateBlueprint"]["errors"]
-                .as_array()
-                .expect("errors")
-                .is_empty(),
-            "it says what is missing"
-        );
-    })
-    .await;
-}
-
 /// An export of everything is unpaged, and the page cap that governs a response
 /// does not govern a file.
 #[tokio::test]
@@ -1504,32 +1298,6 @@ async fn an_export_and_a_delete_refuse_what_the_listing_refuses() {
     .await;
 }
 
-/// A blueprint validated against an agent directory names the agent, and a name
-/// that could leave that directory is refused before any path is built.
-#[tokio::test]
-async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
-    crate::commands::serve::testutil::with_home(|_home| async move {
-        let answer = mutate(
-            no_daemon_client(),
-            r#"mutation { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
-                 agent: "../elsewhere") { valid } }"#,
-        )
-        .await;
-        let error = answer.errors.first().expect("a refusal");
-        assert_eq!(
-            error
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"BAD_USER_INPUT\"".to_string()),
-            "{}",
-            error.message
-        );
-    })
-    .await;
-}
-
 /// Every input object round-trips through its own value form.
 ///
 /// An input type is written for one direction and generated for both: the schema
@@ -1631,13 +1399,16 @@ fn answer_id(answer: &AnswerInteractionInput) -> String {
     }
 }
 
-/// Every write's input refuses what it cannot read.
+/// Every input object in the schema refuses what it cannot read.
 ///
+/// All of them together in one test, wherever their field lives: they are read
+/// by the same derived code, and the question - does a wrong value fail the
+/// request rather than land as a default - has one answer for all of them.
 /// The one-of input is here too. It refuses a value that is not an object the
 /// same way, on top of refusing two answers at once, which is the rule that
 /// makes it a one-of.
 #[test]
-fn every_write_input_refuses_what_it_cannot_read() {
+fn every_input_object_refuses_what_it_cannot_read() {
     use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
 
     /// One object with a single field set to `value`.

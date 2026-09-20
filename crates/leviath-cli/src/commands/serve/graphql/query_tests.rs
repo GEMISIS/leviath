@@ -2058,3 +2058,231 @@ async fn the_config_lists_where_blueprints_are_looked_for() {
         .collect();
     assert_eq!(paths, vec!["/srv/agents", "/opt/more-agents"]);
 }
+
+/// A manifest for the checks to look at.
+fn manifest_text(name: &str, version: &str) -> String {
+    format!(
+        "[agent]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"d\"\n\n\
+         [stages.only]\nmode = \"autonomous\"\n"
+    )
+}
+
+// ─── The four pure checks ─────────────────────────────────────────────────────
+//
+// Query fields, not mutations: text in, verdict out. Each used to sit beside
+// the write it precedes, which is where it appears in a form, not what it does.
+
+/// Validation reports what it found. A manifest that will not install is a
+/// report with the reasons, not a failed request.
+#[tokio::test]
+async fn validation_reports_rather_than_fails() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let good = manifest_text("checked", "1.0.0")
+            .replace('\n', "\\n")
+            .replace('"', "\\\"");
+        let answer = run_query(&format!(
+            r#"query {{ validateBlueprint(manifest: "{good}") {{ valid errors warnings }} }}"#
+        ))
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], true);
+        assert_eq!(
+            json["validateBlueprint"]["errors"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        let bad = run_query(
+            r#"query { validateBlueprint(manifest: "not a manifest") { valid errors } }"#,
+        )
+        .await;
+        assert!(bad.errors.is_empty(), "a finding is not a request failure");
+        let json = serde_json::to_value(&bad.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], false);
+        assert!(
+            !json["validateBlueprint"]["errors"]
+                .as_array()
+                .expect("errors")
+                .is_empty(),
+            "it says why"
+        );
+    })
+    .await;
+}
+/// The three checks that answer without changing anything.
+///
+/// Each is a mutation because it belongs beside the write it precedes, and none
+/// of them is gated: nothing is dialled, nothing is written, and a form that
+/// checks as somebody types should not need `--allow-admin`.
+#[tokio::test]
+async fn the_checks_that_change_nothing_need_no_flag() {
+    let good = run_query(
+        r#"query { validateConfigKey(provider: "anthropic", key: "sk-ant-abc")
+             { valid message } }"#,
+    )
+    .await;
+    assert!(good.errors.is_empty(), "{:?}", good.errors);
+    let json = serde_json::to_value(&good.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], true);
+    assert!(json["validateConfigKey"]["message"].is_null());
+
+    let wrong = run_query(
+        r#"query { validateConfigKey(provider: "anthropic", key: "nope") { valid message } }"#,
+    )
+    .await;
+    let json = serde_json::to_value(&wrong.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], false);
+    assert!(
+        json["validateConfigKey"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("sk-ant-")),
+        "it says what the format is"
+    );
+
+    // The address is judged before the key: a key cannot be judged beyond being
+    // present until there is somewhere to send it.
+    let bad_url = run_query(
+        r#"query { validateConfigKey(provider: "anthropic", key: "sk-ant-abc",
+             baseUrl: "not a url") { valid message } }"#,
+    )
+    .await;
+    let json = serde_json::to_value(&bad_url.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], false);
+
+    let compiles = run_query(
+        r#"query { validateScript(kind: "tool",
+             content: "// @tool summarize\n// @description sums up\n\"ok\"")
+             { valid error } }"#,
+    )
+    .await;
+    assert!(compiles.errors.is_empty(), "{:?}", compiles.errors);
+    let json = serde_json::to_value(&compiles.data).expect("data serializes");
+    assert_eq!(json["validateScript"]["valid"], true);
+
+    let broken =
+        run_query(r#"query { validateScript(kind: "tool", content: "fn (") { valid error } }"#)
+            .await;
+    let json = serde_json::to_value(&broken.data).expect("data serializes");
+    assert_eq!(json["validateScript"]["valid"], false);
+    assert!(json["validateScript"]["error"].as_str().is_some());
+
+    // An unknown registry is a refusal rather than a verdict: there is no
+    // compiler to have an opinion.
+    let unknown =
+        run_query(r#"query { validateScript(kind: "model_provider", content: "") { valid } }"#)
+            .await;
+    assert_eq!(
+        unknown
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"BAD_USER_INPUT\"".to_string())
+    );
+}
+
+/// A yolo profile's decision about one call, through the same code path the
+/// command uses.
+#[tokio::test]
+async fn a_yolo_profile_decides_about_one_call() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let path = crate::yolo::yolo_path();
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+        std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
+
+        let listed = run_query("{ yoloProfiles { profiles { name } } }").await;
+        let json = serde_json::to_value(&listed.data).expect("data serializes");
+        let name = json["yoloProfiles"]["profiles"][0]["name"]
+            .as_str()
+            .expect("a profile")
+            .to_string();
+
+        let decided = run_query(&format!(
+            r#"query {{ testYoloProfile(call: {{ profile: "{name}", tool: "read_file" }})
+                     {{ profile tool configured policy reason }} }}"#
+        ))
+        .await;
+        assert!(decided.errors.is_empty(), "{:?}", decided.errors);
+        let json = serde_json::to_value(&decided.data).expect("data serializes");
+        assert_eq!(json["testYoloProfile"]["profile"], name);
+        assert_eq!(json["testYoloProfile"]["tool"], "read_file");
+        assert!(
+            ["allow", "ask", "deny"].contains(
+                &json["testYoloProfile"]["policy"]
+                    .as_str()
+                    .expect("a policy")
+            ),
+            "one of the three words: {json}"
+        );
+
+        // A profile that is not in the file is a miss.
+        let missing = run_query(
+            r#"query { testYoloProfile(call: { profile: "nope", tool: "read_file" })
+                 { policy } }"#,
+        )
+        .await;
+        assert_eq!(
+            missing
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+    })
+    .await;
+}
+
+/// A manifest that will not parse is a report rather than a written blueprint.
+#[tokio::test]
+async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let report = run_query(
+            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
+                 { valid errors warnings } }"#,
+        )
+        .await;
+        assert!(report.errors.is_empty(), "a finding is not a failure");
+        let json = serde_json::to_value(&report.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], false);
+        assert!(
+            !json["validateBlueprint"]["errors"]
+                .as_array()
+                .expect("errors")
+                .is_empty(),
+            "it says what is missing"
+        );
+    })
+    .await;
+}
+
+/// A blueprint validated against an agent directory names the agent, and a name
+/// that could leave that directory is refused before any path is built.
+#[tokio::test]
+async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query(
+            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
+                 agent: "../elsewhere") { valid } }"#,
+        )
+        .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string()),
+            "{}",
+            error.message
+        );
+    })
+    .await;
+}

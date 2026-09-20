@@ -29,6 +29,7 @@ use axum::response::Response;
 use super::types::AppState;
 
 mod admin;
+mod checks;
 mod config_input;
 mod connection;
 mod error;

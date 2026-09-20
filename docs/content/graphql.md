@@ -584,10 +584,16 @@ rather than as an error, because two people clicking one prompt is ordinary.
 
 ## Blueprint writes and admin
 
-`createBlueprint`, `updateBlueprint`, `deleteBlueprint` and `validateBlueprint`
-are ordinary mutations. A name that is already installed is a `CONFLICT` on
-create: replacing somebody's agent is what an edit is for. Uninstalling one
-leaves every run that used it intact, because each run holds its own snapshot.
+`createBlueprint`, `updateBlueprint` and `deleteBlueprint` are ordinary
+mutations. A name that is already installed is a `CONFLICT` on create:
+replacing somebody's agent is what an edit is for. Uninstalling one leaves
+every run that used it intact, because each run holds its own snapshot.
+
+The four checks are queries, not mutations: `validateBlueprint`,
+`validateScript`, `validateConfigKey` and `testYoloProfile` take text and give
+a verdict, writing nothing, dialling nothing and running nothing. A form
+usually calls one just before a write, which is where it sits on the screen,
+not what it does. None of them is gated, and a read-only client can use them.
 
 `validateBlueprint` reports rather than fails. A manifest that will not install
 comes back `valid: false` with the reasons, because the request to check it
