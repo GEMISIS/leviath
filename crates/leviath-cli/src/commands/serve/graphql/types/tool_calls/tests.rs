@@ -189,6 +189,57 @@ fn a_call_of_every_typed_tool_reads_back_as_its_own_type() {
     }
 }
 
+/// A wrongly typed argument leaves every typed call untyped.
+///
+/// The reading is generated per tool, so "this did not fit" is a separate
+/// decision for each of them: one tool refusing a number where a path belongs
+/// says nothing about the next. A key nothing declares is not the test, because
+/// a tool with only optional arguments accepts one, exactly as its own validator
+/// does.
+#[test]
+fn a_wrongly_typed_argument_leaves_every_tool_untyped() {
+    for (tool, args_type) in TYPED_TOOLS {
+        // A tool that takes nothing has nothing to get wrong.
+        if args_type.is_empty() {
+            continue;
+        }
+        let (_, schema) = catalog()
+            .into_iter()
+            .find(|(name, _)| name == tool)
+            .expect("the catalog declares it");
+        let mut args = sample_arguments(&schema);
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let (key, property) = properties.iter().next().expect("it takes something");
+        args.as_object_mut()
+            .expect("an object")
+            .insert(key.clone(), wrong_type_for(property));
+
+        let call = tool_call(tool, None, &args.to_string());
+        let ToolCall::Untyped(untyped) = call else {
+            panic!("{tool} accepted a {key} of the wrong type: {args}");
+        };
+        assert_eq!(
+            untyped.reason,
+            UntypedCallReason::ArgumentsDidNotMatch,
+            "{tool}"
+        );
+    }
+}
+
+/// A value of a type this property does not declare.
+fn wrong_type_for(property: &serde_json::Value) -> serde_json::Value {
+    match property.get("type").and_then(serde_json::Value::as_str) {
+        // A list is wrong for every scalar, and a number is wrong for a list or
+        // an object.
+        Some("array") | Some("object") => serde_json::json!(7),
+        _ => serde_json::json!([7]),
+    }
+}
+
 /// The smallest arguments object a schema accepts: one value per required key.
 fn sample_arguments(schema: &serde_json::Value) -> serde_json::Value {
     let properties = schema

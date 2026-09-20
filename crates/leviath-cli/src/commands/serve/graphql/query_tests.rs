@@ -1963,6 +1963,19 @@ fn the_run_filter_refuses_what_it_cannot_read() {
     let mut map = IndexMap::new();
     map.insert(Name::new("query"), Value::Number(7.into()));
     assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
+
+    // A first field that reads and a later one that does not: every field is
+    // read in turn, and the last one is refused as squarely as the first.
+    let mut map = IndexMap::new();
+    map.insert(Name::new("query"), Value::String("parser".to_string()));
+    map.insert(Name::new("statusIn"), Value::Number(7.into()));
+    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
+
+    // And the last field, which is read after every other one.
+    let mut map = IndexMap::new();
+    map.insert(Name::new("query"), Value::String("parser".to_string()));
+    map.insert(Name::new("ascending"), Value::Number(7.into()));
+    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
 }
 
 /// Both words a profile's default can be.

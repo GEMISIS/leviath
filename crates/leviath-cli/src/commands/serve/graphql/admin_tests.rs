@@ -1556,4 +1556,76 @@ fn an_input_object_refuses_what_it_cannot_read() {
         MimeTokensInput::parse(empty()).is_ok(),
         "no rate is a rate to keep"
     );
+    // A first field that reads and a later one that does not. Each field is read
+    // in turn, so a setting that gets the last one wrong has to be refused just
+    // as squarely as one that gets the first wrong.
+    let two = |first: (&str, Value), second: (&str, Value)| {
+        let mut map = IndexMap::new();
+        map.insert(Name::new(first.0), first.1);
+        map.insert(Name::new(second.0), second.1);
+        Some(Value::Object(map))
+    };
+    assert!(
+        GatewayInput::parse(two(
+            ("name", Value::String("house".to_string())),
+            ("models", number()),
+        ))
+        .is_err(),
+        "a list of models is a list"
+    );
+    assert!(
+        ConfigInput::parse(two(
+            ("defaultProvider", Value::String("openai".to_string())),
+            ("providerOrder", number()),
+        ))
+        .is_err(),
+        "an order is a list"
+    );
+    assert!(
+        MimeRowInput::parse(two(
+            ("mimeType", Value::String("image/png".to_string())),
+            ("text", number()),
+        ))
+        .is_err(),
+        "whether the bytes are text is a yes or a no"
+    );
+    assert!(
+        MimeTokensInput::parse(two(
+            (
+                "perByte",
+                Value::Number(serde_json::Number::from_f64(0.25).expect("a rate"))
+            ),
+            ("perPixel", Value::String("lots".to_string())),
+        ))
+        .is_err(),
+        "pixels per token is a number"
+    );
+    // And the last field of each, which is read after every other one.
+    assert!(
+        MimeRowInput::parse(two(
+            ("mimeType", Value::String("image/png".to_string())),
+            ("tokens", number()),
+        ))
+        .is_err(),
+        "the rates are a structure"
+    );
+    assert!(
+        MimeTokensInput::parse(two(
+            (
+                "perByte",
+                Value::Number(serde_json::Number::from_f64(0.25).expect("a rate"))
+            ),
+            ("fixed", Value::String("some".to_string())),
+        ))
+        .is_err(),
+        "a fixed count is a number"
+    );
+    assert!(
+        ConfigInput::parse(two(
+            ("defaultProvider", Value::String("openai".to_string())),
+            ("removeGateways", number()),
+        ))
+        .is_err(),
+        "the gateways to remove are a list"
+    );
 }
