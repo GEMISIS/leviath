@@ -75,8 +75,19 @@ pub struct MessageRecord {
 /// A single tool call and (once executed) its result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallRecord {
-    /// The tool-call id.
+    /// The tool-call id, as the provider assigned it.
+    ///
+    /// Correlation, not identity: a provider may reuse one across a retry or a
+    /// reissue, so two attempts can arrive under one id. What tells them apart
+    /// is [`execution_id`](Self::execution_id).
     pub id: String,
+    /// This attempt's own id, minted at dispatch.
+    ///
+    /// Empty in a journal written before executions had identity, where the
+    /// provider's id was all there was: a reader treats an empty one as "this
+    /// attempt was not identified" rather than as an attempt with a blank name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub execution_id: String,
     /// The tool name.
     pub name: String,
     /// The JSON arguments, stringified.
@@ -323,10 +334,23 @@ pub enum RunRecord {
     ToolCallDone {
         /// The iteration of the [`RunRecord::ToolBatch`] this belongs to.
         iteration: usize,
-        /// The tool-call id.
+        /// The tool-call id, as the provider assigned it. Correlation; see
+        /// [`ToolCallRecord::id`].
         call_id: String,
+        /// The attempt this completes, as minted at dispatch. Empty in a journal
+        /// written before executions had identity.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        execution_id: String,
         /// The result: text and any stored parts.
         result: crate::region::EntryContent,
+        /// How the attempt ended.
+        ///
+        /// `None` in a journal written before outcomes were recorded, where a
+        /// completion record said only that the call finished and a failure was
+        /// text inside the result. A reader must not invent one of the five
+        /// states for such a record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<crate::execution::ToolOutcome>,
         /// Unix seconds.
         at: i64,
     },
@@ -1599,6 +1623,7 @@ mod tests {
             },
             RunRecord::ToolBatch {
                 calls: vec![ToolCallRecord {
+                    execution_id: String::new(),
                     id: "c1".to_string(),
                     name: "read_file".to_string(),
                     arguments: "{}".to_string(),
@@ -1611,6 +1636,8 @@ mod tests {
                 response: "reading".to_string(),
             },
             RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
                 iteration: 0,
                 call_id: "c1".to_string(),
                 result: "body".to_string().into(),
@@ -2069,6 +2096,7 @@ mod tests {
 
     fn call(id: &str, result: Option<&str>) -> ToolCallRecord {
         ToolCallRecord {
+            execution_id: String::new(),
             id: id.to_string(),
             name: "shell".to_string(),
             arguments: "{}".to_string(),
@@ -2121,6 +2149,8 @@ mod tests {
                 ],
             ),
             RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
                 iteration: 0,
                 call_id: "c1".to_string(),
                 result: "ran".to_string().into(),
@@ -2158,12 +2188,16 @@ mod tests {
             },
             batch(1, vec![call("c2", None)]),
             RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
                 iteration: 0,
                 call_id: "c1".to_string(),
                 result: "stale".to_string().into(),
                 at: 12,
             },
             RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
                 iteration: 1,
                 call_id: "unknown".to_string(),
                 result: "nowhere to land".to_string().into(),
@@ -2447,6 +2481,8 @@ mod tests {
             },
             batch(0, vec![call("c1", None)]),
             RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
                 iteration: 0,
                 call_id: "c1".to_string(),
                 result: "ran".to_string().into(),

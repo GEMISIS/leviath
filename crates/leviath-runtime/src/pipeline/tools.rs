@@ -812,6 +812,19 @@ pub(crate) fn dispatch_tools(
         // plus a per-call progress hook that records each completion. Worlds
         // without a persistence lane or run metadata (tests, unpersisted
         // agents) dispatch unjournaled with a no-op progress.
+        // One execution id per call, minted here, before anything runs. The
+        // provider's own id travels beside it: a provider may reuse one across a
+        // retry, and two attempts under one id cannot be told apart afterwards.
+        let executions: std::collections::HashMap<String, String> = result
+            .tool_calls
+            .iter()
+            .map(|c| {
+                (
+                    c.tool_id.clone(),
+                    leviath_core::execution::mint_execution_id(),
+                )
+            })
+            .collect();
         let (progress, ack) = match (persist.as_ref(), metadata) {
             (Some(persist), Some(md)) => {
                 let record = leviath_core::run_archive::RunRecord::ToolBatch {
@@ -820,6 +833,7 @@ pub(crate) fn dispatch_tools(
                         .iter()
                         .map(|c| leviath_core::run_archive::ToolCallRecord {
                             id: c.tool_id.clone(),
+                            execution_id: executions.get(&c.tool_id).cloned().unwrap_or_default(),
                             name: c.name.clone(),
                             arguments: c.arguments.to_string(),
                             result: context_results
@@ -843,13 +857,23 @@ pub(crate) fn dispatch_tools(
                 let sender = persist.0.clone();
                 let run_id = md.run_id.clone();
                 let iteration = state.iteration;
+                let minted = executions.clone();
                 let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
                     let _ = sender.send(PersistMsg::Append {
                         run_id: run_id.clone(),
                         record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
                             iteration,
                             call_id: call_id.to_string(),
+                            // The attempt this completes, so a completion cannot
+                            // be attached to a different attempt that shared the
+                            // provider's id.
+                            execution_id: minted.get(call_id).cloned().unwrap_or_default(),
                             result: result.clone(),
+                            // The structured verdict comes with the executor
+                            // contract; until then the completion says only that
+                            // the call finished, which is what it has always
+                            // said.
+                            outcome: None,
                             at: chrono::Utc::now().timestamp(),
                         }),
                         ack: None,
@@ -859,6 +883,13 @@ pub(crate) fn dispatch_tools(
             }
             _ => (noop_progress(), None),
         };
+        // The attempt ids this batch is running under, so the completion system
+        // can say which attempt finished rather than which provider id did.
+        commands
+            .entity(entity)
+            .insert(crate::components::BatchExecutions {
+                ids: executions.clone(),
+            });
         // Announce each lane-bound call before it starts executing. Inline
         // results (context tools, refusals, blocks) never reach the lane and
         // are deliberately not announced.
@@ -868,6 +899,7 @@ pub(crate) fn dispatch_tools(
                     run_id: md.run_id.clone(),
                     agent_id: state.agent_id.clone(),
                     call_id: call.id.clone(),
+                    execution_id: executions.get(&call.id).cloned().unwrap_or_default(),
                     tool: call.name.clone(),
                 });
             }

@@ -1204,6 +1204,7 @@ fn plant_rich_journal(run_id: &str) {
         &mut buf,
         &RunRecord::ToolBatch {
             calls: vec![ToolCallRecord {
+                execution_id: String::new(),
                 id: "c1".to_string(),
                 name: "write_file".to_string(),
                 arguments: r#"{"path":"toolneedle.rs"}"#.to_string(),

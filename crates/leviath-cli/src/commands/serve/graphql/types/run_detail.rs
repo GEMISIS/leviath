@@ -248,6 +248,16 @@ impl From<&leviath_core::run_meta::StageRunStatus> for StageStatus {
 /// One visit to a stage.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageVisit {
+    /// This visit's own id, as the ledger recorded it.
+    ///
+    /// The correlation key for everything that happened during the stay. Null on
+    /// a record written before visits had identity, where a visit was identified
+    /// by its position in the stage's list and so changed identity as soon as
+    /// that list was capped.
+    pub(crate) id: Option<String>,
+    /// Which entry into this stage this is, counting from one. The same number
+    /// the `stageTransition` frame carries as `iteration`.
+    pub(crate) ordinal: i32,
     /// When the run entered, unix epoch seconds.
     pub(crate) entered_at: Timestamp,
     /// When it left; null for the visit in progress.
@@ -334,7 +344,10 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
             visits: record
                 .visits
                 .iter()
-                .map(|visit| StageVisit {
+                .enumerate()
+                .map(|(at, visit)| StageVisit {
+                    id: Some(visit.id.clone()).filter(|id| !id.is_empty()),
+                    ordinal: count(at + 1),
                     entered_at: Timestamp(visit.entered_at),
                     left_at: visit.left_at.map(Timestamp),
                     active: visit.left_at.is_none(),

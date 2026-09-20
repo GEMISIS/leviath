@@ -796,6 +796,7 @@ type ToolQuery = (
     (
         Option<&'static crate::persistence::RunMetadata>,
         Option<&'static crate::components::AgentState>,
+        Option<&'static crate::components::BatchExecutions>,
     ),
 );
 
@@ -850,7 +851,7 @@ pub(crate) fn collect_tools(
             progress,
             mut flags,
             activity,
-            (metadata, agent_state),
+            (metadata, agent_state, executions),
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -871,6 +872,11 @@ pub(crate) fn collect_tools(
                     run_id: md.run_id.clone(),
                     agent_id: state.agent_id.clone(),
                     call_id: id.clone(),
+                    // The attempt, as dispatch minted it. Empty where nothing
+                    // minted one, which is a world with no journal to agree with.
+                    execution_id: executions
+                        .map(|minted| minted.id_for(id))
+                        .unwrap_or_default(),
                     tool,
                     ok: !call_had_no_effect(result),
                     summary: one_line(result, 200),

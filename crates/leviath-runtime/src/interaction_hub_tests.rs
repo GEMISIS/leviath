@@ -434,6 +434,8 @@ fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
     write_record(
         &mut buf,
         &RunRecord::ToolCallDone {
+            execution_id: String::new(),
+            outcome: None,
             iteration: 1,
             call_id: "c1".to_string(),
             result: "[denied] User declined tool call 'bash'. Feedback: use the API"

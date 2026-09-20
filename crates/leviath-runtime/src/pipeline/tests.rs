@@ -14952,9 +14952,19 @@ async fn dispatch_tools_announces_lane_calls() {
     assert!(world.get::<AwaitingTools>(e).is_some());
     let _ = jrx.try_recv().expect("job enqueued");
     let ev = sink_rx.try_recv().expect("tool call started event");
+    // The id is minted here, so the test cannot name it. What it can check is
+    // that the announced id is the one the entity carries for that call: the
+    // finish event is matched to this start through that id alone, so the two
+    // disagreeing would split one execution into two.
+    let minted = world
+        .get::<crate::components::BatchExecutions>(e)
+        .expect("dispatch records what it minted")
+        .id_for("t");
+    assert!(minted.starts_with('x'), "{minted}");
     assert_eq!(
         ev,
         WorldEvent::ToolCallStarted {
+            execution_id: minted,
             run_id: "run-1".to_string(),
             agent_id: "a".to_string(),
             call_id: "t".to_string(),
@@ -14979,6 +14989,12 @@ fn collect_tools_reports_finished_lane_calls() {
             agent_state(),
             run_metadata(),
             AwaitingTools,
+            crate::components::BatchExecutions {
+                ids: [("c1", "xaaa"), ("c2", "xbbb")]
+                    .into_iter()
+                    .map(|(call, execution)| (call.to_string(), execution.to_string()))
+                    .collect(),
+            },
         ))
         .id();
     tx.send(ToolOutcome {
@@ -14999,6 +15015,7 @@ fn collect_tools_reports_finished_lane_calls() {
     assert_eq!(
         sink_rx.try_recv().expect("first finish"),
         WorldEvent::ToolCallFinished {
+            execution_id: "xaaa".to_string(),
             run_id: "run-1".to_string(),
             agent_id: "a".to_string(),
             call_id: "c1".to_string(),
@@ -15010,6 +15027,7 @@ fn collect_tools_reports_finished_lane_calls() {
     assert_eq!(
         sink_rx.try_recv().expect("second finish"),
         WorldEvent::ToolCallFinished {
+            execution_id: "xbbb".to_string(),
             run_id: "run-1".to_string(),
             agent_id: "a".to_string(),
             call_id: "c2".to_string(),
@@ -15021,6 +15039,9 @@ fn collect_tools_reports_finished_lane_calls() {
     assert_eq!(
         sink_rx.try_recv().expect("stray finish"),
         WorldEvent::ToolCallFinished {
+            // No call by this id was dispatched, so there is no execution to
+            // name. An invented id would correlate this result to nothing.
+            execution_id: String::new(),
             run_id: "run-1".to_string(),
             agent_id: "a".to_string(),
             call_id: "zz".to_string(),
@@ -15030,6 +15051,53 @@ fn collect_tools_reports_finished_lane_calls() {
         }
     );
     assert!(sink_rx.try_recv().is_err(), "no extra events");
+}
+
+/// A world that never minted execution ids reports finishes with none.
+///
+/// This is the shape a restore leaves: the ids live on the entity, so an agent
+/// rebuilt from a journal written before this existed has results to report and
+/// nothing to correlate them to. The finish still goes out, because the result
+/// itself is real. It carries no id rather than a made-up one, and a reader can
+/// tell the two apart.
+#[test]
+fn a_finish_with_no_minted_id_reports_an_empty_one() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_with(vec![tc("c1", "read")]),
+            agent_state(),
+            run_metadata(),
+            AwaitingTools,
+        ))
+        .id();
+    tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
+        entity: e,
+        results: vec![("c1".to_string(), "file body".into())],
+    })
+    .unwrap();
+
+    run_collect_tools(&mut world);
+
+    assert_eq!(
+        sink_rx.try_recv().expect("the finish still goes out"),
+        WorldEvent::ToolCallFinished {
+            execution_id: String::new(),
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            call_id: "c1".to_string(),
+            tool: "read".to_string(),
+            ok: true,
+            summary: "file body".to_string(),
+        }
+    );
 }
 
 // ── Final-output shape reaches the model ─────────────────────────────────────

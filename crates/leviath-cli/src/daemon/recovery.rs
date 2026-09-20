@@ -1332,6 +1332,7 @@ mod tests {
         result: Option<&str>,
     ) -> leviath_core::run_archive::ToolCallRecord {
         leviath_core::run_archive::ToolCallRecord {
+            execution_id: String::new(),
             id: id.to_string(),
             name: name.to_string(),
             arguments: "{}".to_string(),
@@ -1388,6 +1389,8 @@ mod tests {
                     response: "writing then running".to_string(),
                 },
                 RunRecord::ToolCallDone {
+                    execution_id: String::new(),
+                    outcome: None,
                     iteration: 9,
                     call_id: "c_done".to_string(),
                     result: "Wrote 42 bytes to x.txt".to_string().into(),

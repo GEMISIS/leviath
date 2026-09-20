@@ -676,6 +676,7 @@ mod tests {
         result: Option<&str>,
     ) -> leviath_core::run_archive::ToolCallRecord {
         leviath_core::run_archive::ToolCallRecord {
+            execution_id: String::new(),
             id: id.to_string(),
             name: name.to_string(),
             arguments: r#"{"path":"x.txt"}"#.to_string(),

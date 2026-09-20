@@ -194,12 +194,17 @@ pub(crate) enum ServerEvent {
         agent_id: String,
         /// The durable run id.
         run_id: String,
-        /// The provider-assigned call id, which pairs this with its finish.
+        /// The provider-assigned call id. Correlation, not identity: a provider
+        /// may reuse one across a retry.
         call_id: String,
+        /// This attempt's own id, as the journal recorded it at dispatch. Pairs
+        /// the start with its finish, and with the journal.
+        execution_id: String,
         /// The tool's name.
         tool: String,
     },
-    /// A lane-executed tool call returned, paired with its start by `call_id`.
+    /// A lane-executed tool call returned, paired with its start by
+    /// `execution_id`.
     ToolCallFinished {
         /// The agent's live id in the world.
         agent_id: String,
@@ -207,6 +212,8 @@ pub(crate) enum ServerEvent {
         run_id: String,
         /// The provider-assigned call id, matching the start event's.
         call_id: String,
+        /// The attempt that finished, matching the start event's.
+        execution_id: String,
         /// The tool's name.
         tool: String,
         /// Whether the call took effect. False for an `[error]`, `[blocked]`
@@ -586,6 +593,7 @@ mod tests {
             ),
             (
                 ServerEvent::ToolCallStarted {
+                    execution_id: "x1".to_string(),
                     agent_id: "a".to_string(),
                     run_id: "r9".to_string(),
                     call_id: "c1".to_string(),
@@ -595,6 +603,7 @@ mod tests {
             ),
             (
                 ServerEvent::ToolCallFinished {
+                    execution_id: "x1".to_string(),
                     agent_id: "a".to_string(),
                     run_id: "r10".to_string(),
                     call_id: "c1".to_string(),

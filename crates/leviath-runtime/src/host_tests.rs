@@ -4385,12 +4385,14 @@ fn every_world_event_variant_carries_its_run_id() {
             iteration: 1,
         },
         WorldEvent::ToolCallStarted {
+            execution_id: "x1".to_string(),
             run_id: rid.clone(),
             agent_id: aid.clone(),
             call_id: "c".to_string(),
             tool: "t".to_string(),
         },
         WorldEvent::ToolCallFinished {
+            execution_id: "x1".to_string(),
             run_id: rid.clone(),
             agent_id: aid.clone(),
             call_id: "c".to_string(),

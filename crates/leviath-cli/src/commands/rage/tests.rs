@@ -353,6 +353,7 @@ api_token = "{EXTRA_VALUE}"
         },
         RunRecord::ToolBatch {
             calls: vec![ToolCallRecord {
+                execution_id: String::new(),
                 id: "c1".to_string(),
                 name: "bash".to_string(),
                 arguments: format!(r#"{{"cmd":"echo {ENV_SECRET}"}}"#),
