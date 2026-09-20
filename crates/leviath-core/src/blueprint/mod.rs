@@ -98,10 +98,15 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
 
-    /// Opt-in escape hatch: when `true`, the agent may add tools to
-    /// its own `tools/` directory mid-run and have them re-discovered and
-    /// re-advertised for its next turn. **Off by default** - tools are otherwise
-    /// discovered once at spawn and an agent cannot grow its own toolchain.
+    /// Opt-in escape hatch: when `true`, the run's workdir gains a `tools/`
+    /// directory in the scan set, so a script the agent writes there mid-run is
+    /// re-discovered and re-advertised for its next turn. **Off by default** -
+    /// tools are otherwise discovered once at spawn and an agent cannot grow
+    /// its own toolchain.
+    ///
+    /// The directory is the *workdir's*, not the blueprint's: anything else
+    /// running in that workdir sees the same tools, and a sub-agent inherits
+    /// the workdir verbatim.
     #[serde(default)]
     pub dynamic_tools: bool,
 

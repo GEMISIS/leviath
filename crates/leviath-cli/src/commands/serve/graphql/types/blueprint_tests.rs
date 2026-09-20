@@ -398,3 +398,34 @@ fn every_stage_mode_maps_to_one_value() {
     .expect("the manifest parses");
     assert_eq!(StageMode::from(&fanned.stages[0].mode), StageMode::FanOut);
 }
+
+/// Every kind a snapshot can carry reads back, including the two spellings
+/// older builds wrote and the one nothing here knows.
+///
+/// The spellings matter because those files are still on disk: a reader that
+/// only knew the current words would answer null for a `sliding_window` region
+/// written months ago, which looks like a region with no behaviour at all.
+#[test]
+fn a_snapshots_region_kind_reads_back_under_either_spelling() {
+    use super::RegionKind;
+    let cases = [
+        ("pinned", RegionKind::Pinned),
+        ("temporary", RegionKind::Temporary),
+        ("clearable", RegionKind::Clearable),
+        ("sliding_window", RegionKind::SlidingWindow),
+        ("sliding", RegionKind::SlidingWindow),
+        ("compacting", RegionKind::Compacting),
+        ("compact_history", RegionKind::CompactHistory),
+        ("history", RegionKind::CompactHistory),
+        ("hashmap", RegionKind::Hashmap),
+        ("checklist", RegionKind::Checklist),
+        ("custom", RegionKind::Custom),
+    ];
+    for (word, kind) in cases {
+        assert_eq!(RegionKind::from_snapshot(word), Some(kind), "{word}");
+    }
+    // A run written by a newer build. Null beside a region that is plainly
+    // there beats refusing the whole window.
+    assert_eq!(RegionKind::from_snapshot("something-else"), None);
+    assert_eq!(RegionKind::from_snapshot(""), None);
+}

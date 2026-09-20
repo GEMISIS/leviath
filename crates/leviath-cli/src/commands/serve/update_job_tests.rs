@@ -154,11 +154,11 @@ impl Fixture {
 }
 
 /// One step out of a finished job.
-fn step<'a>(job: &'a UpdateJob, name: &str) -> &'a UpdateStep {
+fn step(job: &UpdateJob, name: Step) -> &UpdateStep {
     job.steps
         .iter()
         .find(|step| step.step == name)
-        .expect("every job carries all three steps")
+        .expect("every job carries every step")
 }
 
 // ─── The request body ─────────────────────────────────────────────────────────
@@ -172,6 +172,7 @@ fn an_empty_body_asks_for_the_whole_plan() {
         ApplyRequest {
             binary: true,
             agents: true,
+            keys: true,
             migrations: true,
         }
     );
@@ -210,6 +211,7 @@ fn a_runnable_binary_step_runs_the_planned_commands_in_order() {
     let job = fixture.apply(ApplyRequest {
         binary: true,
         agents: false,
+        keys: false,
         migrations: false,
     });
 
@@ -220,8 +222,8 @@ fn a_runnable_binary_step_runs_the_planned_commands_in_order() {
         BinaryStep::Advise(text) => unreachable!("a scoop path plans commands, not {text}"),
     };
     assert_eq!(fixture.recorder.ran(), planned);
-    assert_eq!(step(&job, "binary").status, DONE);
-    assert_eq!(job.status, COMPLETE);
+    assert_eq!(step(&job, Step::Binary).status, StepStatus::Done);
+    assert_eq!(job.status, JobStatus::Complete);
     assert!(job.restart_required);
     assert!(
         job.restart_hint
@@ -242,18 +244,18 @@ fn an_advising_binary_step_says_so_and_runs_nothing() {
     let job = fixture.apply(ApplyRequest::default());
 
     assert!(fixture.recorder.ran().is_empty());
-    let binary = step(&job, "binary");
-    assert_eq!(binary.status, ADVISED);
+    let binary = step(&job, Step::Binary);
+    assert_eq!(binary.status, StepStatus::Advised);
     assert!(
         binary.detail.contains("not where any installer"),
         "{binary:?}"
     );
     // Advice is neither success nor failure, so the job as a whole completed -
     // and the steps after it still ran.
-    assert_eq!(job.status, COMPLETE);
+    assert_eq!(job.status, JobStatus::Complete);
     assert!(!job.restart_required);
     assert_eq!(job.restart_hint, None);
-    assert_ne!(step(&job, "agents").status, SKIPPED);
+    assert_ne!(step(&job, Step::Agents).status, StepStatus::Skipped);
 }
 
 /// A binary step that fails stops the two after it, the same way `lev update`
@@ -265,18 +267,18 @@ fn a_failed_binary_step_stops_the_steps_after_it() {
     let job = fixture.apply(ApplyRequest::default());
 
     assert_eq!(fixture.recorder.ran().len(), 1, "it stopped at the failure");
-    let binary = step(&job, "binary");
-    assert_eq!(binary.status, FAILED);
+    let binary = step(&job, Step::Binary);
+    assert_eq!(binary.status, StepStatus::Failed);
     assert!(binary.detail.contains("exited with 1"), "{binary:?}");
-    for later in ["agents", "migrations"] {
-        assert_eq!(step(&job, later).status, SKIPPED);
+    for later in [Step::Agents, Step::Keys, Step::Migrations] {
+        assert_eq!(step(&job, later).status, StepStatus::Skipped);
         assert!(
             step(&job, later).detail.contains("the binary step failed"),
             "{:?}",
             step(&job, later)
         );
     }
-    assert_eq!(job.status, FAILED);
+    assert_eq!(job.status, JobStatus::Failed);
     assert!(!job.restart_required, "nothing was installed");
     // The blueprints the failed run did not install are still absent.
     assert!(!fixture.agents_dir.exists());
@@ -291,10 +293,11 @@ fn a_failure_part_way_through_the_sequence_fails_the_step() {
     let job = fixture.apply(ApplyRequest {
         binary: true,
         agents: false,
+        keys: false,
         migrations: false,
     });
     assert_eq!(fixture.recorder.ran().len(), 2);
-    assert_eq!(step(&job, "binary").status, FAILED);
+    assert_eq!(step(&job, Step::Binary).status, StepStatus::Failed);
     assert!(!job.restart_required);
 }
 
@@ -308,16 +311,17 @@ fn a_step_the_request_turned_off_is_skipped_and_says_so() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: false,
+        keys: false,
         migrations: false,
     });
 
     assert!(fixture.recorder.ran().is_empty());
-    assert_eq!(job.steps.len(), 3);
+    assert_eq!(job.steps.len(), STEPS.len());
     for name in STEPS {
-        assert_eq!(step(&job, name).status, SKIPPED);
+        assert_eq!(step(&job, name).status, StepStatus::Skipped);
         assert_eq!(step(&job, name).detail, "not asked for");
     }
-    assert_eq!(job.status, COMPLETE);
+    assert_eq!(job.status, JobStatus::Complete);
     assert!(!job.restart_required);
 }
 
@@ -331,11 +335,12 @@ fn the_agents_step_installs_the_blueprints_the_plan_preselects() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: true,
+        keys: false,
         migrations: false,
     });
 
-    let agents = step(&job, "agents");
-    assert_eq!(agents.status, DONE, "{agents:?}");
+    let agents = step(&job, Step::Agents);
+    assert_eq!(agents.status, StepStatus::Done, "{agents:?}");
     assert!(agents.detail.starts_with("installed "), "{agents:?}");
     // Assert over what was discovered rather than over a list of names: the
     // bundled set changes, and a test that enumerated it would only ever be a
@@ -361,15 +366,16 @@ fn an_agents_step_with_nothing_to_install_skips() {
     let only_agents = ApplyRequest {
         binary: false,
         agents: true,
+        keys: false,
         migrations: false,
     };
     fixture.apply(only_agents);
     let job = fixture.apply(only_agents);
 
-    let agents = step(&job, "agents");
-    assert_eq!(agents.status, SKIPPED);
+    let agents = step(&job, Step::Agents);
+    assert_eq!(agents.status, StepStatus::Skipped);
     assert_eq!(agents.detail, "every bundled blueprint is up to date");
-    assert_eq!(job.status, COMPLETE);
+    assert_eq!(job.status, JobStatus::Complete);
 }
 
 /// A blueprint the user edited is left alone and named as left alone.
@@ -384,6 +390,7 @@ fn an_edited_blueprint_is_left_alone_and_the_step_says_why() {
     let only_agents = ApplyRequest {
         binary: false,
         agents: true,
+        keys: false,
         migrations: false,
     };
     fixture.apply(only_agents);
@@ -400,8 +407,8 @@ fn an_edited_blueprint_is_left_alone_and_the_step_says_why() {
     std::fs::write(&marker, format!("{original}\n# mine\n")).expect("the edit writes");
 
     let job = fixture.apply(only_agents);
-    let agents = step(&job, "agents");
-    assert_eq!(agents.status, SKIPPED, "{agents:?}");
+    let agents = step(&job, Step::Agents);
+    assert_eq!(agents.status, StepStatus::Skipped, "{agents:?}");
     assert_eq!(
         agents.detail,
         "1 left alone because you edited them - installing removes the \
@@ -427,14 +434,15 @@ fn an_install_that_fails_is_named_and_the_run_carries_on() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: true,
+        keys: false,
         migrations: false,
     });
-    let agents = step(&job, "agents");
-    assert_eq!(agents.status, FAILED, "{agents:?}");
+    let agents = step(&job, Step::Agents);
+    assert_eq!(agents.status, StepStatus::Failed, "{agents:?}");
     assert!(agents.detail.contains("could not install"), "{agents:?}");
-    assert_eq!(job.status, FAILED);
+    assert_eq!(job.status, JobStatus::Failed);
     // The step after it still ran.
-    assert_ne!(step(&job, "migrations").status, PENDING);
+    assert_ne!(step(&job, Step::Migrations).status, StepStatus::Pending);
 }
 
 // ─── The config ───────────────────────────────────────────────────────────────
@@ -452,10 +460,11 @@ fn the_migrations_step_applies_what_the_plan_found_and_writes_it() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: false,
+        keys: false,
         migrations: true,
     });
-    let migrations = step(&job, "migrations");
-    assert_eq!(migrations.status, DONE, "{migrations:?}");
+    let migrations = step(&job, Step::Migrations);
+    assert_eq!(migrations.status, StepStatus::Done, "{migrations:?}");
     assert!(
         migrations.detail.contains("stale-empty-serves"),
         "{migrations:?}"
@@ -472,10 +481,11 @@ fn a_config_with_nothing_to_migrate_skips() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: false,
+        keys: false,
         migrations: true,
     });
-    let migrations = step(&job, "migrations");
-    assert_eq!(migrations.status, SKIPPED);
+    let migrations = step(&job, Step::Migrations);
+    assert_eq!(migrations.status, StepStatus::Skipped);
     assert_eq!(migrations.detail, "nothing to migrate");
 }
 
@@ -488,10 +498,11 @@ fn a_config_that_will_not_parse_is_left_exactly_as_it_is() {
     let job = fixture.apply(ApplyRequest {
         binary: false,
         agents: false,
+        keys: false,
         migrations: true,
     });
-    let migrations = step(&job, "migrations");
-    assert_eq!(migrations.status, SKIPPED);
+    let migrations = step(&job, Step::Migrations);
+    assert_eq!(migrations.status, StepStatus::Skipped);
     assert!(
         migrations.detail.contains("could not be read"),
         "{migrations:?}"
@@ -554,6 +565,7 @@ fn a_config_that_cannot_be_written_fails_the_step() {
         ApplyRequest {
             binary: true,
             agents: false,
+            keys: false,
             migrations: true,
         },
         &fixture.events,
@@ -561,14 +573,14 @@ fn a_config_that_cannot_be_written_fails_the_step() {
     let job = jobs.get(&id).expect("the job it just ran");
 
     assert_eq!(
-        step(&job, "binary").status,
-        DONE,
+        step(&job, Step::Binary).status,
+        StepStatus::Done,
         "the upgrade itself worked"
     );
-    let migrations = step(&job, "migrations");
-    assert_eq!(migrations.status, FAILED, "{migrations:?}");
+    let migrations = step(&job, Step::Migrations);
+    assert_eq!(migrations.status, StepStatus::Failed, "{migrations:?}");
     assert!(!migrations.detail.is_empty(), "the failure says something");
-    assert_eq!(job.status, FAILED);
+    assert_eq!(job.status, JobStatus::Failed);
     // A failed migration is not a reason to say the new binary is not there.
     assert!(job.restart_required);
 }
@@ -583,6 +595,7 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
     let job = fixture.apply(ApplyRequest {
         binary: true,
         agents: false,
+        keys: false,
         migrations: false,
     });
 
@@ -599,17 +612,34 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
             _ => None,
         })
         .collect();
-    // running then done for the binary, and one each for the two skips.
+    // running then done for the binary, and one each for the skips after it.
     assert_eq!(
         progress,
         vec![
-            (job.id.clone(), "binary".to_string(), RUNNING.to_string()),
-            (job.id.clone(), "binary".to_string(), DONE.to_string()),
-            (job.id.clone(), "agents".to_string(), SKIPPED.to_string()),
+            (
+                job.id.clone(),
+                "binary".to_string(),
+                StepStatus::Running.wire().to_string()
+            ),
+            (
+                job.id.clone(),
+                "binary".to_string(),
+                StepStatus::Done.wire().to_string()
+            ),
+            (
+                job.id.clone(),
+                "agents".to_string(),
+                StepStatus::Skipped.wire().to_string()
+            ),
+            (
+                job.id.clone(),
+                "keys".to_string(),
+                StepStatus::Skipped.wire().to_string()
+            ),
             (
                 job.id.clone(),
                 "migrations".to_string(),
-                SKIPPED.to_string()
+                StepStatus::Skipped.wire().to_string()
             ),
         ]
     );
@@ -625,10 +655,10 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
         unreachable!("the last frame is the finish, not {last:?}")
     };
     assert_eq!(job_id, &job.id);
-    assert_eq!(status, COMPLETE);
+    assert_eq!(status, JobStatus::Complete.wire());
     assert!(restart_required);
     assert_eq!(record["id"], job.id);
-    assert_eq!(record["steps"][0]["status"], DONE);
+    assert_eq!(record["steps"][0]["status"], StepStatus::Done.wire());
     assert!(record["restart_hint"].is_string());
 }
 
@@ -639,14 +669,14 @@ fn an_update_frame_belongs_to_no_run() {
     let progress = ServerEvent::UpdateProgress {
         job_id: "update-1-1".to_string(),
         step: "binary".to_string(),
-        status: RUNNING.to_string(),
+        status: StepStatus::Running.wire().to_string(),
         detail: "running `scoop update`".to_string(),
     };
     assert_eq!(progress.run_id(), "");
     assert!(!progress.is_for_run("run-1"));
     let finished = ServerEvent::UpdateFinished {
         job_id: "update-1-1".to_string(),
-        status: COMPLETE.to_string(),
+        status: JobStatus::Complete.wire().to_string(),
         restart_required: false,
         job: serde_json::json!({}),
     };
@@ -726,26 +756,12 @@ fn a_job_that_aged_out_is_not_resurrected_by_its_own_task() {
     fixture.jobs.step(
         "update-gone-1",
         STEPS[0],
-        DONE,
+        StepStatus::Done,
         "x".to_string(),
         &fixture.events,
     );
     fixture.jobs.finish("update-gone-1", true, &fixture.events);
     assert!(fixture.jobs.all().is_empty());
-}
-
-/// A step name that is not one of the three changes nothing. Unreachable from
-/// the route, which only ever passes [`STEPS`]; asserted so the guard cannot be
-/// removed as dead.
-#[test]
-fn a_step_name_the_job_does_not_carry_changes_nothing() {
-    let fixture = Fixture::runnable("", 0);
-    let id = fixture.jobs.start().expect("nothing is running").id;
-    fixture
-        .jobs
-        .step(&id, "not-a-step", DONE, "x".to_string(), &fixture.events);
-    let job = fixture.jobs.get(&id).expect("still there");
-    assert!(job.steps.iter().all(|step| step.status == PENDING));
 }
 
 /// `spawn` hands back the record straight away and the work happens behind it.
@@ -759,6 +775,7 @@ async fn spawn_answers_with_an_id_and_runs_the_work_behind_it() {
             ApplyRequest {
                 binary: true,
                 agents: false,
+                keys: false,
                 migrations: false,
             },
             &fixture.events,
@@ -777,8 +794,14 @@ async fn spawn_answers_with_an_id_and_runs_the_work_behind_it() {
             _ => continue,
         }
     };
-    assert_eq!(finished, (id.clone(), COMPLETE.to_string()));
-    assert_eq!(fixture.jobs.get(&id).expect("still there").status, COMPLETE);
+    assert_eq!(
+        finished,
+        (id.clone(), JobStatus::Complete.wire().to_string())
+    );
+    assert_eq!(
+        fixture.jobs.get(&id).expect("still there").status,
+        JobStatus::Complete
+    );
     assert_eq!(fixture.recorder.ran().len(), 2, "both planned commands ran");
 }
 
@@ -812,4 +835,122 @@ fn the_fixture_path_detects_as_the_method_its_test_assumes() {
         None,
     );
     assert_eq!(nowhere.id(), "unknown");
+}
+
+// ─── The step vocabulary ──────────────────────────────────────────────────────
+
+/// Every value's word is the word serde writes for it.
+///
+/// Two ways of saying the same thing - the record's JSON and the frame's
+/// `step`/`status` strings - and a client reads both. One arm spelled
+/// differently in `wire()` than in the serde name would be a job whose live
+/// frames and whose record disagree about what happened.
+#[test]
+fn every_wire_word_is_the_word_serde_writes() {
+    for step in STEPS {
+        assert_eq!(serde_json::to_value(step).expect("plain data"), step.wire());
+    }
+    for status in [
+        StepStatus::Pending,
+        StepStatus::Running,
+        StepStatus::Done,
+        StepStatus::Skipped,
+        StepStatus::Advised,
+        StepStatus::Failed,
+    ] {
+        assert_eq!(
+            serde_json::to_value(status).expect("plain data"),
+            status.wire()
+        );
+    }
+    for status in [JobStatus::Running, JobStatus::Complete, JobStatus::Failed] {
+        assert_eq!(
+            serde_json::to_value(status).expect("plain data"),
+            status.wire()
+        );
+    }
+}
+
+// ─── The keys step ────────────────────────────────────────────────────────────
+
+/// A blueprint of the reader's own, spelling two settings the old way.
+const THEIR_BLUEPRINT: &str = "[agent]\nname = \"mine\"\nversion = \"0.1.0\"\n\n\
+     [sandbox]\nkind = \"container\"\npersist = true\n\n\
+     [stages.main]\nmode = \"autonomous\"\n\n\
+     [stages.main.tool_routing]\npersist = false\n";
+
+/// Put a blueprint in the fixture's agents directory.
+fn install_blueprint(fixture: &Fixture, name: &str, text: &str) -> std::path::PathBuf {
+    let dir = fixture.agents_dir.join(name);
+    std::fs::create_dir_all(&dir).expect("the agent directory");
+    let path = dir.join("agent.leviath");
+    std::fs::write(&path, text).expect("the manifest");
+    path
+}
+
+/// The step rewrites the blueprint and says which.
+#[test]
+fn the_keys_step_respells_what_it_found() {
+    let fixture = Fixture::advising("");
+    let path = install_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+
+    let job = fixture.apply(ApplyRequest {
+        binary: false,
+        agents: false,
+        keys: true,
+        migrations: false,
+    });
+
+    let step = step(&job, Step::Keys);
+    assert_eq!(step.status, StepStatus::Done);
+    assert!(step.detail.contains("rewrote mine"), "{step:?}");
+    let after = std::fs::read_to_string(&path).expect("still there");
+    assert!(after.contains("keep_warm = true"), "{after}");
+    assert!(after.contains("keep_results = false"), "{after}");
+}
+
+/// Nothing to respell is a skip that says so, not a silent success.
+#[test]
+fn a_keys_step_with_nothing_to_respell_skips() {
+    let fixture = Fixture::advising("");
+    install_blueprint(&fixture, "current", "[sandbox]\nkeep_warm = true\n");
+
+    let job = fixture.apply(ApplyRequest {
+        binary: false,
+        agents: false,
+        keys: true,
+        migrations: false,
+    });
+
+    let step = step(&job, Step::Keys);
+    assert_eq!(step.status, StepStatus::Skipped);
+    assert!(step.detail.contains("current key names"), "{step:?}");
+}
+
+/// A manifest that will not write fails the step and names the blueprint.
+///
+/// The blueprint still runs either way - both spellings parse - so what this
+/// checks is that the failure is reported rather than swallowed.
+#[test]
+fn a_manifest_that_will_not_write_fails_the_step_and_names_it() {
+    let fixture = Fixture::advising("");
+    let path = install_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
+    // Readable, so the plan finds what to change, and read-only, so writing it
+    // back fails. `set_readonly` is the one way to say that on every platform.
+    let mut perms = std::fs::metadata(&path)
+        .expect("the manifest")
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms).expect("the manifest goes read-only");
+
+    let job = fixture.apply(ApplyRequest {
+        binary: false,
+        agents: false,
+        keys: true,
+        migrations: false,
+    });
+
+    let step = step(&job, Step::Keys);
+    assert_eq!(step.status, StepStatus::Failed);
+    assert!(step.detail.contains("could not rewrite mine"), "{step:?}");
 }

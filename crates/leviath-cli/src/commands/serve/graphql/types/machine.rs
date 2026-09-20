@@ -135,14 +135,78 @@ pub(crate) struct DoctorReport {
 pub(crate) struct McpServer {
     /// Unique server name.
     pub(crate) name: String,
-    /// How it is reached: `stdio`, `http`, or `invalid` when the configured
-    /// transport did not resolve.
-    pub(crate) transport: String,
+    /// How it is reached.
+    pub(crate) transport: McpServerTransport,
     /// The command for a stdio server, the URL for an HTTP one. Empty when the
-    /// transport is invalid.
+    /// configuration does not resolve.
     pub(crate) endpoint: String,
-    /// Its one-word auth state.
-    pub(crate) auth: String,
+    /// Why the configuration does not resolve, when it does not. Null for a
+    /// server that does.
+    pub(crate) config_error: Option<String>,
+    /// Where it stands on credentials.
+    pub(crate) auth: McpAuth,
+}
+
+/// How a configured MCP server on this machine is reached.
+///
+/// Its own type rather than the manifest's `McpTransport`: a blueprint
+/// declares what it wants, and this answers what a configuration on this
+/// machine resolved to - including `INVALID`, which no blueprint can declare.
+/// `configError` says why it did not resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum McpServerTransport {
+    /// A command this daemon spawns and talks to over its pipes.
+    Stdio,
+    /// A URL this daemon calls.
+    Http,
+    /// Neither: the configuration did not resolve.
+    Invalid,
+}
+
+impl McpServerTransport {
+    /// Read the word the server description carries.
+    ///
+    /// Anything else is `INVALID`, which is what a word this build does not
+    /// know amounts to: a transport it cannot use.
+    pub(crate) fn from_wire(word: &str) -> Self {
+        match word {
+            "stdio" => Self::Stdio,
+            "http" => Self::Http,
+            _ => Self::Invalid,
+        }
+    }
+}
+
+/// Where a server stands on credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum McpAuth {
+    /// A stdio server, which has nobody to log in to.
+    NotApplicable,
+    /// An HTTP server with no credential of any kind.
+    None,
+    /// An `Authorization` header from the config. A credential, so no login is
+    /// offered for it.
+    Header,
+    /// Signed in, and the token has not expired.
+    Authenticated,
+    /// Signed in once; the token has expired and the server needs another.
+    Expired,
+}
+
+impl McpAuth {
+    /// Read the word the server description carries.
+    ///
+    /// An unknown word reads as `NONE`: the safe reading, since it is the one
+    /// that offers a login rather than assuming a credential is in place.
+    pub(crate) fn from_wire(word: &str) -> Self {
+        match word {
+            "n/a" => Self::NotApplicable,
+            "header" => Self::Header,
+            "authenticated" => Self::Authenticated,
+            "expired" => Self::Expired,
+            _ => Self::None,
+        }
+    }
 }
 
 /// One named yolo profile, summarised.
@@ -154,17 +218,39 @@ pub(crate) struct YoloProfile {
     /// The profile's name, as `--yolo=<name>` spells it.
     pub(crate) name: String,
     /// What tools with no explicit rule do.
-    pub(crate) default: String,
+    pub(crate) default: YoloWaiver,
     /// What happens to the agent's own questions.
-    pub(crate) questions: String,
+    pub(crate) questions: YoloHuman,
     /// What happens at blueprint checkpoints.
-    pub(crate) checkpoints: String,
+    pub(crate) checkpoints: YoloHuman,
     /// What happens at the taint gate.
-    pub(crate) gate: String,
+    pub(crate) gate: YoloHuman,
     /// How many tool rules it carries: allow, ask, deny.
     pub(crate) tool_rules: Vec<i32>,
     /// How many shell rules it carries: allow, ask, deny.
     pub(crate) shell_rules: Vec<i32>,
+}
+
+/// What a profile does with a tool no rule names.
+///
+/// Two values, not three: a profile waives prompts, it never adds a refusal.
+/// A tool a profile does not reach is decided by the config's own permissions,
+/// which can still deny it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum YoloWaiver {
+    /// Runs without asking.
+    Allow,
+    /// Stops and asks, as it would with no profile.
+    Ask,
+}
+
+/// Whether one human-in-the-loop mechanism still reaches a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum YoloHuman {
+    /// Reaches a person and waits.
+    Ask,
+    /// Answers itself and carries on.
+    Auto,
 }
 
 /// The yolo profiles, and where they are read from.
@@ -206,8 +292,8 @@ pub(crate) struct Script {
     pub(crate) kind: String,
     /// Its name, unique within that kind.
     pub(crate) name: String,
-    /// Where it was found.
-    pub(crate) source: String,
+    /// Where it was found: the directory kind this script was read from.
+    pub(crate) found_at: String,
     /// The agent whose directory it came from, for an agent-scoped script.
     pub(crate) agent: Option<String>,
 }
@@ -227,3 +313,7 @@ pub(crate) struct Directory {
     /// The directories inside, by name.
     pub(crate) entries: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "machine_tests.rs"]
+mod tests;

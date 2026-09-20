@@ -158,13 +158,43 @@ impl From<&super::super::super::providers::ProviderInfo> for Provider {
 pub(crate) struct Tool {
     /// The name the model calls it by.
     pub(crate) name: String,
-    /// Which source offers it: a built-in, a sub-agent tool, a script, or an
-    /// MCP server.
-    pub(crate) source: String,
+    /// What kind of thing offers it.
+    pub(crate) origin: ToolOrigin,
     /// The file behind it, for a script tool.
     pub(crate) path: Option<String>,
     /// The agent whose directory it came from, for an agent-scoped script.
     pub(crate) agent: Option<String>,
+}
+
+/// What kind of thing offers a tool.
+///
+/// A closed set, and the whole of it: this inventory is what an agent on this
+/// machine can be given, and an MCP server's tools are not in it. Read
+/// `mcpServers` for those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum ToolOrigin {
+    /// Compiled into this build. Every agent has it.
+    Builtin,
+    /// A sub-agent tool, offered to an agent that may spawn children.
+    Subagent,
+    /// A `.rhai` script in one agent's own `tools/`, so it travels with that
+    /// agent and no other.
+    AgentScript,
+    /// A `.rhai` script in the machine-wide tools directory, so every agent
+    /// here gets it.
+    GlobalScript,
+}
+
+impl From<crate::tool_inventory::ToolSource> for ToolOrigin {
+    fn from(source: crate::tool_inventory::ToolSource) -> Self {
+        use crate::tool_inventory::ToolSource;
+        match source {
+            ToolSource::Builtin => Self::Builtin,
+            ToolSource::Subagent => Self::Subagent,
+            ToolSource::Agent => Self::AgentScript,
+            ToolSource::Global => Self::GlobalScript,
+        }
+    }
 }
 
 /// One group token an `available_tools` list may name in place of tool names.

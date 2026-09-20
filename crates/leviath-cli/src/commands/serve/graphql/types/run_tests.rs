@@ -202,9 +202,9 @@ async fn the_progress_counters_are_carried() {
     let mut meta = meta();
     meta.iteration = 3;
     meta.tool_calls = 17;
-    let json = ask(meta, "{ run { iteration toolCalls } }").await;
+    let json = ask(meta, "{ run { iteration toolCallCount } }").await;
     assert_eq!(json["run"]["iteration"], 3);
-    assert_eq!(json["run"]["toolCalls"], 17);
+    assert_eq!(json["run"]["toolCallCount"], 17);
 }
 
 /// The `Query` root is what the server actually serves, so it is asked for a

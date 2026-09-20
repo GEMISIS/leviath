@@ -48,34 +48,104 @@ use crate::commands::update::{
 /// operator reading back what happened - not an audit log.
 const KEEP_JOBS: usize = 8;
 
-/// The three steps, in the order they run. `binary` first because the other two
-/// are decided by what the *new* binary ships.
-pub(super) const STEPS: [&str; 3] = ["binary", "agents", "migrations"];
+/// One step of an update run.
+///
+/// An enum rather than three strings so a step cannot be named by a typo, and
+/// so the wire words have one definition: these serialise to exactly what the
+/// REST route and the event frames have always carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Step {
+    /// Leviath itself. First, because what the other steps do is decided by
+    /// what the *new* binary ships.
+    Binary,
+    /// The bundled blueprints in the agents directory.
+    Agents,
+    /// Keys in the user's own blueprints that changed name.
+    Keys,
+    /// The config file.
+    Migrations,
+}
 
-/// A step that has not been reached yet.
-const PENDING: &str = "pending";
-/// A step that is happening now.
-const RUNNING: &str = "running";
-/// A step that did what it set out to.
-const DONE: &str = "done";
-/// A step the request did not ask for, or that had nothing to do.
-const SKIPPED: &str = "skipped";
-/// A step that is the reader's to carry out, with the reason in its detail.
-/// The one status that is neither success nor failure: nothing was done and
-/// nothing went wrong.
-const ADVISED: &str = "advised";
-/// A step that tried and did not manage it.
-const FAILED: &str = "failed";
-/// Every step is finished and none failed.
-const COMPLETE: &str = "complete";
+/// Every step, in the order they run.
+pub(super) const STEPS: [Step; 4] = [Step::Binary, Step::Agents, Step::Keys, Step::Migrations];
+
+/// Where one step got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum StepStatus {
+    /// Not reached yet.
+    Pending,
+    /// Happening now.
+    Running,
+    /// Did what it set out to.
+    Done,
+    /// The request did not ask for it, or it had nothing to do.
+    Skipped,
+    /// The reader's to carry out, with the reason in its detail. The one status
+    /// that is neither success nor failure: nothing was done and nothing went
+    /// wrong.
+    Advised,
+    /// Tried, and did not manage it.
+    Failed,
+}
+
+/// Where the run as a whole got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum JobStatus {
+    /// Still going.
+    Running,
+    /// Every step finished and none failed.
+    Complete,
+    /// At least one step failed.
+    Failed,
+}
+
+impl Step {
+    /// The word this step carries on the wire.
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Agents => "agents",
+            Self::Keys => "keys",
+            Self::Migrations => "migrations",
+        }
+    }
+}
+
+impl StepStatus {
+    /// The word this status carries on the wire.
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Skipped => "skipped",
+            Self::Advised => "advised",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl JobStatus {
+    /// The word this status carries on the wire.
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// What became of one step of an update run.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct UpdateStep {
     /// One of [`STEPS`].
-    pub(super) step: &'static str,
-    /// `pending`, `running`, `done`, `skipped`, `advised` or `failed`.
-    pub(super) status: &'static str,
+    pub(super) step: Step,
+    /// Where it got to.
+    pub(super) status: StepStatus,
     /// One line a console can print under the step's name.
     pub(super) detail: String,
 }
@@ -86,10 +156,10 @@ pub(super) struct UpdateStep {
 pub(super) struct UpdateJob {
     /// What `POST /api/update` answered with, and what the frames carry.
     pub(super) id: String,
-    /// `running`, `complete` or `failed`.
-    pub(super) status: &'static str,
-    /// Every step, always all three, so a client renders a fixed list rather
-    /// than one that grows under it.
+    /// Where the run as a whole got to.
+    pub(super) status: JobStatus,
+    /// Every step, always all of them, so a client renders a fixed list
+    /// rather than one that grows under it.
     pub(super) steps: Vec<UpdateStep>,
     /// Whether the binary on disk is newer than the processes serving this.
     ///
@@ -112,12 +182,12 @@ impl UpdateJob {
     fn new(id: String, started_at: u64) -> Self {
         Self {
             id,
-            status: RUNNING,
+            status: JobStatus::Running,
             steps: STEPS
                 .iter()
                 .map(|step| UpdateStep {
-                    step,
-                    status: PENDING,
+                    step: *step,
+                    status: StepStatus::Pending,
                     detail: String::new(),
                 })
                 .collect(),
@@ -151,6 +221,9 @@ pub(super) struct ApplyRequest {
     /// Install the blueprints the plan marks `preselected`.
     #[serde(default = "asked_for")]
     pub(super) agents: bool,
+    /// Respell renamed keys in the reader's own blueprints.
+    #[serde(default = "asked_for")]
+    pub(super) keys: bool,
     /// Apply the config migrations the plan lists.
     #[serde(default = "asked_for")]
     pub(super) migrations: bool,
@@ -167,6 +240,7 @@ impl Default for ApplyRequest {
         Self {
             binary: true,
             agents: true,
+            keys: true,
             migrations: true,
         }
     }
@@ -287,7 +361,7 @@ impl UpdateJobs {
     /// would both see "nothing running" if they were two.
     pub(super) fn start(&self) -> Result<UpdateJob, String> {
         let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(running) = jobs.iter().find(|job| job.status == RUNNING) {
+        if let Some(running) = jobs.iter().find(|job| job.status == JobStatus::Running) {
             return Err(running.id.clone());
         }
         let now = (self.clock)();
@@ -314,8 +388,8 @@ impl UpdateJobs {
     fn step(
         &self,
         id: &str,
-        step: &'static str,
-        status: &'static str,
+        step: Step,
+        status: StepStatus,
         detail: String,
         events: &broadcast::Sender<ServerEvent>,
     ) {
@@ -324,9 +398,13 @@ impl UpdateJobs {
             let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
                 return;
             };
-            let Some(slot) = job.steps.iter_mut().find(|slot| slot.step == step) else {
-                return;
-            };
+            // Infallible: a job is built with one slot per `STEPS` entry, and
+            // `step` is one of them by its type.
+            let slot = job
+                .steps
+                .iter_mut()
+                .find(|slot| slot.step == step)
+                .expect("a job carries every step");
             slot.status = status;
             slot.detail = detail.clone();
         }
@@ -334,8 +412,8 @@ impl UpdateJobs {
         // update it is watching.
         let _ = events.send(ServerEvent::UpdateProgress {
             job_id: id.to_string(),
-            step: step.to_string(),
-            status: status.to_string(),
+            step: step.wire().to_string(),
+            status: status.wire().to_string(),
             detail,
         });
     }
@@ -351,9 +429,13 @@ impl UpdateJobs {
             let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
                 return;
             };
-            job.status = match job.steps.iter().any(|step| step.status == FAILED) {
-                true => FAILED,
-                false => COMPLETE,
+            job.status = match job
+                .steps
+                .iter()
+                .any(|step| step.status == StepStatus::Failed)
+            {
+                true => JobStatus::Failed,
+                false => JobStatus::Complete,
             };
             job.restart_required = restart_required;
             job.restart_hint = restart_required.then(|| RESTART_HINT.to_string());
@@ -362,7 +444,7 @@ impl UpdateJobs {
         };
         let _ = events.send(ServerEvent::UpdateFinished {
             job_id: finished.id.clone(),
-            status: finished.status.to_string(),
+            status: finished.status.wire().to_string(),
             restart_required: finished.restart_required,
             job: serde_json::to_value(&finished)
                 .expect("an update job is plain data and always serializes"),
@@ -395,6 +477,7 @@ impl UpdateJobs {
         let plan = plan(&UpdateArgs::default(), &env);
         let installed = self.binary_step(id, req, &plan, &env, events);
         self.agents_step(id, req, &plan, &env, events, installed);
+        self.keys_step(id, req, &plan, events, installed);
         self.migrations_step(id, req, &plan, &env, events, installed);
         self.finish(id, matches!(installed, Binary::Installed), events);
     }
@@ -408,9 +491,15 @@ impl UpdateJobs {
         env: &UpdateEnv,
         events: &broadcast::Sender<ServerEvent>,
     ) -> Binary {
-        let step = STEPS[0];
+        let step = Step::Binary;
         if !req.binary {
-            self.step(id, step, SKIPPED, "not asked for".to_string(), events);
+            self.step(
+                id,
+                step,
+                StepStatus::Skipped,
+                "not asked for".to_string(),
+                events,
+            );
             return Binary::Untouched;
         }
         let commands = match &plan.binary {
@@ -420,20 +509,26 @@ impl UpdateJobs {
             // are the reader's call, and this route says so rather than
             // starting one.
             BinaryStep::Advise(message) => {
-                self.step(id, step, ADVISED, message.clone(), events);
+                self.step(id, step, StepStatus::Advised, message.clone(), events);
                 return Binary::Untouched;
             }
             BinaryStep::Run(commands) => commands,
         };
         let shown = render_commands(commands);
-        self.step(id, step, RUNNING, format!("running `{shown}`"), events);
+        self.step(
+            id,
+            step,
+            StepStatus::Running,
+            format!("running `{shown}`"),
+            events,
+        );
         for argv in commands {
             if let Err(e) = (env.runner)(argv) {
-                self.step(id, step, FAILED, e.to_string(), events);
+                self.step(id, step, StepStatus::Failed, e.to_string(), events);
                 return Binary::Failed;
             }
         }
-        self.step(id, step, DONE, format!("ran `{shown}`"), events);
+        self.step(id, step, StepStatus::Done, format!("ran `{shown}`"), events);
         Binary::Installed
     }
 
@@ -447,7 +542,7 @@ impl UpdateJobs {
         events: &broadcast::Sender<ServerEvent>,
         binary: Binary,
     ) {
-        let step = STEPS[1];
+        let step = Step::Agents;
         let Some(()) = self.reached(id, step, req.agents, binary, events) else {
             return;
         };
@@ -460,7 +555,7 @@ impl UpdateJobs {
             .partition(|(_, action)| action.preselect());
         if offered.is_empty() && edited.is_empty() {
             let detail = "every bundled blueprint is up to date".to_string();
-            self.step(id, step, SKIPPED, detail, events);
+            self.step(id, step, StepStatus::Skipped, detail, events);
             return;
         }
 
@@ -470,7 +565,7 @@ impl UpdateJobs {
             self.step(
                 id,
                 step,
-                RUNNING,
+                StepStatus::Running,
                 format!("installing {} blueprint(s)", offered.len()),
                 events,
             );
@@ -502,14 +597,67 @@ impl UpdateJobs {
         // Nothing offered means nothing was attempted, however much there was to
         // say about the ones that were passed over.
         let status = match (failed.is_empty(), offered.is_empty()) {
-            (false, _) => FAILED,
-            (true, true) => SKIPPED,
-            (true, false) => DONE,
+            (false, _) => StepStatus::Failed,
+            (true, true) => StepStatus::Skipped,
+            (true, false) => StepStatus::Done,
         };
         self.step(id, step, status, said.join("; "), events);
     }
 
     /// The config migrations the plan found.
+    /// Renamed keys in blueprints the reader wrote.
+    ///
+    /// The step before this one replaces the *bundled* blueprints wholesale, so
+    /// those arrive spelled the way the binary that shipped them spells things.
+    /// This is for the ones nobody else owns. Both spellings parse, so a
+    /// failure here leaves a blueprint that still runs, which is why one file
+    /// that will not write does not fail the step.
+    fn keys_step(
+        &self,
+        id: &str,
+        req: ApplyRequest,
+        plan: &UpdatePlan,
+        events: &broadcast::Sender<ServerEvent>,
+        binary: Binary,
+    ) {
+        let step = Step::Keys;
+        let Some(()) = self.reached(id, step, req.keys, binary, events) else {
+            return;
+        };
+        if plan.rewrites.is_empty() {
+            let detail = "every blueprint uses the current key names".to_string();
+            self.step(id, step, StepStatus::Skipped, detail, events);
+            return;
+        }
+        self.step(
+            id,
+            step,
+            StepStatus::Running,
+            format!("rewriting {} blueprint(s)", plan.rewrites.len()),
+            events,
+        );
+        let mut written = Vec::new();
+        let mut failed = Vec::new();
+        for rewrite in &plan.rewrites {
+            match std::fs::write(&rewrite.path, &rewrite.rewritten) {
+                Ok(()) => written.push(rewrite.name.clone()),
+                Err(e) => failed.push(format!("{}: {e}", rewrite.name)),
+            }
+        }
+        let mut said = Vec::new();
+        if !written.is_empty() {
+            said.push(format!("rewrote {}", written.join(", ")));
+        }
+        if !failed.is_empty() {
+            said.push(format!("could not rewrite {}", failed.join(", ")));
+        }
+        let status = match failed.is_empty() {
+            true => StepStatus::Done,
+            false => StepStatus::Failed,
+        };
+        self.step(id, step, status, said.join("; "), events);
+    }
+
     fn migrations_step(
         &self,
         id: &str,
@@ -519,26 +667,32 @@ impl UpdateJobs {
         events: &broadcast::Sender<ServerEvent>,
         binary: Binary,
     ) {
-        let step = STEPS[2];
+        let step = Step::Migrations;
         let Some(()) = self.reached(id, step, req.migrations, binary, events) else {
             return;
         };
         let loaded = match &plan.config {
             ConfigState::Unreadable(e) => {
                 let detail = format!("the config could not be read, so it was left alone: {e}");
-                self.step(id, step, SKIPPED, detail, events);
+                self.step(id, step, StepStatus::Skipped, detail, events);
                 return;
             }
             ConfigState::Loaded(loaded) => loaded,
         };
         if plan.migrations.is_empty() {
-            self.step(id, step, SKIPPED, "nothing to migrate".to_string(), events);
+            self.step(
+                id,
+                step,
+                StepStatus::Skipped,
+                "nothing to migrate".to_string(),
+                events,
+            );
             return;
         }
         self.step(
             id,
             step,
-            RUNNING,
+            StepStatus::Running,
             format!("applying {} migration(s)", plan.migrations.len()),
             events,
         );
@@ -550,8 +704,8 @@ impl UpdateJobs {
             }
         }
         match config.save_to_path_public(&env.config_path) {
-            Ok(()) => self.step(id, step, DONE, changed.join("; "), events),
-            Err(e) => self.step(id, step, FAILED, e.to_string(), events),
+            Ok(()) => self.step(id, step, StepStatus::Done, changed.join("; "), events),
+            Err(e) => self.step(id, step, StepStatus::Failed, e.to_string(), events),
         }
     }
 
@@ -565,7 +719,7 @@ impl UpdateJobs {
     fn reached(
         &self,
         id: &str,
-        step: &'static str,
+        step: Step,
         asked_for: bool,
         binary: Binary,
         events: &broadcast::Sender<ServerEvent>,
@@ -575,7 +729,7 @@ impl UpdateJobs {
             (true, Binary::Failed) => "the binary step failed, so this was left alone",
             (true, _) => return Some(()),
         };
-        self.step(id, step, SKIPPED, reason.to_string(), events);
+        self.step(id, step, StepStatus::Skipped, reason.to_string(), events);
         None
     }
 }

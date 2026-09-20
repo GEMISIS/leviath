@@ -130,3 +130,21 @@ fn a_provider_tells_configured_from_signed_in() {
     assert!(provider.plan.is_none());
     assert!(provider.expires_at.is_none());
 }
+
+/// Every source the inventory can report has an origin here.
+///
+/// The inventory's own words are what REST carries, so the two lists have to
+/// stay the same length: a source with no origin would be a tool this schema
+/// could not describe.
+#[test]
+fn every_tool_source_has_an_origin() {
+    use super::ToolOrigin;
+    use crate::tool_inventory::ToolSource;
+    assert_eq!(ToolOrigin::from(ToolSource::Builtin), ToolOrigin::Builtin);
+    assert_eq!(ToolOrigin::from(ToolSource::Subagent), ToolOrigin::Subagent);
+    assert_eq!(ToolOrigin::from(ToolSource::Agent), ToolOrigin::AgentScript);
+    assert_eq!(
+        ToolOrigin::from(ToolSource::Global),
+        ToolOrigin::GlobalScript
+    );
+}

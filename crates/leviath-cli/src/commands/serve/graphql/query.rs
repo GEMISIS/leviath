@@ -24,8 +24,9 @@ use super::scalars::{BigInt, Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
 use super::types::catalog::{Model, Provider, SkippedTool, Tool, ToolGroup, ToolInventory};
 use super::types::machine::{
-    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpServer, MimeRow, Script,
-    ServeLimits, YoloProfile, YoloProfiles,
+    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpAuth, McpServer,
+    McpServerTransport, MimeRow, Script, ServeLimits, YoloHuman, YoloProfile, YoloProfiles,
+    YoloWaiver,
 };
 use super::types::run::{Run, RunStatus};
 use super::types::update::{DaemonStatus, UpdateInfo, UpdateJob};
@@ -412,9 +413,10 @@ impl Query {
             .into_iter()
             .map(|server| McpServer {
                 name: server.name,
-                transport: server.transport,
+                transport: McpServerTransport::from_wire(&server.transport),
                 endpoint: server.endpoint,
-                auth: server.auth,
+                config_error: server.config_error,
+                auth: McpAuth::from_wire(&server.auth),
             })
             .collect())
     }
@@ -454,7 +456,7 @@ impl Query {
             .map(|script| Script {
                 kind: script.kind,
                 name: script.name,
-                source: script.source,
+                found_at: script.source,
                 agent: script.agent,
             })
             .collect())
@@ -494,7 +496,9 @@ impl Query {
         ctx: &Context<'_>,
         #[graphql(desc = "Only this provider's models.")] provider: Option<String>,
         #[graphql(
-            desc = "Reload the provider listings before answering.",
+            desc = "Refresh this server's catalogue from the providers before answering, \
+                    instead of answering from what it already holds. Slower, and it \
+                    changes nothing a later request would not see anyway.",
             default = false
         )]
         refresh: bool,
@@ -544,7 +548,7 @@ impl Query {
                 .into_iter()
                 .map(|tool| Tool {
                     name: tool.name,
-                    source: tool.source.as_str().to_string(),
+                    origin: tool.source.into(),
                     path: tool.path.map(|p| p.display().to_string()),
                     agent: tool.agent,
                 })
@@ -835,18 +839,18 @@ impl Query {
 }
 
 /// What a profile's default does, in the word the config file uses.
-fn waiver_word(waiver: crate::yolo::rules::Waiver) -> &'static str {
+fn waiver_word(waiver: crate::yolo::rules::Waiver) -> YoloWaiver {
     match waiver {
-        crate::yolo::rules::Waiver::Allow => "allow",
-        crate::yolo::rules::Waiver::Ask => "ask",
+        crate::yolo::rules::Waiver::Allow => YoloWaiver::Allow,
+        crate::yolo::rules::Waiver::Ask => YoloWaiver::Ask,
     }
 }
 
 /// Whether a human-in-the-loop mechanism reaches a person, in the same words.
-fn human_word(human: crate::yolo::rules::Human) -> &'static str {
+fn human_word(human: crate::yolo::rules::Human) -> YoloHuman {
     match human {
-        crate::yolo::rules::Human::Ask => "ask",
-        crate::yolo::rules::Human::Auto => "auto",
+        crate::yolo::rules::Human::Ask => YoloHuman::Ask,
+        crate::yolo::rules::Human::Auto => YoloHuman::Auto,
     }
 }
 
@@ -865,10 +869,10 @@ pub(crate) fn yolo_profiles() -> YoloProfiles {
             .into_iter()
             .map(|profile| YoloProfile {
                 name: profile.name,
-                default: waiver_word(profile.default).to_string(),
-                questions: human_word(profile.questions).to_string(),
-                checkpoints: human_word(profile.checkpoints).to_string(),
-                gate: human_word(profile.gate).to_string(),
+                default: waiver_word(profile.default),
+                questions: human_word(profile.questions),
+                checkpoints: human_word(profile.checkpoints),
+                gate: human_word(profile.gate),
                 tool_rules: profile.tool_rules.iter().map(|n| count(*n)).collect(),
                 shell_rules: profile.shell_rules.iter().map(|n| count(*n)).collect(),
             })

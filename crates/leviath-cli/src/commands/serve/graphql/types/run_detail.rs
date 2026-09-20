@@ -263,8 +263,9 @@ pub(crate) struct StageVisit {
     /// When it left; null for the visit in progress.
     pub(crate) left_at: Option<Timestamp>,
     /// Whether this is the visit in progress. The same fact as `leftAt` being
-    /// null, said the way a list is filtered on.
-    pub(crate) active: bool,
+    /// null, said the way a list is filtered on. Not a clock: the `active` on
+    /// a run and on a stage is how long each has been working.
+    pub(crate) in_progress: bool,
     /// Tokens burned on this visit.
     pub(crate) usage: TokenUsage,
     /// Spend on this visit.
@@ -350,7 +351,7 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                     ordinal: count(at + 1),
                     entered_at: Timestamp(visit.entered_at),
                     left_at: visit.left_at.map(Timestamp),
-                    active: visit.left_at.is_none(),
+                    in_progress: visit.left_at.is_none(),
                     usage: TokenUsage {
                         prompt_tokens: BigInt(visit.prompt_tokens as i64),
                         completion_tokens: BigInt(visit.completion_tokens as i64),
@@ -396,8 +397,11 @@ impl ContextRegion {
     }
 
     /// What the region does when it fills, as the snapshot recorded it.
-    async fn kind(&self) -> &str {
-        &self.region().kind
+    ///
+    /// Null for a kind this build does not have a name for, which is a run
+    /// written by a newer one.
+    async fn kind(&self) -> Option<super::blueprint::RegionKind> {
+        super::blueprint::RegionKind::from_snapshot(&self.region().kind)
     }
 
     /// Tokens it holds right now.

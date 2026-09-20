@@ -1085,7 +1085,7 @@ plan and a body naming one part leaves the others on. A field this route does no
 rather than a silent default:
 
 ```json
-{ "binary": true, "agents": true, "migrations": false }
+{ "binary": true, "agents": true, "keys": true, "migrations": false }
 ```
 
 It answers `202` straight away, with the id to watch:
@@ -1094,7 +1094,7 @@ It answers `202` straight away, with the id to watch:
 {
   "job_id": "update-1787438706-1",
   "status": "running",
-  "applying": { "binary": true, "agents": true, "migrations": false }
+  "applying": { "binary": true, "agents": true, "keys": true, "migrations": false }
 }
 ```
 
@@ -1106,8 +1106,9 @@ request does not stay open for it. Watch `/ws`, where each step change arrives a
   "status": "running", "detail": "running `scoop update && scoop update leviath`" }
 ```
 
-`step` is `binary`, `agents` or `migrations`, always in that order, and `status` is one of
-`running`, `done`, `skipped`, `advised` or `failed`. The last frame is `update_finished`, carrying
+`step` is `binary`, `agents`, `keys` or `migrations`, always in that order, and `status` is one
+of `running`, `done`, `skipped`, `advised` or `failed`. The `keys` step respells blueprint keys
+that changed name, in the blueprints you wrote rather than the bundled ones. The last frame is `update_finished`, carrying
 the whole record so a client that connected mid-run needs no follow-up request. Both frames are
 about the machine rather than a run, so `/ws` receives them and a per-run subscription does not.
 
@@ -1121,6 +1122,7 @@ hold a socket open:
   "steps": [
     { "step": "binary", "status": "done", "detail": "ran `scoop update && scoop update leviath`" },
     { "step": "agents", "status": "done", "detail": "installed researcher, coder" },
+    { "step": "keys", "status": "skipped", "detail": "every blueprint uses the current key names" },
     { "step": "migrations", "status": "skipped", "detail": "not asked for" }
   ],
   "restart_required": true,
