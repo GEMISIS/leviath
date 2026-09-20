@@ -518,6 +518,17 @@ done in the browser, because The Lair never holds a run's transcript.
 One honest limit: the deep sources match the raw JSON on disk, so a query containing a quote,
 a backslash or a newline may not match text that does contain it.
 
+`descendant_of=<run_id>` is the other tree question: every run under that one, at
+any depth, and not the run itself. `parent=` is one level, which is what a tree
+view expands a node with; `descendant_of=` is the flat read of a whole fan-out,
+which is what a cost roll-up or an export wants. Setting both is a 400, because
+they name two different sets and the one you meant is not recoverable from the
+pair.
+
+`parent=sub` is the mirror of `parent=none`: only runs somebody started, at any
+depth. `blueprint=<name>` narrows to the runs of one blueprint, by the name each
+run recorded, and composes with everything above.
+
 ## Deleting runs
 
 Cancelling and deleting are different verbs on purpose. `DELETE /api/agents/{id}` stops the run and

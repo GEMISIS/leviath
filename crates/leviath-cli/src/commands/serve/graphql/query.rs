@@ -119,6 +119,16 @@ pub(crate) struct RunFilter {
     pub(crate) parent: Option<String>,
     /// Only runs nobody started, when true.
     pub(crate) top_level_only: Option<bool>,
+    /// Only runs somebody started, at any depth, when true. The mirror of
+    /// `topLevelOnly`, and what a "workers only" view asks for.
+    pub(crate) sub_agents_only: Option<bool>,
+    /// Every run under this one, at any depth, and not the run itself. The flat
+    /// read of a fan-out: nesting `children` walks one level per request, and
+    /// this walks the whole subtree in one page at a time.
+    pub(crate) descendant_of: Option<String>,
+    /// Only runs of this blueprint, by the name the run recorded. A name nothing
+    /// matches gives an empty page rather than an error.
+    pub(crate) blueprint: Option<String>,
     /// Inclusive lower bound on the sort value. Pass the previous page's
     /// `serverTime` to poll for what changed.
     pub(crate) since: Option<Timestamp>,
@@ -140,17 +150,35 @@ impl RunFilter {
         ids: Option<Vec<String>>,
     ) -> Result<RunSelection, ServeError> {
         let limit = page_size(first)?;
-        let parent = match (self.parent.as_deref(), self.top_level_only) {
-            (Some(_), Some(true)) => {
-                return Err(ServeError::BadRequest(
-                    "`parent` names one run's children, so it cannot be combined with \
-                     `topLevelOnly`"
-                        .to_string(),
-                ));
-            }
-            (Some(id), _) => ParentFilter::Of(id.to_string()),
-            (None, Some(true)) => ParentFilter::Roots,
-            (None, _) => ParentFilter::Any,
+        // One question about parentage per listing. Two of these together would
+        // be two predicates for one field, and the pair a caller meant is not
+        // recoverable from the pair they sent.
+        let asked: Vec<&str> = [
+            self.parent.is_some().then_some("parent"),
+            self.descendant_of.is_some().then_some("descendantOf"),
+            (self.top_level_only == Some(true)).then_some("topLevelOnly"),
+            (self.sub_agents_only == Some(true)).then_some("subAgentsOnly"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if asked.len() > 1 {
+            return Err(ServeError::BadRequest(format!(
+                "{} each say which runs to include, so only one of them may be set",
+                asked.join(" and ")
+            )));
+        }
+        let parent = match (
+            self.parent.as_deref(),
+            self.descendant_of.as_deref(),
+            self.top_level_only,
+            self.sub_agents_only,
+        ) {
+            (Some(id), _, _, _) => ParentFilter::Of(id.to_string()),
+            (None, Some(root), _, _) => ParentFilter::Under(root.to_string()),
+            (None, None, Some(true), _) => ParentFilter::Roots,
+            (None, None, _, Some(true)) => ParentFilter::SubAgents,
+            _ => ParentFilter::Any,
         };
 
         let mut statuses: Vec<String> = Vec::new();
@@ -210,6 +238,7 @@ impl RunFilter {
             ids,
             since: self.since.map(|t| t.0),
             parent,
+            blueprint: self.blueprint,
         })
     }
 
@@ -358,6 +387,7 @@ impl Query {
             &health.config.clone(),
             &state.limits.request_limits,
             &health,
+            super::admin::admin_visible(ctx),
         )
     }
 
@@ -745,6 +775,7 @@ pub(crate) fn config_of(
     config: &crate::config::Config,
     requests: &super::super::request_limits::RequestLimits,
     health: &crate::daemon::config_reload::ConfigHealth,
+    admin_enabled: bool,
 ) -> Config {
     let redacted = super::super::config::redact(config, requests, health);
     let mut configured = Vec::new();
@@ -785,6 +816,7 @@ pub(crate) fn config_of(
         mcp_server_count: count(redacted.mcp_server_count),
         api_version: redacted.api_version,
         capabilities: redacted.capabilities,
+        admin_enabled,
         limits: ServeLimits {
             max_page_size: count(redacted.limits.max_limit),
             max_ids: count(redacted.limits.max_ids),

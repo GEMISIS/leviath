@@ -565,6 +565,7 @@ impl Run {
                 mime_type: artifact.mime_type.to_string(),
                 size: Some(BigInt(artifact.size as i64)),
                 sha256: Some(artifact.sha256).filter(|hash| !hash.is_empty()),
+                path: artifact.path,
             })
             .collect()
     }
@@ -771,6 +772,72 @@ impl Run {
         })
     }
 
+    /// A short-lived signed link to one stored part's bytes.
+    ///
+    /// The same kind of link `fileUrl` mints. `blobs` carries one per part
+    /// already; this is for asking about a hash a client already holds, and for
+    /// the download form of a part it is showing inline.
+    async fn blob_url(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The part, by content hash.")] sha256: String,
+        #[graphql(desc = "Offer it as a download rather than inline.", default = false)]
+        download: bool,
+    ) -> String {
+        let state = ctx.data_unchecked::<AppState>();
+        signed(
+            state,
+            &format!("/api/agents/{}/blobs/{sha256}", self.meta.run_id),
+            download,
+        )
+    }
+
+    /// A short-lived signed link to one artifact's bytes.
+    async fn artifact_url(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The artifact, by name.")] name: String,
+        #[graphql(desc = "Offer it as a download rather than inline.", default = false)]
+        download: bool,
+    ) -> String {
+        let state = ctx.data_unchecked::<AppState>();
+        signed(
+            state,
+            &format!("/api/agents/{}/artifacts/{name}", self.meta.run_id),
+            download,
+        )
+    }
+
+    /// Whether `sendMessage` reaches this run where it stands.
+    ///
+    /// Read from the stage the run is in, so it is the answer for now rather than
+    /// for the blueprint as a whole. Null when the run's blueprint cannot be read:
+    /// unknown is not the same as no, and a console that greyed out its box on a
+    /// failed read would be wrong half the time.
+    async fn accepts_messages(&self, ctx: &Context<'_>) -> Option<bool> {
+        let state = ctx.data_unchecked::<AppState>();
+        let meta = Arc::clone(&self.meta);
+        let manifest = blocking(move || {
+            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
+        })
+        .await
+        .ok()?;
+        let parsed = state.caches.blueprints.parse(&manifest).ok()?;
+        let stage = match self.meta.current_stage.is_empty() {
+            // Before the first stage is entered, the answer is the entry
+            // stage's: that is the stage a message would arrive in.
+            true => {
+                let entry = parsed.resolve_entry_stage_name();
+                parsed.stages.iter().find(|stage| stage.name == entry)
+            }
+            false => parsed
+                .stages
+                .iter()
+                .find(|stage| stage.name == self.meta.current_stage),
+        };
+        stage.map(|stage| stage.accepts_messages)
+    }
+
     /// Caller-supplied metadata from spawn. Values are always strings.
     ///
     /// Sorted by key: the daemon keeps these in a hash map, and a listing
@@ -846,6 +913,23 @@ fn as_i32(value: usize) -> i32 {
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
+
+/// A signed link to one of a run's byte routes.
+///
+/// One place mints these, so the fields that hand them out cannot drift apart on
+/// what a link looks like or how long it lasts.
+fn signed(state: &AppState, route: &str, download: bool) -> String {
+    let query: &[(&str, &str)] = match download {
+        true => &[("download", "1")],
+        false => &[],
+    };
+    super::super::super::signed_url::signed_path(
+        &state.signer,
+        route,
+        query,
+        leviath_core::duration::now_secs(),
+    )
+}
 
 /// Where a run is, in its blueprint's own terms.
 #[derive(Debug, SimpleObject)]

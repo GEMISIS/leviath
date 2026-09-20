@@ -246,6 +246,12 @@ type Artifact {
 	"""
 	sha256: String
 	"""
+	Where the run wrote it, relative to its working directory. What the run
+	recorded, so it can name a file the run has since replaced or removed: the
+	link is what fetches the bytes that were handed back.
+	"""
+	path: String!
+	"""
 	A short-lived signed link to the bytes.
 	"""
 	url: String!
@@ -763,6 +769,12 @@ type Config {
 	reading a 404, which also means "no such run".
 	"""
 	capabilities: [String!]!
+	"""
+	Whether this server was started with `--allow-admin`, so the mutations
+	that change the machine will run rather than answer `FORBIDDEN`. Worth
+	asking before offering a settings screen that cannot save.
+	"""
+	adminEnabled: Boolean!
 	"""
 	The numbers above.
 	"""
@@ -4044,6 +4056,45 @@ type Run {
 		descending: Boolean! = false
 	): ContextHistoryConnection!
 	"""
+	A short-lived signed link to one stored part's bytes.
+	
+	The same kind of link `fileUrl` mints. `blobs` carries one per part
+	already; this is for asking about a hash a client already holds, and for
+	the download form of a part it is showing inline.
+	"""
+	blobUrl(
+		"""
+		The part, by content hash.
+		"""
+		sha256: String!,
+		"""
+		Offer it as a download rather than inline.
+		"""
+		download: Boolean! = false
+	): String!
+	"""
+	A short-lived signed link to one artifact's bytes.
+	"""
+	artifactUrl(
+		"""
+		The artifact, by name.
+		"""
+		name: String!,
+		"""
+		Offer it as a download rather than inline.
+		"""
+		download: Boolean! = false
+	): String!
+	"""
+	Whether `sendMessage` reaches this run where it stands.
+	
+	Read from the stage the run is in, so it is the answer for now rather than
+	for the blueprint as a whole. Null when the run's blueprint cannot be read:
+	unknown is not the same as no, and a console that greyed out its box on a
+	failed read would be wrong half the time.
+	"""
+	acceptsMessages: Boolean
+	"""
 	Caller-supplied metadata from spawn. Values are always strings.
 	
 	Sorted by key: the daemon keeps these in a hash map, and a listing
@@ -4216,6 +4267,22 @@ input RunFilter {
 	Only runs nobody started, when true.
 	"""
 	topLevelOnly: Boolean
+	"""
+	Only runs somebody started, at any depth, when true. The mirror of
+	`topLevelOnly`, and what a "workers only" view asks for.
+	"""
+	subAgentsOnly: Boolean
+	"""
+	Every run under this one, at any depth, and not the run itself. The flat
+	read of a fan-out: nesting `children` walks one level per request, and
+	this walks the whole subtree in one page at a time.
+	"""
+	descendantOf: String
+	"""
+	Only runs of this blueprint, by the name the run recorded. A name nothing
+	matches gives an empty page rather than an error.
+	"""
+	blueprint: String
 	"""
 	Inclusive lower bound on the sort value. Pass the previous page's
 	`serverTime` to poll for what changed.
@@ -5294,6 +5361,11 @@ type StageVisit {
 	When it left; null for the visit in progress.
 	"""
 	leftAt: Timestamp
+	"""
+	Whether this is the visit in progress. The same fact as `leftAt` being
+	null, said the way a list is filtered on.
+	"""
+	active: Boolean!
 	"""
 	Tokens burned on this visit.
 	"""

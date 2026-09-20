@@ -132,6 +132,16 @@ same list.
   waiting now answers with that sign-in's URL rather than only refusing, on both
   surfaces, because the URL is what a client needs either way.
 
+- Three more ways to narrow a run listing, on both surfaces: a whole subtree
+  (`descendant_of=` / `descendantOf`), sub-agents only (`parent=sub` /
+  `subAgentsOnly`), and one blueprint's runs (`blueprint=`). A subtree is walked
+  once from the index's own parent map rather than a pass per level, so a fan-out
+  that fanned out again is still one traversal. Setting two of the tree filters at
+  once is refused rather than resolved one way. Also `acceptsMessages`, `blobUrl`
+  and `artifactUrl` on a run, `path` on an artifact, `active` on a stage visit, and
+  `adminEnabled` on the config, so a settings screen can tell whether a save will
+  be allowed before it offers one.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

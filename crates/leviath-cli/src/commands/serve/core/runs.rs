@@ -145,6 +145,13 @@ pub(crate) enum ParentFilter {
     /// unsorted array, which a fan-out of two hundred workers has no windowed
     /// form of.
     Of(String),
+    /// `parent=sub`: every run somebody started, at any depth. The mirror of
+    /// [`Roots`](Self::Roots), and what a "workers only" view asks for.
+    SubAgents,
+    /// `descendant_of=<run_id>`: that run's whole subtree, at any depth, and not
+    /// the run itself. A flat read of a fan-out, which nesting `children` can
+    /// only do one level per request.
+    Under(String),
 }
 
 impl ParentFilter {
@@ -161,6 +168,7 @@ impl ParentFilter {
         match raw.map(str::trim).filter(|s| !s.is_empty()) {
             None => Self::Any,
             Some("none") => Self::Roots,
+            Some("sub") => Self::SubAgents,
             Some(id) => Self::Of(id.to_string()),
         }
     }
@@ -170,7 +178,23 @@ impl ParentFilter {
         match self {
             Self::Any => true,
             Self::Roots => meta.parent_run_id.is_none(),
+            Self::SubAgents => meta.parent_run_id.is_some(),
             Self::Of(parent) => meta.parent_run_id.as_deref() == Some(parent.as_str()),
+            // A subtree cannot be decided from one record: it needs the tree.
+            // [`keeps_in`] is the form that has it, and the listing uses that.
+            Self::Under(_) => true,
+        }
+    }
+
+    /// Whether this run belongs in the listing, given the tree it is part of.
+    ///
+    /// The same question as [`keeps`](Self::keeps) for every filter but a
+    /// subtree, which is the one that cannot be answered from a single record:
+    /// a grandchild names its parent and not its ancestor.
+    pub(crate) fn keeps_in(&self, meta: &RunMeta, descendants: &HashSet<String>) -> bool {
+        match self {
+            Self::Under(_) => descendants.contains(&meta.run_id),
+            _ => self.keeps(meta),
         }
     }
 
@@ -181,11 +205,17 @@ impl ParentFilter {
     /// than an empty part - an empty part is still a part, and would have
     /// changed the digest of every unfiltered listing and so invalidated every
     /// cursor a client was holding when it upgraded.
-    pub(crate) fn digest_part(&self) -> Option<&str> {
+    pub(crate) fn digest_part(&self) -> Option<String> {
         match self {
             Self::Any => None,
-            Self::Roots => Some("none"),
-            Self::Of(parent) => Some(parent.as_str()),
+            Self::Roots => Some("none".to_string()),
+            Self::SubAgents => Some("sub".to_string()),
+            Self::Of(parent) => Some(parent.clone()),
+            // Prefixed, so "this run's children" and "this run's whole subtree"
+            // are two filters to a cursor rather than one: the two answer
+            // different sets, and a cursor from either would otherwise resume in
+            // the other.
+            Self::Under(root) => Some(format!("under:{root}")),
         }
     }
 }
@@ -211,6 +241,8 @@ pub(crate) struct RunSpec {
     pub(crate) ids: Option<Vec<String>>,
     pub(crate) since: Option<i64>,
     pub(crate) parent: ParentFilter,
+    /// Only runs of this blueprint, by recorded name.
+    pub(crate) blueprint: Option<String>,
     pub(crate) digest: String,
 }
 
@@ -336,10 +368,20 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
         };
     }
 
-    let mut runs = state.caches.run_index.snapshot().await.into_runs();
+    let snapshot = state.caches.run_index.snapshot().await;
+    // A subtree is the one filter that needs the tree rather than the record, so
+    // it is walked once here from the index's own parent map rather than per run.
+    let descendants = match &spec.parent {
+        ParentFilter::Under(root) => snapshot.descendants_of(root),
+        _ => HashSet::new(),
+    };
+    let mut runs = snapshot.into_runs();
     // Before the sort and before `total`, like every other filter here, so the
     // count describes what was asked for rather than what is on the machine.
-    runs.retain(|meta| spec.parent.keeps(meta));
+    runs.retain(|meta| spec.parent.keeps_in(meta, &descendants));
+    if let Some(ref blueprint) = spec.blueprint {
+        runs.retain(|meta| &meta.agent_name == blueprint);
+    }
     if !spec.statuses.is_empty() {
         runs.retain(|meta| {
             spec.statuses
@@ -397,6 +439,10 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
 pub(crate) struct RunSelection {
     /// Page size, already bounded by the caller.
     pub(crate) limit: usize,
+    /// Only runs of this blueprint, by the name the run recorded. A name
+    /// nothing matches gives an empty page rather than an error: a blueprint
+    /// with no runs yet is an ordinary answer.
+    pub(crate) blueprint: Option<String>,
     /// Status filters, in the daemon's own spelling.
     pub(crate) statuses: Vec<String>,
     /// Which timestamp orders the listing.
@@ -448,7 +494,13 @@ impl RunSelection {
         // existed, and every cursor a client is already holding stays valid
         // across the upgrade.
         if let Some(part) = self.parent.digest_part() {
-            parts.push(part.to_string());
+            parts.push(part);
+        }
+        // Appended only when it filters, for the same reason: a digest
+        // identifies the filter set, and an absent filter has to digest as
+        // absent so a cursor minted before this existed still resumes.
+        if let Some(ref blueprint) = self.blueprint {
+            parts.push(format!("blueprint:{blueprint}"));
         }
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
         let digest = cursor::filter_digest(&refs);
@@ -474,6 +526,7 @@ impl RunSelection {
             ids: self.ids,
             since: self.since,
             parent: self.parent,
+            blueprint: self.blueprint,
             digest,
         })
     }

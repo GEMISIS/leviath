@@ -30,6 +30,13 @@ fn meta_at(id: &str, started_at: i64) -> RunMeta {
     meta
 }
 
+/// A run of one blueprint, for the filter tests.
+fn named(id: &str, blueprint: &str) -> RunMeta {
+    let mut meta = meta_at(id, 100);
+    meta.agent_name = blueprint.to_string();
+    meta
+}
+
 /// Run one query against a schema wired to a daemon-less state.
 async fn run_query(query: &str) -> async_graphql::Response {
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
@@ -1351,4 +1358,120 @@ async fn the_directory_picker_refuses_what_it_cannot_list() {
         );
     })
     .await;
+}
+
+/// The tree filters each answer a different question, and two at once is a
+/// client that built its query wrong rather than a set to guess at.
+#[tokio::test]
+async fn the_tree_filters_answer_different_questions() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-filters", |_dir| async move {
+        // root -> worker -> grandchild, plus an unrelated run of another
+        // blueprint.
+        let mut root = named("root", "coder");
+        root.started_at = 100;
+        crate::runstate::create_run(&root).expect("run written");
+        let mut worker = named("worker", "coder");
+        worker.parent_run_id = Some("root".to_string());
+        worker.started_at = 200;
+        crate::runstate::create_run(&worker).expect("run written");
+        let mut grandchild = named("grandchild", "coder");
+        grandchild.parent_run_id = Some("worker".to_string());
+        grandchild.started_at = 300;
+        crate::runstate::create_run(&grandchild).expect("run written");
+        let mut other = named("other", "researcher");
+        other.started_at = 400;
+        crate::runstate::create_run(&other).expect("run written");
+
+        // Direct children: one level.
+        let answer =
+            run_query(r#"{ runs(filter: { parent: "root" }) { edges { node { id } } } }"#).await;
+        assert_eq!(ids_of(&answer.data, "runs"), vec!["worker".to_string()]);
+
+        // The whole subtree: every level, and not the root itself.
+        let answer =
+            run_query(r#"{ runs(filter: { descendantOf: "root" }) { edges { node { id } } } }"#)
+                .await;
+        let mut under = ids_of(&answer.data, "runs");
+        under.sort();
+        assert_eq!(under, vec!["grandchild".to_string(), "worker".to_string()]);
+
+        // Roots, and its mirror.
+        let answer =
+            run_query("{ runs(filter: { topLevelOnly: true }) { edges { node { id } } } }").await;
+        let mut roots = ids_of(&answer.data, "runs");
+        roots.sort();
+        assert_eq!(roots, vec!["other".to_string(), "root".to_string()]);
+        let answer =
+            run_query("{ runs(filter: { subAgentsOnly: true }) { edges { node { id } } } }").await;
+        let mut subs = ids_of(&answer.data, "runs");
+        subs.sort();
+        assert_eq!(subs, vec!["grandchild".to_string(), "worker".to_string()]);
+
+        // By blueprint, which composes with the rest.
+        let answer = run_query(
+            r#"{ runs(filter: { blueprint: "researcher" }) { edges { node { id } } total } }"#,
+        )
+        .await;
+        assert_eq!(ids_of(&answer.data, "runs"), vec!["other".to_string()]);
+        let answer = run_query(
+            r#"{ runs(filter: { blueprint: "coder", subAgentsOnly: true })
+                 { edges { node { id } } } }"#,
+        )
+        .await;
+        assert_eq!(ids_of(&answer.data, "runs").len(), 2);
+        // A blueprint nothing matches is an empty page, not a refusal: a
+        // blueprint with no runs yet is an ordinary answer.
+        let answer = run_query(r#"{ runs(filter: { blueprint: "nope" }) { total } }"#).await;
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["runs"]["total"], 0);
+    })
+    .await;
+}
+
+/// Two parentage filters at once is refused, and the message names both.
+#[tokio::test]
+async fn two_parentage_filters_at_once_are_refused() {
+    let answer =
+        run_query(r#"{ runs(filter: { parent: "root", descendantOf: "root" }) { total } }"#).await;
+    let error = answer.errors.first().expect("a refusal");
+    assert!(
+        error.message.contains("parent") && error.message.contains("descendantOf"),
+        "it names both: {}",
+        error.message
+    );
+    let answer =
+        run_query("{ runs(filter: { topLevelOnly: true, subAgentsOnly: true }) { total } }").await;
+    assert!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("only one of them")
+    );
+}
+
+/// The config says whether the admin mutations will run, so a settings screen
+/// does not have to offer a save that answers `FORBIDDEN`.
+#[tokio::test]
+async fn the_config_says_whether_admin_is_open() {
+    let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+    for allow_admin in [false, true] {
+        let schema = async_graphql::Schema::build(
+            Query,
+            async_graphql::EmptyMutation,
+            async_graphql::EmptySubscription,
+        )
+        .data(state.clone())
+        .data(crate::commands::serve::graphql::admin::AdminAccess(
+            allow_admin,
+        ))
+        .finish();
+        let answer = schema
+            .execute(async_graphql::Request::new("{ config { adminEnabled } }"))
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["config"]["adminEnabled"], allow_admin);
+    }
 }

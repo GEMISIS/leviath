@@ -386,7 +386,23 @@
             "schema": {
               "type": "string"
             },
-            "description": "Which runs to list by their place in the tree. `none` keeps only runs nobody started, which is what a top-level list wants; a run id keeps that run's direct children. Omitted lists every run, sub-agents included. A run id that names nothing gives an empty page rather than a 404. Announced as `runs.parent`."
+            "description": "Which runs to list by their place in the tree. `none` keeps only runs nobody started, which is what a top-level list wants; `sub` keeps only runs somebody started, at any depth; a run id keeps that run's direct children. Omitted lists every run, sub-agents included. A run id that names nothing gives an empty page rather than a 404. Announced as `runs.parent`."
+          },
+          {
+            "name": "descendant_of",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Every run under this one, at any depth, and not the run itself: the flat read of a whole fan-out, where `parent=` is one level of it. Setting both is a 400, because they name two different sets and the one you meant is not recoverable from the pair."
+          },
+          {
+            "name": "blueprint",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only runs of this blueprint, by the name each run recorded. A name nothing matches is an empty page rather than an error, because a blueprint with no runs yet is an ordinary answer."
           },
           {
             "name": "sort",

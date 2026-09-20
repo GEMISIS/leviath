@@ -97,6 +97,10 @@ pub(crate) struct Config {
     /// What this server can do. Check these rather than calling a route and
     /// reading a 404, which also means "no such run".
     pub(crate) capabilities: Vec<String>,
+    /// Whether this server was started with `--allow-admin`, so the mutations
+    /// that change the machine will run rather than answer `FORBIDDEN`. Worth
+    /// asking before offering a settings screen that cannot save.
+    pub(crate) admin_enabled: bool,
     /// The numbers above.
     pub(crate) limits: ServeLimits,
     /// Why the config file does not load. Absent when it does.

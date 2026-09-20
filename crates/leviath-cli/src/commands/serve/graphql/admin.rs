@@ -172,6 +172,8 @@ impl AdminMutation {
             &written,
             &state.limits.request_limits,
             &state.config.health(),
+            // True by construction: this mutation is behind the guard.
+            true,
         ))
     }
 

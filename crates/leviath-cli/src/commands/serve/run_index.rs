@@ -60,6 +60,27 @@ impl RunSnapshot {
         self.by_id.get(run_id).and_then(|&at| self.runs.get(at))
     }
 
+    /// Every run under `root`, at any depth, by id. The root itself is not in it.
+    ///
+    /// One walk of the parent map rather than a pass per level: a fan-out that
+    /// fans out again is still one traversal, and a record that somehow names
+    /// itself as an ancestor cannot spin it, because a run already seen is not
+    /// walked twice.
+    pub(super) fn descendants_of(&self, root: &str) -> std::collections::HashSet<String> {
+        let mut found = std::collections::HashSet::new();
+        let mut frontier = vec![root.to_string()];
+        while let Some(parent) = frontier.pop() {
+            for at in self.children.get(&parent).into_iter().flatten() {
+                if let Some(child) = self.runs.get(*at)
+                    && found.insert(child.run_id.clone())
+                {
+                    frontier.push(child.run_id.clone());
+                }
+            }
+        }
+        found
+    }
+
     /// The runs directly under `parent`, or the roots when `parent` is `None`,
     /// in listing order. A parent nothing hangs off yields nothing.
     pub(super) fn under(&self, parent: Option<&str>) -> impl Iterator<Item = &Arc<RunMeta>> {

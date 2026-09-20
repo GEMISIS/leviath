@@ -50,6 +50,11 @@ pub(super) struct RunsQuery {
     pub(super) ids: Option<String>,
     pub(super) since: Option<i64>,
     pub(super) parent: Option<String>,
+    /// `descendant_of=<run_id>`: that run's whole subtree, at any depth, and not
+    /// the run itself. The flat read of a fan-out, where `parent=` is one level.
+    pub(super) descendant_of: Option<String>,
+    /// `blueprint=<name>`: only runs of that blueprint, by recorded name.
+    pub(super) blueprint: Option<String>,
 }
 
 /// A request this route refuses to answer, as the shared failure type.
@@ -75,7 +80,20 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
     // paging, ordering and filtering have nothing to act on. Rejecting the
     // combination is deliberate - a silently ignored parameter produces the
     // kind of bug report that takes a day to read.
-    let parent = ParentFilter::parse(query.parent.as_deref());
+    // One question about parentage per listing. `parent=` and `descendant_of=`
+    // ask two different ones, and the pair a caller meant is not recoverable
+    // from the pair they sent.
+    let parent = match (query.parent.as_deref(), query.descendant_of.as_deref()) {
+        (Some(_), Some(_)) => {
+            return Err(bad_request(
+                "`parent` names one run's children and `descendant_of` names a whole subtree, \
+                 so only one of them may be set"
+                    .to_string(),
+            ));
+        }
+        (_, Some(root)) => ParentFilter::Under(root.to_string()),
+        (parent, None) => ParentFilter::parse(parent),
+    };
     let ids = query.ids.as_deref().map(comma_list);
     if let Some(ref ids) = ids {
         let conflicts = [
@@ -86,6 +104,7 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
             // The resolved filter rather than the raw parameter, so `parent=`
             // is the no-op it looks like rather than a conflict.
             ("parent", parent != ParentFilter::Any),
+            ("blueprint", query.blueprint.is_some()),
         ];
         if let Some((name, _)) = conflicts.iter().find(|(_, present)| *present) {
             return Err(bad_request(format!(
@@ -188,6 +207,7 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
         ids,
         since: query.since,
         parent,
+        blueprint: query.blueprint.clone(),
     }
     .resolve(query.cursor.as_deref())
 }
