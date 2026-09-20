@@ -301,10 +301,15 @@ fn record_abandoned_executions(
     ) else {
         return;
     };
-    for call in batch.calls.iter().filter(|c| c.result.is_none()) {
-        let Some((_, stood_in)) = merged.iter().find(|(id, _)| id == &call.id) else {
-            continue;
-        };
+    // Zipped rather than looked up: `merged` is built from these calls, in this
+    // order, one entry each. A lookup would add a "what if it is missing" branch
+    // to a pairing the caller above guarantees.
+    for (call, (_, stood_in)) in batch
+        .calls
+        .iter()
+        .zip(merged)
+        .filter(|(call, _)| call.result.is_none())
+    {
         let _ = persist
             .0
             .send(crate::persistence_bridge::PersistMsg::Append {
@@ -814,6 +819,39 @@ mod tests {
         assert!(result_of("c2").contains("Verify whether it took effect"));
     }
 
+    /// What a completion record says.
+    struct Completion<'r> {
+        iteration: usize,
+        call_id: &'r str,
+        execution_id: &'r str,
+        result: &'r leviath_core::region::EntryContent,
+        outcome: Option<leviath_core::execution::ToolOutcome>,
+    }
+
+    /// A completion record read as one, or nothing for any other record.
+    ///
+    /// Exercised both ways below, so the arm that says "this is not a
+    /// completion" is a claim a test makes rather than a branch nothing takes.
+    fn completion_of(record: &leviath_core::run_archive::RunRecord) -> Option<Completion<'_>> {
+        match record {
+            leviath_core::run_archive::RunRecord::ToolCallDone {
+                iteration,
+                call_id,
+                execution_id,
+                result,
+                outcome,
+                ..
+            } => Some(Completion {
+                iteration: *iteration,
+                call_id,
+                execution_id,
+                result,
+                outcome: *outcome,
+            }),
+            _ => None,
+        }
+    }
+
     /// The run this test's agent belongs to, for the paths that name it.
     fn run_metadata() -> crate::persistence::RunMetadata {
         crate::persistence::RunMetadata {
@@ -872,6 +910,16 @@ mod tests {
             &[],
         );
 
+        // Something else on the same lane, so the drain below has to pick the
+        // appends out rather than assume every message is one.
+        let _ = world
+            .resource::<crate::pipeline::PersistenceStage>()
+            .0
+            .send(crate::persistence_bridge::PersistMsg::StageLines {
+                run_id: "run-1".to_string(),
+                output_appends: vec![(0, "a line".to_string())],
+                log_appends: Vec::new(),
+            });
         let mut recorded = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg {
@@ -879,29 +927,39 @@ mod tests {
             }
         }
         assert_eq!(recorded.len(), 1, "only the unfinished call: {recorded:?}");
-        let leviath_core::run_archive::RunRecord::ToolCallDone {
+        let completion = completion_of(&recorded[0]).expect("a completion record");
+        let Completion {
             iteration,
             call_id,
             execution_id,
             result,
             outcome,
-            ..
-        } = &recorded[0]
-        else {
-            panic!("expected a completion record, got {:?}", recorded[0]);
-        };
+        } = completion;
         assert_eq!(call_id, "c2");
         // The attempt, as dispatch minted it before the crash. Naming the call
         // alone would leave a later attempt at the same call indistinguishable.
         assert_eq!(execution_id, "x-c2");
-        assert_eq!(*iteration, 7);
+        assert_eq!(iteration, 7);
         assert_eq!(
-            *outcome,
+            outcome,
             Some(leviath_core::execution::ToolOutcome::Indeterminate)
         );
         // The stand-in the run went on to reason about, recorded as what was in
         // the window rather than as something the tool returned.
         assert!(result.contains("interrupted"), "{result:?}");
+        // And nothing else reads as a completion: the batch that dispatched the
+        // call is a different record with a different meaning.
+        assert!(
+            completion_of(&leviath_core::run_archive::RunRecord::ToolBatch {
+                calls: Vec::new(),
+                at: 1,
+                stage_index: 0,
+                iteration: 7,
+                response: String::new(),
+            })
+            .is_none(),
+            "a batch is not a completion"
+        );
     }
 
     /// A resume with no journal behind it records nothing and still replays.

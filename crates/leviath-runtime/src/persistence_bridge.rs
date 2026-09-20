@@ -84,6 +84,21 @@ pub(crate) enum Appended {
     Failed,
 }
 
+#[cfg(test)]
+impl Appended {
+    /// Where the record landed, if it landed at all.
+    ///
+    /// For tests: the lane's own callers want the three states apart, which is
+    /// what the enum is for, and a test asserting on a position wants the one
+    /// number without a match arm it never takes.
+    pub(crate) fn landed_at(self) -> Option<u64> {
+        match self {
+            Self::Landed { position } => Some(position),
+            Self::NoJournal | Self::Failed => None,
+        }
+    }
+}
+
 /// One message on the persistence lane.
 pub(crate) enum PersistMsg {
     /// A whole-agent snapshot (`meta.json` + `context.json` + the archive step).
@@ -396,21 +411,25 @@ async fn append_record(
     let mut buf: Vec<u8> = Vec::new();
     leviath_core::run_archive::write_record(&mut buf, record)
         .expect("writing to a Vec never fails");
-    match open_private_append(&path).await {
-        Ok(mut file) => {
-            let written = file.write_all(&buf).await;
-            let flushed = file.flush().await;
-            if let Err(e) = written.and(flushed) {
-                tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
-                return Appended::Failed;
-            }
-            Appended::Landed { position }
-        }
+    // Opening, writing and flushing are one outcome to everybody upstream: the
+    // record either reached the file or it did not, and which of the three calls
+    // failed belongs in the log rather than in the answer.
+    match append_bytes(&path, &buf).await {
+        Ok(()) => Appended::Landed { position },
         Err(e) => {
             tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
             Appended::Failed
         }
     }
+}
+
+/// Append `buf` to `path`, flushing before it returns.
+async fn append_bytes(path: &Path, buf: &[u8]) -> std::io::Result<()> {
+    let mut file = open_private_append(path).await?;
+    // Both results, one answer: a flush that fails is the one to report, since
+    // it is the one that says the bytes are not on disk.
+    let written = file.write_all(buf).await;
+    file.flush().await.and(written)
 }
 
 /// Whether a run status is fully terminal (no further snapshots expected).
@@ -1504,7 +1523,7 @@ mod tests {
         .unwrap();
         let settled = settled_rx.await.expect("the first snapshot is written");
         assert!(
-            matches!(settled, Appended::Landed { .. }),
+            settled.landed_at().is_some(),
             "the record went into a real archive: {settled:?}"
         );
         let run_dir = runs.join("run-1");
@@ -1595,10 +1614,8 @@ mod tests {
                 ack: Some(ack_tx),
             })
             .unwrap();
-            match ack_rx.await.expect("acked") {
-                Appended::Landed { position } => positions.push(position),
-                other => panic!("expected a landing, got {other:?}"),
-            }
+            let acked = ack_rx.await.expect("acked");
+            positions.push(acked.landed_at().expect("a real archive takes it"));
         }
         drop(tx);
         worker.await.unwrap();
@@ -1626,10 +1643,19 @@ mod tests {
         let record = run_archive::read_record(&mut tail.as_slice())
             .unwrap()
             .expect("a whole record sits at that position");
-        let run_archive::RunRecord::ToolBatch { calls, .. } = record else {
-            panic!("expected the batch this test appended");
-        };
-        assert_eq!(calls.first().map(|c| c.id.as_str()), Some("c3"));
+        assert_eq!(
+            batch_call_id(&record),
+            Some("c3"),
+            "the record at that position is the batch this test appended"
+        );
+        assert_eq!(
+            batch_call_id(&run_archive::RunRecord::StatusChanged {
+                status: leviath_core::run_meta::RunStatus::Complete,
+                at: 1,
+            }),
+            None,
+            "a record of another kind names no call"
+        );
     }
 
     /// A write that fails is reported as a failure, not as a landing.
@@ -1646,6 +1672,7 @@ mod tests {
         std::fs::create_dir_all(runs.join("run-1").join("run.lvr")).unwrap();
         let landed = append_record(&runs, "run-1", &batch_record(0, "c1")).await;
         assert_eq!(landed, Appended::Failed);
+        assert!(landed.landed_at().is_none(), "a failure is nowhere");
     }
 
     /// A run with no archive yet has nowhere to append, and says so.
@@ -1654,6 +1681,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let landed = append_record(dir.path(), "run-1", &batch_record(0, "c1")).await;
         assert_eq!(landed, Appended::NoJournal);
+        assert!(landed.landed_at().is_none(), "no journal is nowhere");
+    }
+
+    /// The first call id of a batch record, or nothing for any other record.
+    ///
+    /// Exercised both ways below, so the arm that says "this is not a batch" is
+    /// a claim a test makes rather than a branch nothing takes.
+    fn batch_call_id(record: &leviath_core::run_archive::RunRecord) -> Option<&str> {
+        match record {
+            run_archive::RunRecord::ToolBatch { calls, .. } => {
+                calls.first().map(|call| call.id.as_str())
+            }
+            _ => None,
+        }
     }
 
     fn batch_record(iteration: usize, call_id: &str) -> leviath_core::run_archive::RunRecord {
