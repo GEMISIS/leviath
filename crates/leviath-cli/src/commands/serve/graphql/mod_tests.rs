@@ -78,6 +78,19 @@ fn the_published_schema_is_the_one_this_build_serves() {
     assert_eq!(published.replace("\r\n", "\n").trim_end(), sdl().trim_end());
 }
 
+/// The published schema documents the whole surface, admin included.
+///
+/// Two different questions: what this API *is*, which the published file
+/// answers, and what a given server will *do*, which introspection answers on
+/// that server. A published file that hid the admin mutations would leave a
+/// client generating code against a contract it cannot see.
+#[test]
+fn the_published_schema_documents_the_admin_surface() {
+    let sdl = sdl();
+    assert!(sdl.contains("addMcpServer"), "{sdl}");
+    assert!(sdl.contains("putMimeRow"), "{sdl}");
+}
+
 /// The limits are the numbers the module documents, so a change to either is a
 /// deliberate edit rather than a drift.
 #[test]

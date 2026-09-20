@@ -31,7 +31,7 @@ fn run_in(id: &str, status: RunStatus) -> RunMeta {
 async fn mutate(control: ControlClient, query: &str) -> async_graphql::Response {
     let mut state = state_with_agent_paths(Vec::new());
     state.control = control;
-    let schema = Schema::build(Query, Mutation, EmptySubscription)
+    let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
         .data(state)
         .finish();
     schema.execute(Request::new(query)).await
@@ -212,7 +212,7 @@ async fn a_spawn_answers_with_the_run_it_started() {
         });
         let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
         state.control = control;
-        let schema = Schema::build(Query, Mutation, EmptySubscription)
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
             .data(state)
             .finish();
 
@@ -255,7 +255,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
             no_remote_yolo: true,
             ..Default::default()
         });
-        let schema = Schema::build(Query, Mutation, EmptySubscription)
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
             .data(state)
             .finish();
 
@@ -414,7 +414,7 @@ async fn a_second_answer_reads_as_not_accepted() {
     // and the remedy is not the client's.
     let mut state = state_with_agent_paths(Vec::new());
     state.control = no_daemon_client();
-    let schema = Schema::build(Query, Mutation, EmptySubscription)
+    let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
         .data(state)
         .finish();
     let answer = schema
@@ -662,6 +662,215 @@ async fn a_delete_needs_exactly_one_predicate() {
                 .contains("two predicates"),
             "{:?}",
             both.errors
+        );
+    })
+    .await;
+}
+
+/// A manifest exercising the blueprint writes.
+fn manifest_text(name: &str, version: &str) -> String {
+    format!(
+        "[agent]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"d\"\n\n\
+         [stages.only]\nmode = \"autonomous\"\n"
+    )
+}
+
+/// Installing a blueprint, then replacing it, then removing it.
+///
+/// The digest changes with the bytes, which is what tells a client the two
+/// revisions apart.
+#[tokio::test]
+async fn a_blueprint_can_be_installed_replaced_and_removed() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let created = mutate(
+            no_daemon_client(),
+            &format!(
+                r#"mutation {{ createBlueprint(name: "writer", manifest: "{}")
+                     {{ name version digest source }} }}"#,
+                manifest_text("writer", "1.0.0")
+                    .replace('\n', "\\n")
+                    .replace('"', "\\\"")
+            ),
+        )
+        .await;
+        assert!(created.errors.is_empty(), "{:?}", created.errors);
+        let json = serde_json::to_value(&created.data).expect("data serializes");
+        assert_eq!(json["createBlueprint"]["name"], "writer");
+        assert_eq!(json["createBlueprint"]["version"], "1.0.0");
+        // A blueprint read from the installed set is never a run's snapshot.
+        assert_eq!(json["createBlueprint"]["source"], "INSTALLED");
+        let first_digest = json["createBlueprint"]["digest"]
+            .as_str()
+            .expect("a digest")
+            .to_string();
+
+        let updated = mutate(
+            no_daemon_client(),
+            &format!(
+                r#"mutation {{ updateBlueprint(name: "writer", manifest: "{}")
+                     {{ version digest }} }}"#,
+                manifest_text("writer", "2.0.0")
+                    .replace('\n', "\\n")
+                    .replace('"', "\\\"")
+            ),
+        )
+        .await;
+        assert!(updated.errors.is_empty(), "{:?}", updated.errors);
+        let json = serde_json::to_value(&updated.data).expect("data serializes");
+        assert_eq!(json["updateBlueprint"]["version"], "2.0.0");
+        assert_ne!(
+            json["updateBlueprint"]["digest"]
+                .as_str()
+                .unwrap_or_default(),
+            first_digest,
+            "different bytes, different identity"
+        );
+
+        let removed = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteBlueprint(name: "writer") }"#,
+        )
+        .await;
+        assert!(removed.errors.is_empty(), "{:?}", removed.errors);
+    })
+    .await;
+}
+
+/// The refusals: a name already taken, a name that is not installed, a manifest
+/// that will not parse, and a name that could escape the agents directory.
+#[tokio::test]
+async fn the_blueprint_writes_refuse_what_they_should() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let manifest = manifest_text("taken", "1.0.0").replace('\n', "\\n").replace('"', "\\\"");
+        let first = mutate(
+            no_daemon_client(),
+            &format!(r#"mutation {{ createBlueprint(name: "taken", manifest: "{manifest}") {{ name }} }}"#),
+        )
+        .await;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+
+        // Creating it again is a conflict: replacing somebody's agent is what
+        // an edit is for.
+        let again = mutate(
+            no_daemon_client(),
+            &format!(r#"mutation {{ createBlueprint(name: "taken", manifest: "{manifest}") {{ name }} }}"#),
+        )
+        .await;
+        assert_eq!(
+            again
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"CONFLICT\"".to_string())
+        );
+
+        // Editing one that is not installed is a miss, not a create.
+        let missing = mutate(
+            no_daemon_client(),
+            &format!(r#"mutation {{ updateBlueprint(name: "ghost", manifest: "{manifest}") {{ name }} }}"#),
+        )
+        .await;
+        assert_eq!(
+            missing
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+
+        let unparseable = mutate(
+            no_daemon_client(),
+            r#"mutation { createBlueprint(name: "broken", manifest: "not a manifest") { name } }"#,
+        )
+        .await;
+        assert!(
+            unparseable
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("Invalid manifest"),
+            "{:?}",
+            unparseable.errors
+        );
+
+        let traversing = mutate(
+            no_daemon_client(),
+            &format!(r#"mutation {{ createBlueprint(name: "../escape", manifest: "{manifest}") {{ name }} }}"#),
+        )
+        .await;
+        assert!(
+            traversing
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("Invalid blueprint name"),
+            "{:?}",
+            traversing.errors
+        );
+
+        let gone = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteBlueprint(name: "ghost") }"#,
+        )
+        .await;
+        assert!(
+            gone.errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("not found"),
+            "{:?}",
+            gone.errors
+        );
+    })
+    .await;
+}
+
+/// Validation reports what it found. A manifest that will not install is a
+/// report with the reasons, not a failed request.
+#[tokio::test]
+async fn validation_reports_rather_than_fails() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let good = manifest_text("checked", "1.0.0").replace('\n', "\\n").replace('"', "\\\"");
+        let answer = mutate(
+            no_daemon_client(),
+            &format!(
+                r#"mutation {{ validateBlueprint(manifest: "{good}") {{ valid errors warnings }} }}"#
+            ),
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], true);
+        assert_eq!(
+            json["validateBlueprint"]["errors"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        let bad = mutate(
+            no_daemon_client(),
+            r#"mutation { validateBlueprint(manifest: "not a manifest") { valid errors } }"#,
+        )
+        .await;
+        assert!(bad.errors.is_empty(), "a finding is not a request failure");
+        let json = serde_json::to_value(&bad.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], false);
+        assert!(
+            !json["validateBlueprint"]["errors"]
+                .as_array()
+                .expect("errors")
+                .is_empty(),
+            "it says why"
         );
     })
     .await;

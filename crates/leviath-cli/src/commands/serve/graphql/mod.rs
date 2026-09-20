@@ -28,6 +28,7 @@ use axum::response::Response;
 
 use super::types::AppState;
 
+mod admin;
 mod connection;
 mod error;
 mod events;
@@ -63,7 +64,7 @@ pub(super) type LeviathSchema =
 pub(super) fn build_schema(state: AppState) -> LeviathSchema {
     Schema::build(
         query::Query,
-        mutation::Mutation,
+        mutation::Mutation::default(),
         subscription::Subscription_,
     )
     .data(state)
@@ -109,7 +110,7 @@ pub(super) async fn ws(
 pub(super) fn sdl() -> String {
     Schema::build(
         query::Query,
-        mutation::Mutation,
+        mutation::Mutation::default(),
         subscription::Subscription_,
     )
     .finish()

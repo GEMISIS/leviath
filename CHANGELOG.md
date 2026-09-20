@@ -30,6 +30,15 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- Blueprint writes over GraphQL (`createBlueprint`, `updateBlueprint`,
+  `deleteBlueprint`, `validateBlueprint`), and the first of the admin mutations
+  (`addMcpServer`, `removeMcpServer`, `putMimeRow`, `deleteMimeRow`) behind
+  `--allow-admin`. Without that flag they are invisible to introspection and
+  refused with `FORBIDDEN`, which is the closest a single built schema comes to
+  the REST side's unmounted route. Creating a blueprint whose name is already
+  installed now answers `409` rather than replacing it silently, on both
+  surfaces.
+
 - `deleteRuns` over GraphQL, taking exactly one of `ids` or `before`, and
   reporting partial success rather than refusing a sweep because one run in it is
   still going. The checks behind it moved into the service layer with the rest,

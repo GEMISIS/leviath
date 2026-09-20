@@ -416,121 +416,45 @@ fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
 pub(super) async fn create_blueprint(
     Json(body): Json<CreateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, ApiError> {
-    // Validate manifest first, keeping the parsed Blueprint so the response
-    // can be built from it directly below instead of re-reading the file we
-    // just wrote (re-reading would make the re-read's error arm a TOCTOU-only,
-    // untestable dead branch).
-    let bp = parse_manifest(&body.manifest).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid manifest: {}", e),
-            }),
-        )
-    })?;
-
-    let dir = blueprint_dir(&body.name)?;
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to create directory: {}", e),
-            }),
-        )
-    })?;
-
-    let manifest_path = dir.join(leviath_core::files::MANIFEST_FILENAME);
-    std::fs::write(&manifest_path, &body.manifest).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to write manifest: {}", e),
-            }),
-        )
-    })?;
-
-    Ok(Json(BlueprintInfo {
-        name: bp.name.clone(),
-        version: bp.version.clone(),
-        description: bp.description.clone(),
-        path: dir.to_string_lossy().to_string(),
-        stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
-        // The text just written. Not serialized on this route, which returns
-        // the catalog shape, but carried so the value is never a lie.
-        manifest: body.manifest,
-        parsed: std::sync::Arc::new(bp),
-    }))
+    written(&body.name, body.manifest, false).map_err(|e| super::core::error::as_api_error(&e))
 }
 
 pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, ApiError> {
-    let bp = parse_manifest(&body.manifest).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid manifest: {}", e),
-            }),
-        )
-    })?;
+    written(&name, body.manifest, true).map_err(|e| super::core::error::as_api_error(&e))
+}
 
-    let dir = blueprint_dir(&name)?;
-    let manifest_path = dir.join(leviath_core::files::MANIFEST_FILENAME);
-    if !manifest_path.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Blueprint '{}' not found", name),
-            }),
-        ));
-    }
-
-    std::fs::write(&manifest_path, &body.manifest).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to write manifest: {}", e),
-            }),
-        )
-    })?;
-
+/// Install or replace a blueprint, and describe what was written.
+fn written(
+    name: &str,
+    manifest: String,
+    replacing: bool,
+) -> Result<Json<BlueprintInfo>, super::core::error::ServeError> {
+    let written = super::core::blueprints::write_blueprint(name, manifest, replacing)?;
     Ok(Json(BlueprintInfo {
-        name: bp.name.clone(),
-        version: bp.version.clone(),
-        description: bp.description.clone(),
-        path: dir.to_string_lossy().to_string(),
-        stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
-        // The text just written. Not serialized on this route, which returns
-        // the catalog shape, but carried so the value is never a lie.
-        manifest: body.manifest,
-        parsed: std::sync::Arc::new(bp),
+        name: written.parsed.name.clone(),
+        version: written.parsed.version.clone(),
+        description: written.parsed.description.clone(),
+        path: written.dir.to_string_lossy().to_string(),
+        stages: written
+            .parsed
+            .stages
+            .iter()
+            .map(|stage| stage.name.clone())
+            .collect(),
+        manifest: written.manifest.text,
+        parsed: written.parsed,
     }))
 }
 
 pub(super) async fn delete_blueprint(
     AxumPath(name): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let dir = blueprint_dir(&name)?;
-    if !dir.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Blueprint '{}' not found", name),
-            }),
-        ));
-    }
-
-    std::fs::remove_dir_all(&dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to delete blueprint: {}", e),
-            }),
-        )
-    })?;
-
-    Ok(StatusCode::NO_CONTENT)
+    super::core::blueprints::remove_blueprint(&name)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// `POST /api/blueprints/validate`: parse, validate and lint a manifest.
@@ -565,7 +489,7 @@ pub(super) async fn validate_blueprint(
 /// A manifest typed from nothing has no directory to offer, and then the lint
 /// runs against the built-in tool set alone, which is the most that can be
 /// said about it.
-fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResponse {
+pub(super) fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResponse {
     let bp = match parse_manifest(manifest) {
         Ok(bp) => bp,
         Err(e) => return ValidateResponse::invalid(vec![e.to_string()]),
