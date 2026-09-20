@@ -20,7 +20,7 @@ use super::types::run::Run;
 use crate::runstate;
 
 /// One caller-supplied metadata entry.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct MetadataEntryInput {
     /// The key.
     pub(crate) key: String,
@@ -29,7 +29,7 @@ pub(crate) struct MetadataEntryInput {
 }
 
 /// Seed text for one named context region at spawn.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct RegionSeedInput {
     /// The region to seed, by name.
     pub(crate) region: String,
@@ -38,7 +38,7 @@ pub(crate) struct RegionSeedInput {
 }
 
 /// Everything about a new run.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct SpawnAgentInput {
     /// The blueprint to start, by name.
     pub(crate) blueprint: String,
@@ -79,7 +79,7 @@ pub(crate) struct SpawnAgentInput {
 }
 
 /// Answer a multiple-choice ask.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct AnswerChoiceInput {
     /// The open request being answered.
     pub(crate) request_id: String,
@@ -88,7 +88,7 @@ pub(crate) struct AnswerChoiceInput {
 }
 
 /// Answer a free-text or edit-text ask.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct AnswerTextInput {
     /// The open request being answered.
     pub(crate) request_id: String,
@@ -119,7 +119,7 @@ impl From<ApprovalScope> for leviath_core::interaction::ApprovalScope {
 }
 
 /// Answer a confirm or a tool approval.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct AnswerApprovalInput {
     /// The open request being answered.
     pub(crate) request_id: String,
@@ -139,7 +139,7 @@ pub(crate) struct AnswerApprovalInput {
 /// for a multiple-choice ask, text for a free-text or edit-text one, an
 /// approval for a confirm or a tool approval. One variant at a time is the
 /// schema's own rule, so there is no combination to get wrong.
-#[derive(Debug, OneofObject)]
+#[derive(OneofObject)]
 pub(crate) enum AnswerInteractionInput {
     /// For a multiple-choice ask.
     Choice(AnswerChoiceInput),
@@ -264,9 +264,11 @@ fn installed(
 ) -> async_graphql::Result<Blueprint> {
     let state = ctx.data_unchecked::<AppState>();
     let written = blueprint_core::write_blueprint(name, manifest, replacing).gql()?;
-    // Into the parse cache by digest, so the listing that follows this
-    // mutation does not parse the same text again.
-    state.caches.blueprints.parse(&written.manifest).gql()?;
+    // Into the parse cache by digest, so the listing that follows this mutation
+    // does not parse the same text again. Best effort on purpose: the text was
+    // parsed to write it, the blueprint is on disk either way, and a cache that
+    // did not warm costs one parse rather than the request.
+    let _ = state.caches.blueprints.parse(&written.manifest);
     Ok(Blueprint {
         parsed: written.parsed,
         digest: written.manifest.digest,
@@ -596,7 +598,11 @@ impl RunMutation {
         // point is everything at once. The listing's own scan bounds still do.
         let mut selection = filter.unwrap_or_default().everything().gql()?;
         selection.fields = fields.map(|named| named.into_iter().collect());
-        let spec = selection.resolve(None).gql()?;
+        // No cursor to decode: an export is not a page, so the one failure
+        // `resolve` has here cannot happen.
+        let spec = selection
+            .resolve(None)
+            .expect("an unpaged selection has no cursor to refuse");
         let job = super::super::core::export::start(state, spec, super::super::runs::known_fields)
             .await
             .gql()?;

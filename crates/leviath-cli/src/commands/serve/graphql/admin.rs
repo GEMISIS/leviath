@@ -285,21 +285,15 @@ impl AdminMutation {
             agents,
             migrations,
         };
-        let id = state
+        // The record the registry wrote, rather than an id read back from it:
+        // what a client sees now is the same record `updateJob` will answer
+        // with in a moment, and there is no absent case to invent an answer for.
+        let job = state
             .update_jobs
             .spawn(request, &state.event_tx)
             .map_err(|running| ServeError::Conflict(format!("update {running} is already running")))
             .gql()?;
-        // Read back rather than assembled here, so what a client sees now is the
-        // same record `updateJob` will answer with in a moment.
-        state
-            .update_jobs
-            .get(&id)
-            .map(super::types::update::UpdateJob::from)
-            .ok_or_else(|| {
-                ServeError::Internal(format!("update '{id}' started but was not recorded"))
-            })
-            .gql()
+        Ok(super::types::update::UpdateJob::from(job))
     }
 
     /// Sign in to a subscription provider.
@@ -446,7 +440,7 @@ impl AdminMutation {
 }
 
 /// One row of the mime registry, as a write sends it.
-#[derive(Debug, async_graphql::InputObject)]
+#[derive(async_graphql::InputObject)]
 pub(crate) struct MimeRowInput {
     /// The type or pattern this row covers: `image/png`, or `image/*`.
     pub(crate) mime_type: String,
@@ -468,7 +462,7 @@ pub(crate) struct MimeRowInput {
 }
 
 /// How the tokens of a mime type are counted. Name exactly one rate.
-#[derive(Debug, async_graphql::InputObject)]
+#[derive(async_graphql::InputObject)]
 pub(crate) struct MimeTokensInput {
     /// Tokens per byte of the stored file.
     pub(crate) per_byte: Option<f64>,

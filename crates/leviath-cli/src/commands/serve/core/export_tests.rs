@@ -256,7 +256,7 @@ async fn an_export_the_filesystem_refuses_is_reported() {
             .enqueue(leviath_core::duration::now_secs());
         std::fs::create_dir_all(export_path(&job.id)).expect("a directory in the way");
 
-        let written = super::write_rows(&export_path(&job.id), &[serde_json::json!({"a": 1})]);
+        let written = super::write_file(&export_path(&job.id), &[serde_json::json!({"a": 1})]);
         assert!(written.is_err(), "a directory is not a file to write");
     })
     .await;
@@ -289,4 +289,157 @@ async fn a_recent_export_survives_the_sweep() {
         assert!(path.exists(), "and its file is still there");
     })
     .await;
+}
+
+/// An export whose write fails records the failure on the job.
+///
+/// The request answered before the file existed, so the only place a client can
+/// learn the write broke is the job it is polling: a job stuck on `running`
+/// forever would read as a slow export.
+#[tokio::test]
+async fn an_export_that_cannot_be_written_records_why() {
+    crate::runstate::with_isolated_runs_dir_async("export-write-fails", |_d| async move {
+        create_run(&meta_at("run-a", 100)).expect("run written");
+        let state = state_with_agent_paths(Vec::new());
+        // A directory standing where the next export's file will go. The id is
+        // the clock plus a counter, so the one this export will take is known.
+        std::fs::create_dir_all(exports_dir()).expect("the exports directory");
+        let now = leviath_core::duration::now_secs();
+        std::fs::create_dir_all(exports_dir().join(format!("export-{now}-0.jsonl")))
+            .expect("a directory in the way");
+
+        let job = start(&state, all_runs(None).resolve(None).expect("a spec"), known)
+            .await
+            .expect("the export starts");
+        let finished = settled(&state.caches.exports, &job.id).await;
+        assert_eq!(finished.status, ExportStatus::Failed);
+        assert!(
+            finished.error.as_deref().is_some_and(|why| !why.is_empty()),
+            "the job says why: {finished:?}"
+        );
+    })
+    .await;
+}
+
+/// A runs directory at the filesystem root has nowhere beside it, so the
+/// exports go inside it.
+///
+/// Not a path any install takes: `LEVIATH_RUNS_DIR=/` is the shape, and the
+/// answer is a directory that exists rather than one built from an empty parent.
+#[test]
+fn a_runs_directory_with_no_parent_keeps_its_exports_inside() {
+    let at_root = super::exports_dir_beside(std::path::Path::new("/"));
+    assert_eq!(at_root, std::path::Path::new("/exports"));
+}
+
+/// Where exports go is beside the run store rather than inside it.
+///
+/// Inside it, an export would be a run directory to every walk of the store: the
+/// listing would count it, and a sweep by age would consider deleting it.
+#[test]
+fn exports_live_beside_the_run_store() {
+    let dir = exports_dir();
+    assert!(dir.ends_with("exports"), "{}", dir.display());
+    assert_ne!(dir, crate::runstate::runs_dir());
+}
+
+/// An exports directory that cannot be made is reported before a job is
+/// recorded.
+///
+/// A job with no directory to write into would sit at `queued` forever, which is
+/// indistinguishable from a slow export.
+#[tokio::test]
+async fn an_exports_directory_that_cannot_be_made_is_reported() {
+    crate::runstate::with_isolated_runs_dir_async("export-no-dir", |_d| async move {
+        let state = state_with_agent_paths(Vec::new());
+        // A file standing where the directory goes, which nothing creates but
+        // which stands in for a directory the filesystem refuses.
+        let dir = exports_dir();
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent).expect("the data directory");
+        }
+        std::fs::write(&dir, "not a directory").expect("a file in the way");
+
+        let failure = start(&state, all_runs(None).resolve(None).expect("a spec"), known)
+            .await
+            .expect_err("there is nowhere to write");
+        assert_eq!(failure.code(), "INTERNAL");
+        assert!(
+            failure.to_string().contains("exports directory"),
+            "{failure}"
+        );
+    })
+    .await;
+}
+
+/// Writing no rows is a file with nothing in it rather than no file.
+///
+/// A client that asked for an export of a filter nothing matches gets an empty
+/// file and a `written` of zero, which is an answer; a missing file would read
+/// as a failure.
+#[test]
+fn an_export_of_nothing_is_an_empty_file() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dir.path().join("empty.jsonl");
+    let written = super::write_file(&path, &[]).expect("it writes");
+    assert_eq!(written, 0);
+    assert_eq!(std::fs::read_to_string(&path).expect("the file"), "");
+}
+
+/// A write that fails partway is reported rather than counted as written.
+///
+/// A client only ever learns about this from the job, so the worker has to hear
+/// it: the request was answered before the file existed.
+#[test]
+fn a_writer_that_gives_up_is_reported() {
+    /// A writer that takes one line and then refuses, standing in for a disk
+    /// that filled up mid-export.
+    struct OneLine {
+        written: usize,
+    }
+
+    impl std::io::Write for OneLine {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written += buf.len();
+            match self.written > 8 {
+                true => Err(std::io::Error::other("no space left")),
+                false => Ok(buf.len()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let rows: Vec<serde_json::Value> = (0..4)
+        .map(|i| serde_json::json!({ "run_id": format!("run-{i}") }))
+        .collect();
+    let failed =
+        super::write_rows(OneLine { written: 0 }, &rows).expect_err("the writer gave up partway");
+    assert_eq!(failed.to_string(), "no space left");
+}
+
+/// A writer that accepts everything and refuses to flush is reported too.
+///
+/// The bytes are buffered, so a flush is where a full disk usually announces
+/// itself: an export that ignored it would report a complete file with its tail
+/// missing.
+#[test]
+fn a_flush_that_fails_is_reported() {
+    struct NeverFlushes;
+
+    impl std::io::Write for NeverFlushes {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("the disk went away"))
+        }
+    }
+
+    let failed = super::write_rows(NeverFlushes, &[serde_json::json!({ "run_id": "a" })])
+        .expect_err("the flush failed");
+    assert_eq!(failed.to_string(), "the disk went away");
 }

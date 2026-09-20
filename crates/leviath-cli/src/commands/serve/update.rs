@@ -97,7 +97,7 @@ pub(super) async fn post_update(
         Err(message) => return err(StatusCode::BAD_REQUEST, message).into_response(),
     };
     match state.update_jobs.spawn(req, &state.event_tx) {
-        Ok(job_id) => (StatusCode::ACCEPTED, Json(started(&job_id, req))).into_response(),
+        Ok(job) => (StatusCode::ACCEPTED, Json(started(&job.id, req))).into_response(),
         Err(running) => err(
             StatusCode::CONFLICT,
             format!("update {running} is already running"),
@@ -493,7 +493,8 @@ mod tests {
         let running = state
             .update_jobs
             .start()
-            .expect("nothing is running to begin with");
+            .expect("nothing is running to begin with")
+            .id;
         let (status, body) = call(update_app(state), post_with("")).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(
@@ -508,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_can_be_read_back_by_id() {
         let (_dir, state) = applying_state();
-        let id = state.update_jobs.start().expect("nothing is running");
+        let id = state.update_jobs.start().expect("nothing is running").id;
         let request = Request::builder()
             .uri(format!("/api/update/jobs/{id}"))
             .body(Body::empty())

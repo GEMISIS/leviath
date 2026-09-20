@@ -264,7 +264,7 @@ fn an_empty_query_string_is_treated_as_no_search() {
     assert!(resolve_ok(&[("q", "")]).q.is_none());
 }
 
-/// The three things `parent` can mean, and the one spelling that is a keyword.
+/// Every shape `parent` has, and the two spellings that are keywords.
 #[test]
 fn parent_resolves_to_the_three_shapes_it_has() {
     assert_eq!(resolve_ok(&[]).parent, ParentFilter::Any);
@@ -275,8 +275,16 @@ fn parent_resolves_to_the_three_shapes_it_has() {
         ParentFilter::Roots
     );
     assert_eq!(
+        resolve_ok(&[("parent", "sub")]).parent,
+        ParentFilter::SubAgents
+    );
+    assert_eq!(
         resolve_ok(&[("parent", "run-7")]).parent,
         ParentFilter::Of("run-7".to_string())
+    );
+    assert_eq!(
+        resolve_ok(&[("descendant_of", "run-7")]).parent,
+        ParentFilter::Under("run-7".to_string())
     );
 
     // And what each keeps, which is the half the handler leans on.
@@ -286,6 +294,44 @@ fn parent_resolves_to_the_three_shapes_it_has() {
     assert!(ParentFilter::Roots.keeps(&root) && !ParentFilter::Roots.keeps(&child));
     let of_root = ParentFilter::Of("root".to_string());
     assert!(of_root.keeps(&child) && !of_root.keeps(&root));
+    // The mirror of `Roots`, and the one filter a single record cannot answer:
+    // a subtree needs the tree, so per-record it keeps everything and the
+    // listing narrows it with `keeps_in`.
+    assert!(ParentFilter::SubAgents.keeps(&child) && !ParentFilter::SubAgents.keeps(&root));
+    let under = ParentFilter::Under("root".to_string());
+    assert!(under.keeps(&root) && under.keeps(&child));
+    let descendants = std::collections::HashSet::from(["child".to_string()]);
+    assert!(under.keeps_in(&child, &descendants));
+    assert!(!under.keeps_in(&root, &descendants), "not the root itself");
+    // Every other filter answers the same either way, so the listing can call
+    // the tree-aware form for all of them.
+    assert!(ParentFilter::Roots.keeps_in(&root, &descendants));
+}
+
+/// `parent` and `descendant_of` name two different sets, so one request cannot
+/// ask for both.
+#[test]
+fn the_two_tree_filters_cannot_be_combined() {
+    let refused = resolve_err(&[("parent", "root"), ("descendant_of", "root")]);
+    assert!(
+        refused.contains("descendant_of") && refused.contains("parent"),
+        "it names both: {refused}"
+    );
+}
+
+/// A blueprint filter is part of the filter set, so a cursor cannot cross it.
+#[test]
+fn a_cursor_is_bound_to_the_blueprint_filter() {
+    let all = resolve_ok(&[]);
+    let narrowed = resolve_ok(&[("blueprint", "coder")]);
+    assert_eq!(narrowed.blueprint.as_deref(), Some("coder"));
+    assert_ne!(
+        all.digest, narrowed.digest,
+        "a cursor from one listing cannot resume in the other"
+    );
+    // And a listing that does not use it digests exactly as it did before the
+    // parameter existed, so a cursor a client is holding still resumes.
+    assert!(all.blueprint.is_none());
 }
 
 /// A cursor carries the filters it was minted under, so a walk cannot change

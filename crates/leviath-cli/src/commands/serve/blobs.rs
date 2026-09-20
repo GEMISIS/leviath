@@ -80,11 +80,9 @@ pub(super) async fn export_file(
                 "export '{id}' is complete, but its file cannot be read: {e}"
             )))
         })?;
-    let jsonl = MimeType::parse("application/jsonl").map_err(|e| {
-        super::core::error::as_api_error(&ServeError::Internal(format!(
-            "the export's own content type will not parse: {e}"
-        )))
-    })?;
+    // A literal this crate writes, so there is no failure to report: parsing it
+    // is how the response's own type is built rather than a claim about input.
+    let jsonl = MimeType::parse("application/jsonl").expect("jsonl is a mime type");
     bytes_response(
         bytes,
         &jsonl,

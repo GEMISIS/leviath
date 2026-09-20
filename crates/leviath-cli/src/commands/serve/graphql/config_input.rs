@@ -11,7 +11,7 @@ use async_graphql::{InputObject, MaybeUndefined};
 use super::super::config_types::{GatewayWrite, WriteConfigReq};
 
 /// One name and value, for a gateway's headers.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct EnvEntryInput {
     /// The header or variable name.
     pub(crate) name: String,
@@ -20,7 +20,7 @@ pub(crate) struct EnvEntryInput {
 }
 
 /// A custom model gateway to write into the config.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct GatewayInput {
     /// The name an agent references, and the table key.
     pub(crate) name: String,
@@ -43,7 +43,7 @@ pub(crate) struct GatewayInput {
 /// Every field is optional. A key with three states says so in its own
 /// description: those are the ones where clearing the setting is a thing a
 /// person does, and where `null` is how they say it.
-#[derive(Debug, InputObject)]
+#[derive(InputObject)]
 pub(crate) struct ConfigInput {
     /// The provider a bare model name resolves on.
     pub(crate) default_provider: Option<String>,

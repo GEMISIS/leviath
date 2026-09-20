@@ -72,16 +72,18 @@ pub(crate) struct Decimal(pub(crate) f64);
 /// shortest round-tripping form rather than inventing precision.
 #[Scalar(name = "Decimal")]
 impl ScalarType for Decimal {
+    /// Read one from the string it travels as.
+    ///
+    /// A JSON number is refused rather than accepted, for the same reason this
+    /// goes out as a string: a parser that re-rounds a cost figure on the way in
+    /// has changed it, and a schema that took both would make the round trip
+    /// depend on which one a client chose.
     fn parse(value: Value) -> InputValueResult<Self> {
         match value {
             Value::String(s) => s
                 .parse::<f64>()
                 .map(Decimal)
                 .map_err(|_| InputValueError::custom("expected a decimal string")),
-            Value::Number(n) => n
-                .as_f64()
-                .map(Decimal)
-                .ok_or_else(|| InputValueError::custom("expected a number")),
             other => Err(InputValueError::expected_type(other)),
         }
     }
@@ -131,7 +133,9 @@ impl ScalarType for Json {
     }
 
     fn to_value(&self) -> Value {
-        Value::from_json(self.0.clone()).unwrap_or(Value::Null)
+        // Every JSON value has a GraphQL counterpart, so this conversion has no
+        // failing case for a value that was itself JSON a moment ago.
+        Value::from_json(self.0.clone()).expect("a JSON value converts to a GraphQL one")
     }
 }
 
@@ -178,10 +182,14 @@ mod tests {
             Decimal::parse(Value::String("0.25".into())).expect("parsed"),
             Decimal(0.25)
         );
-        let number = Value::Number(serde_json::Number::from_f64(0.25).expect("finite"));
-        assert_eq!(Decimal::parse(number).expect("parsed"), Decimal(0.25));
         assert!(Decimal::parse(Value::String("free".into())).is_err());
         assert!(Decimal::parse(Value::Boolean(true)).is_err());
+        // A JSON number is refused for the same reason this goes out as a
+        // string: a parser that re-rounds a cost figure has changed it, and a
+        // scalar that took both would make the round trip depend on which form
+        // a client picked.
+        let number = Value::Number(serde_json::Number::from_f64(0.25).expect("finite"));
+        assert!(Decimal::parse(number).is_err());
     }
 
     /// A cursor is carried, never interpreted.
@@ -194,34 +202,6 @@ mod tests {
             token
         );
         assert!(Cursor::parse(Value::Boolean(false)).is_err());
-    }
-
-    /// A decimal reads back from either shape it travels in.
-    ///
-    /// A string on the way out, because a JSON parser that re-rounds a cost is
-    /// lying about spend; a number on the way in as well, because a client that
-    /// sends one meant it.
-    #[test]
-    fn a_decimal_reads_from_a_string_or_a_number() {
-        assert_eq!(
-            Decimal::parse(Value::String("0.0425".to_string())).expect("a decimal"),
-            Decimal(0.0425)
-        );
-        assert_eq!(
-            Decimal::parse(Value::Number(
-                serde_json::Number::from_f64(2.5).expect("a number")
-            ))
-            .expect("a decimal"),
-            Decimal(2.5)
-        );
-        assert!(
-            Decimal::parse(Value::String("not a number".to_string())).is_err(),
-            "a string that is not a decimal is refused"
-        );
-        assert!(
-            Decimal::parse(Value::Boolean(true)).is_err(),
-            "and so is a value that is neither"
-        );
     }
 
     /// Arbitrary JSON survives the round trip, including the shapes that have no

@@ -285,7 +285,7 @@ impl UpdateJobs {
     /// that double-clicked the button meant one update. The check and the
     /// insert are one locked step on purpose - two requests arriving together
     /// would both see "nothing running" if they were two.
-    pub(super) fn start(&self) -> Result<String, String> {
+    pub(super) fn start(&self) -> Result<UpdateJob, String> {
         let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(running) = jobs.iter().find(|job| job.status == RUNNING) {
             return Err(running.id.clone());
@@ -295,12 +295,15 @@ impl UpdateJobs {
             "update-{now}-{}",
             self.seq.fetch_add(1, Ordering::SeqCst) + 1
         );
-        jobs.push(UpdateJob::new(id.clone(), now));
+        let job = UpdateJob::new(id, now);
+        jobs.push(job.clone());
         // Oldest first, so trimming from the front drops the oldest.
         while jobs.len() > KEEP_JOBS {
             jobs.remove(0);
         }
-        Ok(id)
+        // The record rather than its id: a caller that had to read it back would
+        // need an answer for a job that is not there, and there is no such job.
+        Ok(job)
     }
 
     /// Change one step of a job, and announce it.
@@ -375,11 +378,11 @@ impl UpdateJobs {
         &self,
         req: ApplyRequest,
         events: &broadcast::Sender<ServerEvent>,
-    ) -> Result<String, String> {
-        let id = self.start()?;
-        let (store, events, job_id) = (self.clone(), events.clone(), id.clone());
+    ) -> Result<UpdateJob, String> {
+        let job = self.start()?;
+        let (store, events, job_id) = (self.clone(), events.clone(), job.id.clone());
         tokio::task::spawn_blocking(move || store.apply(&job_id, req, &events));
-        Ok(id)
+        Ok(job)
     }
 
     /// The three steps, in order, against a freshly read plan.

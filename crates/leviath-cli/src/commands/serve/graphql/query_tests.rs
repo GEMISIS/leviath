@@ -1705,3 +1705,168 @@ mod machine_listings {
         .await;
     }
 }
+
+/// The answers that only appear when something is wrong or unusual.
+mod the_awkward_shapes {
+    use super::*;
+
+    /// A config that will not load is reported inside a healthy answer, with
+    /// where and why.
+    ///
+    /// The alternative is refusing the request, which would leave a console with
+    /// nothing to render and no way to say what is wrong: the settings screen is
+    /// exactly where somebody would fix it.
+    #[tokio::test]
+    async fn a_config_that_will_not_load_is_reported_not_refused() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let path = home.join("config.toml");
+            std::fs::write(&path, "default_provider = \"openai\"\n").expect("a config file");
+            let state = crate::commands::serve::testutil::state_with_config_at(&path);
+            // Broken after the server started, which is the order a person
+            // editing it produces: the server keeps the last one that loaded and
+            // says what is wrong with the file on disk.
+            std::fs::write(&path, "default_provider = \n").expect("a broken config file");
+            let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+                .data(state)
+                .finish();
+            let answer = schema
+                .execute(Request::new(
+                    "{ config { defaultProvider configMtime
+                         configError { kind path message line column key note } } }",
+                ))
+                .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let error = &json["config"]["configError"];
+            assert_eq!(error["kind"], "parse");
+            assert!(
+                error["path"]
+                    .as_str()
+                    .is_some_and(|p| p.ends_with("config.toml")),
+                "it names the file: {error}"
+            );
+            assert!(
+                error["message"].as_str().is_some_and(|m| !m.is_empty()),
+                "and says what is wrong: {error}"
+            );
+            assert!(
+                error["line"].as_i64().is_some(),
+                "a parse failure knows where it is: {error}"
+            );
+            assert!(
+                error["note"].as_str().is_some_and(|n| !n.is_empty()),
+                "said in words for a client that renders strings: {error}"
+            );
+            // The config in force is still answered: it is the last one that
+            // loaded, which is what the daemon is running on.
+            assert!(json["config"]["defaultProvider"].as_str().is_some());
+        })
+        .await;
+    }
+
+    /// An agent's own scripts and paths come back beside the global ones.
+    #[tokio::test]
+    async fn an_agents_own_tools_carry_its_name_and_path() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let agent = home.join(".leviath").join("agents").join("coder");
+            std::fs::create_dir_all(agent.join("tools")).expect("the agent's tools directory");
+            std::fs::write(
+                agent.join("agent.leviath"),
+                "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
+                 \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
+                 \n[stages.only]\nmode = \"autonomous\"\n",
+            )
+            .expect("a manifest");
+            std::fs::write(
+                agent.join("tools").join("summarize.rhai"),
+                "// @tool summarize\n// @description sums up\n\"ok\"",
+            )
+            .expect("a tool");
+
+            let answer =
+                run_query(r#"{ tools(agent: "coder") { tools { name source path agent } } }"#)
+                    .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let tools = json["tools"]["tools"].as_array().expect("the tools");
+            let own = tools
+                .iter()
+                .find(|tool| tool["name"] == "summarize")
+                .expect("the agent's own tool");
+            assert_eq!(own["agent"], "coder", "whose tool it is");
+            assert!(
+                own["path"]
+                    .as_str()
+                    .is_some_and(|p| p.ends_with("summarize.rhai")),
+                "and where it came from: {own}"
+            );
+        })
+        .await;
+    }
+
+    /// A profile that asks before everything reads as `ask` rather than as the
+    /// other word.
+    #[tokio::test]
+    async fn a_profile_that_asks_says_ask() {
+        crate::commands::serve::testutil::with_home(|_home| async move {
+            let path = crate::yolo::yolo_path();
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+            std::fs::write(
+                &path,
+                "[cautious]\ndefault = \"ask\"\nquestions = \"ask\"\n\
+                 checkpoints = \"ask\"\ngate = \"ask\"\n",
+            )
+            .expect("the profiles");
+
+            let answer = run_query(
+                "{ yoloProfiles { profiles { name default questions checkpoints gate } } }",
+            )
+            .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let profile = &json["yoloProfiles"]["profiles"][0];
+            assert_eq!(profile["default"], "ask");
+            assert_eq!(profile["questions"], "ask");
+            assert_eq!(profile["checkpoints"], "ask");
+            assert_eq!(profile["gate"], "ask");
+        })
+        .await;
+    }
+
+    /// A search that hits a stage's own text says which stage it was.
+    #[tokio::test]
+    async fn a_match_inside_a_stage_names_the_stage() {
+        crate::runstate::with_isolated_runs_dir_async("graphql-stage-hit", |_dir| async move {
+            let meta = meta_at("logged", 100);
+            create_run(&meta).expect("run written");
+            // The search reads the stages the ledger records rather than the
+            // directories that happen to exist, so the ledger comes first.
+            crate::runstate::write_stages_index(
+                "logged",
+                &[leviath_core::run_meta::StageRecord::new(
+                    "only".to_string(),
+                    0,
+                )],
+            )
+            .expect("the ledger");
+            crate::runstate::append_stage_output("logged", 0, "the parser gave up\n");
+
+            let answer = run_query(
+                r#"{ runs(filter: { query: "parser", queryIn: [LOGS] })
+                     { edges { highlights { field snippet stage } } } }"#,
+            )
+            .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let highlights = json["runs"]["edges"][0]["highlights"]
+                .as_array()
+                .expect("highlights");
+            let hit = highlights
+                .iter()
+                .find(|hit| hit["stage"].as_i64().is_some())
+                .expect("a match that knows its stage");
+            assert_eq!(hit["stage"], 0, "{hit}");
+        })
+        .await;
+    }
+}
