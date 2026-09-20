@@ -90,6 +90,19 @@ same list.
   who did not ask for it. A file and its job record are kept for an hour and
   removed together, so neither outlives the other.
 
+- The whole manifest over GraphQL, field by field. A stage carries its model
+  block, its tool routing and permissions, its checkpoints, its output shape, its
+  hooks, its fan-out and the edges out of it with their conditions, transforms and
+  gates; a blueprint carries its dependencies, the mime rows it ships, its
+  sandbox, its summarizer, its file tracking and what it would like to run
+  unasked; a region carries its budget, its policies and what seeds it. A setting
+  the author left out reads as null rather than as its default, and
+  `Stage.effective` is the resolved answer beside it: the batch hint, the shell
+  hint, the nudge, the sandbox and taint tracking, each resolved stage over
+  blueprint over this machine's config. Two revisions of one blueprint are two
+  ids, so "what did this run execute" and "what is installed now" stay separate
+  questions.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

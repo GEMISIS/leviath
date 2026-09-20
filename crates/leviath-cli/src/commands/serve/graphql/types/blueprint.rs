@@ -12,6 +12,19 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 
 use super::super::super::core::blueprints::BlueprintSource as CoreSource;
+use super::manifest::count;
+use super::manifest::dependency::BlueprintDependency;
+use super::manifest::mime::BlueprintMimeRow;
+use super::manifest::output::OutputSpec;
+use super::manifest::region::{
+    RegionAdmission, RegionEviction, RegionSeed, RegionStrategy, RegionVolatility,
+};
+use super::manifest::runtime::{
+    BlueprintSecurity, CompactionConfig, FileTrackingConfig, NudgeConfig, RepetitionDetection,
+    SafeCommands, SandboxConfig,
+};
+use super::manifest::stage::Stage;
+use super::manifest::transition::ContextTransform;
 use leviath_core::Blueprint as CoreBlueprint;
 
 /// How much of the digest an id carries.
@@ -91,54 +104,6 @@ pub(crate) struct ToolUseGuidance {
     pub(crate) shell_for_multi_step_work: HintSetting,
 }
 
-/// How a stage runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub(crate) enum StageMode {
-    /// The tight loop: infer, act on tool calls, repeat until a transition
-    /// fires.
-    Autonomous,
-    /// Pauses for a person at every step.
-    Interactive,
-    /// Holds at each declared interaction point instead of at every step.
-    InteractivePoints,
-    /// Splits work across worker agents, then continues.
-    FanOut,
-    /// Produces the run's final answer and nothing else.
-    Output,
-}
-
-impl From<&leviath_core::blueprint::StageMode> for StageMode {
-    fn from(mode: &leviath_core::blueprint::StageMode) -> Self {
-        use leviath_core::blueprint::StageMode as Core;
-        match mode {
-            Core::Autonomous => Self::Autonomous,
-            Core::Interactive => Self::Interactive,
-            Core::InteractivePoints { .. } => Self::InteractivePoints,
-            Core::FanOut { .. } => Self::FanOut,
-            Core::Output => Self::Output,
-        }
-    }
-}
-
-/// What a stage must produce before it may transition.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct OutputRequirement {
-    /// How many times the stage is asked again when it tries to leave without
-    /// having submitted. After that the transition proceeds anyway and the
-    /// run's `outputForced` counter records it: a missing answer never strands
-    /// a run.
-    pub(crate) reasks: i32,
-}
-
-/// One outgoing edge of a stage.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct TransitionEdge {
-    /// The stage this edge leads to.
-    pub(crate) target: String,
-    /// Told to the model when it is choosing where to go next.
-    pub(crate) hint: Option<String>,
-}
-
 /// What a region does when it fills.
 ///
 /// One value per kind the daemon recognises. The manifest accepts `hashmap`
@@ -203,9 +168,40 @@ impl Region {
         RegionKind::from(&self.region().kind)
     }
 
-    /// Hard token ceiling for the region.
+    /// Hard token ceiling for the region, as resolved for this layout.
+    ///
+    /// A region whose budget is a share of the window carries the share in
+    /// `budgetPercent`, and this number is what that resolved to against the
+    /// layout's own window.
     async fn max_tokens(&self) -> i32 {
-        i32::try_from(self.region().max_tokens).unwrap_or(i32::MAX)
+        count(self.region().max_tokens)
+    }
+
+    /// The share of the model's context window this region claims, as a
+    /// percentage. Null when the region names a fixed ceiling instead.
+    async fn budget_percent(&self) -> Option<f64> {
+        match &self.region().budget {
+            leviath_core::layout::BudgetSpec::Percent { percent, .. } => Some(percent * 100.0),
+            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+        }
+    }
+
+    /// The floor a percentage budget resolves no lower than, so a small-context
+    /// model does not starve the region.
+    async fn min_tokens(&self) -> Option<i32> {
+        match &self.region().budget {
+            leviath_core::layout::BudgetSpec::Percent { min, .. } => min.map(count),
+            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+        }
+    }
+
+    /// The ceiling a percentage budget resolves no higher than, so a share of a
+    /// very large window does not balloon.
+    async fn budget_max_tokens(&self) -> Option<i32> {
+        match &self.region().budget {
+            leviath_core::layout::BudgetSpec::Percent { max, .. } => max.map(count),
+            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+        }
     }
 
     /// One line on what this region is for.
@@ -218,10 +214,119 @@ impl Region {
         self.region().required
     }
 
+    /// Shown when a required region is empty. `{region}` is filled in.
+    async fn required_message(&self) -> Option<&str> {
+        self.region().required_message.as_deref()
+    }
+
     /// Whether the description is also shown to the model, above the region's
     /// contents.
     async fn describe_in_prompt(&self) -> bool {
         self.region().describe_in_prompt
+    }
+
+    /// Whether an edge that compacts the context may hand this region to the
+    /// summarizer.
+    async fn summarizable(&self) -> bool {
+        self.region().summarizable
+    }
+
+    /// How much the contents move between requests, which is what decides where
+    /// the region sits in the assembled prompt and so what the prompt cache can
+    /// keep.
+    async fn volatility(&self) -> RegionVolatility {
+        RegionVolatility::from(self.region().volatility)
+    }
+
+    /// What happens to a write that does not fit.
+    async fn admission(&self) -> RegionAdmission {
+        RegionAdmission::from(self.region().admission)
+    }
+
+    /// The fraction of the budget at which a compacting region compacts.
+    async fn compact_at(&self) -> Option<f64> {
+        self.region().compact_at
+    }
+
+    /// The mime patterns this region takes as parts. Empty means anything.
+    async fn accepts(&self) -> &[String] {
+        &self.region().accepts
+    }
+
+    /// What fills this region before the first inference. Null means it starts
+    /// empty, for the agent to fill.
+    async fn seed(&self) -> Option<RegionSeed> {
+        self.region().seed.as_ref().map(RegionSeed::from)
+    }
+
+    /// The most entries a sliding region keeps.
+    async fn max_items(&self) -> Option<i32> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::SlidingWindow { max_items, .. } => {
+                Some(count(*max_items))
+            }
+            _ => None,
+        }
+    }
+
+    /// How a sliding region makes room. Null for every other kind.
+    async fn strategy(&self) -> Option<RegionStrategy> {
+        self.eviction().map(|eviction| eviction.strategy)
+    }
+
+    /// How many entries over its ceiling a bulk eviction waits for.
+    async fn overflow(&self) -> Option<i32> {
+        self.eviction().and_then(|eviction| eviction.overflow)
+    }
+
+    /// How many of the oldest entries one compaction pass takes.
+    async fn compact_count(&self) -> Option<i32> {
+        self.eviction().and_then(|eviction| eviction.compact_count)
+    }
+
+    /// The token count at which a compacting region compacts.
+    async fn threshold_tokens(&self) -> Option<i32> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::Compacting { threshold_tokens } => {
+                Some(count(*threshold_tokens))
+            }
+            _ => None,
+        }
+    }
+
+    /// The compacting region whose summaries land here, by name.
+    async fn source_region(&self) -> Option<&str> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::CompactHistory { source_region } => {
+                Some(source_region)
+            }
+            _ => None,
+        }
+    }
+
+    /// The most keys a key-value region holds.
+    async fn max_entries(&self) -> Option<i32> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::HashMap { max_entries } => max_entries.map(count),
+            _ => None,
+        }
+    }
+
+    /// The Rhai script that owns this region, for a custom one.
+    async fn script(&self) -> Option<&str> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::Custom { script, .. } => Some(script),
+            _ => None,
+        }
+    }
+
+    /// Whether a custom region is never evicted, like a pinned one, rather than
+    /// first out, like a temporary one.
+    async fn persistent(&self) -> Option<bool> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::Custom { persistent, .. } => Some(*persistent),
+            _ => None,
+        }
     }
 }
 
@@ -230,137 +335,15 @@ impl Region {
     fn region(&self) -> &leviath_core::layout::RegionDefinition {
         &self.blueprint.context_layout.regions[self.at]
     }
-}
 
-/// One stage of a blueprint.
-pub(crate) struct Stage {
-    /// The blueprint this stage belongs to, shared rather than copied.
-    pub(crate) blueprint: Arc<CoreBlueprint>,
-    /// Which stage, by declaration order.
-    pub(crate) at: usize,
-}
-
-#[Object]
-impl Stage {
-    /// Stage name, unique within the blueprint.
-    async fn name(&self) -> &str {
-        &self.stage().name
-    }
-
-    /// How the stage runs.
-    async fn mode(&self) -> StageMode {
-        StageMode::from(&self.stage().mode)
-    }
-
-    /// One line on what the stage is for.
-    async fn description(&self) -> Option<&str> {
-        self.stage().description.as_deref()
-    }
-
-    /// The only tools the model is offered here. Group tokens (`@all`,
-    /// `@builtin`, `@subagent`, `@scripts`, `@mcp`) stand for whole sources and
-    /// resolve at spawn.
-    async fn available_tools(&self) -> &[String] {
-        &self.stage().available_tools
-    }
-
-    /// Tools this stage cannot work without. These survive an unattended run,
-    /// where the blocking interaction tools are otherwise withheld.
-    async fn required_tools(&self) -> &[String] {
-        &self.stage().required_tools
-    }
-
-    /// MCP servers whose whole tool set this stage may use.
-    async fn available_connectors(&self) -> &[String] {
-        &self.stage().available_connectors
-    }
-
-    /// Inference-turn bound for one visit to this stage.
-    async fn max_iterations(&self) -> Option<i32> {
-        self.stage()
-            .max_iterations
-            .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
-    }
-
-    /// How many times the run may re-enter this stage.
-    async fn max_revisits(&self) -> Option<i32> {
-        self.stage()
-            .max_revisits
-            .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
-    }
-
-    /// What this stage must submit before it transitions. Null when it may
-    /// leave without producing anything.
-    async fn output_requirement(&self) -> Option<OutputRequirement> {
-        self.stage().require_output.then(|| OutputRequirement {
-            reasks: i32::try_from(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP)
-                .unwrap_or(i32::MAX),
-        })
-    }
-
-    /// Whether `sendMessage` reaches a run parked in this stage.
-    async fn accepts_messages(&self) -> bool {
-        self.stage().accepts_messages
-    }
-
-    /// Whether this stage may end the run outright.
-    async fn allow_complete(&self) -> bool {
-        self.stage().allow_complete
-    }
-
-    /// Whether this stage may run as a fan-out worker or sub-agent.
-    async fn allow_as_worker(&self) -> bool {
-        self.stage().allow_as_worker
-    }
-
-    /// Whether this stage may not finish until its child runs complete.
-    async fn requires_children(&self) -> bool {
-        self.stage().requires_children
-    }
-
-    /// Records that the author deliberately offers the human-in-the-loop tools
-    /// while this stage runs autonomously.
-    ///
-    /// Grants nothing and changes no behaviour. Its one consumer is
-    /// `lev validate`, where it silences the
-    /// `blocking-tool-in-autonomous-stage` lint. An autonomous stage that
-    /// calls one of those tools with nobody attached parks in `WAITING_INPUT`
-    /// until a person answers or the run is cancelled.
-    async fn declares_blocking_tools(&self) -> bool {
-        self.stage().allow_blocking_tools
-    }
-
-    /// The prompt guidance this stage declares, before the cascade.
-    async fn tool_guidance(&self) -> ToolUseGuidance {
-        ToolUseGuidance {
-            batch_independent_calls: self.stage().batch_tool_hint.into(),
-            shell_for_multi_step_work: self.stage().shell_hint.into(),
+    /// How this region makes room, for the kinds that slide.
+    fn eviction(&self) -> Option<RegionEviction> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::SlidingWindow {
+                eviction_strategy, ..
+            } => Some(RegionEviction::from(*eviction_strategy)),
+            _ => None,
         }
-    }
-
-    /// Outgoing edges. An empty list marks a terminal stage.
-    async fn transitions(&self) -> Vec<TransitionEdge> {
-        let mut edges: Vec<TransitionEdge> = self
-            .stage()
-            .transitions
-            .iter()
-            .flatten()
-            .map(|(target, edge)| TransitionEdge {
-                target: target.clone(),
-                hint: edge.hint.clone(),
-            })
-            .collect();
-        // The manifest holds these in a map, so a listing sorted by target is
-        // the only order two identical requests can both produce.
-        edges.sort_by(|a, b| a.target.cmp(&b.target));
-        edges
-    }
-}
-
-impl Stage {
-    /// The stage this object stands for.
-    fn stage(&self) -> &leviath_core::blueprint::Stage {
-        &self.blueprint.stages[self.at]
     }
 }
 
@@ -478,6 +461,89 @@ impl Blueprint {
             Some(config) => &config.allow,
             None => &[],
         }
+    }
+
+    /// What must be on the machine before a run of this will start. A required
+    /// one missing fails the spawn with its remedy; the rest are warnings.
+    async fn dependencies(&self) -> Vec<BlueprintDependency> {
+        self.parsed
+            .dependencies
+            .iter()
+            .map(BlueprintDependency::from)
+            .collect()
+    }
+
+    /// The mime rows this blueprint ships, so an agent that works in a file type
+    /// the machine has never heard of carries the row that describes it.
+    async fn mime_types(&self) -> Vec<BlueprintMimeRow> {
+        BlueprintMimeRow::from_table(&self.parsed.mime_types)
+    }
+
+    /// What this blueprint asks of the taint layer. Null inherits the machine's
+    /// setting.
+    async fn security(&self) -> Option<BlueprintSecurity> {
+        self.parsed.security.as_ref().map(BlueprintSecurity::from)
+    }
+
+    /// Where this agent's tools run, unless a stage says otherwise. Null leaves
+    /// the machine's own setting.
+    async fn sandbox(&self) -> Option<SandboxConfig> {
+        self.parsed.sandbox.as_ref().map(SandboxConfig::from)
+    }
+
+    /// What happens when a model answers with text before calling any tool,
+    /// unless a stage says otherwise. Null leaves the machine's own setting.
+    async fn nudge(&self) -> Option<NudgeConfig> {
+        self.parsed.nudge.as_ref().map(NudgeConfig::from)
+    }
+
+    /// The model that summarizes a region when it fills. Null leaves the
+    /// machine's own summarizer.
+    async fn compaction(&self) -> Option<CompactionConfig> {
+        self.parsed
+            .compaction_config
+            .as_ref()
+            .map(CompactionConfig::from)
+    }
+
+    /// Keeping the files this agent reads and writes in one region, so a tool
+    /// result can point at the region rather than repeating the file.
+    async fn file_tracking(&self) -> Option<FileTrackingConfig> {
+        self.parsed
+            .file_tracking
+            .as_ref()
+            .map(FileTrackingConfig::from)
+    }
+
+    /// When a run of this is stopped for going round in circles. Null leaves the
+    /// machine's own thresholds.
+    async fn repetition_detection(&self) -> Option<RepetitionDetection> {
+        self.parsed
+            .repetition_detection
+            .as_ref()
+            .map(RepetitionDetection::from)
+    }
+
+    /// What this agent would like to run without being asked. A request rather
+    /// than a grant: the machine's own policy decides, and this is what an
+    /// operator reads when deciding whether to write it in.
+    async fn safe_commands(&self) -> Option<SafeCommands> {
+        self.parsed.safe_commands.as_ref().map(SafeCommands::from)
+    }
+
+    /// The shape this agent's answer takes, unless a stage narrows it.
+    async fn output(&self) -> Option<OutputSpec> {
+        self.parsed.output.as_ref().map(OutputSpec::from)
+    }
+
+    /// How this agent's context maps onto another's, for a handoff to a
+    /// different blueprint.
+    async fn transforms(&self) -> Vec<ContextTransform> {
+        self.parsed
+            .transforms
+            .iter()
+            .map(ContextTransform::from)
+            .collect()
     }
 }
 

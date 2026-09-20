@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
-use super::{Blueprint, BlueprintSource, HintSetting, RegionKind, StageMode, ToolDiscovery};
+use super::super::manifest::stage::StageMode;
+use super::{Blueprint, BlueprintSource, HintSetting, RegionKind, ToolDiscovery};
 use crate::commands::serve::core::blueprints::{BlueprintSource as CoreSource, digest_of};
 
 /// A manifest exercising the fields this module maps.

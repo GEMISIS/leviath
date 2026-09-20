@@ -202,6 +202,46 @@ The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name
 are two different objects, so a client that caches by type and id cannot merge a
 run's frozen copy with whatever is installed now.
 
+### What a blueprint declares
+
+The whole manifest is readable, one field at a time: a stage's model block, its
+tool routing, its checkpoints, its output shape, its hooks, its fan-out, and the
+edges out of it with their conditions and gates. So is what the agent declares
+run-wide: its dependencies, the mime rows it ships, its sandbox, its summarizer,
+and what it would like to run unasked.
+
+```graphql
+{
+  blueprints(exact: ["coder"]) { blueprints {
+    dependencies { name kind required remedy }
+    stages {
+      name mode
+      model { models { provider model } allowUserDefault }
+      transitions { target condition gate { requireRegions maxAttempts } }
+      interactionPoints { name prompt style options }
+      fanOut { workerStage maxWorkers onWorkerFailure }
+    }
+  } }
+}
+```
+
+Two rules run through all of it, because a manifest is a document rather than a
+database.
+
+A setting the author left out is null, even where the daemon has a default for
+it. What was written and what the daemon resolves are different questions, and
+`Stage.effective` answers the second: the batch hint, the shell hint, the nudge,
+the sandbox and taint tracking, each resolved stage over blueprint over this
+machine's config. It is what a run spawned now would get, not a claim about a run
+that already started.
+
+A reference the manifest guarantees resolves is an object, and one that may
+dangle is a name. An edge's target stage exists, because a blueprint naming a
+stage it does not declare is refused at load. A gate may name a region a later
+edit removed, and a stage may name a tool this machine does not have, so those
+stay names: resolving them would drop them, and a gate that quietly disappears
+reads as a gate nobody wrote.
+
 ## Bytes
 
 Bytes never ride a query answer. A run's parts and artifacts come back as
