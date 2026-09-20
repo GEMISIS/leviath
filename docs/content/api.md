@@ -234,6 +234,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
 | `GET /api/agents/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
+| The three byte routes above | Also take a short-lived `?exp=&sig=` link in place of the bearer token, which is what a browser needs for an `<img src>`. Mint one with the [GraphQL API](/docs/graphql) |
 | `GET /api/agents/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
@@ -1683,6 +1684,7 @@ than that feature, not broken.
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
+| `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
 

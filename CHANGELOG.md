@@ -30,6 +30,16 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- Short-lived signed links on the byte routes, so a browser can show a run's
+  files. The three byte routes now also accept an `exp`/`sig` pair in place of
+  the bearer token, which is what an `<img src>` or a download link needs: a
+  header cannot be set on either, and the alternative a client writes without
+  this (fetch with the token, hold the bytes, mint a blob URL) is real work. A
+  link opens one path, lasts five minutes, and opens byte routes only; the
+  signing key is random per server process and never written down, so a restart
+  invalidates every link it handed out. GraphQL mints them: `blobs`, `artifacts`
+  and `fileUrl` on a run.
+
 - The GraphQL write side: `spawnAgent`, `sendMessage` and `answerInteraction`,
   each answering with the run as it is afterwards, plus `openInteractions`, the
   approval inbox. Answers take exactly one variant, decided by the request's own

@@ -629,6 +629,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         }
     }
 
@@ -670,6 +671,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         };
         // Unfiltered: the same id under both providers.
         let (_, Json(all)) = super::models_with(&state, &Default::default()).await;
@@ -729,6 +731,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         }
     }
 
@@ -764,6 +767,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         }
     }
 
@@ -967,6 +971,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         };
         let app = Router::new()
             .route("/api/config", get(get_config))
@@ -1010,6 +1015,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         }
     }
 
@@ -1235,6 +1241,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         };
         (state, paths_for(path))
     }
@@ -1267,6 +1274,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         };
         (state, paths_for(path))
     }
@@ -2406,6 +2414,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Default::default(),
+            signer: Default::default(),
         };
         let (_, Json(models)) = super::models_with(&state, &Default::default()).await;
         assert!(models.is_empty());

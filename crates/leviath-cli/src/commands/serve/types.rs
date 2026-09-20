@@ -74,6 +74,9 @@ pub(crate) struct AppState {
     pub(super) update_jobs: super::update_job::UpdateJobs,
     /// What the read routes remember between requests; see `caches`.
     pub(super) caches: super::caches::ServeCaches,
+    /// The key this process signs byte URLs with. Random per process, so a
+    /// restart invalidates every URL it handed out.
+    pub(super) signer: Arc<super::signed_url::UrlSigner>,
 }
 
 impl AppState {

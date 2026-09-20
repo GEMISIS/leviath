@@ -1065,3 +1065,99 @@ async fn the_log_selectors_refuse_a_contradiction() {
     })
     .await;
 }
+
+/// A run's parts come back as metadata plus a signed link, never as bytes.
+///
+/// Bytes in a query answer would be base64 in a JSON string, which is both
+/// larger and unusable by an `<img>`. The link is what a page actually needs.
+#[tokio::test]
+async fn a_runs_parts_carry_signed_links_rather_than_bytes() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-blobs", |_d| async move {
+        let meta = meta_at("coder-1788924523-blob00", 100);
+        create_run(&meta).expect("run written");
+        // A stored part, named by the run's context the way a real one is.
+        let registry = leviath_core::mime::MimeRegistry::builtin();
+        use leviath_core::mime::BlobStore as _;
+        let store = leviath_runtime::blob_store::FsBlobStore::new(crate::runstate::runs_dir());
+        let picture = leviath_core::mime::Blob::new(
+            leviath_core::mime::MimeType::parse("image/png").expect("a mime type"),
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+        );
+        let stored = store.put(&meta.run_id, &picture, &registry).expect("stored");
+        let mut entry = leviath_core::run_meta::RegionEntrySnapshot {
+            content: leviath_core::region::EntryContent::from_parts(vec![
+                leviath_core::mime::Part::stored(stored.clone()).named("shot.png"),
+            ]),
+            tokens: 1,
+            kind: Default::default(),
+            metadata: None,
+            key: None,
+            reasoning: None,
+            taint: Default::default(),
+        };
+        entry.tokens = 10;
+        crate::runstate::write_context_snapshot(
+            &meta.run_id,
+            &leviath_core::run_meta::ContextSnapshot {
+                stage_name: "build".to_string(),
+                total_tokens: 10,
+                max_tokens: 100,
+                regions: vec![leviath_core::run_meta::RegionSnapshot {
+                    name: "files".to_string(),
+                    kind: "temporary".to_string(),
+                    current_tokens: 10,
+                    max_tokens: 100,
+                    description: None,
+                    entries: vec![entry],
+                }],
+            },
+        )
+        .expect("window written");
+
+        let answer = run_query(
+            "{ runs { edges { node { blobs { sha256 mimeType name size stored regions url } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let blob = &json["runs"]["edges"][0]["node"]["blobs"][0];
+        assert_eq!(blob["mimeType"], "image/png");
+        assert_eq!(blob["name"], "shot.png");
+        assert_eq!(blob["stored"], true);
+        assert_eq!(blob["regions"][0], "files");
+        let url = blob["url"].as_str().expect("a link");
+        assert!(url.contains("/blobs/"), "{url}");
+        assert!(url.contains("sig="), "it carries its own grant: {url}");
+    })
+    .await;
+}
+
+/// A file link names the file and the grant, and says when it is a download.
+#[tokio::test]
+async fn a_file_link_carries_its_path_and_its_grant() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-file-url", |_d| async move {
+        create_run(&meta_at("coder-1788924523-file00", 100)).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs { edges { node {
+                   inline: fileUrl(path: "out.png")
+                   saved: fileUrl(path: "out.png", download: true)
+                 } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let node = &json["runs"]["edges"][0]["node"];
+        let inline = node["inline"].as_str().expect("a link");
+        assert!(inline.contains("/files/raw?"), "{inline}");
+        assert!(inline.contains("path=out.png"), "{inline}");
+        assert!(inline.contains("sig="), "{inline}");
+        assert!(
+            !inline.contains("download=1"),
+            "inline by default: {inline}"
+        );
+        let saved = node["saved"].as_str().expect("a link");
+        assert!(saved.contains("download=1"), "{saved}");
+    })
+    .await;
+}

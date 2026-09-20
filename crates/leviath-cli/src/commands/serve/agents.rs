@@ -842,6 +842,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -872,6 +873,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -1149,6 +1151,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
@@ -3278,6 +3281,7 @@ system_prompt = "Plan the work"
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
@@ -3338,6 +3342,7 @@ system_prompt = "Plan the work"
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),

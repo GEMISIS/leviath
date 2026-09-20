@@ -160,6 +160,7 @@ mod tests {
         let (tx, _) = tokio::sync::broadcast::channel(64);
         super::super::types::AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: super::super::update_cache::UpdateCheckCache::with_fetcher(
                 std::sync::Arc::new(declines),
             ),
@@ -210,6 +211,7 @@ mod tests {
         let (tx, _) = tokio::sync::broadcast::channel(64);
         let state = super::super::types::AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_check: super::super::update_cache::UpdateCheckCache::with_fetcher(counting),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(crate::config::Config {
@@ -389,6 +391,7 @@ mod tests {
         }));
         let state = super::super::types::AppState {
             caches: Default::default(),
+            signer: Default::default(),
             update_jobs: jobs,
             ..test_state()
         };

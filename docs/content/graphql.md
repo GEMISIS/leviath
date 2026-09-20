@@ -202,6 +202,36 @@ The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name
 are two different objects, so a client that caches by type and id cannot merge a
 run's frozen copy with whatever is installed now.
 
+## Bytes
+
+Bytes never ride a query answer. A run's parts and artifacts come back as
+metadata plus a short-lived signed link, and `fileUrl` mints one for any file in
+the run's working directory.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    blobs { sha256 mimeType name size stored url }
+    artifacts { name mimeType url }
+    fileUrl(path: "out/report.pdf", download: true)
+  } } }
+}
+```
+
+A signed link carries its own permission, so it works in an `<img src>` or a
+download link, where a header cannot be set. What it is not is your API token in
+a URL:
+
+* It opens one path. A link to one run's blob is not a key to another's.
+* It lasts five minutes.
+* It opens byte routes only. The same grant pointed at a listing is refused.
+* The signing key is random per server process and never written down, so a
+  restart invalidates every link it handed out.
+
+Links are relative, so they keep whatever host, scheme and port you reached the
+server on. A server guessing its own public URL would guess wrong behind a
+proxy.
+
 ## The machine itself
 
 Three catalogues, sized by what you configured rather than by what has piled

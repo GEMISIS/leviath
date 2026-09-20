@@ -173,6 +173,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
     let (event_tx, _) = broadcast::channel(256);
     let state = AppState {
         caches: Default::default(),
+        signer: Default::default(),
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: crate::commands::serve::testutil::fixed_config(Config::default()),

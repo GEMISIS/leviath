@@ -45,6 +45,7 @@ pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::t
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     super::types::AppState {
         caches: Default::default(),
+        signer: Default::default(),
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: fixed_config(crate::config::Config {
@@ -66,6 +67,7 @@ pub(super) fn state_with_config_at(path: &std::path::Path) -> super::types::AppS
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     super::types::AppState {
         caches: Default::default(),
+        signer: Default::default(),
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(

@@ -460,6 +460,53 @@ impl ContextWindow {
     }
 }
 
+/// One stored part a run holds.
+///
+/// The bytes are not here. They are behind `url`, which is a short-lived signed
+/// link the byte route verifies: bytes never ride a query answer, and a page can
+/// put that link straight in an `<img src>`.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct BlobEntry {
+    /// The store's key: the bytes' SHA-256.
+    pub(crate) sha256: String,
+    /// The type the bytes were stored as.
+    pub(crate) mime_type: String,
+    /// The name the part carries, when its context gave it one.
+    pub(crate) name: Option<String>,
+    /// Size in bytes.
+    pub(crate) size: BigInt,
+    /// Pixel width, for an image or a video.
+    pub(crate) width: Option<i32>,
+    /// Pixel height, for an image or a video.
+    pub(crate) height: Option<i32>,
+    /// Duration in milliseconds, for audio or video.
+    pub(crate) duration_ms: Option<i32>,
+    /// What the part is budgeted at in context.
+    pub(crate) tokens: i32,
+    /// Every region holding an entry that names this part.
+    pub(crate) regions: Vec<String>,
+    /// Whether the bytes are still on disk. A context can name a part whose
+    /// file was too large to keep, or that a pruned run directory lost.
+    pub(crate) stored: bool,
+    /// A short-lived signed link to the bytes. Null when they are not on disk.
+    pub(crate) url: Option<String>,
+}
+
+/// One file a run handed back beside its answer.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct Artifact {
+    /// What the submission called it.
+    pub(crate) name: String,
+    /// Its declared mime type.
+    pub(crate) mime_type: String,
+    /// Size in bytes, when the record has it.
+    pub(crate) size: Option<BigInt>,
+    /// Content hash, when it was computed.
+    pub(crate) sha256: Option<String>,
+    /// A short-lived signed link to the bytes.
+    pub(crate) url: String,
+}
+
 /// Narrow a daemon counter to the 32 bits GraphQL's `Int` carries.
 ///
 /// Saturating rather than wrapping: a counter that ran away should read as an
