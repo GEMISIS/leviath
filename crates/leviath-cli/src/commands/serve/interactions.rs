@@ -4,7 +4,6 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use leviath_core::interaction::{ApprovalScope, InteractionResponse};
-use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 
 use super::types::*;
 
@@ -14,27 +13,17 @@ pub(super) async fn get_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    match state
-        .control
-        .request(&ControlRequest::ListInteractions)
+    let open = super::core::spawn::open_interactions(&state)
         .await
-    {
-        Ok(ControlResponse::Interactions { interactions }) => {
-            match interactions
-                .into_iter()
-                .find(|(agent_id, _)| agent_id == &id)
-            {
-                Some((_, req)) => Ok(Json(
-                    serde_json::to_value(&req).unwrap_or(serde_json::Value::Null),
-                )),
-                None => Err(err(
-                    StatusCode::NOT_FOUND,
-                    "No pending interaction".to_string(),
-                )),
-            }
-        }
-        Ok(other) => Err(unexpected_response(other)),
-        Err(e) => Err(daemon_error(e)),
+        .map_err(|e| super::core::error::as_api_error(&e))?;
+    match open.into_iter().find(|(agent_id, _)| agent_id == &id) {
+        Some((_, request)) => Ok(Json(
+            serde_json::to_value(&request).unwrap_or(serde_json::Value::Null),
+        )),
+        None => Err(err(
+            StatusCode::NOT_FOUND,
+            "No pending interaction".to_string(),
+        )),
     }
 }
 
@@ -95,15 +84,10 @@ pub(super) async fn submit_interaction(
         feedback: body.feedback,
         parts,
     };
-    let reply = state
-        .control
-        .request(&ControlRequest::AnswerInteraction { response })
-        .await;
-    daemon_ok(
-        reply,
-        StatusCode::ACCEPTED,
-        "No such open interaction".to_string(),
-    )
+    super::core::spawn::answer_interaction(&state, response)
+        .await
+        .map(|()| StatusCode::ACCEPTED)
+        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// The parts a request names inside run `id`'s workdir, by `listed` and by
@@ -147,24 +131,16 @@ pub(super) async fn send_message(
     let (kept, named) = workdir_parts(&id, &body.message, &body.parts, max_upload)?;
     body.message = kept;
     parts.extend(named);
-    let reply = state
-        .control
-        .request(&ControlRequest::Message {
-            agent_id: id.clone(),
-            content: body.message,
-            target_region: body.target_region,
-            parts,
-        })
-        .await;
-    daemon_ok(
-        reply,
-        StatusCode::ACCEPTED,
-        format!("Agent run '{id}' is not accepting messages"),
-    )
+    super::core::spawn::send_message(&state, &id, body.message, body.target_region, parts)
+        .await
+        .map(|()| StatusCode::ACCEPTED)
+        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 #[cfg(test)]
 mod tests {
+    use leviath_runtime::control_socket::ControlResponse;
+
     use super::*;
     use crate::commands::serve::AppState;
     use crate::commands::serve::testutil::fake_daemon;

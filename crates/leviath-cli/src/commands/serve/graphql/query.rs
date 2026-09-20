@@ -406,6 +406,28 @@ impl Query {
         })
     }
 
+    /// Every open ask across every run: the approval inbox.
+    ///
+    /// The daemon holds these in memory, so this is one read rather than a walk
+    /// of the run store. Each entry names the run it is parked on, which is
+    /// what a client needs to show the row it belongs to.
+    async fn open_interactions(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Vec<OpenInteraction>> {
+        let state = ctx.data_unchecked::<AppState>();
+        let open = super::super::core::spawn::open_interactions(state)
+            .await
+            .gql()?;
+        Ok(open
+            .into_iter()
+            .map(|(run_id, request)| OpenInteraction {
+                run_id,
+                request: request.into(),
+            })
+            .collect())
+    }
+
     /// Keyset-paged run listing.
     ///
     /// `ids` fetches exact runs, which is also how a client reads one run:
@@ -480,6 +502,15 @@ impl Query {
             server_time: Timestamp(now),
         })
     }
+}
+
+/// One open ask, with the run it is parked on.
+#[derive(async_graphql::SimpleObject)]
+pub(crate) struct OpenInteraction {
+    /// The run waiting for this answer.
+    pub(crate) run_id: String,
+    /// What is being asked.
+    pub(crate) request: super::events::InteractionRequest,
 }
 
 /// One installed blueprint with its page cursor.

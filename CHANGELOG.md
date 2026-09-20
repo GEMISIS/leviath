@@ -30,6 +30,16 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- The GraphQL write side: `spawnAgent`, `sendMessage` and `answerInteraction`,
+  each answering with the run as it is afterwards, plus `openInteractions`, the
+  approval inbox. Answers take exactly one variant, decided by the request's own
+  kind, so there is no combination to get wrong; `feedback` is refused beside an
+  approval, because it is what the model reads instead of the call; and a second
+  answer to one request reads as `accepted: false` rather than as an error, since
+  two people clicking one prompt is ordinary. The spawn refusals are the
+  server's own decisions (`--workdir-root`, `--no-remote-yolo`, the outbound URL
+  policy), and both surfaces now make them in one place.
+
 - Live frames over GraphQL, at `GET /ws/graphql`. A subscription names the frame
   types it wants and the runs it is about, and both filters are applied on the
   server, before a frame is serialized: a console watching one run of five

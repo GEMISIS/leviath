@@ -5,14 +5,191 @@
 //! is the point: a client does not have to guess whether the act landed, and
 //! it does not need a second request to find out.
 
-use async_graphql::{Context, Object, SimpleObject};
+use async_graphql::{Context, InputObject, Object, OneofObject, SimpleObject};
 
 use super::super::core::error::ServeError;
 use super::super::core::lifecycle::{self, Action};
+use super::super::core::spawn as spawn_core;
 use super::super::types::AppState;
-use super::error::IntoGraphql;
+use super::error::{IntoGraphql, graphql_error};
 use super::types::run::Run;
 use crate::runstate;
+
+/// One caller-supplied metadata entry.
+#[derive(Debug, InputObject)]
+pub(crate) struct MetadataEntryInput {
+    /// The key.
+    pub(crate) key: String,
+    /// The value. Always a string.
+    pub(crate) value: String,
+}
+
+/// Seed text for one named context region at spawn.
+#[derive(Debug, InputObject)]
+pub(crate) struct RegionSeedInput {
+    /// The region to seed, by name.
+    pub(crate) region: String,
+    /// The text it starts with.
+    pub(crate) text: String,
+}
+
+/// Everything about a new run.
+#[derive(Debug, InputObject)]
+pub(crate) struct SpawnAgentInput {
+    /// The blueprint to start, by name.
+    pub(crate) blueprint: String,
+    /// The initial ask.
+    pub(crate) task: String,
+    /// Override the blueprint's model for this run, as `provider/model` or a
+    /// bare model name. Wins over every other model setting.
+    pub(crate) model: Option<String>,
+    /// How deep sub-agent spawning may nest for this run.
+    pub(crate) max_depth: Option<i32>,
+    /// Where the run's tools execute. Defaults to this server's own directory,
+    /// and is refused outside `--workdir-root` when the operator set one.
+    pub(crate) workdir: Option<String>,
+    /// Run unattended: approvals resolve without a person. Refused outright on
+    /// a server started with `--no-remote-yolo`.
+    pub(crate) yolo: Option<bool>,
+    /// A named yolo profile, which is a kind of yolo and refused with it.
+    pub(crate) yolo_profile: Option<String>,
+    /// Tools to allow without asking, for this run.
+    pub(crate) allow: Option<Vec<String>>,
+    /// Refuse this blueprint's command seeds, which run before any approval
+    /// prompt exists.
+    pub(crate) no_seed_commands: Option<bool>,
+    /// Seed text for named context regions.
+    pub(crate) regions: Option<Vec<RegionSeedInput>>,
+    /// Caller-supplied metadata. Values are always strings.
+    pub(crate) metadata: Option<Vec<MetadataEntryInput>>,
+    /// The output format label to ask the run for.
+    pub(crate) output_format: Option<String>,
+    /// Extra instructions for the run's output stage.
+    pub(crate) output_instructions: Option<String>,
+    /// URL the daemon POSTs this run's events to. Checked against the same
+    /// outbound policy a model-supplied URL is.
+    pub(crate) callback_url: Option<String>,
+    /// Shared secret for signing that webhook. Write-only: never read back on
+    /// the run.
+    pub(crate) callback_secret: Option<String>,
+}
+
+/// Answer a multiple-choice ask.
+#[derive(Debug, InputObject)]
+pub(crate) struct AnswerChoiceInput {
+    /// The open request being answered.
+    pub(crate) request_id: String,
+    /// Which option, zero-based into the request's own list.
+    pub(crate) choice_index: i32,
+}
+
+/// Answer a free-text or edit-text ask.
+#[derive(Debug, InputObject)]
+pub(crate) struct AnswerTextInput {
+    /// The open request being answered.
+    pub(crate) request_id: String,
+    /// The words, or the edited document.
+    pub(crate) value: String,
+}
+
+/// How long a tool approval lasts once it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum ApprovalScope {
+    /// This call only.
+    Once,
+    /// Every call of this tool for the rest of the stage.
+    Stage,
+    /// Every call of this tool for the rest of the run.
+    Session,
+}
+
+impl From<ApprovalScope> for leviath_core::interaction::ApprovalScope {
+    fn from(scope: ApprovalScope) -> Self {
+        use leviath_core::interaction::ApprovalScope as Core;
+        match scope {
+            ApprovalScope::Once => Core::Once,
+            ApprovalScope::Stage => Core::Stage,
+            ApprovalScope::Session => Core::Run,
+        }
+    }
+}
+
+/// Answer a confirm or a tool approval.
+#[derive(Debug, InputObject)]
+pub(crate) struct AnswerApprovalInput {
+    /// The open request being answered.
+    pub(crate) request_id: String,
+    /// Whether the call is approved.
+    pub(crate) approved: bool,
+    /// How long the approval lasts. Meaningless on a denial.
+    pub(crate) scope: Option<ApprovalScope>,
+    /// What to tell the model instead, on a denial. It reads this as part of
+    /// the tool result, so a denial can redirect rather than only refuse.
+    /// Refused beside an approval, where there is nothing to redirect.
+    pub(crate) feedback: Option<String>,
+}
+
+/// The answer to one pending ask.
+///
+/// Exactly one variant, and which one the request's own kind decides: a choice
+/// for a multiple-choice ask, text for a free-text or edit-text one, an
+/// approval for a confirm or a tool approval. One variant at a time is the
+/// schema's own rule, so there is no combination to get wrong.
+#[derive(Debug, OneofObject)]
+pub(crate) enum AnswerInteractionInput {
+    /// For a multiple-choice ask.
+    Choice(AnswerChoiceInput),
+    /// For a free-text or edit-text ask.
+    Text(AnswerTextInput),
+    /// For a confirm or a tool approval.
+    Approval(AnswerApprovalInput),
+}
+
+impl AnswerInteractionInput {
+    /// Turn the answer into what the daemon takes, refusing the one
+    /// combination that reads as a mistake.
+    fn into_response(self) -> Result<leviath_core::interaction::InteractionResponse, ServeError> {
+        use leviath_core::interaction::{ApprovalScope as CoreScope, InteractionResponse};
+        match self {
+            Self::Choice(choice) => {
+                let index = usize::try_from(choice.choice_index).map_err(|_| {
+                    ServeError::BadRequest("`choiceIndex` cannot be negative".to_string())
+                })?;
+                Ok(InteractionResponse::choice(choice.request_id, index))
+            }
+            Self::Text(text) => Ok(InteractionResponse::text(text.request_id, text.value)),
+            Self::Approval(approval) => {
+                if approval.approved && approval.feedback.is_some() {
+                    return Err(ServeError::BadRequest(
+                        "`feedback` goes with a denial: it is what the model reads instead of \
+                         the call, and there is nothing to redirect on an approval"
+                            .to_string(),
+                    ));
+                }
+                // The scope only means anything on an approval, and `ONCE` is
+                // what a request that does not say wants: the narrowest.
+                let scope = approval
+                    .scope
+                    .map(CoreScope::from)
+                    .unwrap_or(CoreScope::Once);
+                let mut response =
+                    InteractionResponse::approval(approval.request_id, approval.approved, scope);
+                response.feedback = approval.feedback;
+                Ok(response)
+            }
+        }
+    }
+}
+
+/// How answering an ask landed.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct InteractionPayload {
+    /// The request that was answered.
+    pub(crate) request_id: String,
+    /// True when the daemon took the answer. False when no open request
+    /// carries that id any more: it was answered already, or it expired.
+    pub(crate) accepted: bool,
+}
 
 /// What a lifecycle mutation answers with.
 #[derive(SimpleObject)]
@@ -23,6 +200,37 @@ pub(crate) struct AgentPayload {
     /// Retired checks the mutation noticed. Empty unless something was
     /// superseded.
     pub(crate) warnings: Vec<String>,
+}
+
+/// The output shape a spawn request asks for, when it asks for one.
+fn output_spec(input: &SpawnAgentInput) -> Option<leviath_core::output::OutputSpec> {
+    if input.output_format.is_none() && input.output_instructions.is_none() {
+        return None;
+    }
+    Some(leviath_core::output::OutputSpec {
+        format: input.output_format.clone(),
+        instructions: input.output_instructions.clone(),
+        ..leviath_core::output::OutputSpec::default()
+    })
+}
+
+/// Read a run back after a mutation moved it.
+fn read_back(run_id: &str, warnings: Vec<String>) -> Result<AgentPayload, ServeError> {
+    let meta = runstate::read_meta(run_id).map_err(|e| {
+        // The daemon accepted the act, so the run exists. A record that will
+        // not read is this server's problem, and saying "not found" about a run
+        // that just moved would blame the caller.
+        ServeError::Internal(format!(
+            "Run '{run_id}' changed, but its record would not read: {e}"
+        ))
+    })?;
+    Ok(AgentPayload {
+        run: Run {
+            meta: std::sync::Arc::new(meta),
+            now: leviath_core::duration::now_secs(),
+        },
+        warnings,
+    })
 }
 
 /// Carry out one lifecycle action and read the run back.
@@ -80,6 +288,114 @@ impl Mutation {
         #[graphql(desc = "The run to resume.")] run_id: String,
     ) -> async_graphql::Result<AgentPayload> {
         act_and_read(ctx, &run_id, Action::Resume).await
+    }
+
+    /// Start a run.
+    ///
+    /// Answers with the run itself, so a client renders the new row without a
+    /// second request. `warnings` names checks the blueprint declared that this
+    /// request's own output shape retires.
+    ///
+    /// The refusals are the server's, not the daemon's: a workdir outside
+    /// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, or a
+    /// callback URL the outbound policy will not allow, each answer `FORBIDDEN`.
+    async fn spawn_agent(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Everything about the new run.")] input: SpawnAgentInput,
+    ) -> async_graphql::Result<AgentPayload> {
+        let state = ctx.data_unchecked::<AppState>();
+        let max_depth = match input.max_depth {
+            None => None,
+            Some(depth) => Some(
+                usize::try_from(depth)
+                    .map_err(|_| {
+                        ServeError::BadRequest("`maxDepth` cannot be negative".to_string())
+                    })
+                    .gql()?,
+            ),
+        };
+        let output = output_spec(&input);
+        let request = spawn_core::SpawnRequest {
+            blueprint: input.blueprint,
+            task: input.task,
+            model: input.model,
+            max_depth,
+            workdir: input.workdir,
+            yolo: input.yolo.unwrap_or(false),
+            yolo_profile: input.yolo_profile,
+            allow: input.allow.unwrap_or_default(),
+            no_seed_commands: input.no_seed_commands.unwrap_or(false),
+            regions: input
+                .regions
+                .into_iter()
+                .flatten()
+                .map(|seed| (seed.region, seed.text))
+                .collect(),
+            metadata: input
+                .metadata
+                .into_iter()
+                .flatten()
+                .map(|entry| (entry.key, entry.value))
+                .collect(),
+            callback_url: input.callback_url,
+            callback_secret: input.callback_secret,
+            output,
+        };
+        // No file parts on this path yet: the ones a run starts with are named
+        // by the REST multipart route, and adding them here is a schema
+        // addition rather than a change.
+        let spawned = spawn_core::spawn(state, request, Vec::new()).await.gql()?;
+        read_back(&spawned.run_id, spawned.warnings).gql()
+    }
+
+    /// Send a message to a run that is going.
+    ///
+    /// Whether it lands is the daemon's call: a stage that declared
+    /// `accepts_messages = false`, or a finished run, does not take one, and the
+    /// refusal says that rather than claiming the run does not exist.
+    async fn send_message(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The run to message.")] run_id: String,
+        #[graphql(desc = "What to say to it.")] message: String,
+        #[graphql(desc = "Deliver into this context region instead of the default one.")]
+        target_region: Option<String>,
+    ) -> async_graphql::Result<AgentPayload> {
+        let state = ctx.data_unchecked::<AppState>();
+        spawn_core::send_message(state, &run_id, message, target_region, Vec::new())
+            .await
+            .gql()?;
+        read_back(&run_id, Vec::new()).gql()
+    }
+
+    /// Answer a pending ask.
+    ///
+    /// The first answer wins. A second answer to the same request is not an
+    /// error on the client's part: two people clicking one prompt is ordinary,
+    /// and it reads as `accepted: false` rather than as a failure.
+    async fn answer_interaction(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Exactly one answer, of the kind the request takes.")]
+        input: AnswerInteractionInput,
+    ) -> async_graphql::Result<InteractionPayload> {
+        let state = ctx.data_unchecked::<AppState>();
+        let response = input.into_response().gql()?;
+        let request_id = response.request_id.clone();
+        match spawn_core::answer_interaction(state, response).await {
+            Ok(()) => Ok(InteractionPayload {
+                request_id,
+                accepted: true,
+            }),
+            // Nothing open under that id: answered already, or expired. The
+            // other failures are the daemon's and stay failures.
+            Err(ServeError::NotFound(_)) => Ok(InteractionPayload {
+                request_id,
+                accepted: false,
+            }),
+            Err(other) => Err(graphql_error(&other)),
+        }
     }
 
     /// Cancel a run, and its sub-agents with it.
