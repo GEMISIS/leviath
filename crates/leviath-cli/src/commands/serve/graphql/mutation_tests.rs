@@ -1169,6 +1169,38 @@ async fn a_yolo_profile_decides_about_one_call() {
     .await;
 }
 
+/// A temporary agents directory holding one blueprint by that name.
+///
+/// A spawn checks the blueprint exists before it reaches the daemon, and with no
+/// path configured that check reads the developer's own agents directory. A test
+/// that passed only on a machine with `coder` installed is a test that says
+/// nothing, so every spawn test brings its own.
+fn agents_dir_with(name: &str) -> tempfile::TempDir {
+    let agents = tempfile::tempdir().expect("a temp dir");
+    let agent = agents.path().join(name);
+    std::fs::create_dir_all(&agent).expect("the agent dir");
+    std::fs::write(
+        agent.join(leviath_core::files::MANIFEST_FILENAME),
+        format!("[agent]\nname = \"{name}\"\n\n[stages.only]\nmode = \"autonomous\"\n"),
+    )
+    .expect("manifest written");
+    agents
+}
+
+/// Run one mutation against a schema wired to `control` and an agents directory.
+async fn mutate_with_agents(
+    control: ControlClient,
+    agents: &std::path::Path,
+    query: &str,
+) -> async_graphql::Response {
+    let mut state = state_with_agent_paths(vec![agents.to_path_buf()]);
+    state.control = control;
+    let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+        .data(state)
+        .finish();
+    schema.execute(Request::new(query)).await
+}
+
 /// A spawn carries everything the request asked for down to the daemon.
 ///
 /// The fake daemon answers yes and records what it was sent, so this asserts the
@@ -1178,6 +1210,7 @@ async fn a_yolo_profile_decides_about_one_call() {
 async fn a_spawn_carries_every_field_it_was_given() {
     crate::runstate::with_isolated_runs_dir_async("graphql-spawn-fields", |_d| async move {
         create_run(&run_in("coder-1", RunStatus::Running)).expect("run written");
+        let agents = agents_dir_with("coder");
         let (control, _dir, _srv) = fake_daemon(|request| match request {
             leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
                 // What a client asked for has to reach the daemon, so the
@@ -1204,8 +1237,9 @@ async fn a_spawn_carries_every_field_it_was_given() {
             }
             other => panic!("the spawn is what reaches the daemon, not {other:?}"),
         });
-        let answer = mutate(
+        let answer = mutate_with_agents(
             control,
+            agents.path(),
             r#"mutation { spawnAgent(input: {
                  blueprint: "coder", task: "fix the parser", model: "gpt-5.6",
                  workdir: "/work", maxDepth: 3, yolo: true, yoloProfile: "cautious",
@@ -1227,11 +1261,13 @@ async fn a_spawn_carries_every_field_it_was_given() {
 #[tokio::test]
 async fn a_record_that_will_not_read_after_a_spawn_is_internal() {
     crate::runstate::with_isolated_runs_dir_async("graphql-spawn-unread", |_d| async move {
+        let agents = agents_dir_with("coder");
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
             run_id: "ghost".to_string(),
         });
-        let answer = mutate(
+        let answer = mutate_with_agents(
             control,
+            agents.path(),
             r#"mutation { spawnAgent(input: { blueprint: "coder", task: "t" }) { run { id } } }"#,
         )
         .await;
