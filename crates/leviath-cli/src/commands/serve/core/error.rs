@@ -220,6 +220,26 @@ mod tests {
                 "DAEMON_INCOMPATIBLE",
             ),
             (
+                ServeError::Upstream("u".into()),
+                StatusCode::BAD_GATEWAY,
+                "UPSTREAM",
+            ),
+            (
+                ServeError::Unprocessable("p".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "UNPROCESSABLE",
+            ),
+            (
+                ServeError::RangeNotSatisfiable("r".into()),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "RANGE_NOT_SATISFIABLE",
+            ),
+            (
+                ServeError::UnsupportedMedia("m".into()),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "UNSUPPORTED_MEDIA_TYPE",
+            ),
+            (
                 ServeError::Internal("i".into()),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
@@ -283,6 +303,10 @@ mod tests {
             ServeError::Forbidden("f".into()),
             ServeError::DaemonUnavailable("d".into()),
             ServeError::DaemonIncompatible("i".into()),
+            ServeError::Upstream("u".into()),
+            ServeError::Unprocessable("p".into()),
+            ServeError::RangeNotSatisfiable("r".into()),
+            ServeError::UnsupportedMedia("m".into()),
             ServeError::Internal("x".into()),
         ] {
             let code = failure.code();

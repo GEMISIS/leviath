@@ -1116,3 +1116,255 @@ async fn a_yolo_profile_decides_about_one_call() {
     })
     .await;
 }
+
+/// A spawn carries everything the request asked for down to the daemon.
+///
+/// The fake daemon answers yes and records what it was sent, so this asserts the
+/// translation rather than the spawn: a field a client sets and the daemon never
+/// sees is a field that silently does nothing.
+#[tokio::test]
+async fn a_spawn_carries_every_field_it_was_given() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-fields", |_d| async move {
+        create_run(&run_in("coder-1", RunStatus::Running)).expect("run written");
+        let (control, _dir, _srv) = fake_daemon(|request| match request {
+            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
+                // What a client asked for has to reach the daemon, so the
+                // assertions are here rather than on the answer.
+                assert!(
+                    args.blueprint_path.contains("coder"),
+                    "the blueprint it named: {}",
+                    args.blueprint_path
+                );
+                assert_eq!(args.task, "fix the parser");
+                assert_eq!(args.model.as_deref(), Some("gpt-5.6"));
+                assert_eq!(args.workdir, "/work");
+                assert_eq!(args.max_depth, Some(3));
+                assert!(args.yolo, "the waiver travels");
+                assert_eq!(args.yolo_profile.as_deref(), Some("cautious"));
+                assert_eq!(
+                    args.regions.get("plan").map(String::as_str),
+                    Some("start here")
+                );
+                assert_eq!(args.metadata.get("ticket").map(String::as_str), Some("42"));
+                ControlResponse::Spawned {
+                    run_id: "coder-1".to_string(),
+                }
+            }
+            other => panic!("the spawn is what reaches the daemon, not {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { spawnAgent(input: {
+                 blueprint: "coder", task: "fix the parser", model: "gpt-5.6",
+                 workdir: "/work", maxDepth: 3, yolo: true, yoloProfile: "cautious",
+                 outputFormat: "json", outputInstructions: "one object",
+                 regions: [{ region: "plan", text: "start here" }],
+                 metadata: [{ key: "ticket", value: "42" }]
+               }) { run { id } warnings } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["spawnAgent"]["run"]["id"], "coder-1");
+    })
+    .await;
+}
+
+/// A spawn the daemon accepted whose record will not read is this server's
+/// problem, and the message says so rather than blaming the caller.
+#[tokio::test]
+async fn a_record_that_will_not_read_after_a_spawn_is_internal() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-unread", |_d| async move {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "ghost".to_string(),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { spawnAgent(input: { blueprint: "coder", task: "t" }) { run { id } } }"#,
+        )
+        .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"INTERNAL\"".to_string()),
+            "the daemon said yes, so the missing record is ours"
+        );
+        assert!(
+            error.message.contains("would not read"),
+            "{}",
+            error.message
+        );
+    })
+    .await;
+}
+
+/// Each approval scope is a different grant, and each reaches the daemon as
+/// itself.
+#[tokio::test]
+async fn each_approval_scope_reaches_the_daemon() {
+    for (word, expected) in [
+        ("ONCE", leviath_core::interaction::ApprovalScope::Once),
+        ("STAGE", leviath_core::interaction::ApprovalScope::Stage),
+        ("SESSION", leviath_core::interaction::ApprovalScope::Run),
+    ] {
+        let (control, _dir, _srv) = fake_daemon(move |request| match request {
+            leviath_runtime::control_socket::ControlRequest::AnswerInteraction { response } => {
+                assert_eq!(
+                    response.scope,
+                    Some(expected),
+                    "the scope travels as itself rather than as a default"
+                );
+                assert_eq!(response.approved, Some(true));
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("an answer, not {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            &format!(
+                r#"mutation {{ answerInteraction(input: {{ approval: {{
+                     requestId: "r1", approved: true, scope: {word} }} }})
+                     {{ accepted }} }}"#
+            ),
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{word}: {:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["answerInteraction"]["accepted"], true, "{word}");
+    }
+}
+
+/// A cancel reaches the daemon as a cancel, and answers with the run.
+#[tokio::test]
+async fn a_cancel_reaches_the_daemon_as_a_cancel() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-cancel", |_d| async move {
+        create_run(&run_in("run-a", RunStatus::Running)).expect("run written");
+        let (control, _dir, _srv) = fake_daemon(|request| match request {
+            leviath_runtime::control_socket::ControlRequest::Cancel { .. } => {
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("a cancel, not {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { cancelAgent(runId: "run-a") { run { id status } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["cancelAgent"]["run"]["id"], "run-a");
+    })
+    .await;
+}
+
+/// A manifest that will not parse is a report rather than a written blueprint.
+#[tokio::test]
+async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let report = mutate(
+            no_daemon_client(),
+            r#"mutation { validateBlueprint(manifest: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
+                 { valid errors warnings } }"#,
+        )
+        .await;
+        assert!(report.errors.is_empty(), "a finding is not a failure");
+        let json = serde_json::to_value(&report.data).expect("data serializes");
+        assert_eq!(json["validateBlueprint"]["valid"], false);
+        assert!(
+            !json["validateBlueprint"]["errors"]
+                .as_array()
+                .expect("errors")
+                .is_empty(),
+            "it says what is missing"
+        );
+    })
+    .await;
+}
+
+/// An export of everything is unpaged, and the page cap that governs a response
+/// does not govern a file.
+#[tokio::test]
+async fn an_export_of_everything_is_not_a_page() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-export-all", |_d| async move {
+        for i in 0..3 {
+            create_run(&run_in(&format!("run-{i}"), RunStatus::Complete)).expect("run written");
+        }
+        let state = state_with_agent_paths(Vec::new());
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state.clone())
+            .finish();
+        let started = schema
+            .execute(Request::new("mutation { bulkExportRuns { id status } }"))
+            .await;
+        assert!(started.errors.is_empty(), "{:?}", started.errors);
+        let json = serde_json::to_value(&started.data).expect("data serializes");
+        let id = json["bulkExportRuns"]["id"].as_str().expect("an id");
+        for _ in 0..200 {
+            let job = state.caches.exports.get(id).expect("the job");
+            if job.status == crate::commands::serve::core::export::ExportStatus::Complete {
+                assert_eq!(job.written, 3, "every run, not one page of them");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the export did not finish");
+    })
+    .await;
+}
+
+/// A sweep by age takes the finished runs and leaves a live one out of it
+/// entirely.
+///
+/// Not skipped: skipping is for a run somebody named. An age sweep is asking for
+/// the old finished runs, and a run that is still going is not one of those, so
+/// reporting it as a refusal would read as a failure where nothing failed.
+#[tokio::test]
+async fn a_delete_reports_both_halves() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-delete-both", |_d| async move {
+        let mut old = run_in("finished", RunStatus::Complete);
+        old.updated_at = 100;
+        create_run(&old).expect("run written");
+        let mut live = run_in("running", RunStatus::Running);
+        live.updated_at = 100;
+        create_run(&live).expect("run written");
+
+        let answer = mutate(
+            no_daemon_client(),
+            "mutation { deleteRuns(before: 1000) { deleted skipped { id reason } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(
+            json["deleteRuns"]["deleted"],
+            serde_json::json!(["finished"])
+        );
+        assert_eq!(
+            json["deleteRuns"]["skipped"].as_array().map(Vec::len),
+            Some(0),
+            "the live run was never a candidate: {json}"
+        );
+
+        // Named rather than swept, the same run is a skip with its reason: that
+        // is a request to delete it, and refusing one is worth saying.
+        let named = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteRuns(ids: ["running"]) { deleted skipped { id reason } } }"#,
+        )
+        .await;
+        assert!(named.errors.is_empty(), "{:?}", named.errors);
+        let json = serde_json::to_value(&named.data).expect("data serializes");
+        assert_eq!(json["deleteRuns"]["skipped"][0]["id"], "running");
+        assert!(
+            json["deleteRuns"]["skipped"][0]["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "a refusal says why"
+        );
+    })
+    .await;
+}

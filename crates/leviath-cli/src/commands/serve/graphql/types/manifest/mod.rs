@@ -47,3 +47,7 @@ mod stage_tests;
 #[cfg(test)]
 #[path = "blueprint_detail_tests.rs"]
 mod blueprint_detail_tests;
+
+#[cfg(test)]
+#[path = "conversion_tests.rs"]
+mod conversion_tests;

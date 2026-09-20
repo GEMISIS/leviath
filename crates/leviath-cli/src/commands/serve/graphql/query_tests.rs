@@ -1475,3 +1475,233 @@ async fn the_config_says_whether_admin_is_open() {
         assert_eq!(json["config"]["adminEnabled"], allow_admin);
     }
 }
+
+/// The listings that read the machine rather than the run store.
+///
+/// Each is a walk of a directory or a table on disk, so these arrange one and
+/// then ask: what is asserted is that the walk reaches the schema, with the
+/// fields a console renders.
+mod machine_listings {
+    use super::*;
+
+    /// Scripts come back with where each one came from, and an agent narrows the
+    /// answer to that agent's own plus the global ones.
+    #[tokio::test]
+    async fn the_scripts_listing_reports_where_each_came_from() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let global = home.join(".leviath").join("tools");
+            std::fs::create_dir_all(&global).expect("the tools directory");
+            std::fs::write(
+                global.join("summarize.rhai"),
+                "// @tool summarize\n// @description sums up\n\"ok\"",
+            )
+            .expect("a tool");
+
+            let answer = run_query("{ scripts { kind name source agent } }").await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let scripts = json["scripts"].as_array().expect("the scripts");
+            let tool = scripts
+                .iter()
+                .find(|script| script["name"] == "summarize")
+                .expect("the tool that was just written");
+            assert_eq!(tool["kind"], "tool");
+            assert_eq!(tool["source"], "global");
+            assert!(tool["agent"].is_null(), "a global tool belongs to nobody");
+
+            // An agent nothing knows about is not a refusal: the global scripts
+            // are still the answer, and that agent simply has none.
+            let scoped = run_query(r#"{ scripts(agent: "coder") { name } }"#).await;
+            assert!(scoped.errors.is_empty(), "{:?}", scoped.errors);
+        })
+        .await;
+    }
+
+    /// The tools listing carries the group tokens a stage can name, beside the
+    /// tools themselves.
+    #[tokio::test]
+    async fn the_tools_listing_carries_the_group_tokens() {
+        crate::commands::serve::testutil::with_home(|_home| async move {
+            let answer = run_query(
+                "{ tools { tools { name source path agent } groups { name description }
+                     skipped { path reason } } }",
+            )
+            .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let tools = json["tools"]["tools"].as_array().expect("the tools");
+            assert!(!tools.is_empty(), "a build ships built-in tools");
+            assert!(
+                tools
+                    .iter()
+                    .all(|tool| tool["name"].as_str().is_some_and(|n| !n.is_empty()))
+            );
+            let groups = json["tools"]["groups"].as_array().expect("the groups");
+            assert!(
+                groups.iter().any(|group| group["name"] == "@builtin"),
+                "the tokens a stage can name: {groups:?}"
+            );
+        })
+        .await;
+    }
+
+    /// The MCP servers come back from the config, with their transport and auth
+    /// state.
+    #[tokio::test]
+    async fn the_mcp_servers_come_from_the_config() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let paths = crate::commands::serve::mcp::AdminPaths {
+                config: home.join("config.toml"),
+                store: home.join("mcp-auth.json"),
+                grants: home.join("grants.json"),
+            };
+            std::fs::write(
+                &paths.config,
+                "[[mcp_servers]]\nname = \"docs\"\ncommand = \"docs-mcp\"\n",
+            )
+            .expect("a config file");
+            crate::commands::serve::mcp::TEST_PATHS
+                .scope(paths, async {
+                    let answer = run_query("{ mcpServers { name transport endpoint auth } }").await;
+                    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+                    let json = serde_json::to_value(&answer.data).expect("data serializes");
+                    assert_eq!(json["mcpServers"][0]["name"], "docs");
+                    assert_eq!(json["mcpServers"][0]["transport"], "stdio");
+                    assert_eq!(json["mcpServers"][0]["endpoint"], "docs-mcp");
+                })
+                .await;
+        })
+        .await;
+    }
+
+    /// The profiles come back with what each waives, counted.
+    #[tokio::test]
+    async fn the_yolo_profiles_report_what_they_waive() {
+        crate::commands::serve::testutil::with_home(|_home| async move {
+            let path = crate::yolo::yolo_path();
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+            std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
+
+            let answer = run_query(
+                "{ yoloProfiles { path exists error
+                     profiles { name default questions checkpoints gate toolRules shellRules } } }",
+            )
+            .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            assert_eq!(json["yoloProfiles"]["exists"], true);
+            let profile = &json["yoloProfiles"]["profiles"][0];
+            assert!(
+                ["allow", "ask"].contains(&profile["default"].as_str().expect("a word")),
+                "the default is one of the two words: {profile}"
+            );
+            // Three counts each: allow, ask, deny, so a settings list can show
+            // how much a profile waives without reading the rules.
+            assert_eq!(profile["toolRules"].as_array().map(Vec::len), Some(3));
+            assert_eq!(profile["shellRules"].as_array().map(Vec::len), Some(3));
+        })
+        .await;
+    }
+
+    /// The config's gateways and limits come through, with no secret in them.
+    #[tokio::test]
+    async fn the_config_carries_its_gateways_and_limits() {
+        crate::commands::serve::testutil::with_home(|home| async move {
+            let path = home.join("config.toml");
+            std::fs::write(
+                &path,
+                "default_provider = \"local\"\n\
+                 \n[model_providers.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\n\
+                 api_key = \"sk-secret\"\nmodels = [\"llama\"]\n",
+            )
+            .expect("a config file");
+            let state = crate::commands::serve::testutil::state_with_config_at(&path);
+            let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+                .data(state)
+                .finish();
+            let answer = schema
+                .execute(Request::new(
+                    "{ config { defaultProvider configuredProviders agentPaths mcpServerCount
+                         apiVersion capabilities adminEnabled
+                         gateways { name baseUrl hasApiKey kind }
+                         limits { maxPageSize maxIds maxFileBytes maxListingEntries
+                             maxSearchScan maxHistoryLimit maxConcurrentRequests
+                             maxUploadBytes requestTimeoutSecs } } }",
+                ))
+                .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let config = &json["config"];
+            assert_eq!(config["defaultProvider"], "local");
+            let gateway = &config["gateways"][0];
+            assert_eq!(gateway["name"], "local");
+            // The key is a boolean and never a value: a console needs to know
+            // whether one is configured and never needs the key itself.
+            assert_eq!(gateway["hasApiKey"], true);
+            let rendered = serde_json::to_string(config).expect("it serializes");
+            assert!(!rendered.contains("sk-secret"), "no secret travels");
+            assert!(
+                config["limits"]["maxPageSize"]
+                    .as_i64()
+                    .is_some_and(|n| n > 0)
+            );
+            assert!(
+                config["capabilities"]
+                    .as_array()
+                    .expect("capabilities")
+                    .iter()
+                    .any(|name| name == "graphql"),
+                "the server says what it can do"
+            );
+        })
+        .await;
+    }
+
+    /// The approval inbox needs the daemon, so silence from it is a refusal
+    /// rather than an empty inbox.
+    #[tokio::test]
+    async fn the_approval_inbox_needs_the_daemon() {
+        let answer = run_query("{ openInteractions { runId request { prompt } } }").await;
+        assert_eq!(
+            answer
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"DAEMON_UNAVAILABLE\"".to_string())
+        );
+    }
+
+    /// A search names where to look, and the scopes travel into the cursor's
+    /// digest so a cursor cannot be carried to a different search.
+    #[tokio::test]
+    async fn a_search_can_name_where_to_look() {
+        crate::runstate::with_isolated_runs_dir_async("graphql-scopes", |_dir| async move {
+            let mut meta = meta_at("searchable", 100);
+            meta.task = "find the parser bug".to_string();
+            create_run(&meta).expect("run written");
+
+            let answer = run_query(
+                r#"{ runs(filter: { query: "parser", queryIn: [META, LOGS, CONTEXT, JOURNAL, FILES] })
+                     { edges { node { id } highlights { field snippet stage } } scanTruncated } }"#,
+            )
+            .await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            assert_eq!(ids_of(&answer.data, "runs"), vec!["searchable".to_string()]);
+            let json = serde_json::to_value(&answer.data).expect("data serializes");
+            let highlights = json["runs"]["edges"][0]["highlights"]
+                .as_array()
+                .expect("highlights");
+            assert!(
+                highlights
+                    .iter()
+                    .any(|hit| hit["snippet"].as_str().is_some_and(|s| s.contains("parser"))),
+                "the match says where it was: {highlights:?}"
+            );
+        })
+        .await;
+    }
+}

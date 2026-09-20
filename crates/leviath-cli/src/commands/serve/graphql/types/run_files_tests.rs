@@ -556,3 +556,282 @@ async fn an_unreadable_blueprint_leaves_it_unknown() {
     })
     .await;
 }
+
+/// The parts a run holds come back with a link each, and a part the context
+/// names but the store lacks comes back without one.
+///
+/// A missing link is the honest answer: the part is recorded, the bytes are not
+/// there, and a link that 404s later is worse than no link now.
+#[tokio::test]
+async fn the_stored_parts_come_back_with_links() {
+    use leviath_core::mime::{Blob, BlobStore as _, MimeRegistry, MimeType, Part};
+    use leviath_core::region::EntryContent;
+    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+
+    crate::runstate::with_isolated_runs_dir_async("graphql-blobs", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+
+        let registry = MimeRegistry::builtin();
+        let store = leviath_runtime::blob_store::FsBlobStore::new(crate::runstate::runs_dir());
+        let png = Blob::new(
+            MimeType::parse("image/png").expect("a type"),
+            b"\x89PNG\r\n\x1a\nhero".to_vec(),
+        )
+        .named("hero.png");
+        let stored = Part::stored(
+            store
+                .put(&meta.run_id, &png, &registry)
+                .expect("the part stores"),
+        )
+        .named("hero.png");
+        let lost = Part::stored(leviath_core::mime::BlobRef {
+            sha256: "e".repeat(64),
+            mime_type: MimeType::parse("audio/wav").expect("a type"),
+            size: 3,
+            width: None,
+            height: None,
+            duration_ms: Some(10),
+            tokens: 1,
+            stand_in: "[audio/wav] lost.wav".to_string(),
+        })
+        .named("lost.wav");
+        let entry = |content: EntryContent| RegionEntrySnapshot {
+            content,
+            tokens: 1,
+            kind: Default::default(),
+            metadata: None,
+            key: None,
+            taint: leviath_core::taint::TaintLevel::Public,
+            reasoning: None,
+        };
+        crate::runstate::write_context_snapshot(
+            &meta.run_id,
+            &ContextSnapshot {
+                stage_name: "review".to_string(),
+                total_tokens: 2,
+                max_tokens: 100,
+                regions: vec![RegionSnapshot {
+                    name: "task".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 2,
+                    max_tokens: 100,
+                    entries: vec![entry(EntryContent::from_parts(vec![stored, lost]))],
+                    description: None,
+                }],
+            },
+        )
+        .expect("a snapshot");
+
+        let json = data(
+            meta,
+            "{ run { blobs { sha256 mimeType name size tokens regions stored url
+                 width height durationMs } } }",
+        )
+        .await;
+        let blobs = json["run"]["blobs"].as_array().expect("the parts");
+        assert_eq!(blobs.len(), 2);
+        let picture = blobs
+            .iter()
+            .find(|blob| blob["mimeType"] == "image/png")
+            .expect("the picture");
+        assert_eq!(picture["name"], "hero.png");
+        assert_eq!(picture["stored"], true);
+        assert_eq!(picture["regions"][0], "task");
+        assert!(
+            picture["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("/blobs/") && url.contains("sig=")),
+            "a stored part has a link: {picture}"
+        );
+        let missing = blobs
+            .iter()
+            .find(|blob| blob["mimeType"] == "audio/wav")
+            .expect("the lost one");
+        assert_eq!(missing["stored"], false);
+        assert!(
+            missing["url"].is_null(),
+            "no link for bytes that are not there: {missing}"
+        );
+        assert_eq!(missing["durationMs"], 10);
+    })
+    .await;
+}
+
+/// The files a run handed back come with a link each and the path they were
+/// written at.
+#[tokio::test]
+async fn the_artifacts_come_back_with_links_and_paths() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    let mut meta = meta_in(workdir.path());
+    meta.final_output = Some(leviath_core::output::FinalOutputDescriptor {
+        format: None,
+        stage: "review".to_string(),
+        submitted_at: 1_788_924_600,
+        bytes: 4,
+        truncated: false,
+        artifacts: vec![leviath_core::output::Artifact {
+            name: "report".to_string(),
+            path: "out/report.md".to_string(),
+            mime_type: leviath_core::mime::MimeType::parse("text/markdown").expect("a type"),
+            size: 12,
+            sha256: String::new(),
+        }],
+    });
+
+    let json = data(
+        meta,
+        "{ run { artifacts { name mimeType size sha256 path url } } }",
+    )
+    .await;
+    let artifact = &json["run"]["artifacts"][0];
+    assert_eq!(artifact["name"], "report");
+    assert_eq!(artifact["path"], "out/report.md");
+    assert_eq!(artifact["mimeType"], "text/markdown");
+    assert_eq!(artifact["size"], 12);
+    // An empty hash is null rather than an empty string: nothing computed it,
+    // which is different from computing it to nothing.
+    assert!(artifact["sha256"].is_null());
+    assert!(
+        artifact["url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/artifacts/report")),
+        "{artifact}"
+    );
+}
+
+/// The parent is a lookup in the index rather than a read, so walking up a
+/// fan-out costs nothing per level.
+#[tokio::test]
+async fn the_parent_comes_from_the_index() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-parent", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut parent = meta_in(workdir.path());
+        parent.run_id = "root".to_string();
+        crate::runstate::create_run(&parent).expect("run written");
+        let mut child = meta_in(workdir.path());
+        child.parent_run_id = Some("root".to_string());
+        crate::runstate::create_run(&child).expect("run written");
+
+        let json = data(child, "{ run { parent { id agentName } } }").await;
+        assert_eq!(json["run"]["parent"]["id"], "root");
+
+        // A run nobody started has no parent, and a parent that is not in the
+        // index reads the same way: null rather than an error, because a run
+        // whose parent was deleted is an ordinary record.
+        let json = data(parent, "{ run { parent { id } } }").await;
+        assert!(json["run"]["parent"].is_null());
+
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut orphan = meta_in(workdir.path());
+        orphan.run_id = "orphan".to_string();
+        orphan.parent_run_id = Some("long-gone".to_string());
+        let json = data(orphan, "{ run { parent { id } } }").await;
+        assert!(json["run"]["parent"].is_null());
+    })
+    .await;
+}
+
+/// What a run is parked on comes from the daemon, and an unreachable daemon is a
+/// refusal rather than "nothing is waiting".
+#[tokio::test]
+async fn what_a_run_waits_on_comes_from_the_daemon() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    let answer = ask(
+        meta_in(workdir.path()),
+        "{ run { interaction { prompt } } }",
+    )
+    .await;
+    assert_eq!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"DAEMON_UNAVAILABLE\"".to_string()),
+        "silence from the daemon is not an empty inbox"
+    );
+}
+
+/// A file read past the end reports how far the file goes, and a window that
+/// ends mid-character is trimmed so the windows line up.
+#[tokio::test]
+async fn a_window_is_trimmed_to_character_boundaries() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    // Two-byte characters, so a window boundary can land inside one.
+    std::fs::write(workdir.path().join("text.md"), "éé".repeat(8)).expect("a file");
+
+    let json = data(
+        meta_in(workdir.path()),
+        r#"{ run { fileContent(path: "text.md", offset: 3) { offset content truncated } } }"#,
+    )
+    .await;
+    let window = &json["run"]["fileContent"];
+    // The offset moved forward to the next character, so the text reads as text
+    // rather than starting with half a character.
+    assert_eq!(window["offset"], 4, "{window}");
+    assert!(
+        window["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with('é')),
+        "{window}"
+    );
+}
+
+/// A listing of a directory outside the run's working directory is refused, the
+/// same way a read of a file outside it is.
+#[tokio::test]
+async fn a_listing_outside_the_workdir_is_refused() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    let answer = ask(
+        meta_in(workdir.path()),
+        r#"{ run { files(source: WORKDIR, path: "../elsewhere") { path } } }"#,
+    )
+    .await;
+    assert_eq!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"FORBIDDEN\"".to_string())
+    );
+}
+
+/// A stage record carries its per-region peaks, which is what a stage is judged
+/// on rather than the window as it stands now.
+#[tokio::test]
+async fn a_stage_record_carries_its_region_peaks() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-peaks", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+        let mut record = leviath_core::run_meta::StageRecord::new("review".to_string(), 0);
+        record.region_tokens = std::collections::BTreeMap::from([("plan".to_string(), 120usize)]);
+        record.visits = vec![leviath_core::run_meta::StageVisitRecord::opened_at(100)];
+        crate::runstate::write_stages_index(&meta.run_id, &[record]).expect("the ledger");
+
+        let json = data(
+            meta,
+            "{ run { stages { name regionPeaks { region tokens }
+                 visits { enteredAt leftAt active } } } }",
+        )
+        .await;
+        let stage = &json["run"]["stages"][0];
+        assert_eq!(stage["name"], "review");
+        assert_eq!(stage["regionPeaks"][0]["region"], "plan");
+        assert_eq!(stage["regionPeaks"][0]["tokens"], 120);
+        // The visit in progress says so, which is the same fact as `leftAt`
+        // being null said the way a list is filtered on.
+        assert_eq!(stage["visits"][0]["active"], true);
+        assert!(stage["visits"][0]["leftAt"].is_null());
+    })
+    .await;
+}

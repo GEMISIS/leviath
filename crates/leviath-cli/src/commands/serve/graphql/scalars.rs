@@ -137,7 +137,7 @@ impl ScalarType for Json {
 
 #[cfg(test)]
 mod tests {
-    use super::{BigInt, Cursor, Decimal, Timestamp};
+    use super::{BigInt, Cursor, Decimal, Json, Timestamp};
     use async_graphql::{ScalarType, Value};
 
     /// Times and counters cross the wire as numbers, both ways.
@@ -194,5 +194,48 @@ mod tests {
             token
         );
         assert!(Cursor::parse(Value::Boolean(false)).is_err());
+    }
+
+    /// A decimal reads back from either shape it travels in.
+    ///
+    /// A string on the way out, because a JSON parser that re-rounds a cost is
+    /// lying about spend; a number on the way in as well, because a client that
+    /// sends one meant it.
+    #[test]
+    fn a_decimal_reads_from_a_string_or_a_number() {
+        assert_eq!(
+            Decimal::parse(Value::String("0.0425".to_string())).expect("a decimal"),
+            Decimal(0.0425)
+        );
+        assert_eq!(
+            Decimal::parse(Value::Number(
+                serde_json::Number::from_f64(2.5).expect("a number")
+            ))
+            .expect("a decimal"),
+            Decimal(2.5)
+        );
+        assert!(
+            Decimal::parse(Value::String("not a number".to_string())).is_err(),
+            "a string that is not a decimal is refused"
+        );
+        assert!(
+            Decimal::parse(Value::Boolean(true)).is_err(),
+            "and so is a value that is neither"
+        );
+    }
+
+    /// Arbitrary JSON survives the round trip, including the shapes that have no
+    /// GraphQL counterpart.
+    #[test]
+    fn json_survives_the_round_trip() {
+        let value = serde_json::json!({
+            "nested": { "list": [1, 2.5, "three", true, null] },
+            "empty": {},
+        });
+        let parsed = Json::parse(Json(value.clone()).to_value()).expect("it reads back");
+        assert_eq!(parsed.0, value);
+        // A value that cannot be turned into JSON is refused rather than turned
+        // into something else.
+        assert!(Json::parse(Value::Enum(async_graphql::Name::new("WORD"))).is_ok());
     }
 }

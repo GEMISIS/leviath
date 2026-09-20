@@ -216,3 +216,77 @@ fn an_unknown_export_is_simply_absent() {
     let exports = Exports::default();
     assert!(exports.get("export-1-1").is_none());
 }
+
+/// The registry says how many jobs it is holding, for a log line.
+#[test]
+fn the_registry_describes_itself() {
+    let exports = Exports::default();
+    let empty = format!("{exports:?}");
+    assert!(empty.contains("jobs: 0"), "{empty}");
+    let state = state_with_agent_paths(Vec::new());
+    super::test_job(&state, ExportStatus::Queued, "");
+    let holding = format!("{:?}", state.caches.exports);
+    assert!(holding.contains("jobs: 1"), "{holding}");
+}
+
+/// An update to a job nobody recorded is a no-op rather than a panic.
+///
+/// The worker holds an id and the registry may have been swept underneath it, so
+/// the write has to tolerate an id that is gone.
+#[test]
+fn updating_a_job_that_is_gone_does_nothing() {
+    let exports = Exports::default();
+    exports.update("export-never", |job| job.status = ExportStatus::Complete);
+    assert!(exports.get("export-never").is_none());
+}
+
+/// A file the writer cannot create is reported rather than reading as written.
+#[tokio::test]
+async fn an_export_the_filesystem_refuses_is_reported() {
+    crate::runstate::with_isolated_runs_dir_async("export-refused", |_d| async move {
+        create_run(&meta_at("run-a", 100)).expect("run written");
+        let state = state_with_agent_paths(Vec::new());
+        // A directory where the export's own file should go, which no export
+        // creates but which stands in for any write the filesystem refuses.
+        let dir = exports_dir();
+        std::fs::create_dir_all(&dir).expect("the exports directory");
+        let job = state
+            .caches
+            .exports
+            .enqueue(leviath_core::duration::now_secs());
+        std::fs::create_dir_all(export_path(&job.id)).expect("a directory in the way");
+
+        let written = super::write_rows(&export_path(&job.id), &[serde_json::json!({"a": 1})]);
+        assert!(written.is_err(), "a directory is not a file to write");
+    })
+    .await;
+}
+
+/// Two exports in one second are two jobs, because the id carries a counter as
+/// well as the clock.
+#[test]
+fn two_exports_in_one_second_are_two_jobs() {
+    let exports = Exports::default();
+    let first = exports.enqueue(100);
+    let second = exports.enqueue(100);
+    assert_ne!(first.id, second.id, "one second, two jobs");
+    assert!(exports.get(&first.id).is_some());
+    assert!(exports.get(&second.id).is_some());
+}
+
+/// A job that has not aged out is kept, file and record.
+#[tokio::test]
+async fn a_recent_export_survives_the_sweep() {
+    crate::runstate::with_isolated_runs_dir_async("export-kept", |_d| async move {
+        let state = state_with_agent_paths(Vec::new());
+        let job = super::test_job(&state, ExportStatus::Complete, "{}\n");
+        let path = export_path(&job);
+        state
+            .caches
+            .exports
+            .sweep(&exports_dir(), leviath_core::duration::now_secs());
+        assert!(state.caches.exports.get(&job).is_some(), "still recorded");
+        assert!(path.exists(), "and its file is still there");
+    })
+    .await;
+}
