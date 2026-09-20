@@ -998,6 +998,7 @@ mod tests {
     /// status no longer reachable, or miss one that is.
     const CORE_SOURCES: &[(&str, &str)] = &[
         ("lifecycle", include_str!("core/lifecycle.rs")),
+        ("spawn_core", include_str!("core/spawn.rs")),
         ("run_core", include_str!("core/runs.rs")),
     ];
 
@@ -1046,6 +1047,7 @@ mod tests {
         ("BadRequest", 400),
         ("NotFound", 404),
         ("Conflict", 409),
+        ("Forbidden", 403),
         ("DaemonUnavailable", 503),
         ("DaemonIncompatible", 502),
         ("Internal", 500),
@@ -1218,6 +1220,7 @@ mod tests {
             ("BadRequest", ServeError::BadRequest(String::new())),
             ("NotFound", ServeError::NotFound(String::new())),
             ("Conflict", ServeError::Conflict(String::new())),
+            ("Forbidden", ServeError::Forbidden(String::new())),
             (
                 "DaemonUnavailable",
                 ServeError::DaemonUnavailable(String::new()),

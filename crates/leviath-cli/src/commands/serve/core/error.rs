@@ -32,6 +32,12 @@ pub(crate) enum ServeError {
     #[error("{0}")]
     Conflict(String),
 
+    /// The server is configured to refuse this: a workdir outside
+    /// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, a
+    /// callback URL the outbound policy will not allow.
+    #[error("{0}")]
+    Forbidden(String),
+
     /// The daemon could not be reached. It may be restarting (the control
     /// client already waited out its grace period), stopped, or wedged.
     #[error("Daemon not reachable: {0}")]
@@ -60,6 +66,7 @@ impl ServeError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::DaemonUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::DaemonIncompatible(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -75,6 +82,7 @@ impl ServeError {
             Self::BadRequest(_) => "BAD_USER_INPUT",
             Self::NotFound(_) => "NOT_FOUND",
             Self::Conflict(_) => "CONFLICT",
+            Self::Forbidden(_) => "FORBIDDEN",
             Self::DaemonUnavailable(_) => "DAEMON_UNAVAILABLE",
             Self::DaemonIncompatible(_) => "DAEMON_INCOMPATIBLE",
             Self::Internal(_) => "INTERNAL",
@@ -143,6 +151,11 @@ mod tests {
                 "CONFLICT",
             ),
             (
+                ServeError::Forbidden("f".into()),
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+            ),
+            (
                 ServeError::DaemonUnavailable("d".into()),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "DAEMON_UNAVAILABLE",
@@ -195,6 +208,29 @@ mod tests {
         assert_eq!(
             ServeError::from_daemon_io(&broken).code(),
             "DAEMON_UNAVAILABLE"
+        );
+    }
+
+    /// A daemon that is not there is a 503: try later, or restart it. A daemon
+    /// that answered in a way this server cannot read is a 502 with the remedy
+    /// in the message, because no daemon restart fixes that one.
+    #[test]
+    fn a_daemon_failure_says_which_remedy_applies() {
+        let (code, body) = as_api_error(&ServeError::from_daemon_io(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "no socket",
+        )));
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0.error, "Daemon not reachable: no socket");
+
+        let (code, body) = as_api_error(&ServeError::from_daemon_io(&std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the daemon is now version 9; restart this process",
+        )));
+        assert_eq!(code, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body.0.error,
+            "This server needs a restart: the daemon is now version 9; restart this process"
         );
     }
 

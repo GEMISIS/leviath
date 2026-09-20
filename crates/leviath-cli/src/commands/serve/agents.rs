@@ -6,11 +6,10 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use leviath_core::mime::MimeRegistry;
-use leviath_runtime::control_socket::ControlResponse;
-use leviath_runtime::host::SpawnArgs;
 
 use super::core::error::as_api_error;
 use super::core::lifecycle;
+use super::core::spawn as spawn_core;
 use super::runs::run_json;
 use super::types::*;
 use crate::runstate::{self, ContextSnapshot, RunMeta};
@@ -49,21 +48,6 @@ fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSp
     })
 }
 
-/// What this spawn should tell its caller alongside the run id: today, the
-/// declared shape checks the request's `output_format` retires.
-///
-/// The daemon logs the same retirement at spawn, but into its own log, which
-/// the API caller never reads; the check they may be counting on deserves a
-/// line in the response they do. Best-effort on purpose: a manifest that will
-/// not read or parse is the daemon's to report as the spawn error, and this
-/// must never be why one fails.
-fn spawn_warnings(
-    manifest_path: &std::path::Path,
-    request: Option<&leviath_core::output::OutputSpec>,
-) -> Vec<String> {
-    crate::commands::run::manifest::retired_check_warnings_at(manifest_path, request)
-}
-
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -71,52 +55,14 @@ pub(super) async fn spawn_agent(
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SpawnAgentReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
-    let roots = super::blueprints::blueprint_roots(&state.current_config());
-    let blueprints = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
-    let bp_info = blueprints
-        .iter()
-        .find(|b| b.name == body.blueprint)
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("Blueprint '{}' not found", body.blueprint),
-            )
-        })?;
-    let manifest_path = PathBuf::from(&bp_info.path).join(leviath_core::files::MANIFEST_FILENAME);
-
+    // The files this request named inside the workdir, and the ones its text
+    // mentions with `@path`. Resolved here because they are a property of how
+    // this request arrived; everything after is the same for both surfaces.
     let workdir = body.workdir.clone().unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default()
     });
-    // A caller-supplied workdir was accepted verbatim, so `{"workdir": "/"}`
-    // pointed a tool-executing agent at the whole filesystem. `--workdir-root`
-    // is the operator's answer to "where is this API allowed to work".
-    state
-        .limits
-        .check_workdir(std::path::Path::new(&workdir))
-        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    // Likewise `{"yolo": true}` waived every approval prompt for an agent
-    // running on the host, from a request - as did `{"allow": ["*"]}`, which
-    // reaches the same wildcard override by another name. `--no-remote-yolo`
-    // refuses both.
-    // A named profile is a kind of yolo, so it is refused with it.
-    let yolo = body.yolo || body.yolo_profile.is_some();
-    state
-        .limits
-        .check_launch_overrides(yolo, &body.allow)
-        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    // And a completion webhook is a request the daemon makes on the caller's
-    // behalf, so it goes through the same SSRF policy as any model-supplied URL.
-    if let Some(callback) = body.callback_url.as_deref() {
-        state
-            .limits
-            .check_callback_url(callback)
-            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    }
-    // Files the request names inside the workdir, then the ones the task and
-    // each region's text mention with `@path`. The text keeps the token so
-    // the model reads the same name the part carries.
     let workdir_path = std::path::Path::new(&workdir);
     parts.extend(super::upload::json_parts(
         &body.parts,
@@ -132,52 +78,31 @@ pub(super) async fn spawn_agent(
         *text = kept;
         parts.extend(named);
     }
-    let run_id = runstate::new_run_id(&body.blueprint);
-    let args = SpawnArgs {
-        run_id,
-        blueprint_path: manifest_path.to_string_lossy().to_string(),
+
+    let request = spawn_core::SpawnRequest {
+        blueprint: body.blueprint.clone(),
         task: body.task.clone(),
-        regions: body.regions.clone(),
         model: body.model.clone(),
-        workdir,
+        max_depth: body.max_depth,
+        workdir: Some(workdir),
+        yolo: body.yolo,
+        yolo_profile: body.yolo_profile.clone(),
+        allow: body.allow.clone(),
+        no_seed_commands: body.no_seed_commands,
+        regions: body.regions.clone(),
         metadata: body.metadata.clone(),
         callback_url: body.callback_url.clone(),
         callback_secret: body.callback_secret.clone(),
-        yolo,
-        yolo_profile: body.yolo_profile.clone(),
-        // Either side may refuse: the caller for this run, or the operator
-        // for every run that comes in this way.
-        no_seed_commands: body.no_seed_commands || state.limits.no_remote_seed_commands,
-        allow: body.allow.clone(),
         output: output_request(&body),
-        max_depth: body.max_depth,
-        // Serve spawns are top-level runs.
-        parent_run_id: None,
-        worker_stage: None,
-        parts,
     };
-    let warnings = spawn_warnings(&manifest_path, args.output.as_ref());
-
-    match state.control.spawn(args).await {
-        Ok(ControlResponse::Spawned { run_id }) => {
-            // No `AgentSpawned` from here. The daemon's change-detection pass
-            // emits one for every run the world gains, however it was
-            // launched, so a second one from here would make exactly the runs
-            // that arrived over HTTP appear twice to a subscriber.
-            tracing::info!(run_id = %run_id, blueprint = %body.blueprint, "spawned agent via API");
-            Ok(Json(SpawnAgentResp {
-                agent_id: run_id.clone(),
-                run_id,
-                warnings,
-            }))
-        }
-        Ok(ControlResponse::Error { message }) => Err(err(
-            StatusCode::BAD_REQUEST,
-            format!("Failed to spawn agent: {message}"),
-        )),
-        Ok(other) => Err(unexpected_response(other)),
-        Err(e) => Err(daemon_error(e)),
-    }
+    let spawned = spawn_core::spawn(&state, request, parts)
+        .await
+        .map_err(|e| as_api_error(&e))?;
+    Ok(Json(SpawnAgentResp {
+        agent_id: spawned.run_id.clone(),
+        run_id: spawned.run_id,
+        warnings: spawned.warnings,
+    }))
 }
 
 pub(super) async fn list_agents(
@@ -878,7 +803,7 @@ pub(super) async fn resume_agent(
 
 #[cfg(test)]
 mod tests {
-    use leviath_runtime::control_socket::ControlRequest;
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 
     use super::*;
 
@@ -1579,22 +1504,6 @@ system_prompt = "Plan the work"
         .await;
         assert!(body.get("warnings").is_none(), "{body}");
     }
-
-    /// The lenient arms: a manifest that is not there or will not parse stays
-    /// quiet here, because the spawn itself is where that failure is reported.
-    #[test]
-    fn spawn_warnings_give_up_quietly_on_a_bad_manifest() {
-        let request = Some(leviath_core::output::OutputSpec {
-            format: Some("json".to_string()),
-            ..leviath_core::output::OutputSpec::default()
-        });
-        let dir = tempfile::tempdir().unwrap();
-        assert!(spawn_warnings(&dir.path().join("nope.leviath"), request.as_ref()).is_empty());
-        let unparseable = dir.path().join("agent.leviath");
-        std::fs::write(&unparseable, "not valid toml [[[").unwrap();
-        assert!(spawn_warnings(&unparseable, request.as_ref()).is_empty());
-    }
-
     /// No format request, no retirement: the response stays exactly what
     /// existing clients parse.
     #[tokio::test]

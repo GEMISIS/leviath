@@ -228,19 +228,65 @@ up, so they are plain lists with no paging.
   reason, because a tool an author believes exists and silently is not there is
   the failure worth reporting.
 
-## Moving a run
+## Starting and steering a run
 
-Mutations return the run as it is afterwards, so you never have to guess whether the act landed, and
-you do not need a second request to find out.
+Every mutation answers with the run as it is afterwards, so you never have to
+guess whether the act landed, and you do not need a second request to find out.
 
 ```graphql
+mutation {
+  spawnAgent(input: { blueprint: "coder", task: "fix the parser", workdir: "/work" }) {
+    run { id status task }
+    warnings
+  }
+}
+```
+
+`warnings` names checks the blueprint declared that your own output shape
+retires. Empty when there are none.
+
+Three refusals here are the server's, not the daemon's, and each answers
+`FORBIDDEN`: a workdir outside `--workdir-root`, `yolo` on a server started with
+`--no-remote-yolo`, and a `callbackUrl` the outbound policy will not allow.
+
+```graphql
+mutation { sendMessage(runId: "coder-1788924523-abc123", message: "keep going") { run { status } } }
 mutation { pauseAgent(runId: "coder-1788924523-abc123") { run { id status } } }
 ```
 
 * `pauseAgent`, `resumeAgent` and `cancelAgent` each answer with the run.
-* A run that has already finished answers `CONFLICT`. That is the difference between "you stopped
-  it" and "it was over before you asked".
-* A run the daemon does not know answers `NOT_FOUND`, naming both things that can mean.
+* A run that has already finished answers `CONFLICT`. That is the difference
+  between "you stopped it" and "it was over before you asked".
+* A run that does not take messages says that, rather than reading as missing:
+  a stage can declare `accepts_messages = false`.
+
+## Answering a prompt
+
+`openInteractions` is the approval inbox: every open ask, each naming the run it
+is parked on. The daemon holds these in memory, so it is one read rather than a
+walk of the run store.
+
+```graphql
+{ openInteractions { runId request { id kind prompt options tool body } } }
+```
+
+Answer with exactly one variant, and which one the request's `kind` decides.
+
+```graphql
+mutation { answerInteraction(input: { approval: { requestId: "approve-call_1", approved: false,
+  feedback: "read the file instead" } }) { requestId accepted } }
+```
+
+| Variant | For a request of kind |
+|---|---|
+| `choice` | `MULTIPLE_CHOICE` |
+| `text` | `FREE_TEXT` or `EDIT_TEXT` |
+| `approval` | `CONFIRM` or `TOOL_APPROVAL` |
+
+Two things worth knowing. `feedback` is what the model reads instead of the
+call, so it goes with a denial and is refused beside an approval. And the first
+answer wins: a second answer to the same request comes back `accepted: false`
+rather than as an error, because two people clicking one prompt is ordinary.
 
 ## Live frames
 

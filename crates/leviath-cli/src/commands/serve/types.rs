@@ -199,64 +199,6 @@ pub(super) fn err(code: axum::http::StatusCode, message: String) -> ApiError {
     (code, axum::response::Json(ErrorResponse { error: message }))
 }
 
-/// A daemon reply this handler has no arm for.
-///
-/// 500 rather than 502: the reply decoded, so the two still speak the same
-/// protocol; the handler simply did not expect this answer to this request.
-pub(super) fn unexpected_response(
-    other: leviath_runtime::control_socket::ControlResponse,
-) -> ApiError {
-    err(
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Unexpected daemon response: {other:?}"),
-    )
-}
-
-/// The status for a control request the daemon answers with `Ok { ok }`.
-///
-/// `success` when it did the thing; 404 carrying `not_found` when it could
-/// not, since every such request names a run or an interaction and "could
-/// not" means the daemon had nothing by that name in the right state.
-pub(super) fn daemon_ok(
-    reply: std::io::Result<leviath_runtime::control_socket::ControlResponse>,
-    success: axum::http::StatusCode,
-    not_found: String,
-) -> Result<axum::http::StatusCode, ApiError> {
-    match reply {
-        Ok(leviath_runtime::control_socket::ControlResponse::Ok { ok: true }) => Ok(success),
-        Ok(leviath_runtime::control_socket::ControlResponse::Ok { ok: false }) => {
-            Err(err(axum::http::StatusCode::NOT_FOUND, not_found))
-        }
-        Ok(other) => Err(unexpected_response(other)),
-        Err(e) => Err(daemon_error(e)),
-    }
-}
-
-/// The response for a control request the daemon did not answer.
-///
-/// Two different failures, told apart by the error's kind, because they have
-/// different remedies:
-///
-/// - **503 Service Unavailable**: the daemon is not reachable right now. It
-///   may be restarting (the client already waited a grace period for that),
-///   stopped, or wedged. Retrying later, or `lev daemon restart`, is the fix.
-/// - **502 Bad Gateway**: the daemon answered, but this server could not
-///   understand it - the daemon was updated under a running `lev serve`, and
-///   the two no longer speak the same protocol. Retrying cannot help; the
-///   message says what does, which is restarting `lev serve`.
-pub(super) fn daemon_error(e: std::io::Error) -> ApiError {
-    match e.kind() {
-        std::io::ErrorKind::Unsupported => err(
-            axum::http::StatusCode::BAD_GATEWAY,
-            format!("This server needs a restart: {e}"),
-        ),
-        _ => err(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        ),
-    }
-}
-
 // ─── Pagination ─────────────────────────────────────────────────────────────
 
 /// One page of a collection: the shape every paginated route returns.
@@ -1167,29 +1109,6 @@ mod tests {
     }
 
     use super::*;
-
-    /// A daemon that is not there is a 503 (try later, or restart it); a
-    /// daemon that answered in a way this server cannot read is a 502 with the
-    /// remedy in the message, because no daemon restart fixes that.
-    #[test]
-    fn daemon_errors_are_503_unless_the_two_ends_no_longer_understand_each_other() {
-        let (code, body) = daemon_error(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "no socket",
-        ));
-        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body.error, "Daemon not reachable: no socket");
-
-        let (code, body) = daemon_error(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "the daemon is now version 9; restart this process",
-        ));
-        assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            body.error,
-            "This server needs a restart: the daemon is now version 9; restart this process"
-        );
-    }
 
     #[test]
     fn validate_response_serde_roundtrip() {

@@ -177,3 +177,367 @@ async fn a_record_that_will_not_read_after_the_act_is_internal() {
     })
     .await;
 }
+
+/// A spawn answers with the run it started.
+///
+/// The run id comes back inside the run itself, so a client renders the new row
+/// without a second request.
+#[tokio::test]
+async fn a_spawn_answers_with_the_run_it_started() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn", |_d| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        let agent = agents.path().join("coder");
+        std::fs::create_dir_all(&agent).expect("the agent dir");
+        std::fs::write(
+            agent.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"coder\"\n\n[stages.only]\nmode = \"autonomous\"\n",
+        )
+        .expect("manifest written");
+
+        // The daemon accepts, and the run's record is written the way a real
+        // spawn's placeholder metadata is.
+        let (control, _socket, _srv) = fake_daemon(|req| match req {
+            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
+                // What the daemon persists at spawn, which is what the
+                // mutation then reads back.
+                let mut meta = run_in(&args.run_id, RunStatus::Starting);
+                meta.task = args.task.clone();
+                meta.metadata = args.metadata.clone();
+                create_run(&meta).expect("run written");
+                ControlResponse::Spawned {
+                    run_id: args.run_id,
+                }
+            }
+            other => panic!("the spawn is what reaches the daemon: {other:?}"),
+        });
+        let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
+        state.control = control;
+        let schema = Schema::build(Query, Mutation, EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(Request::new(
+                r#"mutation { spawnAgent(input: {
+                     blueprint: "coder", task: "write the thing", workdir: "/tmp",
+                     metadata: [{ key: "ticket", value: "42" }]
+                   }) { run { id task status metadata { key value } } warnings } }"#,
+            ))
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let run = &json["spawnAgent"]["run"];
+        assert!(
+            run["id"].as_str().unwrap_or_default().starts_with("coder-"),
+            "{run}"
+        );
+        assert_eq!(run["task"], "write the thing");
+        assert_eq!(run["status"], "STARTING");
+        assert_eq!(run["metadata"][0]["key"], "ticket");
+    })
+    .await;
+}
+
+/// A spawn this server is configured to refuse says which decision refused it.
+#[tokio::test]
+async fn a_spawn_the_server_refuses_is_forbidden() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-refused", |_d| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        let agent = agents.path().join("coder");
+        std::fs::create_dir_all(&agent).expect("the agent dir");
+        std::fs::write(
+            agent.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"coder\"\n\n[stages.only]\nmode = \"autonomous\"\n",
+        )
+        .expect("manifest written");
+        let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
+        state.limits = std::sync::Arc::new(crate::commands::serve::types::ServeLimits {
+            no_remote_yolo: true,
+            ..Default::default()
+        });
+        let schema = Schema::build(Query, Mutation, EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(Request::new(
+                r#"mutation { spawnAgent(input: {
+                     blueprint: "coder", task: "t", workdir: "/tmp", yolo: true
+                   }) { run { id } } }"#,
+            ))
+            .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"FORBIDDEN\"".to_string())
+        );
+
+        let negative = schema
+            .execute(Request::new(
+                r#"mutation { spawnAgent(input: {
+                     blueprint: "coder", task: "t", maxDepth: -1
+                   }) { run { id } } }"#,
+            ))
+            .await;
+        assert!(
+            negative
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("negative"),
+            "{:?}",
+            negative.errors
+        );
+    })
+    .await;
+}
+
+/// A message answers with the run, so a client sees the state it landed in.
+#[tokio::test]
+async fn a_message_answers_with_the_run() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-message", |_d| async move {
+        create_run(&run_in("run-a", RunStatus::WaitingInput)).expect("run written");
+        let (control, _socket, _srv) = fake_daemon(|req| match req {
+            leviath_runtime::control_socket::ControlRequest::Message {
+                agent_id, content, ..
+            } => {
+                assert_eq!(agent_id, "run-a");
+                assert_eq!(content, "keep going");
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("the message is what reaches the daemon: {other:?}"),
+        });
+
+        let answer = mutate(
+            control,
+            r#"mutation { sendMessage(runId: "run-a", message: "keep going") {
+                 run { id status } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["sendMessage"]["run"]["id"], "run-a");
+    })
+    .await;
+}
+
+/// A run that does not take messages says that, rather than reading as missing.
+#[tokio::test]
+async fn a_run_that_takes_no_messages_says_so() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-message-refused", |_d| async move {
+        let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+        let answer = mutate(
+            control,
+            r#"mutation { sendMessage(runId: "run-a", message: "hello") { run { id } } }"#,
+        )
+        .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("not accepting messages"),
+            "{}",
+            error.message
+        );
+    })
+    .await;
+}
+
+/// Each answer variant reaches the daemon as what that kind of ask takes.
+#[tokio::test]
+async fn each_answer_variant_reaches_the_daemon() {
+    let cases = [
+        (
+            r#"mutation { answerInteraction(input: { text: { requestId: "ask-1", value: "yes" } })
+                 { requestId accepted } }"#,
+            "text",
+        ),
+        (
+            r#"mutation { answerInteraction(input: { choice: { requestId: "ask-1", choiceIndex: 1 } })
+                 { requestId accepted } }"#,
+            "choice",
+        ),
+        (
+            r#"mutation { answerInteraction(input: { approval: { requestId: "ask-1", approved: true,
+                 scope: SESSION } }) { requestId accepted } }"#,
+            "approval",
+        ),
+    ];
+    for (query, kind) in cases {
+        let (control, _socket, _srv) = fake_daemon(move |req| match req {
+            leviath_runtime::control_socket::ControlRequest::AnswerInteraction { response } => {
+                assert_eq!(response.request_id, "ask-1");
+                match kind {
+                    "text" => assert_eq!(response.value.as_deref(), Some("yes")),
+                    "choice" => assert_eq!(response.choice_index, Some(1)),
+                    _ => {
+                        assert_eq!(response.approved, Some(true));
+                        assert_eq!(
+                            response.scope,
+                            Some(leviath_core::interaction::ApprovalScope::Run),
+                            "SESSION is the run-long scope"
+                        );
+                    }
+                }
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("the answer is what reaches the daemon: {other:?}"),
+        });
+        let answer = mutate(control, query).await;
+        assert!(answer.errors.is_empty(), "{kind}: {:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["answerInteraction"]["accepted"], true, "{kind}");
+        assert_eq!(json["answerInteraction"]["requestId"], "ask-1", "{kind}");
+    }
+}
+
+/// A second answer to one request is not an error: it reads as not accepted.
+///
+/// Two people clicking the same prompt is ordinary, and the first one won.
+#[tokio::test]
+async fn a_second_answer_reads_as_not_accepted() {
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+    let answer = mutate(
+        control,
+        r#"mutation { answerInteraction(input: { text: { requestId: "ask-1", value: "yes" } })
+             { requestId accepted } }"#,
+    )
+    .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    assert_eq!(json["answerInteraction"]["accepted"], false);
+
+    // A daemon that cannot be reached is still a failure: nothing was answered,
+    // and the remedy is not the client's.
+    let mut state = state_with_agent_paths(Vec::new());
+    state.control = no_daemon_client();
+    let schema = Schema::build(Query, Mutation, EmptySubscription)
+        .data(state)
+        .finish();
+    let answer = schema
+        .execute(Request::new(
+            r#"mutation { answerInteraction(input: { text: { requestId: "ask-1", value: "y" } })
+                 { accepted } }"#,
+        ))
+        .await;
+    assert_eq!(
+        answer
+            .errors
+            .first()
+            .expect("a failure")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"DAEMON_UNAVAILABLE\"".to_string())
+    );
+}
+
+/// Feedback is what the model reads instead of the call, so it goes with a
+/// denial. Sending it with an approval is a request that contradicts itself.
+#[tokio::test]
+async fn feedback_with_an_approval_is_refused() {
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+    let answer = mutate(
+        control,
+        r#"mutation { answerInteraction(input: { approval: { requestId: "ask-1",
+             approved: true, feedback: "do it differently" } }) { accepted } }"#,
+    )
+    .await;
+    let error = answer.errors.first().expect("a refusal");
+    assert!(
+        error.message.contains("goes with a denial"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        error
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"BAD_USER_INPUT\"".to_string())
+    );
+}
+
+/// A denial carrying feedback is the redirect case, and it goes through.
+#[tokio::test]
+async fn a_denial_may_carry_feedback() {
+    let (control, _socket, _srv) = fake_daemon(|req| match req {
+        leviath_runtime::control_socket::ControlRequest::AnswerInteraction { response } => {
+            assert_eq!(response.approved, Some(false));
+            assert_eq!(response.feedback.as_deref(), Some("read the file instead"));
+            ControlResponse::Ok { ok: true }
+        }
+        other => panic!("unexpected: {other:?}"),
+    });
+    let answer = mutate(
+        control,
+        r#"mutation { answerInteraction(input: { approval: { requestId: "ask-1",
+             approved: false, feedback: "read the file instead" } }) { accepted } }"#,
+    )
+    .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+}
+
+/// A negative choice index is refused: the options are a zero-based list.
+#[tokio::test]
+async fn a_negative_choice_is_refused() {
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+    let answer = mutate(
+        control,
+        r#"mutation { answerInteraction(input: { choice: { requestId: "ask-1",
+             choiceIndex: -1 } }) { accepted } }"#,
+    )
+    .await;
+    assert!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("negative"),
+        "{:?}",
+        answer.errors
+    );
+}
+
+/// The approval inbox: every open ask, each naming the run it is parked on.
+#[tokio::test]
+async fn the_inbox_lists_every_open_ask_with_its_run() {
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Interactions {
+        interactions: vec![(
+            "run-a".to_string(),
+            leviath_core::interaction::InteractionRequest {
+                id: "ask-1".to_string(),
+                kind: leviath_core::interaction::InteractionKind::ToolApproval,
+                prompt: "Run `rm -rf build`?".to_string(),
+                options: Vec::new(),
+                tool_name: Some("shell".to_string()),
+                tool_arguments: None,
+                required: true,
+                stage_name: "build".to_string(),
+                body: None,
+                body_format: Default::default(),
+            },
+        )],
+    });
+
+    let answer = mutate(
+        control,
+        "{ openInteractions { runId request { id kind prompt tool stageName required } } }",
+    )
+    .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let inbox = &json["openInteractions"][0];
+    assert_eq!(inbox["runId"], "run-a");
+    assert_eq!(inbox["request"]["id"], "ask-1");
+    assert_eq!(inbox["request"]["kind"], "TOOL_APPROVAL");
+    assert_eq!(inbox["request"]["tool"], "shell");
+    assert_eq!(inbox["request"]["stageName"], "build");
+    assert_eq!(inbox["request"]["required"], true);
+}
