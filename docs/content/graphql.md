@@ -754,11 +754,15 @@ and silently getting 200 of the 500 rows it asked for shows up much later as mis
 ## The schema
 
 The schema is generated from the server's own types, so it cannot describe something the server does
-not serve. Read it three ways:
+not serve. It is the only one of Leviath's published schemas that is: the OpenAPI spec, the
+blueprint schema and the config schema are written by hand and held to the code by tests. Read it
+three ways:
 
-* The published file, [`leviath.graphql`](https://leviath.dev/docs/stable/leviath.graphql).
+* The published file, [`leviath.graphql`](https://leviath.dev/docs/stable/leviath.graphql). It is
+  committed, so no command is needed to read it, and a test refuses a build whose schema has moved
+  away from it. Each channel publishes its own copy.
 * Introspection, which any GraphQL client tool can read live from your own server.
-* `lev serve --print-graphql-schema`, which prints what your build serves.
+* `lev serve --print-graphql-schema`, which prints what your build serves and exits.
 
 New fields and types are added; nothing is removed without being marked deprecated first. Check the
 `graphql` capability in `GET /api/config` before choosing this transport, the same way you check any
