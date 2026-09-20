@@ -131,6 +131,55 @@ fn a_provider_tells_configured_from_signed_in() {
     assert!(provider.expires_at.is_none());
 }
 
+/// Each inventory entry reads back as the kind of tool it is, and a script
+/// carries the three things only a script has.
+///
+/// The interface is the point: a client asking for `path` gets a field that is
+/// always there, rather than a nullable one it has to test.
+#[test]
+fn an_inventory_entry_reads_back_as_its_own_kind() {
+    use super::Tool;
+    use crate::tool_inventory::{ToolEntry, ToolSource};
+
+    let entry = |source, path: Option<&str>| ToolEntry {
+        name: "t".to_string(),
+        source,
+        description: "does a thing".to_string(),
+        arguments: serde_json::json!({ "type": "object" }),
+        path: path.map(std::path::PathBuf::from),
+        agent: Some("coder".to_string()),
+        requires: vec!["network".to_string()],
+    };
+
+    assert!(matches!(
+        Tool::of(entry(ToolSource::Builtin, None)),
+        Tool::Builtin(_)
+    ));
+    assert!(matches!(
+        Tool::of(entry(ToolSource::Subagent, None)),
+        Tool::Subagent(_)
+    ));
+    let Tool::Script(script) = Tool::of(entry(ToolSource::Agent, Some("/a/tools/t.rhai"))) else {
+        panic!("an agent script is a script tool");
+    };
+    assert_eq!(script.path, "/a/tools/t.rhai");
+    assert_eq!(script.agent.as_deref(), Some("coder"));
+    assert_eq!(script.requires, vec!["network".to_string()]);
+    assert_eq!(script.description, "does a thing");
+    assert!(matches!(
+        Tool::of(entry(ToolSource::Global, Some("/g/t.rhai"))),
+        Tool::Script(_)
+    ));
+
+    // A script source with no file cannot come out of discovery, which only
+    // makes one from a file it read. Carried as a built-in rather than dropped:
+    // a tool missing from the listing is worse than one in the wrong arm.
+    assert!(matches!(
+        Tool::of(entry(ToolSource::Global, None)),
+        Tool::Builtin(_)
+    ));
+}
+
 /// Every source the inventory can report has an origin here.
 ///
 /// The inventory's own words are what REST carries, so the two lists have to

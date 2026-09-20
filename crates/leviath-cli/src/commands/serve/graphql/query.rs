@@ -543,16 +543,7 @@ impl Query {
         })
         .await;
         Ok(ToolInventory {
-            tools: inventory
-                .tools
-                .into_iter()
-                .map(|tool| Tool {
-                    name: tool.name,
-                    origin: tool.source.into(),
-                    path: tool.path.map(|p| p.display().to_string()),
-                    agent: tool.agent,
-                })
-                .collect(),
+            tools: inventory.tools.into_iter().map(Tool::of).collect(),
             groups: leviath_core::blueprint::ToolGroup::ALL
                 .iter()
                 .map(|group| ToolGroup {

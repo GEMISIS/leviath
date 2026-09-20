@@ -1557,8 +1557,9 @@ mod machine_listings {
     async fn the_tools_listing_carries_the_group_tokens() {
         crate::commands::serve::testutil::with_home(|_home| async move {
             let answer = run_query(
-                "{ tools { tools { name origin path agent } groups { name description }
-                     skipped { path reason } } }",
+                "{ tools { tools { name origin description
+                       ... on ScriptTool { path agent requires } }
+                     groups { name description } skipped { path reason } } }",
             )
             .await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1838,9 +1839,11 @@ mod the_awkward_shapes {
             )
             .expect("a tool");
 
-            let answer =
-                run_query(r#"{ tools(agent: "coder") { tools { name origin path agent } } }"#)
-                    .await;
+            let answer = run_query(
+                r#"{ tools(agent: "coder") { tools { name origin
+                     ... on ScriptTool { path agent requires } } } }"#,
+            )
+            .await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
             let tools = json["tools"]["tools"].as_array().expect("the tools");

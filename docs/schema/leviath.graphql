@@ -706,6 +706,28 @@ enum BlueprintSource {
 }
 
 """
+A tool compiled into this build of Leviath.
+"""
+type BuiltinTool implements Tool {
+	"""
+	The name the model calls it by.
+	"""
+	name: String!
+	"""
+	What it does, in the words the model is given.
+	"""
+	description: String!
+	"""
+	The JSON Schema of its arguments.
+	"""
+	arguments: JSON!
+	"""
+	Always `BUILTIN`.
+	"""
+	origin: ToolOrigin!
+}
+
+"""
 An export job, as a client polls it.
 """
 type BulkExport {
@@ -5656,6 +5678,43 @@ type Script {
 }
 
 """
+A tool backed by a `.rhai` script on this machine.
+"""
+type ScriptTool implements Tool {
+	"""
+	The name the model calls it by.
+	"""
+	name: String!
+	"""
+	What it does, taken from the script's `@description`.
+	"""
+	description: String!
+	"""
+	The JSON Schema of its arguments, built from its `@param` lines.
+	"""
+	arguments: JSON!
+	"""
+	`AGENT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
+	tool one agent has and one every agent here has.
+	"""
+	origin: ToolOrigin!
+	"""
+	The file behind it.
+	"""
+	path: String!
+	"""
+	The agent whose directory it came from, for an agent-scoped script.
+	"""
+	agent: String
+	"""
+	Platform capabilities it declares with `@requires`. A tool the platform
+	cannot satisfy is not offered at all, so an entry here is one this
+	machine meets.
+	"""
+	requires: [String!]!
+}
+
+"""
 Whether a script compiles.
 """
 type ScriptVerdict {
@@ -6665,6 +6724,28 @@ type StuckThresholds {
 }
 
 """
+A sub-agent tool, offered to an agent that may spawn children.
+"""
+type SubagentTool implements Tool {
+	"""
+	The name the model calls it by.
+	"""
+	name: String!
+	"""
+	What it does, in the words the model is given.
+	"""
+	description: String!
+	"""
+	The JSON Schema of its arguments.
+	"""
+	arguments: JSON!
+	"""
+	Always `SUBAGENT`.
+	"""
+	origin: ToolOrigin!
+}
+
+"""
 Arguments for the `submit_output` tool.
 """
 type SubmitOutputArgs {
@@ -6949,25 +7030,29 @@ type TokensUpdated {
 }
 
 """
-Where a tool comes from.
+One tool an agent on this machine can be given.
+
+An interface rather than one type with nullable extras: a script tool always
+has a file and a built-in never does, and a schema that says so lets a client
+read the file without checking whether it is there.
 """
-type Tool {
+interface Tool {
 	"""
 	The name the model calls it by.
 	"""
 	name: String!
 	"""
-	What kind of thing offers it.
+	What it does, in the words the model is given.
+	"""
+	description: String!
+	"""
+	The JSON Schema of its arguments, as the model is given it.
+	"""
+	arguments: JSON!
+	"""
+	What kind of thing offers it, for a client that would rather branch on a value than on a type.
 	"""
 	origin: ToolOrigin!
-	"""
-	The file behind it, for a script tool.
-	"""
-	path: String
-	"""
-	The agent whose directory it came from, for an agent-scoped script.
-	"""
-	agent: String
 }
 
 """

@@ -67,6 +67,16 @@ pub(super) struct ToolItem {
     pub(super) name: String,
     /// `builtin`, `subagent`, `agent` or `global`.
     pub(super) source: String,
+    /// What the tool does, in the words the model is given.
+    pub(super) description: String,
+    /// The JSON Schema of its arguments, as the model is given it. A picker
+    /// showing what a tool takes and a model deciding how to call it read one
+    /// thing.
+    pub(super) arguments: serde_json::Value,
+    /// Platform capabilities a script declares with `@requires`. Empty for a
+    /// built-in, whose requirements are compiled in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) requires: Vec<String>,
     /// The `.rhai` file behind it, for script-backed tools only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) path: Option<String>,
@@ -142,6 +152,9 @@ pub(super) async fn list_tools(
         .map(|t| ToolItem {
             name: t.name,
             source: t.source.as_str().to_string(),
+            description: t.description,
+            arguments: t.arguments,
+            requires: t.requires,
             path: t.path.map(|p| p.display().to_string()),
             agent: t.agent,
         })
