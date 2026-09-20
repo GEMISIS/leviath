@@ -443,3 +443,30 @@ fn a_flush_that_fails_is_reported() {
         .expect_err("the flush failed");
     assert_eq!(failed.to_string(), "the disk went away");
 }
+
+/// A writer that takes a row and then fails on the newline is reported.
+///
+/// The row and the separator are two writes, and a disk that fills between them
+/// leaves a file whose last line is not a line. The export has to say so rather
+/// than report a complete file.
+#[test]
+fn a_newline_that_cannot_be_written_is_reported() {
+    struct RefusesNewlines;
+
+    impl std::io::Write for RefusesNewlines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match buf == b"\n" {
+                true => Err(std::io::Error::other("no space for the newline")),
+                false => Ok(buf.len()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let failed = super::write_rows(RefusesNewlines, &[serde_json::json!({ "run_id": "a" })])
+        .expect_err("the separator failed");
+    assert_eq!(failed.to_string(), "no space for the newline");
+}

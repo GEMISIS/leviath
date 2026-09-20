@@ -572,3 +572,92 @@ impl OneExecution {
         &self.execution
     }
 }
+
+/// A run parked on a prompt carries the ask, and one nobody is asking about
+/// carries none.
+///
+/// The daemon holds open asks in memory, so this is one round trip to it rather
+/// than a read of the run store: the answer has to be what is true now, not what
+/// the run's record said when it was written.
+#[tokio::test]
+async fn a_parked_run_carries_the_ask_it_is_parked_on() {
+    use crate::commands::serve::testutil::fake_daemon;
+    use leviath_runtime::control_socket::ControlResponse;
+
+    let ask = |run: &str| leviath_core::interaction::InteractionRequest {
+        id: "ask-1".to_string(),
+        kind: leviath_core::interaction::InteractionKind::FreeText,
+        prompt: format!("what next for {run}?"),
+        options: Vec::new(),
+        tool_name: None,
+        tool_arguments: None,
+        required: true,
+        stage_name: "plan".to_string(),
+        body: None,
+        body_format: Default::default(),
+    };
+
+    // An ask for this run comes through with what it is asking.
+    let (control, _socket, _srv) = fake_daemon(move |_| ControlResponse::Interactions {
+        interactions: vec![("did-things".to_string(), ask("did-things"))],
+    });
+    let json = with_daemon(
+        control,
+        "{ run { interaction { id kind prompt stageName required } } }",
+    )
+    .await;
+    assert_eq!(json["run"]["interaction"]["id"], "ask-1");
+    assert_eq!(json["run"]["interaction"]["kind"], "FREE_TEXT");
+    assert_eq!(json["run"]["interaction"]["stageName"], "plan");
+
+    // An ask parked on a different run is not this run's.
+    let (control, _socket, _srv) = fake_daemon(move |_| ControlResponse::Interactions {
+        interactions: vec![("somebody-else".to_string(), ask("somebody-else"))],
+    });
+    let json = with_daemon(control, "{ run { interaction { id } } }").await;
+    assert!(
+        json["run"]["interaction"].is_null(),
+        "another run's prompt is not this one's"
+    );
+}
+
+/// A daemon that cannot be reached is a failure, not an absence.
+///
+/// Null would read as "nothing is being asked", which would leave a console
+/// quietly hiding a prompt that is really there.
+#[tokio::test]
+async fn an_unreachable_daemon_fails_the_ask_rather_than_answering_none() {
+    let run = Run {
+        meta: Arc::new(meta()),
+        now: 1_788_925_000,
+    };
+    let schema = Schema::build(Probe { run }, EmptyMutation, EmptySubscription)
+        .data(state_with_agent_paths(Vec::new()))
+        .finish();
+    let answer = schema
+        .execute(Request::new("{ run { interaction { id } } }"))
+        .await;
+    assert!(
+        !answer.errors.is_empty(),
+        "no daemon to ask is not an empty answer"
+    );
+}
+
+/// Ask this run something with a daemon behind it.
+async fn with_daemon(
+    control: leviath_runtime::control_socket::ControlClient,
+    query: &str,
+) -> serde_json::Value {
+    let run = Run {
+        meta: Arc::new(meta()),
+        now: 1_788_925_000,
+    };
+    let mut state = state_with_agent_paths(Vec::new());
+    state.control = control;
+    let schema = Schema::build(Probe { run }, EmptyMutation, EmptySubscription)
+        .data(state)
+        .finish();
+    let answer = schema.execute(Request::new(query)).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    serde_json::to_value(&answer.data).expect("data serializes")
+}

@@ -8,7 +8,7 @@
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema, Variables};
 
-use super::{Query, RunFilter, RunSort, page_size};
+use super::{Query, RunFilter, RunSort, page_size, waiver_word};
 use crate::commands::serve::core::runs::{MAX_IDS, MAX_LIMIT, ParentFilter, SortKey, Source};
 use crate::commands::serve::graphql::scalars::Timestamp;
 use crate::commands::serve::graphql::types::run::RunStatus;
@@ -1963,4 +1963,41 @@ fn the_run_filter_refuses_what_it_cannot_read() {
     let mut map = IndexMap::new();
     map.insert(Name::new("query"), Value::Number(7.into()));
     assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
+}
+
+/// Both words a profile's default can be.
+///
+/// The word is the one the config file uses, so a console showing a profile and
+/// the file it came from agree. Two values, and neither is a bare on or off.
+#[test]
+fn a_profiles_default_reads_as_the_word_the_file_uses() {
+    assert_eq!(waiver_word(crate::yolo::rules::Waiver::Allow), "allow");
+    assert_eq!(waiver_word(crate::yolo::rules::Waiver::Ask), "ask");
+}
+
+/// The configured blueprint directories come back as text.
+///
+/// A path is not a string on every platform, so this is where one becomes one.
+/// A console lists these to say where a blueprint would be installed.
+#[tokio::test]
+async fn the_config_lists_where_blueprints_are_looked_for() {
+    let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
+        std::path::PathBuf::from("/srv/agents"),
+        std::path::PathBuf::from("/opt/more-agents"),
+    ]);
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .data(state)
+        .finish();
+    let answer = schema
+        .execute(Request::new("{ config { agentPaths } }"))
+        .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let paths: Vec<&str> = json["config"]["agentPaths"]
+        .as_array()
+        .expect("the paths")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(paths, vec!["/srv/agents", "/opt/more-agents"]);
 }
