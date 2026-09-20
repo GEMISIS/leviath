@@ -324,6 +324,107 @@ not read fifty windows' text.
 }
 ```
 
+## What a run did
+
+A context window says what a model is looking at now. It does not say what the
+run tried. `executions` reads the run's journal instead, so it holds the attempts
+the window no longer shows: a call a gate refused, one that failed and was
+reissued, one a restart cut off.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    executions(first: 50) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges { node {
+        id callId outcome stageIndex iteration dispatchedAt endedAt
+        journalPosition
+        call {
+          __typename
+          toolName
+          rawArguments
+          ... on ShellCall { args { command } }
+          ... on WriteFileCall { args { path append } }
+          ... on UntypedToolCall { reason }
+        }
+      } }
+    }
+  } } }
+}
+```
+
+One attempt is one execution. A call the model reissued after a failure is a
+second execution with its own `id`, which is why these have ids of their own: a
+provider is free to reuse its `callId` across a retry, so that field is
+correlation rather than identity.
+
+`outcome` is null for three different reasons, and a client must not flatten
+them. The attempt may still be running, it may have ended before this build
+recorded outcomes, or it may have ended in a way only the result text describes.
+`endedAt` tells the first apart from the other two.
+
+`INDETERMINATE` is its own answer, not a missing one. A daemon that died between
+dispatch and completion left a call nobody saw the end of. The resume that
+carried the run on records that, because a missing completion is not evidence of
+success and not a safe thing to retry silently.
+
+`journalPosition` is where the record that dispatched the attempt sits in the
+journal, as a byte offset. It only climbs within a run and it never changes, so
+it orders executions and names one for as long as the run exists.
+
+### Results are their own field
+
+One result can be a whole file, so a page of executions carries none of them.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    executions(first: 1) { edges { node {
+      result { text bytes truncated parts }
+    } } }
+  } } }
+}
+```
+
+Each `result` reads the one record it needs. `bytes` is the whole result's size
+and `truncated` says whether `text` is only its head. `parts` names the stored
+parts the result carried, whose bytes come from the run's own parts.
+
+### One tool, one argument shape
+
+Every tool takes exactly one argument shape, so each tool has its own type and a
+mismatched pair cannot be built. Ask for `__typename`, then select that type's
+`args`.
+
+| Field | What it answers |
+|---|---|
+| `toolName` | The name the model called, before any alias resolution |
+| `toolDescription` | What the tool does, where this build knows the tool |
+| `rawArguments` | Exactly what the model sent, untouched |
+| `args` | The typed reading of those arguments |
+
+`rawArguments` is on every call, typed or not. The typed view is a convenience
+over it and never a replacement, because a debugger that could only show the
+tidied version would hide the malformed call that caused the bug.
+
+A call comes back as `UntypedToolCall` in two cases, and `reason` says which.
+`NO_TYPE_FOR_THIS_TOOL` is an MCP or script tool, which is ordinary.
+`ARGUMENTS_DID_NOT_MATCH` is a built-in whose recorded arguments did not fit its
+own schema, which is worth looking at.
+
+An alias is typed as the tool it means. `bash` is `shell`, so it comes back as a
+`ShellCall` whose `toolName` is still `bash`.
+
+The same interface answers what a person is being asked to approve:
+
+```graphql
+{
+  openInteractions { runId request { id kind prompt
+    toolCall { __typename ... on ShellCall { args { command } } } } }
+}
+```
+
 ## The machine itself
 
 Three catalogues, sized by what you configured rather than by what has piled

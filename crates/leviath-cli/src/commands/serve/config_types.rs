@@ -447,6 +447,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // console watching one run of five thousand should not be handed the
     // fleet's frames to sort through.
     "graphql.subscriptions",
+    // `Run.executions`: what a run tried, read from its journal, with each
+    // attempt's outcome and its call typed by its tool. Announced because a
+    // console cannot infer it from anything else it can see, and the tab it
+    // would draw is empty without it: the run's own counters say how many tool
+    // calls there were, never which ones were refused or cut off.
+    "graphql.executions",
     // Short-lived signed URLs on the byte routes, which is what lets a browser
     // put a run's picture in an `<img src>`. Announced because the alternative
     // a client writes without it - fetch with the token, hold the bytes, mint a

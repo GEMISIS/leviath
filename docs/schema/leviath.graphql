@@ -2684,9 +2684,14 @@ type InteractionRequest {
 	"""
 	options: [String!]!
 	"""
-	The tool awaiting approval, for an approval ask.
+	The call awaiting approval, for an approval ask: the tool and the
+	arguments it would run with, paired and typed.
+	
+	Null for every other kind of ask. An approval that names a tool whose
+	arguments do not fit its shape comes through untyped rather than tidied:
+	deciding whether to approve a call means seeing what it actually says.
 	"""
-	tool: String
+	toolCall: ToolCall
 	"""
 	The stage the run is in.
 	"""

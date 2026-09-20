@@ -288,8 +288,17 @@ pub(crate) struct InteractionRequest {
     pub(crate) body: Option<String>,
     /// The choices, for a multiple-choice ask.
     pub(crate) options: Vec<String>,
-    /// The tool awaiting approval, for an approval ask.
-    pub(crate) tool: Option<String>,
+    /// The call awaiting approval, for an approval ask: the tool and the
+    /// arguments it would run with, paired and typed.
+    ///
+    /// Null for every other kind of ask. An approval that names a tool whose
+    /// arguments do not fit its shape comes through untyped rather than tidied:
+    /// deciding whether to approve a call means seeing what it actually says.
+    ///
+    /// Boxed because a typed call is as large as the largest tool's arguments,
+    /// and every live frame would otherwise carry that much room for one it
+    /// almost never holds.
+    pub(crate) tool_call: Option<Box<super::types::tool_calls::ToolCall>>,
     /// The stage the run is in.
     pub(crate) stage_name: String,
     /// Whether the run holds until this is answered.
@@ -304,7 +313,17 @@ impl From<leviath_core::interaction::InteractionRequest> for InteractionRequest 
             prompt: request.prompt,
             body: request.body,
             options: request.options,
-            tool: request.tool_name,
+            tool_call: request.tool_name.map(|tool| {
+                Box::new(super::types::tool_calls::from_value(
+                    &tool,
+                    None,
+                    // A request that names a tool and no arguments is a call with
+                    // none, which is what an empty object says.
+                    request
+                        .tool_arguments
+                        .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+                ))
+            }),
             stage_name: request.stage_name,
             required: request.required,
         }

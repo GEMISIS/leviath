@@ -148,7 +148,45 @@ same list.
   is behind `--allow-admin`, because none of them dials anything or writes
   anything, and a form that checks as somebody types should not need the flag.
 
+- What a run did, over GraphQL: `Run.executions` pages over the run's journal,
+  so it holds the attempts a context window no longer shows. A call a gate
+  refused, one that failed and was reissued, one a restart cut off: each carries
+  its own id, its outcome, the stage and iteration it belonged to, and the byte
+  position of the record that dispatched it. Results are a field of their own,
+  read one record at a time, because a single result can be a whole file. Each
+  call is typed by its tool, so a `ShellCall` has a command where a
+  `ReadFileCall` has a path, and every call also carries the arguments exactly
+  as the model sent them. A call whose arguments do not fit its tool comes back
+  untyped with a reason rather than tidied. The same typed call answers what a
+  person is being asked to approve, which used to name the tool without saying
+  what it would run. Announced as `graphql.executions`.
+
 ### Changed
+
+- A tool execution is told apart from the tool call it was carrying out. The
+  provider's call id was the only identity a completed call had, and a provider
+  may reuse one across a retry or a reissue, so two attempts at one call could
+  not be told apart afterwards. Each attempt now gets an id minted here at
+  dispatch, and the provider's id travels beside it as correlation. A stage visit
+  gets an id the same way, having been identified by its position in a capped
+  list: the hundred and twenty-ninth visit took the first one's identity, and
+  everything recorded against it moved with it. Old journals stay readable and
+  carry no ids rather than invented ones.
+
+- A run resumed after a crash records what it gave up on. A call with no
+  journaled result is one nobody saw the end of, and the resume lands a stand-in
+  and carries on rather than re-running it. The journal said nothing about that
+  until now, so a batch cut off mid-flight read exactly like one that never
+  started. Each such attempt is now recorded as indeterminate, which is a state
+  and not a missing value: a completion that never arrived is not evidence of
+  success.
+
+- The persistence lane says what became of an append. A tool batch waits for its
+  journal record before running, and that wait used to end in a bare signal, so a
+  failed write was invisible at the point it mattered. The answer now says the
+  record landed and at which byte position, or that this world keeps no journal,
+  or that the write failed. Only the last is a problem, and it is now said out
+  loud.
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the
   manifest into the run's directory and records its SHA-256 as
