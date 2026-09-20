@@ -244,7 +244,7 @@ description = "the other branches"
 [sandbox]
 kind = "namespace"
 network = true
-persist = true
+keep_warm = true
 on_unavailable = "warn"
 
 [agent.nudge]
@@ -327,7 +327,7 @@ seed = { files = ["a.txt", "b.txt"] }
 [context.regions.script_region]
 kind = "custom"
 script = "context_hooks/own.rhai"
-persistent = true
+pinned = true
 max_tokens = 1000
 seed = { rhai = "seeds/now.rhai" }
 
@@ -446,7 +446,7 @@ async fn each_region_kind_reports_its_own_numbers() {
     let json = ask_variants(
         r#"{ blueprint { regions {
              name kind strategy compactCount overflow thresholdTokens
-             sourceRegion script persistent
+             sourceRegion script pinned
            } } }"#,
     )
     .await;
@@ -472,7 +472,7 @@ async fn each_region_kind_reports_its_own_numbers() {
     let own = by_name("script_region");
     assert_eq!(own["kind"], "CUSTOM");
     assert_eq!(own["script"], "context_hooks/own.rhai");
-    assert_eq!(own["persistent"], true);
+    assert_eq!(own["pinned"], true);
 }
 
 /// Every token rule has its own field, and only one is ever set.
@@ -531,7 +531,7 @@ async fn a_transform_maps_one_layout_onto_another() {
 async fn the_remaining_settings_arms_come_back() {
     let json = ask_variants(
         r#"{ blueprint {
-             sandbox { kind network persist onUnavailable }
+             sandbox { kind network keepWarm onUnavailable }
              nudge { policy text }
              dependencies { name kind var check required
                             install { script commands { os command } } }
@@ -541,7 +541,7 @@ async fn the_remaining_settings_arms_come_back() {
     let bp = &json["blueprint"];
     assert_eq!(bp["sandbox"]["kind"], "NAMESPACE");
     assert_eq!(bp["sandbox"]["network"], true);
-    assert_eq!(bp["sandbox"]["persist"], true);
+    assert_eq!(bp["sandbox"]["keepWarm"], true);
     assert_eq!(bp["sandbox"]["onUnavailable"], "WARN");
     // Off outright, which is a different answer from inheriting: a nullable
     // boolean could not tell the two apart.

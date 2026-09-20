@@ -445,7 +445,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
         "brain".to_string(),
         RegionKind::Custom {
             script: "meta.rhai".to_string(),
-            persistent: false,
+            pinned: false,
         },
         1_000,
     ));
@@ -7534,7 +7534,7 @@ fn tc(id: &str, name: &str) -> crate::components::ToolCall {
 fn routing(
     default: &str,
     overrides: &[(&str, &str)],
-    persist: bool,
+    keep_results: bool,
     max_result: Option<usize>,
 ) -> leviath_core::blueprint::ToolResultRouting {
     leviath_core::blueprint::ToolResultRouting {
@@ -7543,7 +7543,7 @@ fn routing(
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-        persist,
+        keep_results,
         max_result_tokens: max_result,
         tool_max_result_tokens: std::collections::HashMap::new(),
     }
@@ -9979,7 +9979,7 @@ fn edge_transforms_respect_custom_region_persistence() {
         "scratch_custom".to_string(),
         RegionKind::Custom {
             script: "s.rhai".to_string(),
-            persistent: false,
+            pinned: false,
         },
         500,
     );
@@ -9989,7 +9989,7 @@ fn edge_transforms_respect_custom_region_persistence() {
         "vault".to_string(),
         RegionKind::Custom {
             script: "v.rhai".to_string(),
-            persistent: true,
+            pinned: true,
         },
         500,
     );
@@ -17827,7 +17827,7 @@ fn add_scripted_region(window: &mut ContextWindow, name: &str, budget: usize, sr
         name.to_string(),
         leviath_core::RegionKind::Custom {
             script: "s.rhai".to_string(),
-            persistent: false,
+            pinned: false,
         },
         budget,
     ));

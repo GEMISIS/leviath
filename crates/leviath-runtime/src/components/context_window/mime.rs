@@ -508,7 +508,7 @@ mod writer_tests {
             "brain".into(),
             RegionKind::Custom {
                 script: "t.rhai".into(),
-                persistent: true,
+                pinned: true,
             },
             5_000,
         ));

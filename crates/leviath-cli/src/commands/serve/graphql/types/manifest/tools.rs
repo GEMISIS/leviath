@@ -89,8 +89,9 @@ pub(crate) struct ToolRouting {
     pub(crate) default_region: String,
     /// Tools whose results go somewhere else.
     pub(crate) overrides: Vec<ToolRouteOverride>,
-    /// Whether results stay in the context after the turn that produced them.
-    pub(crate) persist: bool,
+    /// Whether a tool's result stays in the region it was routed to, rather
+    /// than going to `scratch` where the stage can drop it.
+    pub(crate) keep_results: bool,
     /// The most tokens any one result may take, before truncation.
     pub(crate) max_result_tokens: Option<i32>,
     /// Tools with a ceiling of their own.
@@ -120,7 +121,7 @@ impl From<&leviath_core::blueprint::ToolResultRouting> for ToolRouting {
         Self {
             default_region: routing.default_region.clone(),
             overrides,
-            persist: routing.persist,
+            keep_results: routing.keep_results,
             max_result_tokens: routing.max_result_tokens.map(count),
             max_result_tokens_per_tool: ceilings,
         }

@@ -366,7 +366,7 @@ fn every_region_kind_maps_to_one_value() {
         (
             Core::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             RegionKind::Custom,
         ),

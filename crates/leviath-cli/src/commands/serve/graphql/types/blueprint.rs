@@ -321,10 +321,10 @@ impl Region {
     }
 
     /// Whether a custom region is never evicted, like a pinned one, rather than
-    /// first out, like a temporary one.
-    async fn persistent(&self) -> Option<bool> {
+    /// first out, like a temporary one. Null for every other kind.
+    async fn pinned(&self) -> Option<bool> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::Custom { persistent, .. } => Some(*persistent),
+            leviath_core::region::RegionKind::Custom { pinned, .. } => Some(*pinned),
             _ => None,
         }
     }

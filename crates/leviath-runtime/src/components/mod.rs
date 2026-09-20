@@ -1825,10 +1825,10 @@ mod tests {
         );
     }
 
-    fn custom_kind(script: &str, persistent: bool) -> RegionKind {
+    fn custom_kind(script: &str, pinned: bool) -> RegionKind {
         RegionKind::Custom {
             script: script.to_string(),
-            persistent,
+            pinned,
         }
     }
 
@@ -1892,13 +1892,13 @@ mod tests {
 
     /// A window with one custom region (`brain`, budget 100) backed by `src`,
     /// compiled and installed in the script table under "s.rhai".
-    fn custom_window(src: &str, persistent: bool) -> ContextWindow {
+    fn custom_window(src: &str, pinned: bool) -> ContextWindow {
         let mut window = ContextWindow::new(10_000);
         window.add_region(Region::new(
             "brain".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent,
+                pinned,
             },
             100,
         ));
@@ -2160,7 +2160,7 @@ mod tests {
             "brain".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             100,
         ));
@@ -2198,7 +2198,7 @@ mod tests {
             "brain".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             100,
         ));
@@ -2317,7 +2317,7 @@ mod tests {
             "brain".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             100,
         ));
@@ -2411,7 +2411,7 @@ mod tests {
             "conversation".to_string(),
             RegionKind::Custom {
                 script: "conv.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             5_000,
         ));
@@ -2976,7 +2976,7 @@ mod tests {
             "corpus".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             10_000,
         );
@@ -3020,7 +3020,7 @@ mod tests {
             "corpus".to_string(),
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             10_000,
         );

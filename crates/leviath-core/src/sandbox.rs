@@ -64,9 +64,12 @@ pub struct ToolSandboxConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<String>,
     /// Keep a container warm across the agent's stages rather than tearing it
-    /// down between them. Ignored for non-container kinds.
-    #[serde(default)]
-    pub persist: bool,
+    /// down between them. Ignored for non-container kinds. The container is
+    /// still torn down when the run ends.
+    ///
+    /// Written `persist` before it was renamed; both spellings parse.
+    #[serde(default, alias = "persist")]
+    pub keep_warm: bool,
     /// What to do when the runtime is unavailable.
     #[serde(default)]
     pub on_unavailable: OnUnavailable,
@@ -105,7 +108,7 @@ impl Default for ToolSandboxConfig {
             engine: None,
             network: true,
             mounts: Vec::new(),
-            persist: false,
+            keep_warm: false,
             on_unavailable: OnUnavailable::Error,
         }
     }
@@ -184,7 +187,7 @@ impl ToolSandboxConfig {
                 .filter(|m| ceiling.mounts.contains(m))
                 .cloned()
                 .collect(),
-            persist: self.persist,
+            keep_warm: self.keep_warm,
             // Falling back to the host is the user's call, not the manifest's.
             on_unavailable: ceiling.on_unavailable,
         }
@@ -394,7 +397,7 @@ mod tests {
             image: Some("alpine:3".to_string()),
             network: false,
             mounts: vec![],
-            persist: true,
+            keep_warm: true,
             ..Default::default()
         };
 
@@ -407,7 +410,7 @@ mod tests {
         );
         assert!(!resolved.network, "narrowing is allowed");
         assert!(resolved.mounts.is_empty(), "dropping a mount is allowed");
-        assert!(resolved.persist, "a warm container is not an escalation");
+        assert!(resolved.keep_warm, "a warm container is not an escalation");
         // With no engine pinned either side, the manifest's own choice stands.
         assert_eq!(resolved.engine, None);
     }
@@ -574,6 +577,6 @@ mod tests {
         assert!(c.is_active());
         assert_eq!(c.on_unavailable, OnUnavailable::Error);
         assert!(c.mounts.is_empty());
-        assert!(!c.persist);
+        assert!(!c.keep_warm);
     }
 }

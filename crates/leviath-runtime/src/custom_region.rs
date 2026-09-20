@@ -187,7 +187,7 @@ pub(crate) struct RegionRender<'a> {
     /// Its render hook, when it declares one.
     pub script: Option<&'a Arc<RegionScript>>,
     /// Whether the region persists across stage transitions.
-    pub persistent: bool,
+    pub pinned: bool,
     /// Stage metadata the hook sees.
     pub meta: &'a AssembleMeta,
     /// How full the window is right now.
@@ -211,7 +211,7 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
     let RegionRender {
         region,
         script,
-        persistent,
+        pinned,
         meta,
         window_current,
         window_max,
@@ -261,7 +261,7 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
         }
     };
 
-    match parse_render_output(&rendered, persistent) {
+    match parse_render_output(&rendered, pinned) {
         Ok((blocks, msgs)) => {
             let emitted_tokens: usize = blocks
                 .iter()
@@ -307,7 +307,7 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
 /// which the caller turns into the fallback block.
 fn parse_render_output(
     value: &serde_json::Value,
-    persistent: bool,
+    pinned: bool,
 ) -> Result<
     (
         Vec<leviath_providers::SystemBlock>,
@@ -316,7 +316,7 @@ fn parse_render_output(
     String,
 > {
     // A persistent region's rendered output is expected stable → cacheable.
-    let hint = if persistent {
+    let hint = if pinned {
         leviath_core::CacheHint::Always
     } else {
         leviath_core::CacheHint::UntilChanged
@@ -711,7 +711,7 @@ mod tests {
             "brain".to_string(),
             RegionKind::Custom {
                 script: "test.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             },
             1000,
         );
@@ -726,7 +726,7 @@ mod tests {
     fn render(
         region: &Region,
         script: Option<&Arc<RegionScript>>,
-        persistent: bool,
+        pinned: bool,
     ) -> (
         Vec<leviath_providers::SystemBlock>,
         Vec<leviath_providers::Message>,
@@ -738,7 +738,7 @@ mod tests {
                 RegionRender {
                     region,
                     script,
-                    persistent,
+                    pinned,
                     meta: &AssembleMeta {
                         stage_name: "plan".to_string(),
                         stage_iterations: 2,

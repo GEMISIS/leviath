@@ -163,6 +163,27 @@ same list.
 
 ### Changed
 
+- Three settings are spelled the way they behave. `[sandbox] persist` is
+  `keep_warm`: it keeps one container warm across a run's stages, and the
+  container is torn down when the run ends either way, so `persist` promised a
+  lifetime it never gave. `[stages.<stage>.tool_routing] persist` is
+  `keep_results`: it decides whether a tool's result stays in the region it was
+  routed to or goes to `scratch`, which has nothing to do with surviving a stage
+  change. A custom region's `persistent` is `pinned`: it means the region is not
+  evicted during the run, not that anything outlives it. The same `[sandbox]`
+  key in `config.toml` was renamed with it, as was the GraphQL field on each
+  (`keepWarm`, `keepResults`, `pinned`) and the `pinned` entry a Rhai
+  `region_custom` returns.
+
+  **Nothing has to change.** Every old name is still read, and reads exactly as
+  it did, so a blueprint or config written before this runs untouched. What is
+  new is being told: `lev validate` notes each old key with what the setting
+  actually does, and `lev update` now offers to respell them in your own
+  blueprints and in `config.toml`, listing every line first and writing nothing
+  without a yes. The rewrite replaces the key and nothing else, so comments,
+  spacing and key order survive it. Written both ways in one table, the current
+  name wins and `lev validate` says the old line is dead.
+
 - A tool execution is told apart from the tool call it was carrying out. The
   provider's call id was the only identity a completed call had, and a provider
   may reuse one across a retry or a reissue, so two attempts at one call could

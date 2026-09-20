@@ -2143,7 +2143,7 @@ mod tests {
                     )]),
                     max_result_tokens: None,
                     tool_max_result_tokens: std::collections::HashMap::new(),
-                    persist: true,
+                    keep_results: true,
                 },
             })
             // A declared sensitivity travels with the result, as it does for
@@ -2217,7 +2217,7 @@ mod tests {
                     ]),
                     max_result_tokens: None,
                     tool_max_result_tokens: std::collections::HashMap::new(),
-                    persist: true,
+                    keep_results: true,
                 },
             });
         begin_fan_out(

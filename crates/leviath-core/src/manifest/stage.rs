@@ -82,6 +82,9 @@ pub(super) const TOOL_ROUTING_KEYS: &[&str] = &[
     "max_result_tokens",
     "max_result_tokens_per_tool",
     "overrides",
+    "keep_results",
+    // The name `keep_results` used to carry, still read so an older blueprint
+    // keeps working and is not told it has a typo.
     "persist",
 ];
 
@@ -152,7 +155,7 @@ pub(super) fn reject_unknown_keys(
         if !allowed.contains(&key.as_str()) {
             return Err(Error::Other(format!(
                 "{where_} has unknown key '{key}' (valid: {})",
-                allowed.join(", ")
+                super::renamed::current_names(allowed).join(", ")
             )));
         }
     }
@@ -340,8 +343,8 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         if let Some(dr) = str_of(routing_table, "default_region") {
             routing.default_region = dr.to_string();
         }
-        if let Some(p) = bool_of(routing_table, "persist") {
-            routing.persist = p;
+        if let Some(keep) = renamed_bool_of(routing_table, &renamed::KEEP_RESULTS) {
+            routing.keep_results = keep;
         }
         if let Some(mt) = count_of(
             routing_table,

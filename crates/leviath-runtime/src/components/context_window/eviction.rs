@@ -26,10 +26,7 @@ impl ContextWindow {
                     r.kind,
                     RegionKind::Clearable
                         | RegionKind::Temporary
-                        | RegionKind::Custom {
-                            persistent: false,
-                            ..
-                        }
+                        | RegionKind::Custom { pinned: false, .. }
                 )
         };
 
@@ -81,13 +78,8 @@ impl ContextWindow {
                 break;
             }
             let region = &self.regions[i];
-            if !matches!(
-                region.kind,
-                RegionKind::Custom {
-                    persistent: false,
-                    ..
-                }
-            ) || region.admission == leviath_core::region::Admission::Reject
+            if !matches!(region.kind, RegionKind::Custom { pinned: false, .. })
+                || region.admission == leviath_core::region::Admission::Reject
                 || region.content.is_empty()
             {
                 continue;
@@ -133,11 +125,7 @@ impl ContextWindow {
             for region in &mut self.regions {
                 if matches!(
                     region.kind,
-                    RegionKind::Temporary
-                        | RegionKind::Custom {
-                            persistent: false,
-                            ..
-                        }
+                    RegionKind::Temporary | RegionKind::Custom { pinned: false, .. }
                 ) && region.admission != leviath_core::region::Admission::Reject
                     && let Some(entry) = region.remove_oldest()
                 {
@@ -187,10 +175,7 @@ impl ContextWindow {
                     r.kind,
                     RegionKind::Pinned
                         | RegionKind::CompactHistory { .. }
-                        | RegionKind::Custom {
-                            persistent: true,
-                            ..
-                        }
+                        | RegionKind::Custom { pinned: true, .. }
                 )
             })
             .map(|r| r.current_tokens)

@@ -143,8 +143,9 @@ pub(crate) struct SandboxConfig {
     pub(crate) network: bool,
     /// Paths mounted into it, as written.
     pub(crate) mounts: Vec<String>,
-    /// Whether one sandbox is kept for the whole run rather than one per call.
-    pub(crate) persist: bool,
+    /// Whether one container is kept warm across the run's stages rather than
+    /// built per call. It is still torn down when the run ends.
+    pub(crate) keep_warm: bool,
     /// What happens when it cannot be established.
     pub(crate) on_unavailable: SandboxUnavailable,
 }
@@ -157,7 +158,7 @@ impl From<&leviath_core::sandbox::ToolSandboxConfig> for SandboxConfig {
             engine: sandbox.engine.clone(),
             network: sandbox.network,
             mounts: sandbox.mounts.clone(),
-            persist: sandbox.persist,
+            keep_warm: sandbox.keep_warm,
             on_unavailable: SandboxUnavailable::from(sandbox.on_unavailable),
         }
     }

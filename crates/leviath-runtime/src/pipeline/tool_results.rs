@@ -298,7 +298,7 @@ pub(crate) fn apply_one_tool_result(
         None => "conversation",
     };
     let target_region = match routing {
-        Some(r) if !r.persist && window.get_region("scratch").is_some() => "scratch",
+        Some(r) if !r.keep_results && window.get_region("scratch").is_some() => "scratch",
         _ => base_region,
     };
 

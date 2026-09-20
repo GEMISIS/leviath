@@ -30,11 +30,11 @@ pub fn register_types(engine: &mut Engine) {
 
     engine.register_fn(
         "region_custom",
-        |script: String, persistent: bool| -> rhai::Map {
+        |script: String, pinned: bool| -> rhai::Map {
             let mut map = rhai::Map::new();
             map.insert("kind".into(), rhai::Dynamic::from("custom".to_string()));
             map.insert("script".into(), rhai::Dynamic::from(script));
-            map.insert("persistent".into(), rhai::Dynamic::from(persistent));
+            map.insert("pinned".into(), rhai::Dynamic::from(pinned));
             map
         },
     );
@@ -160,7 +160,7 @@ mod tests {
     // --- region_custom ---
 
     #[test]
-    fn region_custom_returns_map_with_script_and_persistent() {
+    fn region_custom_returns_map_with_script_and_pinned() {
         let e = engine();
         let result: rhai::Map = e.eval(r#"region_custom("hooks/conv.rhai", true)"#).unwrap();
         assert_eq!(result.get("kind").unwrap().clone_cast::<String>(), "custom");
@@ -168,14 +168,14 @@ mod tests {
             result.get("script").unwrap().clone_cast::<String>(),
             "hooks/conv.rhai"
         );
-        assert!(result.get("persistent").unwrap().clone_cast::<bool>());
+        assert!(result.get("pinned").unwrap().clone_cast::<bool>());
     }
 
     #[test]
-    fn region_custom_non_persistent() {
+    fn region_custom_unpinned() {
         let e = engine();
         let result: rhai::Map = e.eval(r#"region_custom("r.rhai", false)"#).unwrap();
-        assert!(!result.get("persistent").unwrap().clone_cast::<bool>());
+        assert!(!result.get("pinned").unwrap().clone_cast::<bool>());
     }
 
     // --- region_entry ---

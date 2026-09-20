@@ -1834,6 +1834,10 @@ some_custom_thing = \"forwarded to the script\"
     fn every_config_field_is_in_the_published_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(CONFIG_SCHEMA).expect("the schema is JSON");
+        // A key marked `deprecated` is an old name the loader still reads
+        // under its new one, so it is a key the schema allows and no field
+        // declares on purpose. The test below holds every one of them against
+        // the rename table, which is what makes leaving it out here safe.
         let keys_at = |path: &[&str]| -> Vec<String> {
             let mut node = &schema;
             for step in path {
@@ -1842,8 +1846,9 @@ some_custom_thing = \"forwarded to the script\"
             let mut keys: Vec<String> = node
                 .as_object()
                 .expect("an object of properties")
-                .keys()
-                .cloned()
+                .iter()
+                .filter(|(_, spec)| spec["deprecated"] != serde_json::json!(true))
+                .map(|(key, _)| key.clone())
                 .collect();
             keys.sort();
             keys
@@ -2016,6 +2021,42 @@ some_custom_thing = \"forwarded to the script\"
             .filter(|(_, missing, stray)| !missing.is_empty() || !stray.is_empty())
             .collect();
         assert_eq!(problems, Vec::new());
+    }
+
+    /// The schema's deprecated keys and the rename table are the same list.
+    ///
+    /// Both halves are load-bearing. A deprecated key the table does not know
+    /// would validate and then be dropped in silence, and an old name missing
+    /// from the schema would make `lev config check` call a file invalid that
+    /// the loader reads perfectly well.
+    #[test]
+    fn every_deprecated_schema_key_is_a_rename_the_loader_knows() {
+        let schema: serde_json::Value =
+            serde_json::from_str(CONFIG_SCHEMA).expect("the schema is JSON");
+        let deprecated_in = |properties: &serde_json::Value, section: Option<&str>| {
+            properties
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, spec)| spec["deprecated"] == serde_json::json!(true))
+                .map(|(key, _)| (section.map(str::to_owned), key.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut found = deprecated_in(&schema["properties"], None);
+        for (name, spec) in schema["properties"]
+            .as_object()
+            .expect("the root has properties")
+        {
+            found.extend(deprecated_in(&spec["properties"], Some(name)));
+        }
+        found.sort();
+
+        let mut expected: Vec<_> = renamed::RENAMED_KEYS
+            .iter()
+            .map(|key| (key.section.map(str::to_owned), key.old.to_string()))
+            .collect();
+        expected.sort();
+        assert_eq!(found, expected);
     }
 
     #[test]

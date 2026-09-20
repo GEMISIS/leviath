@@ -154,10 +154,10 @@ pub enum RegionKind {
     /// `script` is the blueprint-dir-relative path to the `.rhai` file; path
     /// resolution and compilation happen in the CLI spawner (this crate stays
     /// filesystem-free), and the compiled script travels on the runtime's
-    /// context window keyed by this path. `persistent` regions behave like
+    /// context window keyed by this path. A `pinned` custom region behaves like
     /// [`Pinned`](Self::Pinned) for lifecycle - never evicted, immune to edge
-    /// `Clear` transforms, counted as fixed budget - while non-persistent
-    /// regions behave like [`Temporary`](Self::Temporary).
+    /// `Clear` transforms, counted as fixed budget - while an unpinned one
+    /// behaves like [`Temporary`](Self::Temporary).
     ///
     /// Note: this kind is orthogonal to [`RegionSchema`]'s (unwired)
     /// `custom_script` field, which is a content-*validation* concept.
@@ -165,8 +165,11 @@ pub enum RegionKind {
         /// Blueprint-dir-relative path to the Rhai script backing this region
         script: String,
         /// Lifecycle: `true` = Pinned-like (protected, fixed budget),
-        /// `false` = Temporary-like (stage-specific, evictable)
-        persistent: bool,
+        /// `false` = Temporary-like (stage-specific, evictable).
+        ///
+        /// Written `persistent` before it was renamed; both spellings parse.
+        #[serde(alias = "persistent")]
+        pinned: bool,
     },
 }
 
@@ -204,11 +207,11 @@ impl PartialEq for RegionKind {
             (
                 Self::Custom {
                     script: a,
-                    persistent: pa,
+                    pinned: pa,
                 },
                 Self::Custom {
                     script: b,
-                    persistent: pb,
+                    pinned: pb,
                 },
             ) => a == b && pa == pb,
             _ => false,
@@ -381,11 +384,11 @@ impl RegionKind {
             // than a tool result and far rarer than a turn.
             RegionKind::Checklist => crate::cache::CacheHint::UntilChanged,
             RegionKind::Temporary | RegionKind::Clearable => crate::cache::CacheHint::Never,
-            // A persistent custom region is Pinned-like: its rendered output is
-            // expected to be stable. Non-persistent custom content changes on
+            // A pinned custom region is Pinned-like: its rendered output is
+            // expected to be stable. Unpinned custom content changes on
             // writes, like Compacting/HashMap.
-            RegionKind::Custom { persistent, .. } => {
-                if *persistent {
+            RegionKind::Custom { pinned, .. } => {
+                if *pinned {
                     crate::cache::CacheHint::Always
                 } else {
                     crate::cache::CacheHint::UntilChanged
@@ -1238,7 +1241,7 @@ mod tests {
         assert!(
             !RegionKind::Custom {
                 script: "r.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             }
             .rolls_off_oldest()
         );
@@ -1462,21 +1465,21 @@ mod tests {
     fn custom_kind_equality_compares_script_and_persistent() {
         let a = RegionKind::Custom {
             script: "conv.rhai".to_string(),
-            persistent: false,
+            pinned: false,
         };
         assert_eq!(a, a.clone());
         assert_ne!(
             a,
             RegionKind::Custom {
                 script: "other.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             }
         );
         assert_ne!(
             a,
             RegionKind::Custom {
                 script: "conv.rhai".to_string(),
-                persistent: true,
+                pinned: true,
             }
         );
         assert_ne!(a, RegionKind::Temporary);
@@ -1486,7 +1489,7 @@ mod tests {
     fn custom_kind_serde_round_trips() {
         let kind = RegionKind::Custom {
             script: "hooks/conv.rhai".to_string(),
-            persistent: true,
+            pinned: true,
         };
         let json = serde_json::to_string(&kind).unwrap();
         let back: RegionKind = serde_json::from_str(&json).unwrap();
@@ -1501,7 +1504,7 @@ mod tests {
         assert_eq!(
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: true,
+                pinned: true,
             }
             .cache_hint(),
             crate::cache::CacheHint::Always
@@ -1509,7 +1512,7 @@ mod tests {
         assert_eq!(
             RegionKind::Custom {
                 script: "s.rhai".to_string(),
-                persistent: false,
+                pinned: false,
             }
             .cache_hint(),
             crate::cache::CacheHint::UntilChanged

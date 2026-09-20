@@ -8,9 +8,15 @@
 //! rewritten with the user watching). Each of those reads [`RENAMED_KEYS`], so
 //! the next rename is one entry here and nothing else.
 
-/// One top-level config key that now loads under another name.
+/// One config key that now loads under another name.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RenamedKey {
+    /// The table the key sits in, spelled as its header is, or `None` for a
+    /// key at the top of the file. A name is only ever resolved inside its own
+    /// table: `persist` under `[sandbox]` is not the same setting as a
+    /// `persist` anywhere else, and a rewrite that matched on the name alone
+    /// would give one of them the other's name.
+    pub section: Option<&'static str>,
     /// The name a config written before the change carries.
     pub old: &'static str,
     /// The name it is read as now.
@@ -26,15 +32,48 @@ pub struct RenamedKey {
 /// Adding one is adding an entry here. A key that changes meaning without
 /// changing name does not fit this table: it belongs in `lev update`'s
 /// migrations directly, where the raw document can be inspected.
-pub const RENAMED_KEYS: &[RenamedKey] = &[RenamedKey {
-    old: "default_model",
-    new: "fallback_model",
-    note: "`default_model` pinned that one model on every stage, ahead of the models each \
-           blueprint names. It now loads as `fallback_model`: every stage runs the model its \
-           blueprint names again, and this model is used only by a stage none of whose own \
-           models is configured here. To keep the old behaviour, set `override_model` to it \
-           instead.",
-}];
+pub const RENAMED_KEYS: &[RenamedKey] = &[
+    RenamedKey {
+        section: None,
+        old: "default_model",
+        new: "fallback_model",
+        note: "`default_model` pinned that one model on every stage, ahead of the models each \
+               blueprint names. It now loads as `fallback_model`: every stage runs the model its \
+               blueprint names again, and this model is used only by a stage none of whose own \
+               models is configured here. To keep the old behaviour, set `override_model` to it \
+               instead.",
+    },
+    RenamedKey {
+        section: Some("sandbox"),
+        old: "persist",
+        new: "keep_warm",
+        note: "It keeps one container warm across a run's stages rather than building one per \
+               call. The container is still torn down when the run ends, so `persist` promised a \
+               lifetime it never gave. The setting itself is unchanged, and the blueprint key of \
+               the same name was renamed with it.",
+    },
+];
+
+impl RenamedKey {
+    /// The old name as a reader finds it in the file: the key alone, or its
+    /// table and the key.
+    pub fn old_path(&self) -> String {
+        path_of(self.section, self.old)
+    }
+
+    /// The new name, spelled the same way.
+    pub fn new_path(&self) -> String {
+        path_of(self.section, self.new)
+    }
+}
+
+/// A key written the way a notice points at it.
+fn path_of(section: Option<&str>, key: &str) -> String {
+    match section {
+        Some(table) => format!("[{table}] {key}"),
+        None => key.to_string(),
+    }
+}
 
 /// A rename that was applied to a document: the key, and its value as written.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,8 +84,9 @@ pub struct Renamed {
     pub value: String,
 }
 
-/// The key a top-level line assigns, and the text of its value.
-fn top_level_assignment(line: &str) -> Option<(&str, &str)> {
+/// The key a line assigns, and the text of its value. A header, a comment and
+/// a blank line assign nothing.
+fn assignment(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once('=')?;
     let key = key.trim();
     if key.is_empty() || key.starts_with('#') || key.starts_with('[') {
@@ -55,33 +95,50 @@ fn top_level_assignment(line: &str) -> Option<(&str, &str)> {
     Some((key, value.trim()))
 }
 
+/// The table a `[header]` line opens, or `None` for any other line.
+fn header(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix('[')?
+        .strip_suffix(']')
+        .map(str::trim)
+}
+
 /// Rewrite the text of a config so each old key is spelled with its new name,
 /// when the new name is absent, and say which were rewritten.
 ///
 /// Done on the text rather than on a parsed table so that everything else
 /// about reading the file is unchanged: a type error still points at its
 /// line, and the unread-key diff judges the document exactly as the loader
-/// read it. Only lines before the first `[table]` header are top-level keys;
-/// a same-named key inside a table is somebody else's.
+/// read it. Each line carries the table it sits under, so a same-named key in
+/// another table is left alone: it is somebody else's setting.
 ///
 /// The new name wins when both are present: the user wrote the current key on
 /// purpose, and the old one is left where the unread-key warning will name it.
 pub fn rename_in_text(content: &str) -> (String, Vec<Renamed>) {
     let mut renamed = Vec::new();
     let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    let top_level_end = lines
+    let mut open: Option<String> = None;
+    let sections: Vec<Option<String>> = lines
         .iter()
-        .position(|l| l.trim_start().starts_with('['))
-        .unwrap_or(lines.len());
+        .map(|line| {
+            if let Some(name) = header(line) {
+                open = Some(name.to_string());
+            }
+            open.clone()
+        })
+        .collect();
     for key in RENAMED_KEYS {
-        let has_new = lines[..top_level_end]
-            .iter()
-            .any(|l| top_level_assignment(l).is_some_and(|(k, _)| k == key.new));
+        // Only the lines inside this key's own table, so a same-named key
+        // under another header is nobody's business here.
+        let here = |section: &Option<String>| section.as_deref() == key.section;
+        let has_new = lines.iter().zip(&sections).any(|(line, section)| {
+            here(section) && assignment(line).is_some_and(|(k, _)| k == key.new)
+        });
         if has_new {
             continue;
         }
-        for line in &mut lines[..top_level_end] {
-            let Some((k, value)) = top_level_assignment(line) else {
+        for (line, section) in lines.iter_mut().zip(&sections) {
+            let Some((k, value)) = assignment(line).filter(|_| here(section)) else {
                 continue;
             };
             if k != key.old {
@@ -107,7 +164,11 @@ pub fn legacy_keys_present(table: &toml::Table) -> Vec<Renamed> {
     RENAMED_KEYS
         .iter()
         .filter_map(|key| {
-            table.get(key.old).map(|value| Renamed {
+            let scope = match key.section {
+                None => Some(table),
+                Some(name) => table.get(name).and_then(toml::Value::as_table),
+            }?;
+            scope.get(key.old).map(|value| Renamed {
                 key,
                 value: value.to_string(),
             })
@@ -121,8 +182,8 @@ pub fn notice(renamed: &Renamed) -> String {
     format!(
         "config.toml `{old} = {value}` was read as `{new} = {value}`. {note} Run `lev update` \
          to rewrite the file, or rename the key yourself.",
-        old = renamed.key.old,
-        new = renamed.key.new,
+        old = renamed.key.old_path(),
+        new = renamed.key.new_path(),
         value = renamed.value,
         note = renamed.key.note,
     )
@@ -168,6 +229,35 @@ mod tests {
         assert_eq!(renamed.len(), 1);
     }
 
+    /// A key inside a table is renamed inside that table and nowhere else.
+    /// `persist` is a real key under `[sandbox]` and a stranger anywhere
+    /// above it, so matching on the name alone would rewrite both.
+    #[test]
+    fn a_key_is_renamed_within_its_own_table() {
+        let (out, renamed) =
+            rename_in_text("persist = true\n[cache]\npersist = 1\n[sandbox]\npersist = false\n");
+        assert_eq!(
+            out,
+            "persist = true\n[cache]\npersist = 1\n[sandbox]\nkeep_warm = false\n"
+        );
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].key.new, "keep_warm");
+        assert_eq!(renamed[0].value, "false");
+    }
+
+    /// A table the file never opens has nothing to rename, and a line that
+    /// only looks like a header does not open one.
+    #[test]
+    fn a_table_that_is_not_there_renames_nothing() {
+        let text = "[sandbox.limits]\npersist = false\n";
+        let (out, renamed) = rename_in_text(text);
+        assert_eq!(out, text);
+        assert!(renamed.is_empty());
+        assert_eq!(header("[sandbox]"), Some("sandbox"));
+        assert_eq!(header("[sandbox"), None);
+        assert_eq!(header("persist = false"), None);
+    }
+
     #[test]
     fn a_document_without_a_trailing_newline_stays_without_one() {
         let (out, renamed) = rename_in_text("default_model = \"m\"");
@@ -187,6 +277,25 @@ mod tests {
         assert_eq!(present[0].key.new, "fallback_model");
         assert_eq!(present[0].value, "\"old\"");
         let t: toml::Table = toml::from_str("fallback_model = \"m\"\n").unwrap();
+        assert!(legacy_keys_present(&t).is_empty());
+    }
+
+    /// A key in a table is looked for in that table: absent when the table is
+    /// absent, absent when the name sits at the top of the file instead, and
+    /// absent when the table is not a table at all.
+    #[test]
+    fn legacy_keys_present_looks_inside_the_right_table() {
+        let t: toml::Table = toml::from_str("[sandbox]\npersist = false\n").unwrap();
+        let present = legacy_keys_present(&t);
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].key.new_path(), "[sandbox] keep_warm");
+        assert_eq!(present[0].value, "false");
+
+        let t: toml::Table = toml::from_str("persist = false\n[sandbox]\nmode = \"none\"\n")
+            .expect("a stray top-level key is still TOML");
+        assert!(legacy_keys_present(&t).is_empty());
+
+        let t: toml::Table = toml::from_str("sandbox = \"none\"\n").unwrap();
         assert!(legacy_keys_present(&t).is_empty());
     }
 

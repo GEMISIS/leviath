@@ -140,8 +140,8 @@ pub(super) fn parse_region_layout(
                         ))
                     })?
                     .to_string();
-                let persistent = bool_of(region_value, "persistent").unwrap_or(false);
-                RegionKind::Custom { script, persistent }
+                let pinned = renamed_bool_of(region_value, &renamed::PINNED).unwrap_or(false);
+                RegionKind::Custom { script, pinned }
             }
             unknown => {
                 // Refused rather than folded into Temporary: for a custom
@@ -464,6 +464,9 @@ pub(super) const REGION_KEYS: &[&str] = &[
     "max_tokens",
     "min_tokens",
     "overflow",
+    "pinned",
+    // The name `pinned` used to carry, still read so an older blueprint keeps
+    // working and is not told it has a typo.
     "persistent",
     "required",
     "required_message",

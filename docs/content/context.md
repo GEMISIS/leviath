@@ -112,7 +112,7 @@ max_entries = 50               # a write to an existing key replaces it
 [context.regions.brain]
 kind       = "custom"
 script     = "context_hooks/brain.rhai"   # relative to the agent directory
-persistent = false             # true behaves pinned-like: never evicted
+pinned     = false             # true behaves like a pinned region: never evicted
 ```
 
 ### Tracking work with a checklist
@@ -622,6 +622,7 @@ than scratch:
 ```toml
 [stages.analyze.tool_routing]
 default_region = "scratch"
+keep_results = true               # false sends every result to `scratch` instead
 max_result_tokens = 4000          # ceiling for any tool without one of its own
 [stages.analyze.tool_routing.overrides]
 read_file = "codebase"
