@@ -520,6 +520,55 @@ async fn the_inbox_lists_every_open_ask_with_its_run() {
                 prompt: "Run `rm -rf build`?".to_string(),
                 options: Vec::new(),
                 tool_name: Some("shell".to_string()),
+                tool_arguments: Some(serde_json::json!({"command": "rm -rf build"})),
+                required: true,
+                stage_name: "build".to_string(),
+                body: None,
+                body_format: Default::default(),
+            },
+        )],
+    });
+
+    let answer = mutate(
+        control,
+        r#"{ openInteractions { runId request { id kind prompt stageName required
+             toolCall { __typename toolName rawArguments
+               ... on ShellCall { args { command } } } } } }"#,
+    )
+    .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let inbox = &json["openInteractions"][0];
+    assert_eq!(inbox["runId"], "run-a");
+    assert_eq!(inbox["request"]["id"], "ask-1");
+    assert_eq!(inbox["request"]["kind"], "TOOL_APPROVAL");
+    assert_eq!(inbox["request"]["stageName"], "build");
+    assert_eq!(inbox["request"]["required"], true);
+    // The whole point of an approval is what it would run, so the ask carries
+    // the call rather than only the tool's name.
+    let call = &inbox["request"]["toolCall"];
+    assert_eq!(call["__typename"], "ShellCall");
+    assert_eq!(call["toolName"], "shell");
+    assert_eq!(call["args"]["command"], "rm -rf build");
+    assert_eq!(call["rawArguments"]["command"], "rm -rf build");
+}
+
+/// An approval that names a tool and no arguments comes through untyped.
+///
+/// A call with no arguments is not the same as a `shell` call with an empty
+/// command, so it is not typed as one. What comes through says the tool is known
+/// and the arguments do not fit it, which is the truth about that ask.
+#[tokio::test]
+async fn an_approval_with_no_arguments_says_the_arguments_do_not_fit() {
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Interactions {
+        interactions: vec![(
+            "run-a".to_string(),
+            leviath_core::interaction::InteractionRequest {
+                id: "ask-1".to_string(),
+                kind: leviath_core::interaction::InteractionKind::ToolApproval,
+                prompt: "Run it?".to_string(),
+                options: Vec::new(),
+                tool_name: Some("shell".to_string()),
                 tool_arguments: None,
                 required: true,
                 stage_name: "build".to_string(),
@@ -531,18 +580,18 @@ async fn the_inbox_lists_every_open_ask_with_its_run() {
 
     let answer = mutate(
         control,
-        "{ openInteractions { runId request { id kind prompt tool stageName required } } }",
+        r#"{ openInteractions { request { toolCall {
+             __typename toolName rawArguments
+             ... on UntypedToolCall { reason } } } } }"#,
     )
     .await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     let json = serde_json::to_value(&answer.data).expect("data serializes");
-    let inbox = &json["openInteractions"][0];
-    assert_eq!(inbox["runId"], "run-a");
-    assert_eq!(inbox["request"]["id"], "ask-1");
-    assert_eq!(inbox["request"]["kind"], "TOOL_APPROVAL");
-    assert_eq!(inbox["request"]["tool"], "shell");
-    assert_eq!(inbox["request"]["stageName"], "build");
-    assert_eq!(inbox["request"]["required"], true);
+    let call = &json["openInteractions"][0]["request"]["toolCall"];
+    assert_eq!(call["__typename"], "UntypedToolCall");
+    assert_eq!(call["toolName"], "shell");
+    assert_eq!(call["reason"], "ARGUMENTS_DID_NOT_MATCH");
+    assert_eq!(call["rawArguments"], serde_json::json!({}));
 }
 
 /// A delete removes a run and its sub-agents, and says what it removed.

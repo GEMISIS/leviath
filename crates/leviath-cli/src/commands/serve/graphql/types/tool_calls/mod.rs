@@ -253,13 +253,23 @@ tool_calls! {
 pub(crate) fn tool_call(tool: &str, description: Option<String>, arguments: &str) -> ToolCall {
     let raw: serde_json::Value = serde_json::from_str(arguments)
         .unwrap_or_else(|_| serde_json::Value::String(arguments.to_string()));
-    if let Some(call) = typed(tool, description.clone(), &raw) {
+    from_value(tool, description, raw)
+}
+
+/// One call whose arguments are already parsed, which is how a live request
+/// carries them.
+pub(crate) fn from_value(
+    tool: &str,
+    description: Option<String>,
+    arguments: serde_json::Value,
+) -> ToolCall {
+    if let Some(call) = typed(tool, description.clone(), &arguments) {
         return call;
     }
     ToolCall::Untyped(UntypedToolCall {
         tool_name: tool.to_string(),
         tool_description: description,
-        raw_arguments: Json(raw),
+        raw_arguments: Json(arguments),
         reason: match is_typed(tool) {
             true => UntypedCallReason::ArgumentsDidNotMatch,
             false => UntypedCallReason::NoTypeForThisTool,

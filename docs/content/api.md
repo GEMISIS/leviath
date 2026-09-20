@@ -1738,6 +1738,7 @@ than that feature, not broken.
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
+| `graphql.executions` | `Run.executions`: what a run tried, with each call typed |
 | `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
 | `runs.export` | `bulkExportRuns` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
