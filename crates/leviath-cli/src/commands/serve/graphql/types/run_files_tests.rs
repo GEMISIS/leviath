@@ -462,3 +462,97 @@ async fn a_run_says_which_stage_it_is_in() {
     let json = data(fresh, "{ run { currentStage { name } } }").await;
     assert!(json["run"]["currentStage"].is_null());
 }
+
+/// A byte link is minted per hash and per name, with a download form.
+///
+/// Signed rather than authorized: the byte route checks the signature, which is
+/// what lets a link work in an `<img src>` or a download button, where a header
+/// cannot be set.
+#[tokio::test]
+async fn the_byte_links_carry_their_own_permission() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    let json = data(
+        meta_in(workdir.path()),
+        r#"{ run {
+             blob: blobUrl(sha256: "abc123")
+             download: blobUrl(sha256: "abc123", download: true)
+             artifact: artifactUrl(name: "report.md")
+           } }"#,
+    )
+    .await;
+    let blob = json["run"]["blob"].as_str().expect("a link");
+    assert!(
+        blob.starts_with("/api/agents/reader/blobs/abc123?"),
+        "{blob}"
+    );
+    assert!(blob.contains("exp=") && blob.contains("sig="), "{blob}");
+    assert!(!blob.contains("download"), "inline by default: {blob}");
+
+    let download = json["run"]["download"].as_str().expect("a link");
+    assert!(download.contains("download=1"), "{download}");
+    // A different query means a different signature: the signature covers the
+    // whole path, so a client cannot add the download flag to an inline link.
+    assert_ne!(
+        blob.split("sig=").nth(1),
+        download.split("sig=").nth(1),
+        "the signature covers the query too"
+    );
+
+    let artifact = json["run"]["artifact"].as_str().expect("a link");
+    assert!(
+        artifact.starts_with("/api/agents/reader/artifacts/report.md?"),
+        "{artifact}"
+    );
+}
+
+/// Whether a message reaches the run is read from the stage it is in.
+#[tokio::test]
+async fn whether_messages_reach_the_run_comes_from_its_stage() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-accepts", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut meta = meta_in(workdir.path());
+        meta.current_stage = "review".to_string();
+        crate::runstate::create_run(&meta).expect("run written");
+        // The run's own snapshot, which is what this reads: the installed file
+        // may say something else by now.
+        std::fs::write(
+            crate::runstate::run_dir(&meta.run_id)
+                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
+            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
+             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
+             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
+             \n[stages.build]\nmode = \"autonomous\"\n",
+        )
+        .expect("a snapshot");
+
+        let json = data(meta.clone(), "{ run { acceptsMessages } }").await;
+        assert_eq!(
+            json["run"]["acceptsMessages"], false,
+            "the stage it is in says no"
+        );
+
+        // Another stage of the same blueprint says otherwise, which is the point
+        // of reading the stage rather than the blueprint.
+        let mut building = meta.clone();
+        building.current_stage = "build".to_string();
+        let json = data(building, "{ run { acceptsMessages } }").await;
+        assert_eq!(json["run"]["acceptsMessages"], true);
+    })
+    .await;
+}
+
+/// A run whose blueprint cannot be read answers null rather than no.
+///
+/// Unknown and no are different: a console that greyed out its message box on a
+/// failed read would be wrong wherever the blueprint is simply elsewhere.
+#[tokio::test]
+async fn an_unreadable_blueprint_leaves_it_unknown() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-accepts-none", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+        let json = data(meta, "{ run { acceptsMessages } }").await;
+        assert!(json["run"]["acceptsMessages"].is_null());
+    })
+    .await;
+}

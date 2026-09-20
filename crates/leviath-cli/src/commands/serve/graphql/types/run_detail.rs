@@ -252,6 +252,9 @@ pub(crate) struct StageVisit {
     pub(crate) entered_at: Timestamp,
     /// When it left; null for the visit in progress.
     pub(crate) left_at: Option<Timestamp>,
+    /// Whether this is the visit in progress. The same fact as `leftAt` being
+    /// null, said the way a list is filtered on.
+    pub(crate) active: bool,
     /// Tokens burned on this visit.
     pub(crate) usage: TokenUsage,
     /// Spend on this visit.
@@ -334,6 +337,7 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                 .map(|visit| StageVisit {
                     entered_at: Timestamp(visit.entered_at),
                     left_at: visit.left_at.map(Timestamp),
+                    active: visit.left_at.is_none(),
                     usage: TokenUsage {
                         prompt_tokens: BigInt(visit.prompt_tokens as i64),
                         completion_tokens: BigInt(visit.completion_tokens as i64),
@@ -503,6 +507,10 @@ pub(crate) struct Artifact {
     pub(crate) size: Option<BigInt>,
     /// Content hash, when it was computed.
     pub(crate) sha256: Option<String>,
+    /// Where the run wrote it, relative to its working directory. What the run
+    /// recorded, so it can name a file the run has since replaced or removed: the
+    /// link is what fetches the bytes that were handed back.
+    pub(crate) path: String,
     /// A short-lived signed link to the bytes.
     pub(crate) url: String,
 }
