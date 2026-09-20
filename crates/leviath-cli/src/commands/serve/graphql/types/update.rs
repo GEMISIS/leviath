@@ -1,0 +1,259 @@
+//! Self-update, and who is on the other end of the control socket.
+//!
+//! Both are about this machine rather than a run, and neither grows, so they are
+//! plain values.
+
+use async_graphql::{Enum, SimpleObject, Union};
+
+use super::super::scalars::Timestamp;
+
+/// Who is on the other end of the control socket.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct DaemonStatus {
+    /// Whether this server is receiving the daemon's events right now.
+    ///
+    /// A request still works while this is false: the control client waits out a
+    /// restart, and the run store is read from disk either way. What stops while
+    /// it is false is the live frames.
+    pub(crate) connected: bool,
+    /// The daemon's version, once it has said. Null before any daemon has
+    /// introduced itself.
+    pub(crate) version: Option<String>,
+    /// Its build id, which is what tells a restart from an upgrade.
+    pub(crate) build: Option<String>,
+    /// Its process id.
+    pub(crate) pid: Option<i32>,
+    /// How many times the daemon behind this link has changed process since
+    /// this server started.
+    pub(crate) restarts: i32,
+    /// Present when the daemon and this server run different code, with what to
+    /// do about it. Requests keep working while the two still understand each
+    /// other, which is why this is advice rather than an error.
+    pub(crate) restart_advised: Option<String>,
+}
+
+impl DaemonStatus {
+    /// What the control client currently knows.
+    pub(crate) fn of(control: &leviath_runtime::control_socket::ControlClient) -> Self {
+        let link = control.link();
+        Self {
+            connected: link.reachable,
+            version: link.daemon.as_ref().map(|daemon| daemon.version.clone()),
+            build: link.daemon.as_ref().map(|daemon| daemon.build.clone()),
+            pid: link
+                .daemon
+                .as_ref()
+                .map(|daemon| i32::try_from(daemon.pid).unwrap_or(i32::MAX)),
+            restarts: i32::try_from(link.restarts).unwrap_or(i32::MAX),
+            restart_advised: control.code_mismatch().map(|mismatch| mismatch.to_string()),
+        }
+    }
+}
+
+/// How this copy of Leviath was installed, which decides how it upgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum InstallMethod {
+    /// Homebrew, under a formula that carries the channel.
+    Homebrew,
+    /// Scoop, under a package that carries the channel the same way.
+    Scoop,
+    /// `cargo install`, so the binary was compiled here.
+    Cargo,
+    /// The hosted install script, or something else that dropped a plain binary
+    /// where that script puts one.
+    Script,
+    /// Somewhere no supported installer writes. `upgrade.message` says where.
+    Unknown,
+}
+
+/// Commands that would upgrade the binary.
+///
+/// A list rather than one command because a package manager will not see a
+/// release published minutes ago until its own index is refreshed, so the
+/// refresh and the upgrade only make sense together.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpgradeByCommand {
+    /// Each command's own words, in order. They stop at the first failure.
+    pub(crate) commands: Vec<String>,
+    /// The same sequence as one line, joined with `&&`: what to paste into a
+    /// shell to do it by hand.
+    pub(crate) shell: String,
+}
+
+/// There is nothing to run, and this is why.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpgradeByAdvice {
+    /// What to tell the person instead.
+    pub(crate) message: String,
+}
+
+/// How the binary would be upgraded.
+#[derive(Debug, Union)]
+pub(crate) enum BinaryUpgrade {
+    /// By running commands.
+    Command(UpgradeByCommand),
+    /// By telling somebody something.
+    Advice(UpgradeByAdvice),
+}
+
+/// One bundled blueprint, and what an update would do to it.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpdateAgentEntry {
+    /// The blueprint's name.
+    pub(crate) name: String,
+    /// The version this build ships.
+    pub(crate) version: String,
+    /// What would happen to the installed copy, in words.
+    pub(crate) change: String,
+    /// Whether that is a change at all, rather than "already current".
+    pub(crate) changes: bool,
+    /// Whether an update would install it without being asked. A copy somebody
+    /// edited is not, because overwriting it would throw that work away.
+    pub(crate) preselected: bool,
+}
+
+/// One config migration that applies to the config as it stands.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpdateMigration {
+    /// The migration's name.
+    pub(crate) name: String,
+    /// What it changes.
+    pub(crate) description: String,
+}
+
+/// What an update would do, and whether there is anything newer to get.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpdateInfo {
+    /// The version running now.
+    pub(crate) version: String,
+    /// How this copy was installed.
+    pub(crate) install_method: InstallMethod,
+    /// The release channel this install tracks, where that is knowable. Null for
+    /// an install method that does not carry one.
+    pub(crate) channel: Option<String>,
+    /// The newest version there is. Null means nothing to show, which covers
+    /// three cases that are one answer to a client: not checked yet, checking
+    /// switched off, and the check failed.
+    pub(crate) latest: Option<String>,
+    /// Whether that is newer than this. Null for the same three cases.
+    pub(crate) update_available: Option<bool>,
+    /// When the check last answered. Null for the same three cases.
+    pub(crate) checked_at: Option<Timestamp>,
+    /// How the binary would be upgraded.
+    pub(crate) binary: BinaryUpgrade,
+    /// The bundled blueprints, and what would happen to each.
+    pub(crate) agents: Vec<UpdateAgentEntry>,
+    /// The config migrations that apply.
+    pub(crate) migrations: Vec<UpdateMigration>,
+    /// Why the config could not be read, when it could not. The plan is still
+    /// honest about the binary and the blueprints; it is the migrations it
+    /// cannot judge.
+    pub(crate) config_error: Option<String>,
+}
+
+impl UpdateInfo {
+    /// Describe a plan and the last answer to "is there anything newer".
+    pub(crate) fn from_plan(
+        plan: &crate::commands::update::UpdatePlan,
+        version: &str,
+        latest: &crate::commands::update::latest::LatestCheck,
+    ) -> Self {
+        use crate::commands::update::BinaryStep;
+        use crate::commands::update::detect::InstallMethod as Core;
+
+        Self {
+            version: version.to_string(),
+            install_method: match &plan.method {
+                Core::Homebrew { .. } => InstallMethod::Homebrew,
+                Core::Scoop { .. } => InstallMethod::Scoop,
+                Core::Cargo => InstallMethod::Cargo,
+                Core::Script { .. } => InstallMethod::Script,
+                Core::Unknown { .. } => InstallMethod::Unknown,
+            },
+            channel: plan
+                .method
+                .channel()
+                .map(|channel| channel.id().to_string()),
+            latest: latest.latest.clone(),
+            update_available: latest.update_available,
+            checked_at: latest
+                .checked_at
+                .map(|at| Timestamp(i64::try_from(at).unwrap_or(i64::MAX))),
+            binary: match &plan.binary {
+                BinaryStep::Run(commands) => BinaryUpgrade::Command(UpgradeByCommand {
+                    commands: commands.iter().map(|argv| argv.join(" ")).collect(),
+                    shell: crate::commands::update::render_commands(commands),
+                }),
+                BinaryStep::Advise(message) => BinaryUpgrade::Advice(UpgradeByAdvice {
+                    message: message.clone(),
+                }),
+            },
+            agents: plan
+                .agents
+                .iter()
+                .map(|(agent, action)| UpdateAgentEntry {
+                    name: agent.name.to_string(),
+                    version: agent.version.to_string(),
+                    change: action.label(agent.version),
+                    changes: action.is_change(),
+                    preselected: action.preselect(),
+                })
+                .collect(),
+            migrations: plan
+                .migrations
+                .iter()
+                .map(|migration| UpdateMigration {
+                    name: migration.name.to_string(),
+                    description: migration.description.to_string(),
+                })
+                .collect(),
+            config_error: match &plan.config {
+                crate::commands::update::ConfigState::Unreadable(e) => Some(e.clone()),
+                crate::commands::update::ConfigState::Loaded(_) => None,
+            },
+        }
+    }
+}
+
+/// One step of an update run.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpdateJobStep {
+    /// Which step: the binary, the blueprints, or the migrations.
+    pub(crate) step: String,
+    /// Where it got to: `pending`, `running`, `done`, `skipped`, `failed` or
+    /// `advised`.
+    pub(crate) status: String,
+    /// What happened, in words.
+    pub(crate) detail: String,
+}
+
+/// One update run.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpdateJob {
+    /// The job's id.
+    pub(crate) id: String,
+    /// Where the run as a whole got to: `running`, `complete` or `failed`.
+    pub(crate) status: String,
+    /// Each step, in the order they run. A step that was not asked for is
+    /// `skipped` rather than absent, so a client renders the same three rows
+    /// whatever the request was.
+    pub(crate) steps: Vec<UpdateJobStep>,
+}
+
+impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
+    fn from(job: super::super::super::update_job::UpdateJob) -> Self {
+        Self {
+            id: job.id,
+            status: job.status.to_string(),
+            steps: job
+                .steps
+                .into_iter()
+                .map(|step| UpdateJobStep {
+                    step: step.step.to_string(),
+                    status: step.status.to_string(),
+                    detail: step.detail,
+                })
+                .collect(),
+        }
+    }
+}

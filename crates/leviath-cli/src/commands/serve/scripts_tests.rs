@@ -402,9 +402,9 @@ async fn a_name_that_already_carries_the_extension_is_the_same_file() {
 #[tokio::test]
 async fn an_unknown_kind_is_refused() {
     with_home(|_home| async move {
-        let (status, _) =
+        let refused =
             resolve(&Config::default(), "model_provider", "x", None).expect_err("no such kind");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
 }
@@ -412,9 +412,9 @@ async fn an_unknown_kind_is_refused() {
 #[tokio::test]
 async fn a_traversing_script_name_is_refused() {
     with_home(|_home| async move {
-        let (status, _) =
+        let refused =
             resolve(&Config::default(), "tool", "../../evil", None).expect_err("a traversal");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
 }
@@ -422,9 +422,9 @@ async fn a_traversing_script_name_is_refused() {
 #[tokio::test]
 async fn a_traversing_agent_name_is_refused() {
     with_home(|_home| async move {
-        let (status, _) =
+        let refused =
             resolve(&Config::default(), "tool", "x", Some("../../etc")).expect_err("a traversal");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
 }
@@ -461,10 +461,9 @@ async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
 #[tokio::test]
 async fn a_hook_without_an_agent_is_refused() {
     with_home(|_home| async move {
-        let (status, body) =
-            resolve(&Config::default(), "region_hook", "x", None).expect_err("no scope");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0.error.contains("?agent="), "{}", body.0.error);
+        let refused = resolve(&Config::default(), "region_hook", "x", None).expect_err("no scope");
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+        assert!(refused.to_string().contains("?agent="), "{refused}");
     })
     .await;
 }
@@ -485,8 +484,8 @@ fn a_path_that_cannot_be_shown_to_be_contained_is_refused() {
         scope: "global",
         agent: None,
     };
-    let (status, _) = guard(&target, Presence::Optional).expect_err("nothing contains it");
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    let refused = guard(&target, Presence::Optional).expect_err("nothing contains it");
+    assert_eq!(refused.code(), "FORBIDDEN");
 }
 
 // ─── the fallible filesystem helpers ────────────────────────────────────────
@@ -509,12 +508,17 @@ async fn a_write_the_filesystem_refuses_is_reported() {
             scope: "global",
             agent: None,
         };
-        let (status, _) = write_script(&target, GOOD_TOOL).expect_err("no such directory");
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let refused = write_script(&target, GOOD_TOOL).expect_err("no such directory");
+        assert_eq!(refused.code(), "INTERNAL");
     })
     .await;
 }
 
+/// A delete the filesystem refuses is reported rather than reading as done.
+///
+/// Reached with a directory standing where the script should be, which the
+/// routes never create but which stands in for any removal the filesystem
+/// refuses: a file somebody else owns, a read-only volume.
 #[tokio::test]
 async fn a_delete_the_filesystem_refuses_is_reported() {
     with_home(|home| async move {
@@ -530,8 +534,9 @@ async fn a_delete_the_filesystem_refuses_is_reported() {
             scope: "global",
             agent: None,
         };
-        let (status, _) = remove_script(&target).expect_err("a directory is not a file");
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let refused = remove_script(&target).expect_err("a directory is not a file");
+        assert_eq!(refused.code(), "INTERNAL");
+        assert!(refused.to_string().contains("cannot delete"), "{refused}");
     })
     .await;
 }
@@ -1648,10 +1653,10 @@ async fn a_provider_resolves_into_the_providers_directory() {
 #[tokio::test]
 async fn a_provider_with_an_agent_is_refused() {
     with_home(|_home| async move {
-        let (status, body) = resolve(&Config::default(), "provider", "groq", Some("researcher"))
+        let refused = resolve(&Config::default(), "provider", "groq", Some("researcher"))
             .expect_err("global");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0.error.contains("?agent="), "{}", body.0.error);
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+        assert!(refused.to_string().contains("?agent="), "{refused}");
     })
     .await;
 }

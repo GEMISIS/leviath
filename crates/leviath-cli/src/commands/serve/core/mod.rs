@@ -13,6 +13,7 @@
 //! surfaces get it.
 
 pub(super) mod blueprints;
+pub(super) mod config;
 pub(super) mod error;
 pub(super) mod export;
 pub(super) mod files;

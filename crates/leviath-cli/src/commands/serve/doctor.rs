@@ -62,9 +62,21 @@ static LIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(super) async fn run_doctor_live(
     State(state): State<AppState>,
 ) -> Result<Json<DoctorResp>, (StatusCode, Json<ErrorResponse>)> {
+    live_checks(&state)
+        .await
+        .map(|checks| Json(DoctorResp { checks }))
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// Run the checks that reach the network, for whichever surface asked.
+///
+/// One at a time: each check costs a request to a provider and a round trip to
+/// the daemon, and two runs at once would double that for no better answer.
+pub(super) async fn live_checks(
+    state: &AppState,
+) -> Result<Vec<super::types::DoctorCheck>, super::core::error::ServeError> {
     let Ok(_running) = LIVE.try_lock() else {
-        return Err(err(
-            StatusCode::CONFLICT,
+        return Err(super::core::error::ServeError::Conflict(
             "a live doctor run is already in progress".to_string(),
         ));
     };
@@ -74,7 +86,7 @@ pub(super) async fn run_doctor_live(
         DaemonTarget::Client(&state.control),
     )
     .await;
-    Ok(Json(report(checks)))
+    Ok(report(checks).checks)
 }
 
 /// The checks as the wire shape both halves answer with.

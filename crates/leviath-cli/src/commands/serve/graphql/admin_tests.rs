@@ -87,7 +87,7 @@ async fn every_admin_mutation_is_gated() {
     let calls = [
         r#"mutation { addMcpServer(name: "x", command: "/bin/echo") }"#,
         r#"mutation { removeMcpServer(name: "x") }"#,
-        r#"mutation { putMimeRow(mimeType: "image/png") { created } }"#,
+        r#"mutation { putMimeRow(row: { mimeType: "image/png" }) { created } }"#,
         r#"mutation { deleteMimeRow(mimeType: "image/png") }"#,
     ];
     for call in calls {
@@ -212,8 +212,8 @@ async fn a_mime_row_can_be_written_and_removed() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let written = schema(true)
             .execute(Request::new(
-                r#"mutation { putMimeRow(mimeType: "application/x-thing", family: "binary",
-                     extensions: ["thing"]) { mimeType created } }"#,
+                r#"mutation { putMimeRow(row: { mimeType: "application/x-thing", family: "binary",
+                     extensions: ["thing"] }) { mimeType created } }"#,
             ))
             .await;
         assert!(written.errors.is_empty(), "{:?}", written.errors);
@@ -225,7 +225,7 @@ async fn a_mime_row_can_be_written_and_removed() {
         // flag on the way back is for.
         let updated = schema(true)
             .execute(Request::new(
-                r#"mutation { putMimeRow(mimeType: "application/x-thing", family: "document")
+                r#"mutation { putMimeRow(row: { mimeType: "application/x-thing", family: "document" })
                      { created } }"#,
             ))
             .await;
@@ -259,7 +259,7 @@ async fn a_row_key_that_is_not_a_mime_type_is_refused() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = schema(true)
             .execute(Request::new(
-                r#"mutation { putMimeRow(mimeType: "not a mime type") { created } }"#,
+                r#"mutation { putMimeRow(row: { mimeType: "not a mime type" }) { created } }"#,
             ))
             .await;
         assert_eq!(
@@ -282,4 +282,282 @@ async fn a_row_key_that_is_not_a_mime_type_is_refused() {
         assert!(!deleting.errors.is_empty(), "refused on the way out too");
     })
     .await;
+}
+
+/// Every admin mutation added since the first batch is behind the same gate.
+///
+/// One list, checked as a whole: a mutation added without its guard is invisible
+/// to every other test, and this is the one that would catch it.
+#[tokio::test]
+async fn every_machine_changing_mutation_is_gated() {
+    let calls = [
+        r#"mutation { updateConfig(input: { defaultProvider: "openai" }) { defaultProvider } }"#,
+        r#"mutation { putScript(kind: "tool", name: "x", content: "fn x(){}") { path } }"#,
+        r#"mutation { deleteScript(kind: "tool", name: "x") }"#,
+        r#"mutation { makeDirectory(path: "/tmp", name: "x") { path } }"#,
+        r#"mutation { runDoctorLive { ok } }"#,
+        r#"mutation { startUpdate { id } }"#,
+    ];
+    for call in calls {
+        let answer = schema(false).execute(Request::new(call)).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("--allow-admin"),
+            "{call} is gated: {}",
+            error.message
+        );
+    }
+}
+
+/// A mime row can be written whole, with its token rule, and the rule is checked
+/// the same way the REST route checks it.
+#[tokio::test]
+async fn a_mime_row_carries_its_token_rule() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let written = schema(true)
+            .execute(Request::new(
+                r#"mutation { putMimeRow(row: { mimeType: "image/x-thing", family: "image",
+                     extensions: ["thing"], magic: "89504e47", standIn: "[a thing]",
+                     tokens: { perPixel: 750, max: 1600 } }) { mimeType created } }"#,
+            ))
+            .await;
+        assert!(written.errors.is_empty(), "{:?}", written.errors);
+
+        let listed = schema(true)
+            .execute(Request::new("{ mime { mimeType family extensions } }"))
+            .await;
+        let json = serde_json::to_value(&listed.data).expect("data serializes");
+        assert!(
+            json["mime"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .any(|row| row["mimeType"] == "image/x-thing"),
+            "the row is in the registry"
+        );
+
+        // Two rates at once is not a rule. Refused here rather than saved as
+        // whichever one the reader happened to check first.
+        let refused = schema(true)
+            .execute(Request::new(
+                r#"mutation { putMimeRow(row: { mimeType: "image/x-two",
+                     tokens: { perPixel: 750, perSecond: 4 } }) { created } }"#,
+            ))
+            .await;
+        assert_eq!(
+            refused
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+        // And `max` without `perPixel` is a ceiling on nothing.
+        let refused = schema(true)
+            .execute(Request::new(
+                r#"mutation { putMimeRow(row: { mimeType: "image/x-three",
+                     tokens: { perByte: 0.25, max: 10 } }) { created } }"#,
+            ))
+            .await;
+        assert!(!refused.errors.is_empty(), "max only goes with perPixel");
+    })
+    .await;
+}
+
+/// A config write is a partial edit with three states per setting, and the
+/// answer is the config as it now stands.
+#[tokio::test]
+async fn a_config_write_sets_clears_and_leaves_alone() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants: home.join("grants.json"),
+        };
+        std::fs::write(&paths.config, "default_provider = \"anthropic\"\n").expect("a config file");
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let set = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: {
+                             defaultProvider: "openai",
+                             overrideModel: "gpt-5.6",
+                             providerOrder: ["openai", "anthropic"]
+                           }) { defaultProvider overrideModel providerOrder } }"#,
+                    ))
+                    .await;
+                assert!(set.errors.is_empty(), "{:?}", set.errors);
+                let json = serde_json::to_value(&set.data).expect("data serializes");
+                assert_eq!(json["updateConfig"]["defaultProvider"], "openai");
+                assert_eq!(json["updateConfig"]["overrideModel"], "gpt-5.6");
+                assert_eq!(json["updateConfig"]["providerOrder"][0], "openai");
+
+                // A field left out leaves the setting alone, and null clears it:
+                // two different things one nullable field could not tell apart.
+                let cleared = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: { overrideModel: null })
+                             { defaultProvider overrideModel } }"#,
+                    ))
+                    .await;
+                assert!(cleared.errors.is_empty(), "{:?}", cleared.errors);
+                let json = serde_json::to_value(&cleared.data).expect("data serializes");
+                assert!(json["updateConfig"]["overrideModel"].is_null(), "cleared");
+                assert_eq!(
+                    json["updateConfig"]["defaultProvider"], "openai",
+                    "and the field nobody sent is untouched"
+                );
+
+                // An empty string is refused rather than read as a clear.
+                let refused = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { updateConfig(input: { overrideModel: "" })
+                             { overrideModel } }"#,
+                    ))
+                    .await;
+                let error = refused.errors.first().expect("a refusal");
+                assert!(
+                    error.message.contains("send null to clear it"),
+                    "{}",
+                    error.message
+                );
+            })
+            .await;
+    })
+    .await;
+}
+
+/// A script is written, read back through the schema, and removed.
+#[tokio::test]
+async fn a_script_can_be_written_and_removed() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let written = schema(true)
+            .execute(Request::new(
+                r#"mutation { putScript(kind: "tool", name: "greet",
+                     content: "fn describe() { #{ name: \"greet\", description: \"hi\" } }")
+                     { path compiles error } }"#,
+            ))
+            .await;
+        assert!(written.errors.is_empty(), "{:?}", written.errors);
+        let json = serde_json::to_value(&written.data).expect("data serializes");
+        assert!(json["putScript"]["path"].as_str().is_some());
+
+        // A script that does not compile is still written: an editor saves work
+        // in progress, and the run is what refuses to use it.
+        let broken = schema(true)
+            .execute(Request::new(
+                r#"mutation { putScript(kind: "tool", name: "broken", content: "fn (")
+                     { compiles error } }"#,
+            ))
+            .await;
+        assert!(broken.errors.is_empty(), "{:?}", broken.errors);
+        let json = serde_json::to_value(&broken.data).expect("data serializes");
+        assert_eq!(json["putScript"]["compiles"], false);
+        assert!(json["putScript"]["error"].as_str().is_some(), "it says why");
+
+        let removed = schema(true)
+            .execute(Request::new(r#"mutation { deleteScript(kind: "tool", name: "greet") }"#))
+            .await;
+        assert!(removed.errors.is_empty(), "{:?}", removed.errors);
+
+        // And one that is not there is a miss rather than a silent success.
+        let gone = schema(true)
+            .execute(Request::new(r#"mutation { deleteScript(kind: "tool", name: "greet") }"#))
+            .await;
+        assert_eq!(
+            gone.errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+
+        // An unknown registry is refused before any path is built.
+        let unknown = schema(true)
+            .execute(Request::new(
+                r#"mutation { putScript(kind: "model_provider", name: "x", content: "") { path } }"#,
+            ))
+            .await;
+        assert!(
+            unknown
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("Unknown script kind")
+        );
+    })
+    .await;
+}
+
+/// Making a directory tells its three refusals apart, because a picker shows
+/// each of them differently.
+#[tokio::test]
+async fn making_a_directory_tells_its_refusals_apart() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let parent = dir.path().to_string_lossy().into_owned();
+
+    let made = schema(true)
+        .execute(Request::new(format!(
+            r#"mutation {{ makeDirectory(path: "{parent}", name: "new-thing")
+                 {{ path parent }} }}"#
+        )))
+        .await;
+    assert!(made.errors.is_empty(), "{:?}", made.errors);
+    let json = serde_json::to_value(&made.data).expect("data serializes");
+    assert!(
+        json["makeDirectory"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("new-thing"))
+    );
+
+    let code = |answer: &async_graphql::Response| -> String {
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    };
+
+    // Already there.
+    let again = schema(true)
+        .execute(Request::new(format!(
+            r#"mutation {{ makeDirectory(path: "{parent}", name: "new-thing") {{ path }} }}"#
+        )))
+        .await;
+    assert_eq!(code(&again), "\"CONFLICT\"");
+
+    // A name that is a path is not a name.
+    let nested = schema(true)
+        .execute(Request::new(format!(
+            r#"mutation {{ makeDirectory(path: "{parent}", name: "a/b") {{ path }} }}"#
+        )))
+        .await;
+    assert_eq!(code(&nested), "\"BAD_USER_INPUT\"");
+
+    // A parent that is not there.
+    let missing = schema(true)
+        .execute(Request::new(format!(
+            r#"mutation {{ makeDirectory(path: "{parent}/nope", name: "x") {{ path }} }}"#
+        )))
+        .await;
+    assert_eq!(code(&missing), "\"NOT_FOUND\"");
+
+    // And a relative path, which this route never resolves for the caller.
+    let relative = schema(true)
+        .execute(Request::new(
+            r#"mutation { makeDirectory(path: "somewhere", name: "x") { path } }"#,
+        ))
+        .await;
+    assert_eq!(code(&relative), "\"BAD_USER_INPUT\"");
 }

@@ -29,6 +29,7 @@ use axum::response::Response;
 use super::types::AppState;
 
 mod admin;
+mod config_input;
 mod connection;
 mod error;
 mod events;
@@ -61,13 +62,18 @@ pub(super) type LeviathSchema =
 /// Built once at startup and shared: the type registry and the limits are the
 /// same for every request, and the per-request state travels in the execution
 /// context instead.
-pub(super) fn build_schema(state: AppState) -> LeviathSchema {
+pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema {
     Schema::build(
         query::Query,
         mutation::Mutation::default(),
         subscription::Subscription_,
     )
     .data(state)
+    // Whether this server was started for the acts that change the machine.
+    // Decided once, here, rather than read per request: the REST side answers
+    // 404 for them by not mounting the route at all, and a schema has no
+    // "unmounted", so this is what stands in for it.
+    .data(admin::AdminAccess(allow_admin))
     .limit_depth(MAX_DEPTH)
     .limit_complexity(MAX_COMPLEXITY)
     .finish()

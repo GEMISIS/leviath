@@ -260,6 +260,11 @@ a browser without loss.
 scalar BigInt
 
 """
+How the binary would be upgraded.
+"""
+union BinaryUpgrade = UpgradeByCommand | UpgradeByAdvice
+
+"""
 One stored part a run holds.
 
 The bytes are not here. They are behind `url`, which is a short-lived signed
@@ -830,6 +835,115 @@ type ConfigHealthChanged {
 }
 
 """
+A partial edit of the machine's config.
+
+Every field is optional. A key with three states says so in its own
+description: those are the ones where clearing the setting is a thing a
+person does, and where `null` is how they say it.
+"""
+input ConfigInput {
+	"""
+	The provider a bare model name resolves on.
+	"""
+	defaultProvider: String
+	"""
+	Providers allowed to serve a bare model name, best first. A list replaces
+	the order whole, and an empty one clears it back to `defaultProvider`
+	alone.
+	"""
+	providerOrder: [String!]
+	"""
+	The model every stage that permits it starts on, ahead of its own list.
+	Three states: absent leaves the pin, `null` removes it so each blueprint
+	picks its own model again, a value pins that one. An empty string is
+	refused rather than read as a clear.
+	"""
+	overrideModel: String
+	"""
+	The model tried after every model a stage names. Same three states.
+	"""
+	fallbackModel: String
+	"""
+	The Anthropic key. Three states: absent leaves it, `null` clears it and
+	takes the provider out of this install, a value sets it. An empty string
+	is refused rather than stored as a key that authenticates as nobody.
+	"""
+	anthropicKey: String
+	"""
+	The OpenAI key, with the same three states.
+	"""
+	openaiKey: String
+	"""
+	The Google key, with the same three states.
+	"""
+	googleKey: String
+	"""
+	The OpenRouter key, with the same three states.
+	"""
+	openrouterKey: String
+	"""
+	The Bedrock key, sent as a bearer token. Same three states.
+	"""
+	bedrockKey: String
+	"""
+	The xAI key, which starts `xai-`. Same three states.
+	"""
+	xaiKey: String
+	"""
+	The Meta key, with the same three states.
+	"""
+	metaKey: String
+	"""
+	The AWS region Bedrock is called in.
+	"""
+	bedrockRegion: String
+	"""
+	Where Ollama is.
+	"""
+	ollamaBaseUrl: String
+	"""
+	Whether the Ollama provider is on.
+	"""
+	ollamaEnabled: Boolean
+	"""
+	Whether the Codex transport is on.
+	"""
+	codexEnabled: Boolean
+	"""
+	Whether the Grok transport is on.
+	"""
+	grokEnabled: Boolean
+	"""
+	Whether providers may be handed files rather than text.
+	"""
+	fileUploads: Boolean
+	"""
+	How hard Codex thinks: `none`, `minimal`, `low`, `medium`, `high` or
+	`xhigh`. A word the provider does not know is refused rather than saved,
+	because it would be saved and then ignored.
+	"""
+	codexReasoningEffort: String
+	"""
+	How much Codex writes: `low`, `medium` or `high`.
+	"""
+	codexVerbosity: String
+	"""
+	Whether Codex is sent its own reasoning back.
+	"""
+	codexReplayReasoning: Boolean
+	"""
+	Gateways to add or change. Each is merged field by field, so a gateway can
+	be edited without resending its key.
+	"""
+	gateways: [GatewayInput!]
+	"""
+	Gateways to remove, by name. Removals run after the edits above, so one
+	request that both edits and deletes does not depend on the order.
+	"""
+	removeGateways: [String!]
+}
+
+"""
 A paged history of one run's context window.
 """
 type ContextHistoryConnection {
@@ -1077,6 +1191,44 @@ type DaemonLinkChanged {
 }
 
 """
+Who is on the other end of the control socket.
+"""
+type DaemonStatus {
+	"""
+	Whether this server is receiving the daemon's events right now.
+	
+	A request still works while this is false: the control client waits out a
+	restart, and the run store is read from disk either way. What stops while
+	it is false is the live frames.
+	"""
+	connected: Boolean!
+	"""
+	The daemon's version, once it has said. Null before any daemon has
+	introduced itself.
+	"""
+	version: String
+	"""
+	Its build id, which is what tells a restart from an upgrade.
+	"""
+	build: String
+	"""
+	Its process id.
+	"""
+	pid: Int
+	"""
+	How many times the daemon behind this link has changed process since
+	this server started.
+	"""
+	restarts: Int!
+	"""
+	Present when the daemon and this server run different code, with what to
+	do about it. Requests keep working while the two still understand each
+	other, which is why this is advice rather than an error.
+	"""
+	restartAdvised: String
+}
+
+"""
 An exact decimal, serialized as a JSON string. Money is never a `Float` on
 the wire: a cost figure that a JSON parser silently re-rounds is a lie
 about spend. The daemon keeps costs as `f64`, so this carries that number's
@@ -1297,6 +1449,20 @@ type EnvEntry {
 	Its value, as the blueprint wrote it. A `${VAR}` reference stands for a
 	secret the installer asks for, so the secret itself never ships in a
 	manifest and never appears here.
+	"""
+	value: String!
+}
+
+"""
+One name and value, for a gateway's headers.
+"""
+input EnvEntryInput {
+	"""
+	The header or variable name.
+	"""
+	name: String!
+	"""
+	Its value.
 	"""
 	value: String!
 }
@@ -1578,6 +1744,40 @@ type Gateway {
 }
 
 """
+A custom model gateway to write into the config.
+"""
+input GatewayInput {
+	"""
+	The name an agent references, and the table key.
+	"""
+	name: String!
+	"""
+	What backs it: `script`, `openai-compatible` or `openai`.
+	"""
+	kind: String
+	"""
+	Where the gateway lives, for an endpoint-backed one.
+	"""
+	baseUrl: String
+	"""
+	The script that serves it, for a script-backed one.
+	"""
+	script: String
+	"""
+	Its API key. Written, never read back.
+	"""
+	apiKey: String
+	"""
+	Extra headers every request carries.
+	"""
+	headers: [EnvEntryInput!]
+	"""
+	The models it serves, when the gateway cannot be asked.
+	"""
+	models: [String!]
+}
+
+"""
 Where a search matched, and enough text to show a person why.
 
 The part of search a browser cannot do: the client never holds a run's
@@ -1635,6 +1835,33 @@ type InstallCommand {
 	The command line.
 	"""
 	command: String!
+}
+
+"""
+How this copy of Leviath was installed, which decides how it upgrades.
+"""
+enum InstallMethod {
+	"""
+	Homebrew, under a formula that carries the channel.
+	"""
+	HOMEBREW
+	"""
+	Scoop, under a package that carries the channel the same way.
+	"""
+	SCOOP
+	"""
+	`cargo install`, so the binary was compiled here.
+	"""
+	CARGO
+	"""
+	The hosted install script, or something else that dropped a plain binary
+	where that script puts one.
+	"""
+	SCRIPT
+	"""
+	Somewhere no supported installer writes. `upgrade.message` says where.
+	"""
+	UNKNOWN
 }
 
 """
@@ -1834,6 +2061,20 @@ type LogLine {
 }
 
 """
+A directory that was made.
+"""
+type MadeDirectory {
+	"""
+	The new directory.
+	"""
+	path: String!
+	"""
+	The directory it was made in.
+	"""
+	parent: String!
+}
+
+"""
 What happens to one region's content as it crosses between blueprints.
 """
 enum MappingTransform {
@@ -2030,6 +2271,45 @@ type MimeRow {
 }
 
 """
+One row of the mime registry, as a write sends it.
+"""
+input MimeRowInput {
+	"""
+	The type or pattern this row covers: `image/png`, or `image/*`.
+	"""
+	mimeType: String!
+	"""
+	The family providers key their encoders on.
+	"""
+	family: String
+	"""
+	Whether the bytes are text, and so may travel inline.
+	"""
+	text: Boolean
+	"""
+	Extensions that imply this type, without the dot.
+	"""
+	extensions: [String!]
+	"""
+	A hex prefix that identifies the bytes.
+	"""
+	magic: String
+	"""
+	What a consumer that cannot take the type sees in the part's place.
+	"""
+	standIn: String
+	"""
+	A script the bytes must pass to be stored as this type. An empty string
+	lifts a check a broader row put on the type.
+	"""
+	check: String
+	"""
+	How the tokens are counted.
+	"""
+	tokens: MimeTokensInput
+}
+
+"""
 What writing a mime row did.
 """
 type MimeRowWritten {
@@ -2058,6 +2338,37 @@ type MimeTokenRates {
 	"""
 	The most one part may cost, and the answer when the dimensions are
 	unknown.
+	"""
+	max: Int
+	"""
+	Tokens per second of audio or video.
+	"""
+	perSecond: Int
+	"""
+	Tokens per page of a document.
+	"""
+	perPage: Int
+	"""
+	A flat charge, whatever the size.
+	"""
+	fixed: Int
+}
+
+"""
+How the tokens of a mime type are counted. Name exactly one rate.
+"""
+input MimeTokensInput {
+	"""
+	Tokens per byte of the stored file.
+	"""
+	perByte: Float
+	"""
+	Pixels one token buys. Pair it with `max`.
+	"""
+	perPixel: Int
+	"""
+	The most one part may cost, and the answer when the dimensions are
+	unknown. Only with `perPixel`.
 	"""
 	max: Int
 	"""
@@ -2450,24 +2761,16 @@ type Mutation {
 	): Boolean!
 	"""
 	Add or update one row of the mime registry.
+	
+	Every field but the key is optional, because a row says only what it
+	changes: what a field leaves out stays as whatever broader row already
+	covers the type.
 	"""
 	putMimeRow(
 		"""
-		The type or pattern this row covers.
+		The row to write.
 		"""
-		mimeType: String!,
-		"""
-		The family providers key their encoders on.
-		"""
-		family: String,
-		"""
-		Whether the bytes are text, and may travel inline.
-		"""
-		text: Boolean,
-		"""
-		Extensions that imply this type, without the dot.
-		"""
-		extensions: [String!]
+		row: MimeRowInput!
 	): MimeRowWritten!
 	"""
 	Remove a row from the mime registry.
@@ -2481,6 +2784,113 @@ type Mutation {
 		"""
 		mimeType: String!
 	): Boolean!
+	"""
+	Change the machine's config.
+	
+	A partial edit: a field left out leaves the setting alone, `null` clears
+	it, and a value sets it. An empty string is refused rather than read as a
+	clear, because a form that posts its empty box should be told rather than
+	obeyed. Every refusal happens before anything is written, so a request
+	that is going to fail leaves the file as it was.
+	"""
+	updateConfig(
+		"""
+		What to change.
+		"""
+		input: ConfigInput!
+	): Config!
+	"""
+	Write a Rhai script.
+	
+	Remote code execution by construction, like adding an MCP server: what is
+	written here is what an agent then runs. The answer says whether it
+	compiles, so an editor does not have to save and wait for a run to fail.
+	"""
+	putScript(
+		"""
+		Which registry: tool, region_hook, stage_hook, output_validator, mime_check or provider.
+		"""
+		kind: String!,
+		"""
+		Its name, unique within that kind.
+		"""
+		name: String!,
+		"""
+		The script's source.
+		"""
+		content: String!,
+		"""
+		The agent whose directory it belongs to, for an agent-scoped script.
+		"""
+		agent: String
+	): ScriptWritten!
+	"""
+	Remove a script.
+	"""
+	deleteScript(
+		"""
+		Which registry it belongs to.
+		"""
+		kind: String!,
+		"""
+		The script to remove.
+		"""
+		name: String!,
+		"""
+		The agent whose directory it is in.
+		"""
+		agent: String
+	): Boolean!
+	"""
+	Run the diagnostics that reach the network.
+	
+	The plain `doctor` field answers from the config alone. This one asks a
+	provider whether a key works and the daemon whether it is there, which
+	costs a few seconds and is why it is a mutation rather than a field: it is
+	an act with a cost, and one runs at a time.
+	"""
+	runDoctorLive: DoctorReport!
+	"""
+	Make one directory, so a picker can offer "New Folder" rather than one
+	that refuses.
+	
+	The three refusals are told apart on purpose: a path outside
+	`--workdir-root`, a parent that is not there, and a name already taken are
+	three different things to show somebody.
+	"""
+	makeDirectory(
+		"""
+		The existing directory to make it in, absolute.
+		"""
+		path: String!,
+		"""
+		One directory name, not a path.
+		"""
+		name: String!
+	): MadeDirectory!
+	"""
+	Start a self-update, and hand back the job.
+	
+	Answers before the work is done, because the work is a download and an
+	install: a request held open for a package manager is a console showing a
+	spinner it made up. Poll `updateJob(id:)`, or watch the live frames. One
+	update at a time: two package-manager upgrades of the same binary racing
+	each other is not a state worth debugging.
+	"""
+	startUpdate(
+		"""
+		Upgrade the binary.
+		"""
+		binary: Boolean! = true,
+		"""
+		Install the bundled blueprints.
+		"""
+		agents: Boolean! = true,
+		"""
+		Apply the config migrations.
+		"""
+		migrations: Boolean! = true
+	): UpdateJob!
 }
 
 """
@@ -2810,6 +3220,35 @@ type Query {
 		"""
 		agent: String
 	): ToolInventory!
+	"""
+	Who is on the other end of the control socket.
+	
+	A read this server answers from what it already knows, so it works while
+	the daemon is down: that is the point of asking. `connected` false does
+	not mean requests fail, it means the live frames have stopped.
+	"""
+	daemon: DaemonStatus!
+	"""
+	What an update would do, and whether there is anything newer to get.
+	
+	Planning never reaches the network. The "is there anything newer" half is
+	whatever the last check found, and asking starts another one for whoever
+	asks next rather than waiting on one here, so this is cheap enough for a
+	page to ask every time it opens.
+	"""
+	update: UpdateInfo!
+	"""
+	One update run, by id.
+	
+	Null when no job carries that id. The last few runs are kept, so an
+	operator reading back after the fact finds the job rather than nothing.
+	"""
+	updateJob(
+		"""
+		The job's id.
+		"""
+		id: String!
+	): UpdateJob
 	"""
 	Poll an export this server started.
 	
@@ -3934,6 +4373,25 @@ type Script {
 	The agent whose directory it came from, for an agent-scoped script.
 	"""
 	agent: String
+}
+
+"""
+What writing a script did.
+"""
+type ScriptWritten {
+	"""
+	Where it was written.
+	"""
+	path: String!
+	"""
+	Whether it compiles. A script that does not is still written: an editor
+	saves work in progress, and the run is what refuses to use it.
+	"""
+	compiles: Boolean!
+	"""
+	Why it does not compile, when it does not.
+	"""
+	error: String
 }
 
 """
@@ -5295,6 +5753,33 @@ enum UnattendedPolicy {
 }
 
 """
+One bundled blueprint, and what an update would do to it.
+"""
+type UpdateAgentEntry {
+	"""
+	The blueprint's name.
+	"""
+	name: String!
+	"""
+	The version this build ships.
+	"""
+	version: String!
+	"""
+	What would happen to the installed copy, in words.
+	"""
+	change: String!
+	"""
+	Whether that is a change at all, rather than "already current".
+	"""
+	changes: Boolean!
+	"""
+	Whether an update would install it without being asked. A copy somebody
+	edited is not, because overwriting it would throw that work away.
+	"""
+	preselected: Boolean!
+}
+
+"""
 A self-update finished.
 """
 type UpdateFinished {
@@ -5311,6 +5796,110 @@ type UpdateFinished {
 	until they are restarted.
 	"""
 	restartRequired: Boolean!
+}
+
+"""
+What an update would do, and whether there is anything newer to get.
+"""
+type UpdateInfo {
+	"""
+	The version running now.
+	"""
+	version: String!
+	"""
+	How this copy was installed.
+	"""
+	installMethod: InstallMethod!
+	"""
+	The release channel this install tracks, where that is knowable. Null for
+	an install method that does not carry one.
+	"""
+	channel: String
+	"""
+	The newest version there is. Null means nothing to show, which covers
+	three cases that are one answer to a client: not checked yet, checking
+	switched off, and the check failed.
+	"""
+	latest: String
+	"""
+	Whether that is newer than this. Null for the same three cases.
+	"""
+	updateAvailable: Boolean
+	"""
+	When the check last answered. Null for the same three cases.
+	"""
+	checkedAt: Timestamp
+	"""
+	How the binary would be upgraded.
+	"""
+	binary: BinaryUpgrade!
+	"""
+	The bundled blueprints, and what would happen to each.
+	"""
+	agents: [UpdateAgentEntry!]!
+	"""
+	The config migrations that apply.
+	"""
+	migrations: [UpdateMigration!]!
+	"""
+	Why the config could not be read, when it could not. The plan is still
+	honest about the binary and the blueprints; it is the migrations it
+	cannot judge.
+	"""
+	configError: String
+}
+
+"""
+One update run.
+"""
+type UpdateJob {
+	"""
+	The job's id.
+	"""
+	id: String!
+	"""
+	Where the run as a whole got to: `running`, `complete` or `failed`.
+	"""
+	status: String!
+	"""
+	Each step, in the order they run. A step that was not asked for is
+	`skipped` rather than absent, so a client renders the same three rows
+	whatever the request was.
+	"""
+	steps: [UpdateJobStep!]!
+}
+
+"""
+One step of an update run.
+"""
+type UpdateJobStep {
+	"""
+	Which step: the binary, the blueprints, or the migrations.
+	"""
+	step: String!
+	"""
+	Where it got to: `pending`, `running`, `done`, `skipped`, `failed` or
+	`advised`.
+	"""
+	status: String!
+	"""
+	What happened, in words.
+	"""
+	detail: String!
+}
+
+"""
+One config migration that applies to the config as it stands.
+"""
+type UpdateMigration {
+	"""
+	The migration's name.
+	"""
+	name: String!
+	"""
+	What it changes.
+	"""
+	description: String!
 }
 
 """
@@ -5333,6 +5922,35 @@ type UpdateProgress {
 	One line about what just happened, ready to print.
 	"""
 	detail: String!
+}
+
+"""
+There is nothing to run, and this is why.
+"""
+type UpgradeByAdvice {
+	"""
+	What to tell the person instead.
+	"""
+	message: String!
+}
+
+"""
+Commands that would upgrade the binary.
+
+A list rather than one command because a package manager will not see a
+release published minutes ago until its own index is refreshed, so the
+refresh and the upgrade only make sense together.
+"""
+type UpgradeByCommand {
+	"""
+	Each command's own words, in order. They stop at the first failure.
+	"""
+	commands: [String!]!
+	"""
+	The same sequence as one line, joined with `&&`: what to paste into a
+	shell to do it by hand.
+	"""
+	shell: String!
 }
 
 """

@@ -166,47 +166,58 @@ pub(super) async fn create_dir(
     State(state): State<AppState>,
     Json(req): Json<MkdirReq>,
 ) -> Result<(StatusCode, Json<MkdirResp>), ApiError> {
-    let parent = PathBuf::from(&req.path);
+    made(&state, &req.path, &req.name)
+        .map(|made| (StatusCode::CREATED, Json(made)))
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// Make one directory under an existing one, for whichever surface asked.
+///
+/// A picker needs the three refusals told apart: a path outside the fence, a
+/// parent that is not there, and a name already taken are three different things
+/// to show somebody.
+pub(super) fn made(
+    state: &AppState,
+    path: &str,
+    name: &str,
+) -> Result<MkdirResp, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    let parent = PathBuf::from(path);
     if !parent.is_absolute() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "path must be absolute".to_string(),
-        ));
+        return Err(ServeError::BadRequest("path must be absolute".to_string()));
     }
     if let Some(root) = state.limits.workdir_root.as_deref()
         && !leviath_core::resolves_within(&parent, root)
     {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            format!(
-                "path '{}' is outside the configured --workdir-root",
-                req.path
-            ),
-        ));
+        return Err(ServeError::Forbidden(format!(
+            "path '{}' is outside the configured --workdir-root",
+            path
+        )));
     }
     match std::fs::metadata(&parent) {
         Ok(m) if !m.is_dir() => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("'{}' is a file, not a directory", parent.display()),
-            ));
+            return Err(ServeError::BadRequest(format!(
+                "'{}' is a file, not a directory",
+                parent.display()
+            )));
         }
         Ok(_) => {}
         Err(_) => {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                format!("directory '{}' not found", parent.display()),
-            ));
+            return Err(ServeError::NotFound(format!(
+                "directory '{}' not found",
+                parent.display()
+            )));
         }
     }
-    if !is_one_segment(&req.name) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            format!("name '{}' must be a single directory name", req.name),
-        ));
+    if !is_one_segment(name) {
+        return Err(ServeError::BadRequest(format!(
+            "name '{}' must be a single directory name",
+            name
+        )));
     }
 
-    let target = parent.join(&req.name);
+    let target = parent.join(name);
     // `create_dir` already fails on an existing path, but its error does not
     // say *which* failure it was, and "already there" is the one a picker has
     // to render differently from "the machine said no".
@@ -215,25 +226,19 @@ pub(super) async fn create_dir(
     // name too. `exists` follows the link, finds nothing, and would send this
     // to `create_dir` for an `EEXIST` reported as a 500.
     if target.symlink_metadata().is_ok() {
-        return Err(err(
-            StatusCode::CONFLICT,
-            format!("'{}' already exists", target.display()),
-        ));
+        return Err(ServeError::Conflict(format!(
+            "'{}' already exists",
+            target.display()
+        )));
     }
     std::fs::create_dir(&target).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not create '{}': {e}", target.display()),
-        )
+        ServeError::Internal(format!("could not create '{}': {e}", target.display()))
     })?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(MkdirResp {
-            path: target.to_string_lossy().into_owned(),
-            parent: parent.to_string_lossy().into_owned(),
-        }),
-    ))
+    Ok(MkdirResp {
+        path: target.to_string_lossy().into_owned(),
+        parent: parent.to_string_lossy().into_owned(),
+    })
 }
 
 /// Whether `name` is one ordinary directory name rather than a path.
