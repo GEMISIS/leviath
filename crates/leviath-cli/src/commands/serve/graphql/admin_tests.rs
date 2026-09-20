@@ -1540,4 +1540,20 @@ fn an_input_object_refuses_what_it_cannot_read() {
     // pinning: it means a client cannot learn about a typo from the answer, so
     // the schema's own field list is the only place that says what is accepted.
     assert!(ConfigInput::parse(one("nonesuch", Value::Null)).is_ok());
+
+    // An object with nothing in it, which is how a required field goes missing.
+    let empty = || Some(Value::Object(IndexMap::new()));
+    assert!(
+        GatewayInput::parse(empty()).is_err(),
+        "a gateway needs a name"
+    );
+    assert!(MimeRowInput::parse(empty()).is_err(), "a row needs a type");
+    assert!(
+        ConfigInput::parse(empty()).is_ok(),
+        "an empty edit changes nothing"
+    );
+    assert!(
+        MimeTokensInput::parse(empty()).is_ok(),
+        "no rate is a rate to keep"
+    );
 }

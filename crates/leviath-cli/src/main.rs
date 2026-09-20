@@ -194,13 +194,6 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()> {
-        // Printing the schema serves nothing, so it happens before the log
-        // file and before the daemon: regenerating the checked-in copy has to
-        // work on a machine with no daemon, no token and no config.
-        if args.print_graphql_schema {
-            println!("{}", commands::serve::graphql_schema());
-            return Ok(());
-        }
         // A server is long-lived and often runs under nohup or a supervisor,
         // so it keeps its own capped log like the daemon does: one file per
         // server, named for `--name` or the port. The cap is read once here,
