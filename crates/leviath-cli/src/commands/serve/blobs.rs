@@ -427,10 +427,15 @@ pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
 
 /// `GET /api/mime`: the effective mime registry.
 pub(super) async fn list_mime(State(state): State<AppState>) -> Json<MimeListing> {
-    let registry = state.current_config().mime_registry_or_defaults();
     Json(MimeListing {
-        types: registry_rows(&registry),
+        types: mime_rows(&state),
     })
+}
+
+/// The operator's registry rows, before any blueprint's own. Both surfaces
+/// read them here.
+pub(super) fn mime_rows(state: &AppState) -> Vec<MimeTypeEntry> {
+    registry_rows(&state.current_config().mime_registry_or_defaults())
 }
 
 #[cfg(test)]

@@ -1161,3 +1161,194 @@ async fn a_file_link_carries_its_path_and_its_grant() {
     })
     .await;
 }
+
+/// The machine's own state: how it is configured, and what it can do.
+#[tokio::test]
+async fn the_config_field_answers_without_secrets() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query(
+            "{ config { defaultProvider providerOrder configuredProviders apiVersion
+                        capabilities agentPaths mcpServerCount
+                        limits { maxPageSize maxIds maxUploadBytes requestTimeoutSecs }
+                        configError { message } configMtime } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let config = &json["config"];
+        assert!(
+            config["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .any(|c| c == "graphql"),
+            "this server announces the surface a client is reading it over"
+        );
+        assert_eq!(config["limits"]["maxPageSize"], 200);
+        assert!(config["limits"]["maxIds"].as_i64().unwrap_or_default() > 0);
+        assert!(
+            config["apiVersion"].as_str().unwrap_or_default().len() > 2,
+            "{config}"
+        );
+        // Nothing configured in an isolated home, which is a state rather than
+        // a failure, and no key material either way.
+        assert_eq!(
+            config["configuredProviders"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            !serde_json::to_string(config)
+                .expect("config serializes")
+                .contains("key\":\""),
+            "no key values cross the wire"
+        );
+    })
+    .await;
+}
+
+/// The diagnostics report. A failing check is a finding, not a request error.
+#[tokio::test]
+async fn the_doctor_reports_its_checks() {
+    // The checks read the real config path unless one is staked out for them,
+    // which the repo's own guard insists on: an unisolated read races every
+    // other environment-touching test.
+    crate::config::with_isolated_config_path_async("graphql-doctor", |_path| async move {
+        let answer = run_query("{ doctor { ok checks { name ok detail } } }").await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let checks = json["doctor"]["checks"].as_array().expect("checks");
+        assert!(!checks.is_empty(), "something was checked");
+        assert!(
+            checks
+                .iter()
+                .all(|c| !c["name"].as_str().unwrap_or_default().is_empty()),
+            "each one says what it checked"
+        );
+    })
+    .await;
+}
+
+/// The MCP servers, the yolo profiles, the mime rows and the scripts, from a
+/// machine with none of them configured.
+///
+/// Empty is the honest answer here, and each field says where it read from
+/// rather than implying the file is broken.
+#[tokio::test]
+async fn the_machine_listings_answer_for_a_bare_install() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = run_query(
+            "{ mcpServers { name transport endpoint auth }
+               yoloProfiles { path exists error profiles { name default } }
+               mime { mimeType source family text extensions }
+               scripts { kind name source agent } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["mcpServers"].as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            json["yoloProfiles"]["exists"], false,
+            "no profiles file yet"
+        );
+        assert!(json["yoloProfiles"]["error"].is_null(), "and no failure");
+        assert!(
+            json["yoloProfiles"]["path"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("yolo.toml"),
+            "it says where it looked"
+        );
+        // The built-in mime rows are always there: they are compiled in.
+        let mime = json["mime"].as_array().expect("mime rows");
+        assert!(
+            mime.iter().any(|row| row["mimeType"] == "image/png"),
+            "the built-in rows are listed"
+        );
+        assert!(
+            mime.iter()
+                .all(|row| !row["source"].as_str().unwrap_or_default().is_empty()),
+            "each row says where it came from"
+        );
+        assert!(json["scripts"].is_array());
+    })
+    .await;
+}
+
+/// The directory picker lists directories, and says where "up" and "home" are.
+#[tokio::test]
+async fn the_directory_picker_lists_directories() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        std::fs::create_dir_all(dir.path().join("visible")).expect("a child");
+        std::fs::create_dir_all(dir.path().join(".hidden")).expect("a hidden child");
+        std::fs::write(dir.path().join("a-file.txt"), "x").expect("a file");
+        let path = dir.path().to_string_lossy().into_owned();
+
+        let answer = run_query(&format!(
+            r#"{{ directories(path: "{path}") {{ path parent home cwd entries }} }}"#
+        ))
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let listing = &json["directories"];
+        let entries = listing["entries"].as_array().expect("entries");
+        assert!(entries.iter().any(|e| e == "visible"));
+        assert!(
+            !entries.iter().any(|e| e == ".hidden"),
+            "hidden ones are left out unless asked for"
+        );
+        assert!(
+            !entries.iter().any(|e| e == "a-file.txt"),
+            "a file is not a directory"
+        );
+        assert!(listing["parent"].is_string(), "up one level");
+        assert!(!listing["home"].as_str().unwrap_or_default().is_empty());
+
+        let with_hidden = run_query(&format!(
+            r#"{{ directories(path: "{path}", hidden: true) {{ entries }} }}"#
+        ))
+        .await;
+        let json = serde_json::to_value(&with_hidden.data).expect("data serializes");
+        assert!(
+            json["directories"]["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .any(|e| e == ".hidden"),
+            "asked for, they are there"
+        );
+    })
+    .await;
+}
+
+/// A path that is not a directory, or is not there, says which.
+#[tokio::test]
+async fn the_directory_picker_refuses_what_it_cannot_list() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let relative = run_query(r#"{ directories(path: "relative/path") { path } }"#).await;
+        assert!(
+            relative
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("must be absolute"),
+            "{:?}",
+            relative.errors
+        );
+
+        let missing = run_query(r#"{ directories(path: "/nowhere/at/all") { path } }"#).await;
+        assert_eq!(
+            missing
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+    })
+    .await;
+}

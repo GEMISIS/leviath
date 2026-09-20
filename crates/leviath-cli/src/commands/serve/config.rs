@@ -46,7 +46,7 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
 /// disk. Every other field here describes the config in force; without this
 /// one a client had no way to tell "your edit is applied" from "your edit did
 /// not parse and is being ignored".
-fn redact(
+pub(super) fn redact(
     c: &Config,
     requests: &super::request_limits::RequestLimits,
     health: &crate::daemon::config_reload::ConfigHealth,

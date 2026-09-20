@@ -99,10 +99,10 @@ impl Default for McpAdmin {
 /// A server, as reported by the list/status endpoints.
 #[derive(Serialize)]
 pub(super) struct McpServerInfo {
-    name: String,
-    transport: String,
-    endpoint: String,
-    auth: String,
+    pub(super) name: String,
+    pub(super) transport: String,
+    pub(super) endpoint: String,
+    pub(super) auth: String,
 }
 
 impl McpServerInfo {
@@ -147,20 +147,29 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
 
 /// `GET /api/mcp/servers` - list configured servers with their auth status.
 pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResponse {
-    let admin = &state.mcp;
+    match server_infos(&state) {
+        Ok(servers) => Json(servers).into_response(),
+        Err(e) => super::core::error::as_api_error(&e).into_response(),
+    }
+}
+
+/// Every MCP server the config declares, with its auth state. Both surfaces
+/// read the config file here rather than from `AppState`, because the admin
+/// routes write it and a stale copy would report a server that was just
+/// removed.
+pub(super) fn server_infos(
+    state: &AppState,
+) -> Result<Vec<McpServerInfo>, super::core::error::ServeError> {
     let paths = admin_paths();
-    let config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| super::core::error::ServeError::Internal(e.to_string()))?;
     let store = AuthStore::load(&paths.store).unwrap_or_default();
-    let now = (admin.clock)();
-    let servers: Vec<McpServerInfo> = config
+    let now = (state.mcp.clock)();
+    Ok(config
         .mcp_servers
         .iter()
-        .map(|s| McpServerInfo::describe(s, &store, now))
-        .collect();
-    Json(servers).into_response()
+        .map(|server| McpServerInfo::describe(server, &store, now))
+        .collect())
 }
 
 /// Body of `POST /api/mcp/servers`.

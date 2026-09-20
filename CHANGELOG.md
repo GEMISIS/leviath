@@ -30,6 +30,11 @@ same list.
   types and held to them by a test. See [the GraphQL
   docs](https://leviath.dev/docs/graphql).
 
+- The machine's own state over GraphQL: `config` (with every secret left out),
+  `doctor`, `mcpServers`, `yoloProfiles`, `mime`, `scripts` and `directories`.
+  Each REST handler behind these was split so both surfaces run the same read,
+  rather than one of them growing a second copy of the walk.
+
 - Short-lived signed links on the byte routes, so a browser can show a run's
   files. The three byte routes now also accept an `exp`/`sig` pair in place of
   the bearer token, which is what an `<img src>` or a download link needs: a

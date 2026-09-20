@@ -17,9 +17,13 @@ use super::super::cursor::{self, CursorKey};
 use super::super::types::AppState;
 use super::connection::{Highlight, PageInfo, RunConnection, RunEdge};
 use super::error::IntoGraphql;
-use super::scalars::{Cursor, Timestamp};
+use super::scalars::{BigInt, Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
 use super::types::catalog::{Model, Provider, SkippedTool, Tool, ToolGroup, ToolInventory};
+use super::types::machine::{
+    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpServer, MimeRow, Script,
+    ServeLimits, YoloProfile, YoloProfiles,
+};
 use super::types::run::{Run, RunStatus};
 
 /// Sort order for the run listing.
@@ -322,6 +326,205 @@ impl Query {
         })
     }
 
+    /// How this server is configured, with every secret left out.
+    ///
+    /// Read `capabilities` before choosing a code path. A 404 also means "no
+    /// such run", so discovering a feature by being refused costs a round trip
+    /// and tells you less.
+    async fn config(&self, ctx: &Context<'_>) -> Config {
+        let state = ctx.data_unchecked::<AppState>();
+        // One health read rather than a config read beside it: health re-checks
+        // the file and hands back the config in force with its verdict, so the
+        // two halves of one answer cannot disagree.
+        let health = state.config.health();
+        let redacted = super::super::config::redact(
+            &health.config.clone(),
+            &state.limits.request_limits,
+            &health,
+        );
+        let mut configured = Vec::new();
+        for (name, present) in [
+            ("anthropic", redacted.has_anthropic_key),
+            ("openai", redacted.has_openai_key),
+            ("google", redacted.has_google_key),
+            ("openrouter", redacted.has_openrouter_key),
+            ("bedrock", redacted.has_bedrock_key),
+            ("xai", redacted.has_xai_key),
+            ("meta", redacted.has_meta_key),
+        ] {
+            if present {
+                configured.push(name.to_string());
+            }
+        }
+        Config {
+            default_provider: redacted.default_provider,
+            provider_order: redacted.provider_order,
+            override_model: redacted.override_model,
+            fallback_model: redacted.fallback_model,
+            configured_providers: configured,
+            gateways: redacted
+                .gateways
+                .iter()
+                .map(|gateway| Gateway {
+                    name: gateway.name.clone(),
+                    base_url: gateway.base_url.clone(),
+                    has_api_key: gateway.has_api_key,
+                    kind: gateway.kind.clone(),
+                })
+                .collect(),
+            agent_paths: redacted
+                .agent_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            mcp_server_count: count(redacted.mcp_server_count),
+            api_version: redacted.api_version,
+            capabilities: redacted.capabilities,
+            limits: ServeLimits {
+                max_page_size: count(redacted.limits.max_limit),
+                max_ids: count(redacted.limits.max_ids),
+                max_file_bytes: BigInt(redacted.limits.max_file_bytes as i64),
+                max_listing_entries: count(redacted.limits.max_listing_entries),
+                max_search_scan: count(redacted.limits.max_search_scan),
+                max_history_limit: count(redacted.limits.max_history_limit),
+                max_concurrent_requests: BigInt(redacted.limits.max_concurrent_requests as i64),
+                max_upload_bytes: BigInt(state.limits.request_limits.max_upload_bytes as i64),
+                request_timeout_secs: i32::try_from(
+                    state.limits.request_limits.request_timeout_secs,
+                )
+                .unwrap_or(i32::MAX),
+            },
+            config_error: redacted.config_error.map(|error| ConfigError {
+                kind: error.kind,
+                path: error.path,
+                message: error.message,
+                line: error.line.and_then(|line| i32::try_from(line).ok()),
+                column: error.column.and_then(|col| i32::try_from(col).ok()),
+                key: error.key,
+                note: error.note,
+            }),
+            config_mtime: redacted.config_mtime.map(Timestamp),
+        }
+    }
+
+    /// Environment and configuration diagnostics.
+    ///
+    /// A failing check is `ok: false` inside a healthy answer, never an error:
+    /// the request to run the checks succeeded, and what they found is the
+    /// answer.
+    async fn doctor(&self) -> DoctorReport {
+        let report = super::super::doctor::offline_report().await;
+        DoctorReport {
+            ok: report.checks.iter().all(|check| check.ok),
+            checks: report
+                .checks
+                .into_iter()
+                .map(|check| DoctorCheck {
+                    name: check.name,
+                    ok: check.ok,
+                    detail: check.detail,
+                })
+                .collect(),
+        }
+    }
+
+    /// The MCP servers this machine has configured.
+    async fn mcp_servers(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<McpServer>> {
+        let state = ctx.data_unchecked::<AppState>();
+        Ok(super::super::mcp::server_infos(state)
+            .gql()?
+            .into_iter()
+            .map(|server| McpServer {
+                name: server.name,
+                transport: server.transport,
+                endpoint: server.endpoint,
+                auth: server.auth,
+            })
+            .collect())
+    }
+
+    /// The yolo profiles, and the file they are read from.
+    async fn yolo_profiles(&self) -> YoloProfiles {
+        let listing = super::super::yolo::listing();
+        YoloProfiles {
+            path: listing.path,
+            exists: listing.exists,
+            error: listing.error,
+            profiles: listing
+                .profiles
+                .into_iter()
+                .map(|profile| YoloProfile {
+                    name: profile.name,
+                    default: waiver_word(profile.default).to_string(),
+                    questions: human_word(profile.questions).to_string(),
+                    checkpoints: human_word(profile.checkpoints).to_string(),
+                    gate: human_word(profile.gate).to_string(),
+                    tool_rules: profile.tool_rules.iter().map(|n| count(*n)).collect(),
+                    shell_rules: profile.shell_rules.iter().map(|n| count(*n)).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The operator's mime registry, before any blueprint's own rows.
+    async fn mime(&self, ctx: &Context<'_>) -> Vec<MimeRow> {
+        let state = ctx.data_unchecked::<AppState>();
+        super::super::blobs::mime_rows(state)
+            .into_iter()
+            .map(|row| MimeRow {
+                mime_type: row.mime_type,
+                source: row.source,
+                family: row.family,
+                text: row.text,
+                extensions: row.extensions.unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// The scripts this machine has registered.
+    async fn scripts(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Only this blueprint's own scripts, plus the global ones.")] agent: Option<
+            String,
+        >,
+    ) -> async_graphql::Result<Vec<Script>> {
+        let state = ctx.data_unchecked::<AppState>();
+        Ok(super::super::scripts::registered(state, agent.as_deref())
+            .gql()?
+            .into_iter()
+            .map(|script| Script {
+                kind: script.kind,
+                name: script.name,
+                source: script.source,
+                agent: script.agent,
+            })
+            .collect())
+    }
+
+    /// The directories under a path, for a file picker.
+    ///
+    /// Confined to `--workdir-root` when the operator set one, which is also
+    /// why `parent` is null at that fence rather than leading above it.
+    async fn directories(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The directory to list. Omitted means this server's own.")] path: Option<
+            String,
+        >,
+        #[graphql(desc = "Include hidden directories.", default = false)] hidden: bool,
+    ) -> async_graphql::Result<Directory> {
+        let state = ctx.data_unchecked::<AppState>();
+        let listing = super::super::fs::dir_listing(state, path.as_deref(), hidden).gql()?;
+        Ok(Directory {
+            path: listing.path,
+            parent: listing.parent,
+            home: listing.home,
+            cwd: listing.cwd,
+            entries: listing.dirs.into_iter().map(|dir| dir.name).collect(),
+        })
+    }
+
     /// Every model this machine can route to.
     ///
     /// Answered from the catalogue this server keeps, so it costs no provider
@@ -502,6 +705,27 @@ impl Query {
             server_time: Timestamp(now),
         })
     }
+}
+
+/// What a profile's default does, in the word the config file uses.
+fn waiver_word(waiver: crate::yolo::rules::Waiver) -> &'static str {
+    match waiver {
+        crate::yolo::rules::Waiver::Allow => "allow",
+        crate::yolo::rules::Waiver::Ask => "ask",
+    }
+}
+
+/// Whether a human-in-the-loop mechanism reaches a person, in the same words.
+fn human_word(human: crate::yolo::rules::Human) -> &'static str {
+    match human {
+        crate::yolo::rules::Human::Ask => "ask",
+        crate::yolo::rules::Human::Auto => "auto",
+    }
+}
+
+/// Narrow a count to the 32 bits GraphQL's `Int` carries.
+fn count(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// One open ask, with the run it is parked on.

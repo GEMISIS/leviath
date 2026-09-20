@@ -39,25 +39,39 @@ pub(super) async fn list_dirs(
     State(state): State<AppState>,
     Query(query): Query<DirsQuery>,
 ) -> Result<Json<DirsResp>, ApiError> {
+    dir_listing(&state, query.path.as_deref(), query.hidden)
+        .map(Json)
+        .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// The directories under `path`, for a file picker.
+///
+/// Confined to `--workdir-root` when the operator set one. That fence is why
+/// `parent` is null at the root rather than leading above it, and why a symlink
+/// child pointing outside is left out: offering it would be offering a workdir
+/// the spawn path refuses.
+pub(super) fn dir_listing(
+    state: &AppState,
+    path: Option<&str>,
+    hidden: bool,
+) -> Result<DirsResp, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
     let root = state.limits.workdir_root.as_deref();
     let cwd = known_dir_or_fs_root(std::env::current_dir().ok());
 
-    let listed = match &query.path {
+    let listed = match path {
         Some(p) => {
             let requested = PathBuf::from(p);
             if !requested.is_absolute() {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "path must be absolute".to_string(),
-                ));
+                return Err(ServeError::BadRequest("path must be absolute".to_string()));
             }
             if let Some(root) = root
                 && !leviath_core::resolves_within(&requested, root)
             {
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    format!("path '{p}' is outside the configured --workdir-root"),
-                ));
+                return Err(ServeError::Forbidden(format!(
+                    "path '{p}' is outside the configured --workdir-root"
+                )));
             }
             requested
         }
@@ -71,30 +85,26 @@ pub(super) async fn list_dirs(
 
     match std::fs::metadata(&listed) {
         Ok(m) if !m.is_dir() => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("'{}' is a file, not a directory", listed.display()),
-            ));
+            return Err(ServeError::BadRequest(format!(
+                "'{}' is a file, not a directory",
+                listed.display()
+            )));
         }
         Ok(_) => {}
         Err(_) => {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                format!("directory '{}' not found", listed.display()),
-            ));
+            return Err(ServeError::NotFound(format!(
+                "directory '{}' not found",
+                listed.display()
+            )));
         }
     }
 
-    let entries = std::fs::read_dir(&listed).map_err(|e| {
-        err(
-            StatusCode::NOT_FOUND,
-            format!("could not read '{}': {e}", listed.display()),
-        )
-    })?;
+    let entries = std::fs::read_dir(&listed)
+        .map_err(|e| ServeError::NotFound(format!("could not read '{}': {e}", listed.display())))?;
     let mut dirs = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !query.hidden && name.starts_with('.') {
+        if !hidden && name.starts_with('.') {
             continue;
         }
         let path = entry.path();
@@ -128,7 +138,7 @@ pub(super) async fn list_dirs(
         false => listed.parent().map(|p| p.to_string_lossy().into_owned()),
     };
 
-    Ok(Json(DirsResp {
+    Ok(DirsResp {
         path: listed.to_string_lossy().into_owned(),
         parent,
         home: known_dir_or_fs_root(dirs::home_dir())
@@ -137,7 +147,7 @@ pub(super) async fn list_dirs(
         cwd: cwd.to_string_lossy().into_owned(),
         root: root.map(|r| r.to_string_lossy().into_owned()),
         dirs,
-    }))
+    })
 }
 
 /// `POST /api/fs/dirs`: create one empty directory inside a directory the

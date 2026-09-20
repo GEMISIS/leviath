@@ -486,6 +486,105 @@ type CompletedOutput {
 }
 
 """
+The daemon's configuration, with every secret left out.
+
+The `has*Key` flags are the shape this takes deliberately: a console needs
+to know whether a provider is configured, and never needs the key.
+"""
+type Config {
+	"""
+	The default provider, by name.
+	"""
+	defaultProvider: String!
+	"""
+	Providers allowed to serve a bare model name, best first. Empty means
+	the default provider alone decides.
+	"""
+	providerOrder: [String!]!
+	"""
+	The model every stage that permits it starts on, ahead of its own list.
+	"""
+	overrideModel: String
+	"""
+	The model tried after every model a stage names.
+	"""
+	fallbackModel: String
+	"""
+	Whether a key is stored for each provider. Names only; no values.
+	"""
+	configuredProviders: [String!]!
+	"""
+	Custom model gateways.
+	"""
+	gateways: [Gateway!]!
+	"""
+	Where this server looks for blueprints, beyond the installed agents
+	directory.
+	"""
+	agentPaths: [String!]!
+	"""
+	How many MCP servers the config declares.
+	"""
+	mcpServerCount: Int!
+	"""
+	The API version this server speaks.
+	"""
+	apiVersion: String!
+	"""
+	What this server can do. Check these rather than calling a route and
+	reading a 404, which also means "no such run".
+	"""
+	capabilities: [String!]!
+	"""
+	The numbers above.
+	"""
+	limits: ServeLimits!
+	"""
+	Why the config file does not load. Absent when it does.
+	"""
+	configError: ConfigError
+	"""
+	When the config was last saved. While unhealthy this is the last good
+	save, not what is on disk.
+	"""
+	configMtime: Timestamp
+}
+
+"""
+Why the config file does not load.
+"""
+type ConfigError {
+	"""
+	Which step refused it: reading, parsing, or validating.
+	"""
+	kind: String!
+	"""
+	The file, as the server resolved it.
+	"""
+	path: String!
+	"""
+	One line on what is wrong.
+	"""
+	message: String!
+	"""
+	The line a parse failure is at, 1-based.
+	"""
+	line: Int
+	"""
+	The column beside it.
+	"""
+	column: Int
+	"""
+	The dotted config key a validation failure is about.
+	"""
+	key: String
+	"""
+	Said in words, for a client that only renders strings.
+	"""
+	note: String!
+}
+
+"""
 The config file's health changed.
 """
 type ConfigHealthChanged {
@@ -668,6 +767,65 @@ shortest round-tripping form rather than inventing precision.
 scalar Decimal
 
 """
+One directory, for a file picker.
+"""
+type Directory {
+	"""
+	The absolute directory that was listed.
+	"""
+	path: String!
+	"""
+	Where "up one level" goes. Null at the filesystem root, and at the
+	workdir root: a picker is never led above the fence.
+	"""
+	parent: String
+	"""
+	The user's home directory, for a "home" shortcut.
+	"""
+	home: String!
+	"""
+	This server's own working directory, for a "here" shortcut.
+	"""
+	cwd: String!
+	"""
+	The directories inside, by name.
+	"""
+	entries: [String!]!
+}
+
+"""
+One environment or configuration check.
+"""
+type DoctorCheck {
+	"""
+	What was checked.
+	"""
+	name: String!
+	"""
+	Whether it passed.
+	"""
+	ok: Boolean!
+	"""
+	What was found, or why not.
+	"""
+	detail: String!
+}
+
+"""
+The diagnostics report.
+"""
+type DoctorReport {
+	"""
+	Whether every check passed.
+	"""
+	ok: Boolean!
+	"""
+	The checks themselves, in the order they ran.
+	"""
+	checks: [DoctorCheck!]!
+}
+
+"""
 This subscription fell behind, and frames were dropped.
 
 The daemon's broadcast is bounded, and a subscriber that cannot keep up is
@@ -706,6 +864,28 @@ type FinalOutput {
 	True when the stored answer was cut to fit.
 	"""
 	truncated: Boolean!
+}
+
+"""
+A custom model gateway from `[model_providers]`.
+"""
+type Gateway {
+	"""
+	The name an agent references, and the table key.
+	"""
+	name: String!
+	"""
+	Where the gateway lives, when the entry names one.
+	"""
+	baseUrl: String
+	"""
+	Whether a key is configured. The value itself never crosses the wire.
+	"""
+	hasApiKey: Boolean!
+	"""
+	What backs it: a script, or an endpoint.
+	"""
+	kind: String!
 }
 
 """
@@ -872,6 +1052,30 @@ type LogLine {
 }
 
 """
+One MCP server in the config.
+"""
+type McpServer {
+	"""
+	Unique server name.
+	"""
+	name: String!
+	"""
+	How it is reached: `stdio`, `http`, or `invalid` when the configured
+	transport did not resolve.
+	"""
+	transport: String!
+	"""
+	The command for a stdio server, the URL for an HTTP one. Empty when the
+	transport is invalid.
+	"""
+	endpoint: String!
+	"""
+	Its one-word auth state.
+	"""
+	auth: String!
+}
+
+"""
 One caller-supplied metadata entry on a run.
 """
 type MetadataEntry {
@@ -897,6 +1101,33 @@ input MetadataEntryInput {
 	The value. Always a string.
 	"""
 	value: String!
+}
+
+"""
+One row of the mime registry.
+"""
+type MimeRow {
+	"""
+	The row's key: a type, or a pattern such as `image/*`.
+	"""
+	mimeType: String!
+	"""
+	Where the row came from: `builtin`, `config`, or a blueprint's name.
+	"""
+	source: String!
+	"""
+	The family the type resolves to, which is what providers key their
+	encoders on.
+	"""
+	family: String
+	"""
+	Whether the bytes are text, and so may travel inline.
+	"""
+	text: Boolean
+	"""
+	The extensions this type is known by.
+	"""
+	extensions: [String!]!
 }
 
 """
@@ -1211,6 +1442,59 @@ type Query {
 		"""
 		skip: Int! = 0
 	): BlueprintConnection!
+	"""
+	How this server is configured, with every secret left out.
+	
+	Read `capabilities` before choosing a code path. A 404 also means "no
+	such run", so discovering a feature by being refused costs a round trip
+	and tells you less.
+	"""
+	config: Config!
+	"""
+	Environment and configuration diagnostics.
+	
+	A failing check is `ok: false` inside a healthy answer, never an error:
+	the request to run the checks succeeded, and what they found is the
+	answer.
+	"""
+	doctor: DoctorReport!
+	"""
+	The MCP servers this machine has configured.
+	"""
+	mcpServers: [McpServer!]!
+	"""
+	The yolo profiles, and the file they are read from.
+	"""
+	yoloProfiles: YoloProfiles!
+	"""
+	The operator's mime registry, before any blueprint's own rows.
+	"""
+	mime: [MimeRow!]!
+	"""
+	The scripts this machine has registered.
+	"""
+	scripts(
+		"""
+		Only this blueprint's own scripts, plus the global ones.
+		"""
+		agent: String
+	): [Script!]!
+	"""
+	The directories under a path, for a file picker.
+	
+	Confined to `--workdir-root` when the operator set one, which is also
+	why `parent` is null at that fence rather than leading above it.
+	"""
+	directories(
+		"""
+		The directory to list. Omitted means this server's own.
+		"""
+		path: String,
+		"""
+		Include hidden directories.
+		"""
+		hidden: Boolean! = false
+	): Directory!
 	"""
 	Every model this machine can route to.
 	
@@ -1959,6 +2243,29 @@ type RunTreeStatus {
 }
 
 """
+One registered script.
+"""
+type Script {
+	"""
+	Which registry it belongs to: a tool, a hook, a validator, a mime check
+	or a provider.
+	"""
+	kind: String!
+	"""
+	Its name, unique within that kind.
+	"""
+	name: String!
+	"""
+	Where it was found.
+	"""
+	source: String!
+	"""
+	The agent whose directory it came from, for an agent-scoped script.
+	"""
+	agent: String
+}
+
+"""
 Where a run search looks.
 
 `META` and `FILES` answer from what is already parsed in memory. The other
@@ -1986,6 +2293,52 @@ enum SearchScope {
 	The crash-resume journal.
 	"""
 	JOURNAL
+}
+
+"""
+What the server will and will not do, in numbers.
+
+Published so a client never hardcodes a cap. Reading the limit is how a
+paging loop knows what to ask for, rather than discovering it by being
+refused.
+"""
+type ServeLimits {
+	"""
+	The largest page any listing will serve.
+	"""
+	maxPageSize: Int!
+	"""
+	The most ids one batch fetch may name.
+	"""
+	maxIds: Int!
+	"""
+	The most bytes one file read returns.
+	"""
+	maxFileBytes: BigInt!
+	"""
+	The most entries one directory listing returns.
+	"""
+	maxListingEntries: Int!
+	"""
+	How many runs a file-reading search examines before giving up.
+	"""
+	maxSearchScan: Int!
+	"""
+	The largest page of context history.
+	"""
+	maxHistoryLimit: Int!
+	"""
+	The most requests served at once.
+	"""
+	maxConcurrentRequests: BigInt!
+	"""
+	The largest accepted upload, in bytes.
+	"""
+	maxUploadBytes: BigInt!
+	"""
+	The per-request deadline, in seconds.
+	"""
+	requestTimeoutSecs: Int!
 }
 
 """
@@ -2732,6 +3085,67 @@ type WorkingClock {
 	When the span in progress began; null while the clock is stopped.
 	"""
 	since: Timestamp
+}
+
+"""
+One named yolo profile, summarised.
+
+The counts rather than the rules: a settings list shows how much a profile
+waives, and `lev yolo show` prints the rules themselves.
+"""
+type YoloProfile {
+	"""
+	The profile's name, as `--yolo=<name>` spells it.
+	"""
+	name: String!
+	"""
+	What tools with no explicit rule do.
+	"""
+	default: String!
+	"""
+	What happens to the agent's own questions.
+	"""
+	questions: String!
+	"""
+	What happens at blueprint checkpoints.
+	"""
+	checkpoints: String!
+	"""
+	What happens at the taint gate.
+	"""
+	gate: String!
+	"""
+	How many tool rules it carries: allow, ask, deny.
+	"""
+	toolRules: [Int!]!
+	"""
+	How many shell rules it carries: allow, ask, deny.
+	"""
+	shellRules: [Int!]!
+}
+
+"""
+The yolo profiles, and where they are read from.
+"""
+type YoloProfiles {
+	"""
+	The file the profiles are read from.
+	"""
+	path: String!
+	"""
+	Whether that file exists. False with no error means `--yolo=<name>` has
+	nothing to name yet.
+	"""
+	exists: Boolean!
+	"""
+	Why the file does not load, when it does not. The profiles are then
+	empty, and a spawn naming one is refused with this same message.
+	"""
+	error: String
+	"""
+	The profiles themselves.
+	"""
+	profiles: [YoloProfile!]!
 }
 
 """
