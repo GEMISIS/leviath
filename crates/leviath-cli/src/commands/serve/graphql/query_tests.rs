@@ -46,6 +46,24 @@ async fn run_query(query: &str) -> async_graphql::Response {
     schema.execute(Request::new(query)).await
 }
 
+/// Run one query with a `$path` variable.
+///
+/// A path travels as a variable rather than inside the query text: a Windows
+/// path is full of backslashes, a backslash escapes inside a GraphQL string, and
+/// interpolating one is a parse error on that platform and nowhere else.
+async fn run_query_for_path(query: &str, path: &str) -> async_graphql::Response {
+    let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .data(state)
+        .finish();
+    schema
+        .execute(
+            Request::new(query)
+                .variables(Variables::from_json(serde_json::json!({ "path": path }))),
+        )
+        .await
+}
+
 /// The ids a `runs` answer carries, in the order they came back.
 fn ids_of(data: &async_graphql::Value, field: &str) -> Vec<String> {
     let json = serde_json::to_value(data).expect("data serializes");
@@ -1291,9 +1309,11 @@ async fn the_directory_picker_lists_directories() {
         std::fs::write(dir.path().join("a-file.txt"), "x").expect("a file");
         let path = dir.path().to_string_lossy().into_owned();
 
-        let answer = run_query(&format!(
-            r#"{{ directories(path: "{path}") {{ path parent home cwd entries }} }}"#
-        ))
+        let answer = run_query_for_path(
+            "query Dirs($path: String!) { directories(path: $path)
+               { path parent home cwd entries } }",
+            &path,
+        )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
@@ -1311,9 +1331,10 @@ async fn the_directory_picker_lists_directories() {
         assert!(listing["parent"].is_string(), "up one level");
         assert!(!listing["home"].as_str().unwrap_or_default().is_empty());
 
-        let with_hidden = run_query(&format!(
-            r#"{{ directories(path: "{path}", hidden: true) {{ entries }} }}"#
-        ))
+        let with_hidden = run_query_for_path(
+            "query Dirs($path: String!) { directories(path: $path, hidden: true) { entries } }",
+            &path,
+        )
         .await;
         let json = serde_json::to_value(&with_hidden.data).expect("data serializes");
         assert!(
@@ -1331,7 +1352,7 @@ async fn the_directory_picker_lists_directories() {
 /// A path that is not a directory, or is not there, says which.
 #[tokio::test]
 async fn the_directory_picker_refuses_what_it_cannot_list() {
-    crate::commands::serve::testutil::with_home(|_home| async move {
+    crate::commands::serve::testutil::with_home(|home| async move {
         let relative = run_query(r#"{ directories(path: "relative/path") { path } }"#).await;
         assert!(
             relative
@@ -1344,7 +1365,19 @@ async fn the_directory_picker_refuses_what_it_cannot_list() {
             relative.errors
         );
 
-        let missing = run_query(r#"{ directories(path: "/nowhere/at/all") { path } }"#).await;
+        // An absolute path nothing is at, written the way this platform writes
+        // one: a leading slash is not absolute on Windows.
+        let nowhere = std::path::Path::new(&home)
+            .join("nowhere")
+            .join("at")
+            .join("all")
+            .to_string_lossy()
+            .into_owned();
+        let missing = run_query_for_path(
+            "query Dirs($path: String!) { directories(path: $path) { path } }",
+            &nowhere,
+        )
+        .await;
         assert_eq!(
             missing
                 .errors

@@ -855,8 +855,14 @@ async fn an_absolute_path_inside_the_workdir_lists() {
     .await;
     let entry = &json["run"]["files"]["entries"][0];
     assert_eq!(entry["name"], "main.rs");
+    // The host's own separator: this path goes back to this host, and a Windows
+    // server answers `src\main.rs`.
+    let expected = std::path::Path::new("src")
+        .join("main.rs")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
-        entry["path"], "src/main.rs",
+        entry["path"], expected,
         "relative to the working directory, so it can be passed back"
     );
 }

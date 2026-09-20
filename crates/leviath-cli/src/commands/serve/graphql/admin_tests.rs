@@ -517,12 +517,20 @@ async fn making_a_directory_tells_its_refusals_apart() {
     let dir = tempfile::tempdir().expect("a directory");
     let parent = dir.path().to_string_lossy().into_owned();
 
-    let made = schema(true)
-        .execute(Request::new(format!(
-            r#"mutation {{ makeDirectory(path: "{parent}", name: "new-thing")
-                 {{ path parent }} }}"#
-        )))
-        .await;
+    // The path travels as a variable rather than inside the query text. A
+    // Windows path is full of backslashes and a backslash escapes inside a
+    // GraphQL string, so interpolating one is a parse error on that platform
+    // and nowhere else.
+    let ask = |query: &str, path: &str, name: &str| {
+        Request::new(query).variables(async_graphql::Variables::from_json(
+            serde_json::json!({ "path": path, "name": name }),
+        ))
+    };
+    let make = r#"mutation Make($path: String!, $name: String!) {
+        makeDirectory(path: $path, name: $name) { path parent }
+    }"#;
+
+    let made = schema(true).execute(ask(make, &parent, "new-thing")).await;
     assert!(made.errors.is_empty(), "{:?}", made.errors);
     let json = serde_json::to_value(&made.data).expect("data serializes");
     assert!(
@@ -544,27 +552,16 @@ async fn making_a_directory_tells_its_refusals_apart() {
     };
 
     // Already there.
-    let again = schema(true)
-        .execute(Request::new(format!(
-            r#"mutation {{ makeDirectory(path: "{parent}", name: "new-thing") {{ path }} }}"#
-        )))
-        .await;
+    let again = schema(true).execute(ask(make, &parent, "new-thing")).await;
     assert_eq!(code(&again), "\"CONFLICT\"");
 
     // A name that is a path is not a name.
-    let nested = schema(true)
-        .execute(Request::new(format!(
-            r#"mutation {{ makeDirectory(path: "{parent}", name: "a/b") {{ path }} }}"#
-        )))
-        .await;
+    let nested = schema(true).execute(ask(make, &parent, "a/b")).await;
     assert_eq!(code(&nested), "\"BAD_USER_INPUT\"");
 
     // A parent that is not there.
-    let missing = schema(true)
-        .execute(Request::new(format!(
-            r#"mutation {{ makeDirectory(path: "{parent}/nope", name: "x") {{ path }} }}"#
-        )))
-        .await;
+    let absent = dir.path().join("nope").to_string_lossy().into_owned();
+    let missing = schema(true).execute(ask(make, &absent, "x")).await;
     assert_eq!(code(&missing), "\"NOT_FOUND\"");
 
     // And a relative path, which this route never resolves for the caller.
