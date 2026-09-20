@@ -982,7 +982,9 @@ pub(crate) struct FileEntry {
     /// The entry's own name.
     pub(crate) name: String,
     /// Relative to the run's working directory where possible, so it can be
-    /// passed straight back as `path`.
+    /// passed straight back as `path`. Separated the way the serving host
+    /// separates paths, so a Windows server answers `src\main.rs`: it is the
+    /// host's own path, and it goes back to that host.
     pub(crate) path: String,
     /// Whether it is a directory. List it by passing its path back to `files`.
     pub(crate) is_dir: bool,
