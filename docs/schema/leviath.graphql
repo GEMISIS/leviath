@@ -2054,6 +2054,21 @@ inventing one here would mean dropping whatever did not fit.
 scalar JSON
 
 """
+Whether a key looks like one of that provider's.
+"""
+type KeyVerdict {
+	"""
+	Whether the format is right. Not whether the key works: nothing was
+	dialled.
+	"""
+	valid: Boolean!
+	"""
+	What is wrong with it, when something is.
+	"""
+	message: String
+}
+
+"""
 One log line.
 """
 type LogLine {
@@ -2677,6 +2692,62 @@ type Mutation {
 		"""
 		agent: String
 	): ValidationReport!
+	"""
+	Whether a provider key looks like one of that provider's.
+	
+	Format only: nothing is dialled and nothing is written, which is what makes
+	it safe to run on every keystroke of a form. It is a mutation because it
+	belongs beside the config write it precedes, not because it changes
+	anything. `checkProvider` is the one that asks the account.
+	"""
+	validateConfigKey(
+		"""
+		The provider the key is for.
+		"""
+		provider: String!,
+		"""
+		The key to look at. Never stored, never logged.
+		"""
+		key: String!,
+		"""
+		A gateway's address, checked first when given.
+		"""
+		baseUrl: String
+	): KeyVerdict!
+	"""
+	Whether a script compiles, without writing it.
+	
+	The alternative was saving it and waiting for an agent to fail, which is
+	not much of an improvement on editing the file over SSH. Ungated:
+	compiling text in memory writes nothing and runs nothing, because every
+	compiler here stops at the syntax tree.
+	"""
+	validateScript(
+		"""
+		Which registry the script is for.
+		"""
+		kind: String!,
+		"""
+		The source to compile.
+		"""
+		content: String!,
+		"""
+		Hook functions it has to define, for a stage or region hook.
+		"""
+		hooks: [String!]
+	): ScriptVerdict!
+	"""
+	What one yolo profile would do with one call.
+	
+	The same code path `lev yolo test` runs, so the command and the API cannot
+	disagree about a call. Decides and reports; nothing is run.
+	"""
+	testYoloProfile(
+		"""
+		The call to decide about.
+		"""
+		call: YoloTestInput!
+	): YoloDecision!
 	"""
 	Export the run store to a file, and hand back the job.
 	
@@ -4562,6 +4633,20 @@ type Script {
 }
 
 """
+Whether a script compiles.
+"""
+type ScriptVerdict {
+	"""
+	Whether the compiler for this kind accepts the text.
+	"""
+	valid: Boolean!
+	"""
+	The compiler's complaint, when it does not.
+	"""
+	error: String
+}
+
+"""
 What writing a script did.
 """
 type ScriptWritten {
@@ -6297,6 +6382,32 @@ type WorkingClock {
 }
 
 """
+What a yolo profile would do with one call.
+"""
+type YoloDecision {
+	"""
+	The profile that decided.
+	"""
+	profile: String!
+	"""
+	The tool the call was for.
+	"""
+	tool: String!
+	"""
+	What the config layers resolve the tool to, before the profile.
+	"""
+	configured: String!
+	"""
+	What the profile makes of it: `allow`, `ask` or `deny`.
+	"""
+	policy: String!
+	"""
+	Why, in words, when the decision has a reason to give.
+	"""
+	reason: String
+}
+
+"""
 One named yolo profile, summarised.
 
 The counts rather than the rules: a settings list shows how much a profile
@@ -6355,6 +6466,46 @@ type YoloProfiles {
 	The profiles themselves.
 	"""
 	profiles: [YoloProfile!]!
+}
+
+"""
+One call to decide about, as a yolo test sends it.
+"""
+input YoloTestInput {
+	"""
+	The profile to test.
+	"""
+	profile: String!
+	"""
+	The tool the model would call.
+	"""
+	tool: String!
+	"""
+	The command line, for the shell.
+	"""
+	command: String
+	"""
+	The call's arguments, for a tool that is not the shell.
+	"""
+	arguments: JSON
+	"""
+	The working directory the run would have. The server's own, when left out.
+	"""
+	workdir: String
+	"""
+	What the config resolves the tool to. Read from the config in force when
+	left out.
+	"""
+	configured: String
+	"""
+	The tool's kind: `builtin`, `subagent`, `script` or `mcp`. Guessed from the
+	name when left out.
+	"""
+	kind: String
+	"""
+	Decide as if the tool had been named in `--allow`.
+	"""
+	allowed: Boolean
 }
 
 """

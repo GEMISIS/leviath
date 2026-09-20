@@ -142,6 +142,12 @@ same list.
   `adminEnabled` on the config, so a settings screen can tell whether a save will
   be allowed before it offers one.
 
+- The three checks that answer without changing anything, over GraphQL:
+  `validateConfigKey` for a key's format, `validateScript` for whether a script
+  compiles, and `testYoloProfile` for what a profile would do with one call. None
+  is behind `--allow-admin`, because none of them dials anything or writes
+  anything, and a form that checks as somebody types should not need the flag.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

@@ -974,3 +974,145 @@ async fn an_export_of_an_unknown_field_is_refused() {
     })
     .await;
 }
+
+/// The three checks that answer without changing anything.
+///
+/// Each is a mutation because it belongs beside the write it precedes, and none
+/// of them is gated: nothing is dialled, nothing is written, and a form that
+/// checks as somebody types should not need `--allow-admin`.
+#[tokio::test]
+async fn the_checks_that_change_nothing_need_no_flag() {
+    let good = mutate(
+        no_daemon_client(),
+        r#"mutation { validateConfigKey(provider: "anthropic", key: "sk-ant-abc")
+             { valid message } }"#,
+    )
+    .await;
+    assert!(good.errors.is_empty(), "{:?}", good.errors);
+    let json = serde_json::to_value(&good.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], true);
+    assert!(json["validateConfigKey"]["message"].is_null());
+
+    let wrong = mutate(
+        no_daemon_client(),
+        r#"mutation { validateConfigKey(provider: "anthropic", key: "nope") { valid message } }"#,
+    )
+    .await;
+    let json = serde_json::to_value(&wrong.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], false);
+    assert!(
+        json["validateConfigKey"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("sk-ant-")),
+        "it says what the format is"
+    );
+
+    // The address is judged before the key: a key cannot be judged beyond being
+    // present until there is somewhere to send it.
+    let bad_url = mutate(
+        no_daemon_client(),
+        r#"mutation { validateConfigKey(provider: "anthropic", key: "sk-ant-abc",
+             baseUrl: "not a url") { valid message } }"#,
+    )
+    .await;
+    let json = serde_json::to_value(&bad_url.data).expect("data serializes");
+    assert_eq!(json["validateConfigKey"]["valid"], false);
+
+    let compiles = mutate(
+        no_daemon_client(),
+        r#"mutation { validateScript(kind: "tool",
+             content: "// @tool summarize\n// @description sums up\n\"ok\"")
+             { valid error } }"#,
+    )
+    .await;
+    assert!(compiles.errors.is_empty(), "{:?}", compiles.errors);
+    let json = serde_json::to_value(&compiles.data).expect("data serializes");
+    assert_eq!(json["validateScript"]["valid"], true);
+
+    let broken = mutate(
+        no_daemon_client(),
+        r#"mutation { validateScript(kind: "tool", content: "fn (") { valid error } }"#,
+    )
+    .await;
+    let json = serde_json::to_value(&broken.data).expect("data serializes");
+    assert_eq!(json["validateScript"]["valid"], false);
+    assert!(json["validateScript"]["error"].as_str().is_some());
+
+    // An unknown registry is a refusal rather than a verdict: there is no
+    // compiler to have an opinion.
+    let unknown = mutate(
+        no_daemon_client(),
+        r#"mutation { validateScript(kind: "model_provider", content: "") { valid } }"#,
+    )
+    .await;
+    assert_eq!(
+        unknown
+            .errors
+            .first()
+            .expect("a refusal")
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .map(ToString::to_string),
+        Some("\"BAD_USER_INPUT\"".to_string())
+    );
+}
+
+/// A yolo profile's decision about one call, through the same code path the
+/// command uses.
+#[tokio::test]
+async fn a_yolo_profile_decides_about_one_call() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let path = crate::yolo::yolo_path();
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+        std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
+
+        let listed = mutate(no_daemon_client(), "{ yoloProfiles { profiles { name } } }").await;
+        let json = serde_json::to_value(&listed.data).expect("data serializes");
+        let name = json["yoloProfiles"]["profiles"][0]["name"]
+            .as_str()
+            .expect("a profile")
+            .to_string();
+
+        let decided = mutate(
+            no_daemon_client(),
+            &format!(
+                r#"mutation {{ testYoloProfile(call: {{ profile: "{name}", tool: "read_file" }})
+                     {{ profile tool configured policy reason }} }}"#
+            ),
+        )
+        .await;
+        assert!(decided.errors.is_empty(), "{:?}", decided.errors);
+        let json = serde_json::to_value(&decided.data).expect("data serializes");
+        assert_eq!(json["testYoloProfile"]["profile"], name);
+        assert_eq!(json["testYoloProfile"]["tool"], "read_file");
+        assert!(
+            ["allow", "ask", "deny"].contains(
+                &json["testYoloProfile"]["policy"]
+                    .as_str()
+                    .expect("a policy")
+            ),
+            "one of the three words: {json}"
+        );
+
+        // A profile that is not in the file is a miss.
+        let missing = mutate(
+            no_daemon_client(),
+            r#"mutation { testYoloProfile(call: { profile: "nope", tool: "read_file" })
+                 { policy } }"#,
+        )
+        .await;
+        assert_eq!(
+            missing
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"NOT_FOUND\"".to_string())
+        );
+    })
+    .await;
+}
