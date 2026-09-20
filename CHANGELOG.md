@@ -165,6 +165,13 @@ same list.
 
 ### Changed
 
+- `addMcpServer` takes the `headers` the REST route has always taken. An HTTP
+  MCP server that authenticates with an `Authorization` header could be added
+  over REST and not over GraphQL, so adding one there produced a server that
+  could never answer. Three more fields the REST side already served are served
+  here too: a config error's `since`, and which tool credentials the daemon can
+  see, by name, on both the daemon status and the link frame.
+
 - Names on the GraphQL surface say what they answer. `Run.toolCalls` is
   `toolCallCount`, because it is a number and the calls themselves are
   `executions`. `Run.logs(tail:)` is `tailBytes`, which is what it counts.

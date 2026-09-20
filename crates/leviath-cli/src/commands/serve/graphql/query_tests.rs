@@ -1781,7 +1781,7 @@ mod the_awkward_shapes {
             let answer = schema
                 .execute(Request::new(
                     "{ config { defaultProvider configMtime
-                         configError { kind path message line column key note } } }",
+                         configError { kind path message line column key since note } } }",
                 ))
                 .await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1797,6 +1797,12 @@ mod the_awkward_shapes {
             assert!(
                 error["message"].as_str().is_some_and(|m| !m.is_empty()),
                 "and says what is wrong: {error}"
+            );
+            // When this server first saw it in this state. A banner that has
+            // been up an hour is a different thing from one that just appeared.
+            assert!(
+                error["since"].as_i64().is_some_and(|at| at > 0),
+                "and when it started: {error}"
             );
             assert!(
                 error["line"].as_i64().is_some(),

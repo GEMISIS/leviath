@@ -118,6 +118,51 @@ async fn every_admin_mutation_is_gated() {
     }
 }
 
+/// An HTTP server added with an `Authorization` header is a server with a
+/// credential, so it is not offered a sign-in.
+///
+/// The headers were the difference between the two surfaces: a server that
+/// needs a header could be added over REST and not here, which meant adding it
+/// over GraphQL produced one that could never answer.
+#[tokio::test]
+async fn an_http_server_can_be_added_with_its_headers() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = crate::commands::serve::mcp::AdminPaths {
+            config: home.join("config.toml"),
+            store: home.join("mcp-auth.json"),
+            grants: home.join("grants.json"),
+        };
+        std::fs::write(&paths.config, "").expect("a config file");
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let added = schema(true)
+                    .execute(Request::new(
+                        r#"mutation { addMcpServer(name: "docs", url: "https://docs.example/mcp",
+                             headers: [{ name: "Authorization", value: "Bearer t" }]) }"#,
+                    ))
+                    .await;
+                assert!(added.errors.is_empty(), "{:?}", added.errors);
+
+                let listed = schema(true)
+                    .execute(Request::new(
+                        "{ mcpServers { name transport endpoint auth configError } }",
+                    ))
+                    .await;
+                let json = serde_json::to_value(&listed.data).expect("data serializes");
+                let server = &json["mcpServers"][0];
+                assert_eq!(server["transport"], "HTTP");
+                assert_eq!(server["endpoint"], "https://docs.example/mcp");
+                assert_eq!(
+                    server["auth"], "HEADER",
+                    "the header is the credential, so no login is offered"
+                );
+                assert!(server["configError"].is_null());
+            })
+            .await;
+    })
+    .await;
+}
+
 /// With the flag, an MCP server can be added and taken away again.
 #[tokio::test]
 async fn an_mcp_server_can_be_added_and_removed() {

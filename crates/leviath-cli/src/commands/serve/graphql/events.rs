@@ -381,6 +381,13 @@ pub(crate) struct DaemonIdentity {
     pub(crate) build: String,
     /// Its process id.
     pub(crate) pid: i32,
+    /// Which tool credentials it can see, by name. Names only: no value ever
+    /// crosses the wire.
+    ///
+    /// Null means the process did not say, which is an older daemon or an
+    /// embedder driving the runtime directly. That is "unknown", not "sees
+    /// nothing" - an empty list is the answer for that.
+    pub(crate) tool_env: Option<Vec<String>>,
 }
 
 /// The link to the daemon changed.
@@ -673,6 +680,7 @@ impl From<ServerEvent> for RunEvent {
                     version: identity.version,
                     build: identity.build,
                     pid: i32::try_from(identity.pid).unwrap_or(i32::MAX),
+                    tool_env: identity.tool_env,
                 }),
                 restarted,
                 restart_advised,

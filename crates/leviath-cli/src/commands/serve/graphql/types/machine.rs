@@ -51,6 +51,10 @@ pub(crate) struct ConfigError {
     pub(crate) column: Option<i32>,
     /// The dotted config key a validation failure is about.
     pub(crate) key: Option<String>,
+    /// When this server first saw the file in this state. A banner that has
+    /// been up for an hour is a different thing from one that appeared while
+    /// somebody was editing.
+    pub(crate) since: Timestamp,
     /// Said in words, for a client that only renders strings.
     pub(crate) note: String,
 }

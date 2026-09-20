@@ -196,7 +196,7 @@ pub(super) struct AddServerRequest {
 
 /// `POST /api/mcp/servers` - add a server.
 pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoResponse {
-    match install_server_with(req.name, req.command, req.url, req.args, req.headers) {
+    match install_server(req.name, req.command, req.url, req.args, req.headers) {
         Ok(name) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "name": name })),
@@ -212,22 +212,6 @@ pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoRe
 /// Leviath spawns, for this run and every future one. Both surfaces gate the
 /// act behind `--allow-admin`; this is what the act itself is.
 pub(super) fn install_server(
-    name: &str,
-    command: Option<&str>,
-    url: Option<&str>,
-    args: Vec<String>,
-) -> Result<String, super::core::error::ServeError> {
-    install_server_with(
-        name.to_string(),
-        command.map(str::to_string),
-        url.map(str::to_string),
-        args,
-        Default::default(),
-    )
-}
-
-/// [`install_server`], with the headers only the REST body carries today.
-fn install_server_with(
     name: String,
     command: Option<String>,
     url: Option<String>,
