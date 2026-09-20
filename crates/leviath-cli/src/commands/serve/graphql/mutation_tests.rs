@@ -7,7 +7,10 @@
 use async_graphql::{EmptySubscription, Request, Schema};
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 
-use super::Mutation;
+use super::{
+    AnswerApprovalInput, AnswerChoiceInput, AnswerInteractionInput, AnswerTextInput, ApprovalScope,
+    MetadataEntryInput, Mutation, RegionSeedInput, SpawnAgentInput, YoloTestInput,
+};
 use crate::commands::serve::graphql::query::Query;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
 use crate::runstate::{RunMeta, RunStatus, create_run};
@@ -1367,4 +1370,178 @@ async fn a_delete_reports_both_halves() {
         );
     })
     .await;
+}
+
+/// The refusals the export and the delete share with the listing.
+///
+/// Each is the listing's own rule reaching a caller that never asked for a page:
+/// an export and a delete take the same filter, so they refuse the same shapes.
+#[tokio::test]
+async fn an_export_and_a_delete_refuse_what_the_listing_refuses() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-shared-refusals", |_d| async move {
+        // Two parentage filters in one export: the same contradiction the
+        // listing refuses, refused here too rather than resolved one way.
+        let refused = mutate(
+            no_daemon_client(),
+            r#"mutation { bulkExportRuns(filter: { parent: "root", topLevelOnly: true }) { id } }"#,
+        )
+        .await;
+        assert_eq!(
+            refused
+                .errors
+                .first()
+                .expect("a refusal")
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+
+        // And more ids than one delete may name: the cap is the listing's, and
+        // deleting is the act where exceeding it matters most.
+        let many: Vec<String> = (0..300).map(|i| format!("\"run-{i}\"")).collect();
+        let too_many = mutate(
+            no_daemon_client(),
+            &format!(
+                "mutation {{ deleteRuns(ids: [{}]) {{ deleted }} }}",
+                many.join(", ")
+            ),
+        )
+        .await;
+        let error = too_many.errors.first().expect("a refusal");
+        assert!(
+            error.message.contains("at most"),
+            "it says what the cap is: {}",
+            error.message
+        );
+    })
+    .await;
+}
+
+/// A blueprint validated against an agent directory names the agent, and a name
+/// that could leave that directory is refused before any path is built.
+#[tokio::test]
+async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let answer = mutate(
+            no_daemon_client(),
+            r#"mutation { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
+                 agent: "../elsewhere") { valid } }"#,
+        )
+        .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string()),
+            "{}",
+            error.message
+        );
+    })
+    .await;
+}
+
+/// Every input object round-trips through its own value form.
+///
+/// An input type is written for one direction and generated for both: the schema
+/// reads one off the wire, and the executor writes one back when it reports a bad
+/// value or fills a variable's default. A type whose two halves disagree would
+/// report a rejected value as something the caller did not send.
+#[test]
+fn every_input_object_round_trips() {
+    use async_graphql::InputType;
+
+    let spawn = SpawnAgentInput {
+        blueprint: "coder".to_string(),
+        task: "fix the parser".to_string(),
+        model: Some("gpt-5.6".to_string()),
+        max_depth: Some(3),
+        workdir: Some("/work".to_string()),
+        yolo: Some(true),
+        yolo_profile: Some("cautious".to_string()),
+        allow: Some(vec!["shell".to_string()]),
+        no_seed_commands: Some(true),
+        regions: Some(vec![RegionSeedInput {
+            region: "plan".to_string(),
+            text: "start here".to_string(),
+        }]),
+        metadata: Some(vec![MetadataEntryInput {
+            key: "ticket".to_string(),
+            value: "42".to_string(),
+        }]),
+        output_format: Some("json".to_string()),
+        output_instructions: Some("one object".to_string()),
+        callback_url: Some("https://example.test/hook".to_string()),
+        callback_secret: Some("shh".to_string()),
+    };
+    let Ok(read_back) = SpawnAgentInput::parse(Some(spawn.to_value())) else {
+        panic!("a spawn input reads back from its own value");
+    };
+    assert_eq!(read_back.blueprint, "coder");
+    assert_eq!(read_back.max_depth, Some(3));
+    assert_eq!(
+        read_back.regions.as_ref().map(Vec::len),
+        Some(1),
+        "the nested inputs come with it"
+    );
+    assert_eq!(read_back.metadata.as_ref().map(Vec::len), Some(1));
+
+    let answers = [
+        AnswerInteractionInput::Choice(AnswerChoiceInput {
+            request_id: "r1".to_string(),
+            choice_index: 1,
+        }),
+        AnswerInteractionInput::Text(AnswerTextInput {
+            request_id: "r2".to_string(),
+            value: "the words".to_string(),
+        }),
+        AnswerInteractionInput::Approval(AnswerApprovalInput {
+            request_id: "r3".to_string(),
+            approved: false,
+            scope: Some(ApprovalScope::Stage),
+            feedback: Some("try the other file".to_string()),
+        }),
+    ];
+    for answer in answers {
+        let value = answer.to_value();
+        let Ok(read_back) = AnswerInteractionInput::parse(Some(value)) else {
+            panic!("an answer reads back from its own value");
+        };
+        assert_eq!(
+            read_back.into_response().expect("a response").request_id,
+            answer_id(&answer),
+            "the same answer came back"
+        );
+    }
+
+    let yolo = YoloTestInput {
+        profile: "cautious".to_string(),
+        tool: "shell".to_string(),
+        command: Some("rm -r target".to_string()),
+        arguments: Some(crate::commands::serve::graphql::scalars::Json(
+            serde_json::json!({ "path": "." }),
+        )),
+        workdir: Some("/work".to_string()),
+        configured: Some("ask".to_string()),
+        kind: Some("builtin".to_string()),
+        allowed: Some(true),
+    };
+    let Ok(read_back) = YoloTestInput::parse(Some(yolo.to_value())) else {
+        panic!("a yolo test input reads back from its own value");
+    };
+    assert_eq!(read_back.tool, "shell");
+    assert_eq!(read_back.command.as_deref(), Some("rm -r target"));
+}
+
+/// The request id one answer carries, whichever kind it is.
+fn answer_id(answer: &AnswerInteractionInput) -> String {
+    match answer {
+        AnswerInteractionInput::Choice(choice) => choice.request_id.clone(),
+        AnswerInteractionInput::Text(text) => text.request_id.clone(),
+        AnswerInteractionInput::Approval(approval) => approval.request_id.clone(),
+    }
 }

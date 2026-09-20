@@ -192,3 +192,73 @@ pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, Serv
         total,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, HistorySpec};
+    use crate::commands::serve::cursor;
+
+    /// The page size is bounded at both ends, and the order is one of two words.
+    #[test]
+    fn a_history_request_is_bounded_and_ordered() {
+        let spec = HistorySpec::resolve("run-a", None, None, None).expect("the defaults");
+        assert_eq!(spec.limit, HISTORY_DEFAULT_LIMIT);
+        assert!(spec.ascending, "chronological by default");
+        assert!(spec.after.is_none());
+
+        // Clamped rather than refused: this cap protects the server from a page
+        // of whole context windows, and a smaller page is still an answer.
+        let capped = HistorySpec::resolve("run-a", Some(10_000), None, None).expect("clamped");
+        assert_eq!(capped.limit, HISTORY_MAX_LIMIT);
+
+        let refused = HistorySpec::resolve("run-a", Some(0), None, None)
+            .expect_err("zero is not a page size");
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+        let order = HistorySpec::resolve("run-a", None, Some("sideways"), None)
+            .expect_err("a word that is not an order");
+        assert!(order.to_string().contains("asc"), "{order}");
+        assert!(
+            !HistorySpec::resolve("run-a", None, Some("desc"), None)
+                .expect("newest first")
+                .ascending
+        );
+    }
+
+    /// A cursor is read for its index, and one carrying anything else is read as
+    /// no cursor.
+    ///
+    /// This listing only ever mints an integer key, so a token with another kind
+    /// of key did not come from here. Starting the page from the beginning is the
+    /// answer a client can act on; resuming from a key this listing cannot use
+    /// would be guessing.
+    #[test]
+    fn a_cursor_is_read_for_its_index_and_nothing_else() {
+        let digest = cursor::filter_digest(&["run-a"]);
+        let numbered = cursor::encode("index", "asc", &digest, cursor::CursorKey::Int(7), "");
+        let spec = HistorySpec::resolve("run-a", None, None, Some(&numbered)).expect("a cursor");
+        assert_eq!(spec.after, Some(7));
+
+        let lettered = cursor::encode(
+            "index",
+            "asc",
+            &digest,
+            cursor::CursorKey::Text("seven".to_string()),
+            "",
+        );
+        let spec = HistorySpec::resolve("run-a", None, None, Some(&lettered)).expect("readable");
+        assert!(spec.after.is_none(), "a key this listing cannot use");
+
+        // A cursor minted for another run is refused rather than resumed: the
+        // digest binds it to the run it was made for.
+        let elsewhere = cursor::encode(
+            "index",
+            "asc",
+            &cursor::filter_digest(&["run-b"]),
+            cursor::CursorKey::Int(1),
+            "",
+        );
+        let refused = HistorySpec::resolve("run-a", None, None, Some(&elsewhere))
+            .expect_err("a cursor from another run");
+        assert_eq!(refused.code(), "BAD_USER_INPUT");
+    }
+}

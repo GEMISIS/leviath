@@ -138,7 +138,7 @@ impl Fixture {
 
     /// Run one apply to completion, on this thread.
     fn apply(&self, req: ApplyRequest) -> UpdateJob {
-        let id = self.jobs.start().expect("nothing else is running");
+        let id = self.jobs.start().expect("nothing else is running").id;
         self.jobs.apply(&id, req, &self.events);
         self.jobs.get(&id).expect("the job it just ran")
     }
@@ -548,7 +548,7 @@ fn a_config_that_cannot_be_written_fails_the_step() {
             ..UpdateEnv::for_applying(Arc::clone(&runner))
         })
     });
-    let id = jobs.start().expect("nothing else is running");
+    let id = jobs.start().expect("nothing else is running").id;
     jobs.apply(
         &id,
         ApplyRequest {
@@ -663,12 +663,12 @@ fn an_update_frame_belongs_to_no_run() {
 #[test]
 fn a_second_update_is_refused_while_one_is_running() {
     let fixture = Fixture::runnable("", 0);
-    let first = fixture.jobs.start().expect("the first starts");
+    let first = fixture.jobs.start().expect("the first starts").id;
     let refused = fixture.jobs.start().expect_err("the second is refused");
     assert_eq!(refused, first);
     // Once it finishes, another may start.
     fixture.jobs.finish(&first, false, &fixture.events);
-    let second = fixture.jobs.start().expect("the next one starts");
+    let second = fixture.jobs.start().expect("the next one starts").id;
     assert_ne!(second, first);
 }
 
@@ -679,7 +679,7 @@ fn two_jobs_started_in_the_same_second_get_different_ids() {
     let fixture = Fixture::runnable("", 0);
     let mut ids = Vec::new();
     for _ in 0..3 {
-        let id = fixture.jobs.start().expect("nothing is running");
+        let id = fixture.jobs.start().expect("nothing is running").id;
         fixture.jobs.finish(&id, false, &fixture.events);
         ids.push(id);
     }
@@ -693,7 +693,7 @@ fn the_job_history_is_capped_and_drops_the_oldest_first() {
     let fixture = Fixture::runnable("", 0);
     let mut ids = Vec::new();
     for _ in 0..KEEP_JOBS + 2 {
-        let id = fixture.jobs.start().expect("nothing is running");
+        let id = fixture.jobs.start().expect("nothing is running").id;
         fixture.jobs.finish(&id, false, &fixture.events);
         ids.push(id);
     }
@@ -740,7 +740,7 @@ fn a_job_that_aged_out_is_not_resurrected_by_its_own_task() {
 #[test]
 fn a_step_name_the_job_does_not_carry_changes_nothing() {
     let fixture = Fixture::runnable("", 0);
-    let id = fixture.jobs.start().expect("nothing is running");
+    let id = fixture.jobs.start().expect("nothing is running").id;
     fixture
         .jobs
         .step(&id, "not-a-step", DONE, "x".to_string(), &fixture.events);
@@ -748,8 +748,8 @@ fn a_step_name_the_job_does_not_carry_changes_nothing() {
     assert!(job.steps.iter().all(|step| step.status == PENDING));
 }
 
-/// `spawn` hands back an id straight away and the work happens behind it. That
-/// is the whole reason the route answers `202`.
+/// `spawn` hands back the record straight away and the work happens behind it.
+/// That is the whole reason the route answers `202`.
 #[tokio::test]
 async fn spawn_answers_with_an_id_and_runs_the_work_behind_it() {
     let mut fixture = Fixture::runnable("", 0);
@@ -763,7 +763,8 @@ async fn spawn_answers_with_an_id_and_runs_the_work_behind_it() {
             },
             &fixture.events,
         )
-        .expect("nothing else is running");
+        .expect("nothing else is running")
+        .id;
     // The record exists the moment the route answers, whether or not the work
     // behind it has got anywhere yet - which is what a console polls.
     assert!(

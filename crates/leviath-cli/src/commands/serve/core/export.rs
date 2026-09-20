@@ -130,10 +130,23 @@ impl Exports {
 
 /// Where exports are written.
 pub(crate) fn exports_dir() -> PathBuf {
-    crate::runstate::runs_dir()
-        .parent()
-        .map(|data| data.join("exports"))
-        .unwrap_or_else(|| PathBuf::from("exports"))
+    exports_dir_beside(&crate::runstate::runs_dir())
+}
+
+/// Where exports go, given where the runs are.
+///
+/// Beside the run store rather than inside it: a directory under `runs/` is a
+/// run directory to every walk of the store, so the listing would stat it on
+/// every request and a sweep by age would consider deleting it.
+///
+/// Split from [`exports_dir`] for the one case the real path never takes: a runs
+/// directory with no parent, which is a filesystem root and has nowhere beside
+/// it to put anything.
+fn exports_dir_beside(runs: &std::path::Path) -> PathBuf {
+    match runs.parent() {
+        Some(data) => data.join("exports"),
+        None => runs.join("exports"),
+    }
 }
 
 /// The file one export writes.
@@ -193,7 +206,7 @@ pub(crate) async fn start(
     // as long as the store is large.
     tokio::task::spawn_blocking(move || {
         exports.update(&id, |job| job.status = ExportStatus::Running);
-        match write_rows(&path, &rows) {
+        match write_file(&path, &rows) {
             Ok(written) => exports.update(&id, |job| {
                 job.status = ExportStatus::Complete;
                 job.written = written;
@@ -208,13 +221,19 @@ pub(crate) async fn start(
     Ok(job)
 }
 
+/// Write the rows to a file as JSONL.
+fn write_file(path: &std::path::Path, rows: &[serde_json::Value]) -> std::io::Result<usize> {
+    let file = std::fs::File::create(path)?;
+    write_rows(std::io::BufWriter::new(file), rows)
+}
+
 /// Write the rows as JSONL, one run per line.
 ///
-/// Line by line through a buffered writer: the file can be larger than memory,
-/// and a reader can start on it before the writer has finished.
-fn write_rows(path: &std::path::Path, rows: &[serde_json::Value]) -> std::io::Result<usize> {
-    let file = std::fs::File::create(path)?;
-    let mut out = std::io::BufWriter::new(file);
+/// Line by line into whatever it is given: the file can be larger than memory,
+/// and a reader can start on it before the writer has finished. Taking the
+/// writer rather than opening one is what makes a failed write testable, which
+/// matters because a client only ever learns about it from the job.
+fn write_rows(mut out: impl Write, rows: &[serde_json::Value]) -> std::io::Result<usize> {
     for row in rows {
         serde_json::to_writer(&mut out, row)?;
         out.write_all(b"\n")?;
@@ -230,12 +249,27 @@ fn write_rows(path: &std::path::Path, rows: &[serde_json::Value]) -> std::io::Re
 /// real worker would be a flaky test asserting a timing accident.
 #[cfg(test)]
 pub(crate) fn test_job(state: &AppState, status: ExportStatus, contents: &str) -> String {
+    test_job_with(state, status, contents, Some("the disk went away"))
+}
+
+/// [`test_job`], with the reason a failure recorded, or none.
+///
+/// A failure with no reason is a real state rather than a contrivance: the
+/// status and the reason are two writes, so a record read between them has the
+/// first and not the second.
+#[cfg(test)]
+pub(crate) fn test_job_with(
+    state: &AppState,
+    status: ExportStatus,
+    contents: &str,
+    reason: Option<&str>,
+) -> String {
     let now = leviath_core::duration::now_secs();
     let job = state.caches.exports.enqueue(now);
     state.caches.exports.update(&job.id, |job| {
         job.status = status;
         if status == ExportStatus::Failed {
-            job.error = Some("the disk went away".to_string());
+            job.error = reason.map(str::to_string);
         }
     });
     if status == ExportStatus::Complete {

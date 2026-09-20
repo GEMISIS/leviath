@@ -478,3 +478,53 @@ async fn a_stage_says_what_it_does_to_the_context() {
         "the stage says nothing, so its regions decide"
     );
 }
+
+/// A stage that declares regions of its own says which they are.
+///
+/// A stage-local region is part of the layout that stage runs with and of no
+/// other, so a client rendering one stage's context needs the names from the
+/// stage rather than from the blueprint.
+#[tokio::test]
+async fn a_stage_can_declare_regions_of_its_own() {
+    let text = r#"
+[agent]
+name = "local-regions"
+version = "1.0.0"
+description = "a stage with its own regions"
+
+[context.regions.shared]
+kind = "pinned"
+max_tokens = 100
+
+[stages.only]
+mode = "autonomous"
+
+[stages.only.context.regions.scratch]
+kind = "temporary"
+max_tokens = 50
+
+[stages.only.context]
+hide = ["shared"]
+"#;
+    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
+    let schema = Schema::build(
+        StageProbe {
+            blueprint: Arc::new(parsed),
+        },
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .data(state_with_agent_paths(Vec::new()))
+    .finish();
+    let answer = schema
+        .execute(Request::new(
+            r#"{ stage(name: "only") { context { regions hide reset } } }"#,
+        ))
+        .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let context = &json["stage"]["context"];
+    assert_eq!(context["regions"][0], "scratch");
+    assert_eq!(context["hide"][0], "shared");
+    assert_eq!(context["reset"].as_array().map(Vec::len), Some(0));
+}

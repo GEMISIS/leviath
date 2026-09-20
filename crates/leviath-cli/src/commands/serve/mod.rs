@@ -1059,6 +1059,10 @@ mod tests {
         ("Forbidden", 403),
         ("DaemonUnavailable", 503),
         ("DaemonIncompatible", 502),
+        ("Upstream", 502),
+        ("Unprocessable", 422),
+        ("RangeNotSatisfiable", 416),
+        ("UnsupportedMedia", 415),
         ("Internal", 500),
     ];
 
@@ -1219,6 +1223,19 @@ mod tests {
         );
     }
 
+    /// A handler the delegation scan cannot find contributes no statuses.
+    ///
+    /// The same answer as a missing core function, one level up: a renamed
+    /// handler reads as "nothing found" rather than as a panic, and the spec
+    /// check then holds the route to what it can see.
+    #[test]
+    fn the_delegation_scan_finds_nothing_for_a_handler_that_is_not_there() {
+        assert_eq!(
+            delegated_status_codes("pub(super) async fn other(", "no_such_handler"),
+            Vec::<u16>::new()
+        );
+    }
+
     /// The scan's `ServeError` table is the same mapping `ServeError::status`
     /// makes. Two copies of a mapping is exactly how a spec check comes to
     /// pass while describing something else.
@@ -1237,6 +1254,16 @@ mod tests {
             (
                 "DaemonIncompatible",
                 ServeError::DaemonIncompatible(String::new()),
+            ),
+            ("Upstream", ServeError::Upstream(String::new())),
+            ("Unprocessable", ServeError::Unprocessable(String::new())),
+            (
+                "RangeNotSatisfiable",
+                ServeError::RangeNotSatisfiable(String::new()),
+            ),
+            (
+                "UnsupportedMedia",
+                ServeError::UnsupportedMedia(String::new()),
             ),
             ("Internal", ServeError::Internal(String::new())),
         ];
@@ -1816,10 +1843,42 @@ mod tests {
                 core::export::ExportStatus::Running,
                 core::export::ExportStatus::Failed,
             ] {
+                let word = status.wire();
                 let id = core::export::test_job(&state, status, "");
                 let resp = fetch(app.clone(), format!("/api/exports/{id}")).await;
-                assert_eq!(resp.status(), StatusCode::CONFLICT, "{}", status.wire());
+                assert_eq!(resp.status(), StatusCode::CONFLICT, "{word}");
             }
+
+            // A range of the file, which is what a resumed download asks for.
+            let ranged = Request::builder()
+                .uri(format!("/api/exports/{done}"))
+                .header("Authorization", "Bearer secret")
+                .header("Range", "bytes=0-3")
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.clone().oneshot(ranged).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+            let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("the bytes");
+            assert_eq!(&body[..], b"{\"ru", "the four bytes it asked for");
+
+            // A failure with no reason recorded: the status and the reason are
+            // two writes, so a record read between them has the first only.
+            let quiet =
+                core::export::test_job_with(&state, core::export::ExportStatus::Failed, "", None);
+            let resp = fetch(app.clone(), format!("/api/exports/{quiet}")).await;
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("the body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("an error body");
+            assert!(
+                json["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("no reason recorded")),
+                "it says the reason is missing rather than leaving a gap: {json}"
+            );
 
             // Complete, with the file taken away underneath it: the record says
             // there is something to fetch and there is not, which is this

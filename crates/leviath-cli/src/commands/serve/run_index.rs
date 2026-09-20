@@ -202,4 +202,40 @@ mod tests {
         })
         .await;
     }
+
+    /// A subtree is every run below one, at any depth, and never the root.
+    #[tokio::test]
+    async fn a_subtree_walk_finds_every_level() {
+        with_isolated_runs_dir_async("run-index-subtree", |_dir| async move {
+            create_run(&meta("root", None, 1)).unwrap();
+            create_run(&meta("worker", Some("root"), 2)).unwrap();
+            create_run(&meta("grandchild", Some("worker"), 3)).unwrap();
+            create_run(&meta("elsewhere", None, 4)).unwrap();
+
+            let snapshot = RunIndex::default().snapshot().await;
+            let under = snapshot.descendants_of("root");
+            assert_eq!(under.len(), 2, "{under:?}");
+            assert!(under.contains("worker") && under.contains("grandchild"));
+            assert!(!under.contains("root"), "never the root itself");
+            assert!(!under.contains("elsewhere"));
+            // A run with nothing under it has an empty subtree rather than no
+            // answer: a fan-out that has not started yet is an ordinary record.
+            assert!(snapshot.descendants_of("elsewhere").is_empty());
+        })
+        .await;
+    }
+
+    /// A record that names itself as its own ancestor cannot spin the walk.
+    ///
+    /// Nothing writes such a record, and a walk that trusted the parent map
+    /// would hang rather than answer: the guard is that a run already seen is
+    /// not walked again.
+    #[test]
+    fn a_cycle_in_the_parent_map_terminates() {
+        let one = std::sync::Arc::new(meta("one", Some("two"), 1));
+        let two = std::sync::Arc::new(meta("two", Some("one"), 2));
+        let snapshot = RunSnapshot::new(vec![one, two]);
+        let under = snapshot.descendants_of("one");
+        assert_eq!(under.len(), 2, "both, once each: {under:?}");
+    }
 }

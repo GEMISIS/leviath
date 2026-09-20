@@ -7,6 +7,7 @@
 
 use async_graphql::{EmptySubscription, Request, Schema};
 
+use super::{MimeRowInput, MimeTokensInput};
 use crate::commands::serve::graphql::mutation::Mutation;
 use crate::commands::serve::graphql::query::Query;
 
@@ -1284,4 +1285,155 @@ mod against_a_real_endpoint {
         })
         .await;
     }
+}
+
+/// The refusals the acts that reach the machine give when their own state says
+/// no.
+///
+/// Each is the arm a happy-path test cannot reach: an update already running, a
+/// doctor run already going, a sign-in for a provider whose flow will not start.
+#[tokio::test]
+async fn the_machine_acts_refuse_when_their_own_state_says_no() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let mut state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+        let agents = home.join("agents");
+        state.update_jobs = crate::commands::serve::update_job::UpdateJobs::with_env(
+            std::sync::Arc::new(move || crate::commands::update::UpdateEnv {
+                agents_dir: agents.clone(),
+                runner: std::sync::Arc::new(|_argv: &[String]| Ok(())),
+                ..crate::commands::update::UpdateEnv::for_planning_offline()
+            }),
+        );
+        // A job already running, so the next request is the conflict arm: two
+        // package-manager upgrades of one binary racing is not a state to debug.
+        let running = state
+            .update_jobs
+            .start()
+            .expect("nothing else is running")
+            .id;
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state.clone())
+            .data(super::AdminAccess(true))
+            .finish();
+
+        let refused = schema
+            .execute(Request::new("mutation { startUpdate { id } }"))
+            .await;
+        let error = refused.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"CONFLICT\"".to_string())
+        );
+        assert!(
+            error.message.contains(&running),
+            "it names the one that is going: {}",
+            error.message
+        );
+    })
+    .await;
+}
+
+/// The admin inputs round-trip through their own value form, like every other
+/// input object.
+#[test]
+fn the_admin_inputs_round_trip() {
+    use async_graphql::InputType;
+
+    let row = MimeRowInput {
+        mime_type: "image/webp".to_string(),
+        family: Some("image".to_string()),
+        text: Some(false),
+        extensions: Some(vec!["webp".to_string()]),
+        magic: Some("52494646".to_string()),
+        stand_in: Some("[a picture]".to_string()),
+        check: Some("checks/webp.rhai".to_string()),
+        tokens: Some(MimeTokensInput {
+            per_byte: None,
+            per_pixel: Some(750),
+            max: Some(1_600),
+            per_second: None,
+            per_page: None,
+            fixed: None,
+        }),
+    };
+    let Ok(read_back) = MimeRowInput::parse(Some(row.to_value())) else {
+        panic!("a mime row reads back from its own value");
+    };
+    assert_eq!(read_back.mime_type, "image/webp");
+    assert_eq!(read_back.text, Some(false));
+    let tokens = read_back.tokens.expect("the rates come with it");
+    assert_eq!(tokens.per_pixel, Some(750));
+    assert_eq!(tokens.max, Some(1_600));
+
+    let config = crate::commands::serve::graphql::config_input::ConfigInput {
+        default_provider: Some("openai".to_string()),
+        provider_order: Some(vec!["openai".to_string()]),
+        override_model: async_graphql::MaybeUndefined::Value("gpt-5.6".to_string()),
+        fallback_model: async_graphql::MaybeUndefined::Null,
+        anthropic_key: async_graphql::MaybeUndefined::Undefined,
+        openai_key: async_graphql::MaybeUndefined::Value("sk-o".to_string()),
+        google_key: async_graphql::MaybeUndefined::Undefined,
+        openrouter_key: async_graphql::MaybeUndefined::Undefined,
+        bedrock_key: async_graphql::MaybeUndefined::Undefined,
+        xai_key: async_graphql::MaybeUndefined::Undefined,
+        meta_key: async_graphql::MaybeUndefined::Undefined,
+        bedrock_region: Some("us-east-1".to_string()),
+        ollama_base_url: Some("http://127.0.0.1:11434".to_string()),
+        ollama_enabled: Some(true),
+        codex_enabled: Some(false),
+        grok_enabled: Some(true),
+        file_uploads: Some(true),
+        codex_reasoning_effort: Some("high".to_string()),
+        codex_verbosity: Some("low".to_string()),
+        codex_replay_reasoning: Some(true),
+        gateways: Some(vec![
+            crate::commands::serve::graphql::config_input::GatewayInput {
+                name: "local".to_string(),
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                script: None,
+                api_key: Some("sk-l".to_string()),
+                headers: Some(vec![
+                    crate::commands::serve::graphql::config_input::EnvEntryInput {
+                        name: "X-Thing".to_string(),
+                        value: "1".to_string(),
+                    },
+                ]),
+                models: Some(vec!["llama".to_string()]),
+            },
+        ]),
+        remove_gateways: Some(vec!["old".to_string()]),
+    };
+    let value = config.to_value();
+    let Ok(read_back) =
+        crate::commands::serve::graphql::config_input::ConfigInput::parse(Some(value))
+    else {
+        panic!("a config edit reads back from its own value");
+    };
+    // A value stays a value and a null stays a clear. An absent field comes back
+    // as a null, because the value form has no way to say "not sent": that is a
+    // property of the echo rather than of the write, and the write is what the
+    // server reads. `a_config_write_sets_clears_and_leaves_alone` is where the
+    // third state is held to, over the wire.
+    let request = read_back.into_request();
+    assert_eq!(request.override_model, Some(Some("gpt-5.6".to_string())));
+    assert_eq!(request.fallback_model, Some(None), "null stays a clear");
+    assert_eq!(request.remove_gateways, Some(vec!["old".to_string()]));
+    let gateway = request
+        .gateways
+        .as_ref()
+        .and_then(|gateways| gateways.first())
+        .expect("the gateway");
+    assert_eq!(gateway.name, "local");
+    assert_eq!(
+        gateway
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.get("X-Thing")),
+        Some(&"1".to_string())
+    );
 }

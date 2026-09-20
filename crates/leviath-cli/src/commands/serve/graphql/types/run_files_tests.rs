@@ -835,3 +835,123 @@ async fn a_stage_record_carries_its_region_peaks() {
     })
     .await;
 }
+
+/// A listing of an absolute path inside the run's working directory works, and
+/// the entries come back relative to it.
+#[tokio::test]
+async fn an_absolute_path_inside_the_workdir_lists() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    std::fs::create_dir(workdir.path().join("src")).expect("a directory");
+    std::fs::write(workdir.path().join("src/main.rs"), "fn main() {}").expect("a file");
+    let absolute = workdir.path().join("src").to_string_lossy().into_owned();
+
+    let json = data(
+        meta_in(workdir.path()),
+        &format!(
+            r#"{{ run {{ files(source: WORKDIR, path: "{}") {{ entries {{ name path }} }} }} }}"#,
+            absolute.replace('\\', "\\\\")
+        ),
+    )
+    .await;
+    let entry = &json["run"]["files"]["entries"][0];
+    assert_eq!(entry["name"], "main.rs");
+    assert_eq!(
+        entry["path"], "src/main.rs",
+        "relative to the working directory, so it can be passed back"
+    );
+}
+
+/// A part's dimensions and duration come through where the record has them.
+#[tokio::test]
+async fn a_parts_dimensions_come_through() {
+    use leviath_core::mime::{MimeType, Part};
+    use leviath_core::region::EntryContent;
+    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+
+    crate::runstate::with_isolated_runs_dir_async("graphql-blob-dims", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+        let picture = Part::stored(leviath_core::mime::BlobRef {
+            sha256: "a".repeat(64),
+            mime_type: MimeType::parse("image/png").expect("a type"),
+            size: 2_048,
+            width: Some(1_024),
+            height: Some(768),
+            duration_ms: Some(0),
+            tokens: 400,
+            stand_in: "[image/png 1024x768, 2 KB] hero.png".to_string(),
+        })
+        .named("hero.png");
+        crate::runstate::write_context_snapshot(
+            &meta.run_id,
+            &ContextSnapshot {
+                stage_name: "review".to_string(),
+                total_tokens: 400,
+                max_tokens: 1_000,
+                regions: vec![RegionSnapshot {
+                    name: "task".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 400,
+                    max_tokens: 1_000,
+                    entries: vec![RegionEntrySnapshot {
+                        content: EntryContent::from_parts(vec![picture]),
+                        tokens: 400,
+                        kind: Default::default(),
+                        metadata: None,
+                        key: None,
+                        taint: leviath_core::taint::TaintLevel::Public,
+                        reasoning: None,
+                    }],
+                    description: None,
+                }],
+            },
+        )
+        .expect("a snapshot");
+
+        let json = data(meta, "{ run { blobs { width height durationMs tokens } } }").await;
+        let blob = &json["run"]["blobs"][0];
+        assert_eq!(blob["width"], 1_024);
+        assert_eq!(blob["height"], 768);
+        assert_eq!(blob["durationMs"], 0);
+        // The listing counts the tokens from the type and the size rather than
+        // echoing what the record happened to store, so this is a number rather
+        // than the one above.
+        assert!(blob["tokens"].as_i64().is_some_and(|n| n > 0), "{blob}");
+    })
+    .await;
+}
+
+/// A file read that reaches the end of a larger file says where the next window
+/// starts, and the window that follows it finishes the file.
+#[tokio::test]
+async fn a_truncated_window_says_where_to_continue() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    // Larger than one window, so the first read is truncated.
+    let size = crate::commands::serve::core::files::MAX_FILE_READ_BYTES as usize + 16;
+    std::fs::write(workdir.path().join("big.txt"), "a".repeat(size)).expect("a file");
+
+    let json = data(
+        meta_in(workdir.path()),
+        r#"{ run { fileContent(path: "big.txt") { size nextOffset truncated } } }"#,
+    )
+    .await;
+    let window = &json["run"]["fileContent"];
+    assert_eq!(window["truncated"], true);
+    assert_eq!(
+        window["nextOffset"],
+        crate::commands::serve::core::files::MAX_FILE_READ_BYTES as i64,
+        "{window}"
+    );
+
+    let rest = data(
+        meta_in(workdir.path()),
+        &format!(
+            r#"{{ run {{ fileContent(path: "big.txt", offset: {}) {{ truncated nextOffset }} }} }}"#,
+            crate::commands::serve::core::files::MAX_FILE_READ_BYTES
+        ),
+    )
+    .await;
+    assert_eq!(rest["run"]["fileContent"]["truncated"], false);
+    assert!(rest["run"]["fileContent"]["nextOffset"].is_null());
+}

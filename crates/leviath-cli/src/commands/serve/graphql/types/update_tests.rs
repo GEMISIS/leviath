@@ -270,9 +270,9 @@ async fn the_daemon_link_answers_with_no_daemon_behind_it() {
 #[tokio::test]
 async fn an_update_job_carries_its_steps() {
     let jobs = crate::commands::serve::update_job::UpdateJobs::default();
-    let id = jobs.start().expect("nothing else is running");
-    let job = UpdateJob::from(jobs.get(&id).expect("the job is recorded"));
-    assert_eq!(job.id, id);
+    let started = jobs.start().expect("nothing else is running");
+    let job = UpdateJob::from(started.clone());
+    assert_eq!(job.id, started.id);
     assert_eq!(job.status, "running");
     // Three steps, always: a step that was not asked for reads as skipped rather
     // than being absent, so a client renders the same rows whatever was asked.
