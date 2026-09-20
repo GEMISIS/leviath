@@ -199,8 +199,12 @@ pub enum WorldEvent {
         run_id: String,
         /// The agent id.
         agent_id: String,
-        /// The provider-assigned tool call id.
+        /// The provider-assigned tool call id. Correlation only: a provider may
+        /// reuse one across a retry, so it is not an identity.
         call_id: String,
+        /// This attempt's own id, as the journal recorded it at dispatch. Empty
+        /// for a world that does not persist, which has no journal to agree with.
+        execution_id: String,
         /// The tool name.
         tool: String,
     },
@@ -211,8 +215,11 @@ pub enum WorldEvent {
         run_id: String,
         /// The agent id.
         agent_id: String,
-        /// The provider-assigned tool call id.
+        /// The provider-assigned tool call id. Correlation only; see
+        /// [`WorldEvent::ToolCallStarted`].
         call_id: String,
+        /// The attempt that finished, as minted at dispatch.
+        execution_id: String,
         /// The tool name.
         tool: String,
         /// Whether the call took effect (`false` for `[error]`/`[blocked]`/

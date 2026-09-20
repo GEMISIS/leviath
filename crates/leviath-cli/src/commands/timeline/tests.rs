@@ -48,6 +48,8 @@ fn status(status: RunStatus, at: i64) -> RunRecord {
 
 fn tool_done(at: i64) -> RunRecord {
     RunRecord::ToolCallDone {
+        execution_id: String::new(),
+        outcome: None,
         iteration: 1,
         call_id: "c1".to_string(),
         result: "ok".to_string().into(),

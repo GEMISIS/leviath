@@ -1520,6 +1520,7 @@ mod tests {
         leviath_core::run_archive::RunRecord::ToolBatch {
             calls: vec![leviath_core::run_archive::ToolCallRecord {
                 id: call_id.to_string(),
+                execution_id: String::new(),
                 name: "shell".to_string(),
                 arguments: "{}".to_string(),
                 result: None,
@@ -1552,7 +1553,9 @@ mod tests {
             record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
                 iteration: 0,
                 call_id: "c1".to_string(),
+                execution_id: String::new(),
                 result: "ran".to_string().into(),
+                outcome: None,
                 at: 2,
             }),
             ack: None, // the fire-and-forget per-call path

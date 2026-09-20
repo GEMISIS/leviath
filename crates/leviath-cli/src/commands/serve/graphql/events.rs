@@ -179,8 +179,14 @@ pub(crate) struct ToolCallStarted {
     pub(crate) run_id: String,
     /// The agent's live id.
     pub(crate) agent_id: String,
-    /// The provider's call id, which pairs this with its finish.
+    /// The provider's own call id, kept as external correlation. Not an
+    /// identity: a provider may reuse one across a retry or a reissue, which is
+    /// why the execution id exists.
     pub(crate) call_id: String,
+    /// This attempt's own id, minted at dispatch and recorded in the journal.
+    /// What pairs a start with its finish, and either with the journal. Empty
+    /// from a daemon that predates execution identity.
+    pub(crate) execution_id: String,
     /// The tool called.
     pub(crate) tool: String,
 }
@@ -192,12 +198,19 @@ pub(crate) struct ToolCallFinished {
     pub(crate) run_id: String,
     /// The agent's live id.
     pub(crate) agent_id: String,
-    /// Pairs with the start.
+    /// The provider's own call id, as correlation. See `ToolCallStarted`.
     pub(crate) call_id: String,
+    /// The attempt that finished, matching the start's.
+    pub(crate) execution_id: String,
     /// The tool called.
     pub(crate) tool: String,
     /// Whether the call took effect. False for a refused or failed call: a
     /// finish is not a success on its own.
+    ///
+    /// Read from the result's own text, so it is a summary rather than the
+    /// durable verdict. The recorded outcome lives on the execution in the
+    /// journal, where a refusal and a failure are different states and an
+    /// unobserved ending is its own.
     pub(crate) ok: bool,
     /// The result, flattened to one line and cut to fit.
     pub(crate) summary: String,
@@ -545,17 +558,20 @@ impl From<ServerEvent> for RunEvent {
                 agent_id,
                 run_id,
                 call_id,
+                execution_id,
                 tool,
             } => Self::ToolCallStarted(ToolCallStarted {
                 run_id,
                 agent_id,
                 call_id,
+                execution_id,
                 tool,
             }),
             ServerEvent::ToolCallFinished {
                 agent_id,
                 run_id,
                 call_id,
+                execution_id,
                 tool,
                 ok,
                 summary,
@@ -563,6 +579,7 @@ impl From<ServerEvent> for RunEvent {
                 run_id,
                 agent_id,
                 call_id,
+                execution_id,
                 tool,
                 ok,
                 summary,

@@ -5444,6 +5444,20 @@ One visit to a stage.
 """
 type StageVisit {
 	"""
+	This visit's own id, as the ledger recorded it.
+	
+	The correlation key for everything that happened during the stay. Null on
+	a record written before visits had identity, where a visit was identified
+	by its position in the stage's list and so changed identity as soon as
+	that list was capped.
+	"""
+	id: String
+	"""
+	Which entry into this stage this is, counting from one. The same number
+	the `stageTransition` frame carries as `iteration`.
+	"""
+	ordinal: Int!
+	"""
 	When the run entered, unix epoch seconds.
 	"""
 	enteredAt: Timestamp!
@@ -5658,9 +5672,13 @@ type ToolCallFinished {
 	"""
 	agentId: String!
 	"""
-	Pairs with the start.
+	The provider's own call id, as correlation. See `ToolCallStarted`.
 	"""
 	callId: String!
+	"""
+	The attempt that finished, matching the start's.
+	"""
+	executionId: String!
 	"""
 	The tool called.
 	"""
@@ -5668,6 +5686,11 @@ type ToolCallFinished {
 	"""
 	Whether the call took effect. False for a refused or failed call: a
 	finish is not a success on its own.
+	
+	Read from the result's own text, so it is a summary rather than the
+	durable verdict. The recorded outcome lives on the execution in the
+	journal, where a refusal and a failure are different states and an
+	unobserved ending is its own.
 	"""
 	ok: Boolean!
 	"""
@@ -5689,9 +5712,17 @@ type ToolCallStarted {
 	"""
 	agentId: String!
 	"""
-	The provider's call id, which pairs this with its finish.
+	The provider's own call id, kept as external correlation. Not an
+	identity: a provider may reuse one across a retry or a reissue, which is
+	why the execution id exists.
 	"""
 	callId: String!
+	"""
+	This attempt's own id, minted at dispatch and recorded in the journal.
+	What pairs a start with its finish, and either with the journal. Empty
+	from a daemon that predates execution identity.
+	"""
+	executionId: String!
 	"""
 	The tool called.
 	"""

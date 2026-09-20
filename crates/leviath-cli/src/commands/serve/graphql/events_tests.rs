@@ -54,12 +54,14 @@ fn every_frame() -> Vec<ServerEvent> {
             iteration: 2,
         },
         ServerEvent::ToolCallStarted {
+            execution_id: "x1".to_string(),
             agent_id: "a".to_string(),
             run_id: "run-a".to_string(),
             call_id: "call-1".to_string(),
             tool: "read_file".to_string(),
         },
         ServerEvent::ToolCallFinished {
+            execution_id: "x1".to_string(),
             agent_id: "a".to_string(),
             run_id: "run-a".to_string(),
             call_id: "call-1".to_string(),

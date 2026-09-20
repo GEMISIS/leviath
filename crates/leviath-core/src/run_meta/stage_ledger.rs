@@ -115,6 +115,16 @@ pub const MAX_STAGE_VISITS: usize = 128;
 /// new visit, while iterations within one stay do not.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StageVisitRecord {
+    /// This visit's own id, minted when the stage was entered.
+    ///
+    /// The correlation key for everything that happened during the stay: an
+    /// execution names the visit it ran in, and a visit named by its position in
+    /// this list would move under that reference as soon as the list was capped.
+    ///
+    /// Empty on a record written before visits had identity, where position was
+    /// all there was.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// Unix seconds when the run entered the stage on this visit.
     pub entered_at: i64,
     /// Unix seconds when it left. `None` on the visit in progress, which is the
@@ -153,6 +163,7 @@ impl StageVisitRecord {
     /// A visit that has just started and billed nothing.
     pub fn opened_at(at: i64) -> Self {
         Self {
+            id: crate::execution::mint_visit_id(),
             entered_at: at,
             left_at: None,
             prompt_tokens: 0,

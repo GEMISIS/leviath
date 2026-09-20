@@ -33,6 +33,30 @@ pub struct AgentState {
     pub accepts_messages: bool,
 }
 
+/// The execution ids minted for the tool batch in flight, by provider call id.
+///
+/// Dispatch mints one id per attempt and the journal records it; the completion
+/// system needs the same id to say which attempt finished, and the provider's own
+/// id cannot serve because it may be reused across a retry. Carried on the entity
+/// because dispatch and completion are two systems and two ticks apart.
+///
+/// Replaced wholesale at each dispatch: one batch is in flight per agent, so the
+/// previous batch's ids are answered for by then and keeping them would let a
+/// late completion attach itself to the wrong attempt.
+#[derive(Component, Debug, Clone, Default)]
+pub struct BatchExecutions {
+    /// Provider call id to the execution id minted for it.
+    pub ids: std::collections::HashMap<String, String>,
+}
+
+impl BatchExecutions {
+    /// The execution id for one provider call id, or empty when this world did
+    /// not mint one (a world with no journal to agree with).
+    pub fn id_for(&self, call_id: &str) -> String {
+        self.ids.get(call_id).cloned().unwrap_or_default()
+    }
+}
+
 /// Reference to a parent agent, making this agent a sub-agent.
 #[derive(Component, Debug, Clone)]
 pub struct ParentRef {

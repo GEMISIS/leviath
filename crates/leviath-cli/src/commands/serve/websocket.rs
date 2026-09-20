@@ -762,12 +762,14 @@ mod tests {
                 iteration: 1,
             },
             ServerEvent::ToolCallStarted {
+                execution_id: "x1".to_string(),
                 agent_id: "a".to_string(),
                 run_id: "run-match".to_string(),
                 call_id: "c1".to_string(),
                 tool: "read_file".to_string(),
             },
             ServerEvent::ToolCallFinished {
+                execution_id: "x1".to_string(),
                 agent_id: "a".to_string(),
                 run_id: "run-match".to_string(),
                 call_id: "c1".to_string(),
