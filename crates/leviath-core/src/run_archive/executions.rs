@@ -23,7 +23,7 @@ use crate::region::EntryContent;
 ///
 /// An attempt, not a call: the same call reissued after a failure is a second
 /// execution with its own id, and telling them apart is the point.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Execution {
     /// The execution id minted at dispatch. Empty in a journal written before
     /// executions had identity, where the provider's call id is all there is.
@@ -153,6 +153,17 @@ fn match_completion<'e>(
         .find(|e| e.call_id == call_id && e.iteration == iteration && e.unfinished())
 }
 
+/// A reader that can also move to a given offset.
+///
+/// A trait object rather than a type parameter, deliberately. A generic function
+/// is compiled once per kind of reader it is used with, and a real file never
+/// fails to seek while a test double exists to make it fail: neither copy would
+/// ever exercise both paths, and the two together would still leave each copy
+/// half covered.
+pub trait SeekRead: Read + Seek {}
+
+impl<T: Read + Seek> SeekRead for T {}
+
 /// The result recorded at `position`, for the call `call_id`.
 ///
 /// Both record kinds that can hold a result are read, because both do: a
@@ -160,8 +171,8 @@ fn match_completion<'e>(
 /// results of the calls its dispatcher resolved inline. `None` means the record
 /// at that position holds no result for that call, which is what a stale
 /// position looks like.
-pub fn read_result_at<R: Read + Seek>(
-    r: &mut R,
+pub fn read_result_at(
+    r: &mut dyn SeekRead,
     position: u64,
     call_id: &str,
 ) -> io::Result<Option<EntryContent>> {
@@ -169,7 +180,19 @@ pub fn read_result_at<R: Read + Seek>(
     let Some(record) = read_record(r)? else {
         return Ok(None);
     };
-    Ok(match record {
+    Ok(result_of(record, call_id))
+}
+
+/// The result one record holds for `call_id`, if it holds one at all.
+///
+/// Its own function rather than a match inside the reader above, because that
+/// reader is generic over where the bytes come from and everything inside it is
+/// compiled once per kind of reader. Reading the record is the part that has to be
+/// generic; deciding what it says is not.
+fn result_of(record: RunRecord, call_id: &str) -> Option<EntryContent> {
+    match record {
+        // A position identifies one record, so a mismatched call id means a
+        // caller pointing at a record that is not the one it thinks it is.
         RunRecord::ToolCallDone { call_id: done, .. } if done != call_id => None,
         RunRecord::ToolCallDone { result, .. } => Some(result),
         RunRecord::ToolBatch { calls, .. } => calls
@@ -177,7 +200,7 @@ pub fn read_result_at<R: Read + Seek>(
             .find(|c| c.id == call_id)
             .and_then(|c| c.result),
         _ => None,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -514,6 +537,71 @@ mod tests {
                 .as_deref(),
             Some("after the unknown")
         );
+    }
+
+    /// Records that are neither a dispatch nor a completion are passed over.
+    ///
+    /// Most of a journal is context and progress, and none of it says anything
+    /// about an execution. Reading it as though it might would be the same
+    /// mistake as folding a window to answer what a run tried.
+    #[test]
+    fn records_about_anything_else_are_passed_over() {
+        let bytes = archive(vec![
+            RunRecord::StatusChanged {
+                status: crate::run_meta::RunStatus::Running,
+                at: 1,
+            },
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "x1", None)],
+                at: 10,
+                stage_index: 0,
+                iteration: 1,
+                response: String::new(),
+            },
+            RunRecord::StatusChanged {
+                status: crate::run_meta::RunStatus::Complete,
+                at: 20,
+            },
+        ]);
+        let executions = read_archive_executions(&mut bytes.as_slice()).expect("it reads");
+        assert_eq!(executions.len(), 1, "one dispatch, two status changes");
+        assert_eq!(executions[0].call_id, "c1");
+    }
+
+    /// A reader that cannot seek, and a reader that cannot read.
+    ///
+    /// Both are what a file being replaced or truncated under a running server
+    /// looks like. The failure has to come back as a failure: answering "no
+    /// result" would read as an execution that produced nothing.
+    struct Broken {
+        /// Whether the seek is the part that fails. Reading always does, which is
+        /// what the read stops at once the seek has worked.
+        seek_fails: bool,
+    }
+
+    impl std::io::Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("the file went away mid-read"))
+        }
+    }
+
+    impl Seek for Broken {
+        fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+            match self.seek_fails {
+                true => Err(io::Error::other("the file went away mid-seek")),
+                false => Ok(0),
+            }
+        }
+    }
+
+    /// A result read that cannot seek or cannot read fails rather than answering
+    /// that there was no result.
+    #[test]
+    fn a_result_read_that_breaks_reports_the_failure() {
+        let failed_seek = read_result_at(&mut Broken { seek_fails: true }, 10, "c1");
+        assert!(failed_seek.is_err(), "a failed seek is not an empty answer");
+        let failed_read = read_result_at(&mut Broken { seek_fails: false }, 10, "c1");
+        assert!(failed_read.is_err(), "a failed read is not an empty answer");
     }
 
     /// A position pointing at a record that holds no results answers nothing.

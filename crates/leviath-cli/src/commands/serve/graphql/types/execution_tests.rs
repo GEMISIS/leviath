@@ -424,3 +424,151 @@ async fn an_unreadable_journal_says_so() {
     })
     .await;
 }
+
+/// Every outcome the journal can hold has a word on the wire.
+///
+/// Five states, mapped one to one. A state this build could not name would have
+/// to come through as null, which already means three other things.
+#[test]
+fn every_outcome_has_a_word() {
+    use super::execution::ToolOutcome as Served;
+    let cases = [
+        (ToolOutcome::Succeeded, Served::Succeeded),
+        (ToolOutcome::Failed, Served::Failed),
+        (ToolOutcome::Blocked, Served::Blocked),
+        (ToolOutcome::Denied, Served::Denied),
+        (ToolOutcome::Indeterminate, Served::Indeterminate),
+    ];
+    for (recorded, served) in cases {
+        assert_eq!(Served::from(recorded), served, "{recorded:?}");
+    }
+}
+
+/// A result that carried stored parts names them.
+///
+/// The bytes are not repeated here: they are already in the run's parts, and a
+/// history that inlined every attached file would be the one thing this surface
+/// is built to avoid.
+#[tokio::test]
+async fn a_result_with_stored_parts_names_them() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-exec-parts", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        let part = leviath_core::mime::Part::stored(leviath_core::mime::BlobRef {
+            sha256: "abc123".to_string(),
+            mime_type: leviath_core::mime::MimeType::parse("image/png").expect("a type"),
+            size: 12,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens: 1,
+            stand_in: "[image/png, 12 B] diagram.png".to_string(),
+        })
+        .named("diagram.png");
+        let carried = leviath_core::region::EntryContent::from_parts(vec![
+            leviath_core::mime::Part::text("here it is"),
+            part,
+        ]);
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call(
+                    "c1",
+                    "x1",
+                    "context_attach",
+                    r#"{"region":"n","path":"d.png"}"#,
+                )],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                response: String::new(),
+            },
+            RunRecord::ToolCallDone {
+                iteration: 1,
+                call_id: "c1".to_string(),
+                execution_id: "x1".to_string(),
+                result: carried,
+                outcome: Some(ToolOutcome::Succeeded),
+                at: 101,
+            },
+        ]);
+
+        let json =
+            data("{ run { executions(first: 1) { edges { node { result { text parts } } } } } }")
+                .await;
+        let result = &json["run"]["executions"]["edges"][0]["node"]["result"];
+        assert_eq!(
+            result["parts"].as_array().and_then(|p| p.first()),
+            Some(&serde_json::json!("diagram.png"))
+        );
+        assert!(
+            result["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("here it is")),
+            "the text renders beside the part: {}",
+            result["text"]
+        );
+    })
+    .await;
+}
+
+/// Reading one result from a journal that broke since the page was read fails,
+/// rather than reading as an attempt that produced nothing.
+#[tokio::test]
+async fn a_result_read_from_a_broken_journal_fails() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-exec-result-broken",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            std::fs::write(
+                crate::runstate::run_dir("did-things").join(leviath_core::files::ARCHIVE_FILE),
+                b"not an archive",
+            )
+            .expect("a corrupt journal");
+
+            // The execution is built here rather than listed, because listing is what
+            // would fail first: this is the race where the file breaks in between.
+            let execution = super::execution::ToolExecution {
+                run_id: "did-things".to_string(),
+                record: leviath_core::run_archive::Execution {
+                    id: "x1".to_string(),
+                    call_id: "c1".to_string(),
+                    tool: "shell".to_string(),
+                    arguments: r#"{"command":"ls"}"#.to_string(),
+                    stage_index: 0,
+                    iteration: 1,
+                    dispatched_at: 100,
+                    position: 6,
+                    ended_at: Some(101),
+                    result_position: Some(6),
+                    outcome: Some(ToolOutcome::Succeeded),
+                },
+            };
+            let schema =
+                Schema::build(OneExecution { execution }, EmptyMutation, EmptySubscription)
+                    .data(state_with_agent_paths(Vec::new()))
+                    .finish();
+            let answer = schema
+                .execute(Request::new("{ execution { result { text } } }"))
+                .await;
+            let message = answer
+                .errors
+                .first()
+                .map(|e| e.message.clone())
+                .expect("a failure");
+            assert!(message.contains("unreadable journal"), "{message}");
+        },
+    )
+    .await;
+}
+
+/// A root handing out one execution directly.
+struct OneExecution {
+    execution: super::execution::ToolExecution,
+}
+
+#[async_graphql::Object]
+impl OneExecution {
+    /// The execution under test.
+    async fn execution(&self) -> &super::execution::ToolExecution {
+        &self.execution
+    }
+}

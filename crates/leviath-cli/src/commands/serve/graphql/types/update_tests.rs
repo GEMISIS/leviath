@@ -254,7 +254,8 @@ async fn the_agents_and_migrations_say_what_would_happen() {
 /// works while the daemon is down: that is the point of asking.
 #[tokio::test]
 async fn the_daemon_link_answers_with_no_daemon_behind_it() {
-    let status = DaemonStatus::of(&crate::commands::serve::testutil::no_daemon_client());
+    let control = crate::commands::serve::testutil::no_daemon_client();
+    let status = DaemonStatus::of(control.link(), control.code_mismatch());
     // True before anything has been tried: this server talks to the daemon when
     // it has something to ask, so silence is not evidence either way. Reporting
     // "not reachable" here would be a claim nobody has checked.
@@ -264,6 +265,54 @@ async fn the_daemon_link_answers_with_no_daemon_behind_it() {
     assert!(status.pid.is_none());
     assert_eq!(status.restarts, 0);
     assert!(status.restart_advised.is_none());
+}
+
+/// A daemon that has introduced itself is named, and one running other code
+/// comes with the advice to restart.
+///
+/// Neither state needs a socket to describe, which is why the mapper takes the
+/// two readings: a server cannot arrange for a daemon of a different build to be
+/// running behind it, and the answer about one still has to be right.
+#[tokio::test]
+async fn a_daemon_that_introduced_itself_is_named() {
+    use leviath_runtime::control_socket::{CodeMismatch, LinkStatus};
+    let daemon = leviath_runtime::control_socket::DaemonIdentity {
+        version: "0.6.1".to_string(),
+        build: "deadbeef".to_string(),
+        pid: 4242,
+        tool_env: None,
+    };
+    let client = leviath_runtime::control_socket::DaemonIdentity {
+        version: "0.6.2".to_string(),
+        build: "cafef00d".to_string(),
+        pid: 99,
+        tool_env: None,
+    };
+    let status = DaemonStatus::of(
+        LinkStatus {
+            daemon: Some(daemon.clone()),
+            restarts: 2,
+            reachable: true,
+        },
+        Some(CodeMismatch {
+            daemon,
+            client: client.clone(),
+        }),
+    );
+    assert_eq!(status.version.as_deref(), Some("0.6.1"));
+    assert_eq!(status.build.as_deref(), Some("deadbeef"));
+    assert_eq!(status.pid, Some(4242));
+    assert_eq!(status.restarts, 2);
+    // Advice rather than an error: requests keep working while the two ends
+    // still understand each other, so what this says is what to do about it.
+    assert!(
+        status
+            .restart_advised
+            .as_deref()
+            .is_some_and(|advice| !advice.is_empty()),
+        "{:?}",
+        status.restart_advised
+    );
 }
 
 /// An update job comes through with each step and where it got to.

@@ -571,7 +571,7 @@ impl Query {
     /// not mean requests fail, it means the live frames have stopped.
     async fn daemon(&self, ctx: &Context<'_>) -> DaemonStatus {
         let state = ctx.data_unchecked::<AppState>();
-        DaemonStatus::of(&state.control)
+        DaemonStatus::of(state.control.link(), state.control.code_mismatch())
     }
 
     /// What an update would do, and whether there is anything newer to get.

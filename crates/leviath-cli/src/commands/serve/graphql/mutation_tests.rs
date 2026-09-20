@@ -1594,3 +1594,50 @@ fn answer_id(answer: &AnswerInteractionInput) -> String {
         AnswerInteractionInput::Approval(approval) => approval.request_id.clone(),
     }
 }
+
+/// Every write's input refuses what it cannot read.
+///
+/// The one-of input is here too. It refuses a value that is not an object the
+/// same way, on top of refusing two answers at once, which is the rule that
+/// makes it a one-of.
+#[test]
+fn every_write_input_refuses_what_it_cannot_read() {
+    use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
+
+    /// One object with a single field set to `value`.
+    fn one(field: &str, value: Value) -> Option<Value> {
+        let mut map = IndexMap::new();
+        map.insert(Name::new(field), value);
+        Some(Value::Object(map))
+    }
+    let scalar = || Some(Value::String("nope".to_string()));
+    let number = || Value::Number(7.into());
+
+    assert!(MetadataEntryInput::parse(scalar()).is_err());
+    assert!(MetadataEntryInput::parse(None).is_err());
+    assert!(MetadataEntryInput::parse(one("key", number())).is_err());
+    assert!(RegionSeedInput::parse(scalar()).is_err());
+    assert!(RegionSeedInput::parse(None).is_err());
+    assert!(RegionSeedInput::parse(one("region", number())).is_err());
+    assert!(SpawnAgentInput::parse(scalar()).is_err());
+    assert!(SpawnAgentInput::parse(None).is_err());
+    assert!(SpawnAgentInput::parse(one("blueprint", number())).is_err());
+    assert!(AnswerChoiceInput::parse(scalar()).is_err());
+    assert!(AnswerChoiceInput::parse(None).is_err());
+    assert!(AnswerChoiceInput::parse(one("requestId", number())).is_err());
+    assert!(AnswerTextInput::parse(scalar()).is_err());
+    assert!(AnswerTextInput::parse(None).is_err());
+    assert!(AnswerTextInput::parse(one("requestId", number())).is_err());
+    assert!(AnswerApprovalInput::parse(scalar()).is_err());
+    assert!(AnswerApprovalInput::parse(None).is_err());
+    assert!(AnswerApprovalInput::parse(one("requestId", number())).is_err());
+    assert!(AnswerInteractionInput::parse(scalar()).is_err());
+    assert!(AnswerInteractionInput::parse(None).is_err());
+    assert!(
+        AnswerInteractionInput::parse(one("text", number())).is_err(),
+        "the chosen answer still has to be an answer"
+    );
+    assert!(YoloTestInput::parse(scalar()).is_err());
+    assert!(YoloTestInput::parse(None).is_err());
+    assert!(YoloTestInput::parse(one("profile", number())).is_err());
+}

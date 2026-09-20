@@ -667,7 +667,7 @@ pub use codec::{
     Frame, Frames, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
     read_archive_start, read_frame, read_record, write_archive_start, write_record,
 };
-pub use executions::{Execution, read_archive_executions, read_result_at};
+pub use executions::{Execution, SeekRead, read_archive_executions, read_result_at};
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 

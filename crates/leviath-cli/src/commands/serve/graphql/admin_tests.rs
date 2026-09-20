@@ -1437,3 +1437,107 @@ fn the_admin_inputs_round_trip() {
         Some(&"1".to_string())
     );
 }
+
+/// Every input object refuses what it cannot read.
+///
+/// Three shapes, because the reader is generated per type and each shape lands
+/// in a different branch of it: a value that is not an object at all, one field
+/// of the wrong type, and nothing where a required object belongs. A client
+/// sending any of them gets a refusal naming the argument, which is what makes a
+/// malformed request debuggable from the answer alone.
+#[test]
+fn an_input_object_refuses_what_it_cannot_read() {
+    use crate::commands::serve::graphql::config_input::{ConfigInput, EnvEntryInput, GatewayInput};
+    use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
+
+    /// One object with a single field set to `value`.
+    fn one(field: &str, value: Value) -> Option<Value> {
+        let mut map = IndexMap::new();
+        map.insert(Name::new(field), value);
+        Some(Value::Object(map))
+    }
+    let scalar = || Some(Value::String("nope".to_string()));
+    let number = || Value::Number(7.into());
+
+    assert!(EnvEntryInput::parse(scalar()).is_err());
+    assert!(EnvEntryInput::parse(None).is_err(), "required, not empty");
+    assert!(
+        EnvEntryInput::parse(one("name", Value::String("n".to_string()))).is_err(),
+        "a field left out"
+    );
+    assert!(GatewayInput::parse(scalar()).is_err());
+    assert!(GatewayInput::parse(None).is_err());
+    assert!(
+        GatewayInput::parse(one("name", number())).is_err(),
+        "a number"
+    );
+    assert!(ConfigInput::parse(scalar()).is_err());
+    assert!(ConfigInput::parse(one("defaultProvider", number())).is_err());
+    assert!(MimeRowInput::parse(scalar()).is_err());
+    assert!(MimeRowInput::parse(None).is_err());
+    assert!(MimeRowInput::parse(one("mimeType", number())).is_err());
+    assert!(MimeTokensInput::parse(scalar()).is_err());
+    assert!(MimeTokensInput::parse(one("perByte", scalar().expect("a string"))).is_err());
+
+    // And each reads back what it does accept, which is the other half of the
+    // same generated reader.
+    let Ok(gateway) = GatewayInput::parse(one("name", Value::String("house".to_string()))) else {
+        panic!("a gateway needs only its name");
+    };
+    assert_eq!(gateway.name, "house");
+    let Ok(config) =
+        ConfigInput::parse(one("defaultProvider", Value::String("openai".to_string())))
+    else {
+        panic!("one setting is a whole edit");
+    };
+    assert_eq!(config.default_provider.as_deref(), Some("openai"));
+    let Ok(row) = MimeRowInput::parse(one("mimeType", Value::String("image/png".to_string())))
+    else {
+        panic!("a row needs only its type");
+    };
+    assert_eq!(row.mime_type, "image/png");
+    let Ok(tokens) = MimeTokensInput::parse(one(
+        "perByte",
+        Value::Number(serde_json::Number::from_f64(0.25).expect("a rate")),
+    )) else {
+        panic!("one rate is enough");
+    };
+    assert_eq!(tokens.per_byte, Some(0.25));
+
+    // A field sent as null explicitly, which for a three-state setting means
+    // "clear it" and is a different branch of the reader from leaving it out.
+    let Ok(cleared) = ConfigInput::parse(one("overrideModel", Value::Null)) else {
+        panic!("null is a value a three-state field takes");
+    };
+    assert!(
+        matches!(cleared.override_model, async_graphql::MaybeUndefined::Null),
+        "null means clear it, not leave it alone"
+    );
+
+    // A nested list of objects, which is its own branch again.
+    let mut header = IndexMap::new();
+    header.insert(Name::new("name"), Value::String("X-Key".to_string()));
+    header.insert(Name::new("value"), Value::String("secret".to_string()));
+    let mut gateway = IndexMap::new();
+    gateway.insert(Name::new("name"), Value::String("house".to_string()));
+    gateway.insert(
+        Name::new("headers"),
+        Value::List(vec![Value::Object(header)]),
+    );
+    let Ok(with_headers) = GatewayInput::parse(Some(Value::Object(gateway))) else {
+        panic!("a gateway carries its headers");
+    };
+    assert_eq!(
+        with_headers.headers.map(|h| h.len()),
+        Some(1),
+        "the nested objects come through"
+    );
+
+    // A field no input object declares is refused rather than ignored, so a
+    // typo in a variable is an answer rather than a setting that silently did
+    // nothing.
+    // A field no input object declares is ignored rather than refused. Worth
+    // pinning: it means a client cannot learn about a typo from the answer, so
+    // the schema's own field list is the only place that says what is accepted.
+    assert!(ConfigInput::parse(one("nonesuch", Value::Null)).is_ok());
+}
