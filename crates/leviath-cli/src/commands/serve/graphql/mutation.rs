@@ -491,6 +491,39 @@ impl RunMutation {
         })
     }
 
+    /// Export the run store to a file, and hand back the job.
+    ///
+    /// Paging ten thousand runs through a connection is two hundred requests,
+    /// and a client that wants everything wants it once. This returns
+    /// immediately; poll `bulkExport(id:)` and fetch `downloadUrl` when it is
+    /// complete.
+    ///
+    /// The filter is the run listing's own, so a client builds the predicate
+    /// once and uses it for both. `fields` narrows each row, and an unknown name
+    /// is refused rather than dropped: a column quietly missing from an export
+    /// is discovered downstream, by somebody else.
+    async fn bulk_export_runs(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which runs to export. Omitted means all of them.")] filter: Option<
+            super::query::RunFilter,
+        >,
+        #[graphql(desc = "Which top-level run fields to keep in each row.")] fields: Option<
+            Vec<String>,
+        >,
+    ) -> async_graphql::Result<super::query::BulkExport> {
+        let state = ctx.data_unchecked::<AppState>();
+        // An export is not a page, so the page cap does not apply: the whole
+        // point is everything at once. The listing's own scan bounds still do.
+        let mut selection = filter.unwrap_or_default().everything().gql()?;
+        selection.fields = fields.map(|named| named.into_iter().collect());
+        let spec = selection.resolve(None).gql()?;
+        let job = super::super::core::export::start(state, spec, super::super::runs::known_fields)
+            .await
+            .gql()?;
+        Ok(super::query::BulkExport::from_job(state, &job))
+    }
+
     /// Delete run records.
     ///
     /// Takes exactly one of `ids` or `before`. Neither is a client that failed

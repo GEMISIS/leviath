@@ -79,6 +79,17 @@ same list.
   `EventsDropped` frame saying how many frames it missed; `/ws` skips a slow
   listener silently, which reads exactly like a quiet run.
 
+- Exporting the run store, as one file. `bulkExportRuns` over GraphQL starts a
+  job and answers immediately, however large the store is; `bulkExport(id:)`
+  polls it, and hands back a signed link to `GET /api/exports/{id}` once the
+  file is written. The body is JSONL, one run per line, written a run at a time
+  and never held whole in memory, so a reader can start on it before the writer
+  has finished. The filter is the run listing's own, and `fields` narrows each
+  row to the names it uses, with an unknown name refused rather than dropped:
+  a column quietly missing from an export is discovered downstream, by somebody
+  who did not ask for it. A file and its job record are kept for an hour and
+  removed together, so neither outlives the other.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

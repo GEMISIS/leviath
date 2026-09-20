@@ -575,6 +575,89 @@
         }
       }
     },
+    "/api/exports/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The export job's id, as the `bulkExportRuns` mutation returned it."
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "The file one bulk export wrote",
+        "description": "Exports are started over GraphQL, with the `bulkExportRuns` mutation, and this is where the file it writes is fetched. The body is JSONL: one run per line, under the same field names the run listing uses, narrowed to the `fields` the export asked for. One run per line rather than one JSON array so a reader can start on it before the writer has finished, and so neither side ever holds the whole store in memory. A file is kept for one hour and then removed with its job record, so an id that has expired and one that was never started both answer 404. While the export is still queued or running, or after it failed, the answer is 409 and the client polls `bulkExport(id:)` instead. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted as `downloadUrl` on the job), which is what a browser download link needs: a header cannot be set on one.",
+        "parameters": [
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too). A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The export, as `application/jsonl`.",
+            "content": {
+              "application/jsonl": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "application/jsonl": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "description": "The export is not ready, or it failed. The message says which, and `bulkExport(id:)` carries the reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
     "/api/agents": {
       "get": {
         "tags": [

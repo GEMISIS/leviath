@@ -150,7 +150,7 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
         None => None,
         Some(raw) => {
             let requested = comma_list(raw);
-            let known = known_meta_fields();
+            let known = known_fields();
             let unknown: Vec<&String> = requested
                 .iter()
                 .filter(|name| !known.contains(name.as_str()))
@@ -205,7 +205,7 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
 /// the sentence above true, and
 /// `every_skip_if_none_option_on_run_meta_is_filled_by_the_probe` in the tests
 /// reads the struct's source to catch the next one added without a line here.
-fn known_meta_fields() -> HashSet<String> {
+pub(super) fn known_fields() -> HashSet<String> {
     serialized_keys(&probe_meta())
 }
 

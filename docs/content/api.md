@@ -597,6 +597,49 @@ and those are runs that are now gone. Naming a parent and one of its own childre
 request is fine. Each is deleted once, and the child is reported as deleted rather than skipped as
 missing.
 
+## Exporting the whole store
+
+Paging five thousand runs is a hundred requests, and a client that wants the lot wants it once. So
+there is an export. It is started over [GraphQL](/docs/graphql), because that is where the filter
+already lives:
+
+```graphql
+mutation {
+  bulkExportRuns(filter: { statusIn: [COMPLETE] }, fields: ["run_id", "status", "cost_usd"]) {
+    id status
+  }
+}
+```
+
+The answer comes back before the file exists. That is the point of a job: the request returns in
+milliseconds however large the store is. Poll it, and fetch it when it is ready:
+
+```graphql
+{ bulkExport(id: "export-1789865498-0") { status written error downloadUrl } }
+```
+
+`status` is `queued`, `running`, `complete` or `failed`. `written` counts the runs on disk so far.
+`downloadUrl` is null until the export is complete, and then it is a signed link to
+`GET /api/exports/{id}`, good for five minutes. That link needs no bearer token, so it can be the
+`href` of a download button.
+
+The filter is the run listing's own, so a predicate that works for one works for the other.
+`fields` narrows each row to the top-level run fields you name, using the same names the listing
+uses. A name no run carries is a 400 rather than a column quietly missing from the file.
+
+The body is JSONL: one JSON object per line, not one array. A reader can start on it before the
+writer has finished, and neither side ever holds the whole store in memory. Ten thousand runs is a
+loop over ten thousand lines at either end.
+
+```
+{"run_id":"run-a","status":"complete","cost_usd":0.0142}
+{"run_id":"run-b","status":"complete","cost_usd":0.0071}
+```
+
+A file is kept for one hour, then removed along with its job record. Neither outlives the other, so
+an id that has expired and one that was never started both answer 404. While the export is still
+running, or after it failed, the file route answers 409 and `bulkExport` carries the reason.
+
 ## Where a run's cost went
 
 `GET /api/agents/{id}/stages` returns one record per declared stage, in blueprint
@@ -1686,6 +1729,7 @@ than that feature, not broken.
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
 | `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
+| `runs.export` | `bulkExportRuns` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
 
 A few of those promises carry a consequence worth spelling out.
