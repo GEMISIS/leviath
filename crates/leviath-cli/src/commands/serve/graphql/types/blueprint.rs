@@ -54,17 +54,34 @@ impl From<CoreSource> for BlueprintSource {
     }
 }
 
-/// Whether a run sees tools that appear after it started.
+/// When a run looks for tools again after it started.
+///
+/// Discovery happens either way. What this decides is whether it happens more
+/// than once - not whether the agent may install a tool, which is what the tool
+/// permissions decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub(crate) enum ToolDiscovery {
-    /// Tools are discovered once, at spawn. A tool installed mid-run reaches
+pub(crate) enum ToolRescan {
+    /// The set is fixed when the run starts. A tool installed mid-run reaches
     /// the next run, not this one.
     AtSpawnOnly,
-    /// The run also scans its workdir's `tools/`, and re-advertises its tool
-    /// set after a script is written. This decides when a run *sees* a new
-    /// tool, not whether it may install one: that is what the tool permissions
-    /// decide.
+    /// The run also scans its workdir's `tools/`, and looks again before its
+    /// next turn once a script is written there.
     RescanAfterWrites,
+    /// As `RESCAN_AFTER_WRITES`, and the run looks again before each batch of
+    /// tool calls. The difference is one turn: a tool the model writes and
+    /// calls in the same turn is refused as unoffered without this.
+    RescanBeforeDispatch,
+}
+
+impl From<leviath_core::blueprint::ToolRescan> for ToolRescan {
+    fn from(setting: leviath_core::blueprint::ToolRescan) -> Self {
+        use leviath_core::blueprint::ToolRescan as Core;
+        match setting {
+            Core::AtSpawn => Self::AtSpawnOnly,
+            Core::AfterWrites => Self::RescanAfterWrites,
+            Core::BeforeDispatch => Self::RescanBeforeDispatch,
+        }
+    }
 }
 
 /// Whether a prompt hint is included at one manifest level.
@@ -441,12 +458,9 @@ impl Blueprint {
             .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
     }
 
-    /// Whether a run sees tools that appear after it started.
-    async fn tool_discovery(&self) -> ToolDiscovery {
-        match self.parsed.dynamic_tools {
-            true => ToolDiscovery::RescanAfterWrites,
-            false => ToolDiscovery::AtSpawnOnly,
-        }
+    /// When this blueprint's runs look for tools again.
+    async fn tool_rescan(&self) -> ToolRescan {
+        self.parsed.tool_rescan.into()
     }
 
     /// The prompt guidance this blueprint declares, before the cascade.

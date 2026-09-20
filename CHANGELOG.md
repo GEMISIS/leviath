@@ -165,6 +165,17 @@ same list.
 
 ### Changed
 
+- A blueprint says when its runs look for tools again, with a third answer that
+  did not exist: `[agent] tool_rescan` takes `at_spawn` (the default),
+  `after_writes`, or the new `before_dispatch`, which looks again before each
+  batch of tool calls as well as before each turn. That buys exactly one turn,
+  and it is the turn that matters: a call is checked against the set the turn was
+  built from, so an agent that writes a script and calls it immediately used to
+  be told the tool was not offered and had to try again. The check is a `stat`
+  per scanned directory per batch, and re-reads only what changed.
+  `dynamic_tools = true` is the older spelling of `after_writes` and still reads
+  as it, so no blueprint has to change.
+
 - `addMcpServer` takes the `headers` the REST route has always taken. An HTTP
   MCP server that authenticates with an `Authorization` header could be added
   over REST and not over GraphQL, so adding one there produced a server that

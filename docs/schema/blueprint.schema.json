@@ -280,9 +280,20 @@
           "type": "integer",
           "minimum": 0
         },
+        "tool_rescan": {
+          "enum": [
+            "at_spawn",
+            "after_writes",
+            "before_dispatch"
+          ],
+          "default": "at_spawn",
+          "description": "When a run looks for tools again. `at_spawn` fixes the set when the run starts. `after_writes` adds the workdir's tools/ to the scan set and looks again before the next turn once a script is written there. `before_dispatch` also looks again before each batch of tool calls, so a tool written and called in the same turn is not refused."
+        },
         "dynamic_tools": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "deprecated": true,
+          "description": "Renamed to `tool_rescan`. `true` still reads as `after_writes`."
         },
         "batch_tool_hint": {
           "type": "boolean"

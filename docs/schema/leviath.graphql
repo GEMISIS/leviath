@@ -467,9 +467,9 @@ type Blueprint {
 	"""
 	maxChildDepth: Int
 	"""
-	Whether a run sees tools that appear after it started.
+	When this blueprint's runs look for tools again.
 	"""
-	toolDiscovery: ToolDiscovery!
+	toolRescan: ToolRescan!
 	"""
 	The prompt guidance this blueprint declares, before the cascade.
 	"""
@@ -7035,24 +7035,6 @@ type ToolCallStarted {
 	tool: String!
 }
 
-"""
-Whether a run sees tools that appear after it started.
-"""
-enum ToolDiscovery {
-	"""
-	Tools are discovered once, at spawn. A tool installed mid-run reaches
-	the next run, not this one.
-	"""
-	AT_SPAWN_ONLY
-	"""
-	The run also scans its workdir's `tools/`, and re-advertises its tool
-	set after a script is written. This decides when a run *sees* a new
-	tool, not whether it may install one: that is what the tool permissions
-	decide.
-	"""
-	RESCAN_AFTER_WRITES
-}
-
 type ToolExecution {
 	"""
 	This attempt's own id, minted when it was dispatched.
@@ -7274,6 +7256,32 @@ type ToolPermissionRule {
 	daemon does not recognise, which is a rule that grants nothing.
 	"""
 	policy: ToolPermissionPolicy
+}
+
+"""
+When a run looks for tools again after it started.
+
+Discovery happens either way. What this decides is whether it happens more
+than once - not whether the agent may install a tool, which is what the tool
+permissions decide.
+"""
+enum ToolRescan {
+	"""
+	The set is fixed when the run starts. A tool installed mid-run reaches
+	the next run, not this one.
+	"""
+	AT_SPAWN_ONLY
+	"""
+	The run also scans its workdir's `tools/`, and looks again before its
+	next turn once a script is written there.
+	"""
+	RESCAN_AFTER_WRITES
+	"""
+	As `RESCAN_AFTER_WRITES`, and the run looks again before each batch of
+	tool calls. The difference is one turn: a tool the model writes and
+	calls in the same turn is refused as unoffered without this.
+	"""
+	RESCAN_BEFORE_DISPATCH
 }
 
 """

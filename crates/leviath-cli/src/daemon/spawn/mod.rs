@@ -648,7 +648,7 @@ fn build_agent_inner(
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
     all_tool_defs.extend(deps.mcp_tool_defs.iter().cloned());
     // The non-script defs (built-in + sub-agent + MCP), captured before script
-    // defs are appended - a `dynamic_tools` agent re-filters against these plus a
+    // defs are appended - a rescanning agent re-filters against these plus a
     // fresh script scan on each mid-run refresh.
     let static_tool_defs = all_tool_defs.clone();
 
@@ -659,11 +659,12 @@ fn build_agent_inner(
     // classification see them. A script tool whose name collides with a built-in,
     // sub-agent, or MCP tool is ignored (the existing tool wins), so it never
     // shadows a core tool.
-    // A `dynamic_tools` agent also scans its run workdir's `tools/`, so a tool it
+    // An agent that rescans also scans its run workdir's `tools/`, so a tool it
     // writes mid-run (into a workdir it can reach) is discoverable on re-scan.
-    let dynamic_tools = blueprint.dynamic_tools;
-    let workdir_tools_dir =
-        dynamic_tools.then(|| std::path::PathBuf::from(&args.workdir).join("tools"));
+    let tool_rescan = blueprint.tool_rescan;
+    let workdir_tools_dir = tool_rescan
+        .rescans()
+        .then(|| std::path::PathBuf::from(&args.workdir).join("tools"));
     let (script_tools, script_tool_names, script_defs) = discover_script_tools(
         &args.blueprint_path,
         &builtin_names,
@@ -725,7 +726,7 @@ fn build_agent_inner(
     // the manifest's top-level block would be silently ignored.
     let agent_perms = blueprint.agent_tool_permissions();
     // Each stage's Layer-1 allowlist, captured before the blueprint moves - a
-    // `dynamic_tools` agent re-filters against these on refresh.
+    // rescanning agent re-filters against these on refresh.
     //
     // Connector grants are expanded here rather than left for the refresh to
     // redo, so the refresh filters against exactly the list spawn resolved.
@@ -1089,14 +1090,24 @@ fn build_agent_inner(
         offered_parts: offered_parts.clone(),
         mime: Some(mime.clone()),
     };
-    // Build the dynamic-tools re-resolution context and tag the entity
-    // `DynamicTools` so the runtime polls it for mid-run re-scans.
-    let dynamic = dynamic_tools.then(|| {
+    // Build the re-resolution context and tag the entity `DynamicTools` so the
+    // runtime polls it for mid-run re-scans, plus `RescanBeforeDispatch` when
+    // the blueprint asks for a look before every batch as well.
+    let dynamic = tool_rescan.rescans().then(|| {
         world
             .entity_mut(entity)
             .insert(leviath_runtime::pipeline::DynamicTools);
+        if tool_rescan.before_dispatch() {
+            world
+                .entity_mut(entity)
+                .insert(leviath_runtime::pipeline::RescanBeforeDispatch);
+        }
+        let scan_dirs = script_scan_dirs(&args.blueprint_path, workdir_tools_dir);
+        // Stamped as spawn found them, so the first batch of a `before_dispatch`
+        // run does not re-scan directories it has just read.
+        let stamp = std::sync::Mutex::new(crate::daemon::tool_service::stamp_scan_dirs(&scan_dirs));
         Arc::new(crate::daemon::tool_service::DynamicToolCtx {
-            scan_dirs: script_scan_dirs(&args.blueprint_path, workdir_tools_dir),
+            scan_dirs,
             reserved_names: reserved_tool_names(&builtin_names, deps.mcp_tool_defs),
             static_defs: static_tool_defs,
             mcp_owners: deps.mcp_tool_owners.clone(),
@@ -1104,6 +1115,7 @@ fn build_agent_inner(
             stage_required,
             unattended: unattended_tools,
             dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stamp,
         })
     });
     let state = build_tool_state(ToolStateParts {
@@ -3045,11 +3057,78 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(!out[0].1.contains("no tool state"));
     }
 
+    /// Each `tool_rescan` value tags the agent with what that value turns on,
+    /// and nothing more.
+    ///
+    /// The markers are what the runtime queries, so a value that tagged too
+    /// little would leave a run doing less than its blueprint asked for, and one
+    /// that tagged too much would make every batch of an ordinary run pay for a
+    /// mode it never asked for.
+    #[tokio::test]
+    async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
+        use leviath_core::blueprint::ToolRescan;
+        use leviath_runtime::pipeline::{DynamicTools, RescanBeforeDispatch};
+
+        for (value, polls, before_dispatch) in [
+            (ToolRescan::AtSpawn, false, false),
+            (ToolRescan::AfterWrites, true, false),
+            (ToolRescan::BeforeDispatch, true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("agent.leviath");
+            std::fs::write(
+                &manifest,
+                coder_manifest().replace(
+                    "[agent]",
+                    &format!("[agent]\ntool_rescan = \"{}\"", value.wire()),
+                ),
+            )
+            .unwrap();
+
+            let (mut world, cli) = test_world();
+            let hub = InteractionHub::new();
+            let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+            let entity = build_agent(
+                world.world_mut(),
+                SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp,
+                    mcp_tool_defs: &[],
+                    mcp_tool_owners: &Default::default(),
+                    hub: &hub,
+                    now_secs: 100,
+                    subagent_tx: sub_tx(),
+                },
+                &spawn_args(&manifest.to_string_lossy()),
+            )
+            .expect("spawn succeeds");
+
+            let word = value.wire();
+            assert_eq!(
+                world.world().get::<DynamicTools>(entity).is_some(),
+                polls,
+                "{word}: whether the runtime polls it between turns"
+            );
+            assert_eq!(
+                world.world().get::<RescanBeforeDispatch>(entity).is_some(),
+                before_dispatch,
+                "{word}: whether it looks again before each batch"
+            );
+            // And the re-resolution context exists exactly when it is used.
+            assert_eq!(
+                leviath_runtime::pipeline::ToolService::refresh_tools(cli.as_ref(), entity, 0)
+                    .is_some(),
+                polls,
+                "{word}: whether there is anything to refresh with"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn build_agent_tags_dynamic_tools_agent() {
-        // A blueprint opting into dynamic_tools gets the DynamicTools marker so the
-        // runtime polls it for mid-run re-scans; the agent's tool state carries the
-        // re-resolution context (exercised via refresh_tools).
+        // The flag `tool_rescan` grew out of still reads as `after_writes`, so a
+        // blueprint carrying it is polled between turns as it always was.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(

@@ -210,8 +210,9 @@ Three things keep the directory yours:
 A tool is meant for repeatable mechanical steps, never for judgement. A script that encodes a
 decision the model should be making each time ages badly and is hard to notice from the outside.
 
-To use an installed tool in the same run, the agent must be a `dynamic_tools` agent, which picks
-the new tool up on its next turn. Any later run sees it at spawn, and a stage advertises it when its
+To use an installed tool in the same run, the agent needs
+[`tool_rescan`](/docs/agents#discovering-tools-mid-run): `after_writes` picks the new tool up on its
+next turn, and `before_dispatch` also picks it up in the turn that wrote it. Any later run sees it at spawn, and a stage advertises it when its
 `available_tools` names it or includes `@scripts`. See [Tools](/docs/tools) for how a stage's tool
 set is put together.
 

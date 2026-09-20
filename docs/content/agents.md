@@ -484,16 +484,28 @@ registered.
 ## Discovering tools mid-run
 
 By default a stage advertises a fixed tool set resolved at spawn, and a tool that appears later is
-invisible to it. `dynamic_tools` opts an agent in to re-advertising:
+invisible to it. `tool_rescan` says when a run looks again:
 
 ```toml
 [agent]
-dynamic_tools = true
+tool_rescan = "after_writes"   # at_spawn | after_writes | before_dispatch
 ```
 
-With it on, a script tool written into the run's own `tools/` directory becomes callable on the
-next inference. Off (the default) is the safer choice, since it means an agent cannot grow its own
-capabilities mid-run.
+| Value | When it looks | What that buys |
+|---|---|---|
+| `at_spawn` | Once, at spawn | The default. An agent cannot grow its own capabilities mid-run |
+| `after_writes` | Before the next turn, once a script is written | A tool written this turn is callable next turn |
+| `before_dispatch` | Also before each batch of calls | A tool written and called in the same turn is not refused |
+
+Anything but `at_spawn` puts the run's own `tools/` directory in the scan set. The directory is the
+workdir's, so anything else running there sees the same tools and a sub-agent inherits it.
+
+`before_dispatch` buys exactly one turn. A call is checked against the set the turn was built from,
+so under `after_writes` a model that writes a script and calls it immediately is told the tool is
+not offered, and has to try again. The cost is one `stat` per scanned directory per batch, and a
+re-scan only when something changed.
+
+`dynamic_tools = true` is the older spelling of `after_writes` and still reads as it.
 
 ## Handing context to a sub-agent
 

@@ -83,7 +83,7 @@ pub(crate) use transition_choice::{
 pub(crate) use transition_choice::{build_transition_prompt, match_transition_choice};
 mod tool_stages;
 pub(crate) use tool_stages::{
-    poll_dynamic_tool_refresh, refresh_advertised_tools, sync_tool_stages,
+    poll_dynamic_tool_refresh, refresh_advertised_tools, rescan_before_dispatch, sync_tool_stages,
 };
 mod messaging;
 pub(crate) use messaging::{MessageIntake, deliver_messages};
@@ -116,7 +116,7 @@ pub(crate) use tools::{
     AwaitingTools, ContextToolResults, ToolServiceRes, ToolStage, ToolsNeedRefresh,
     call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
 };
-pub use tools::{DynamicTools, ToolProgress, ToolService, noop_progress};
+pub use tools::{DynamicTools, RescanBeforeDispatch, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]
 pub(crate) use tools::{barrier_then, invalid_args_refusal};
 mod cut_off;

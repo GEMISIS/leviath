@@ -5024,6 +5024,194 @@ fn stage_inf(tools: &[&str]) -> StageInference {
     }
 }
 
+/// A service whose scan directories are stale as often as it is asked.
+///
+/// The answer is scripted rather than read off a disk, because what the system
+/// owes is "ask, and act only on yes" - whether a `stat` says yes is the
+/// service's business and is tested where the stamping lives.
+struct StaleService {
+    stale: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl ToolService for StaleService {
+    fn exec_for(
+        &self,
+        _e: Entity,
+        _c: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
+        Box::new(|| Box::pin(async { Vec::new() }))
+    }
+    fn refresh_tools(&self, _e: Entity, _idx: usize) -> Option<Vec<Tool>> {
+        Some(vec![Tool {
+            name: "just_written".to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }])
+    }
+    fn scan_stale(&self, _e: Entity) -> bool {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stale.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn run_rescan(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(rescan_before_dispatch);
+    schedule.run(world);
+}
+
+/// A batch about to be dispatched by an agent that asked for a look first sees
+/// the tool that appeared since its turn began.
+///
+/// The advertised set is what dispatch refuses an unoffered call against, so
+/// this is the difference between a tool written and called in one turn being
+/// refused and being run.
+#[test]
+fn a_stale_scan_is_re_advertised_before_the_batch() {
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(StaleService {
+        stale: std::sync::atomic::AtomicBool::new(true),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    })));
+    let entity = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+            ReadyForTools,
+            RescanBeforeDispatch,
+        ))
+        .id();
+
+    run_rescan(&mut world);
+
+    let live: Vec<String> = world
+        .get::<StageInference>(entity)
+        .unwrap()
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(live, vec!["just_written".to_string()]);
+    // The catalog too, or re-entering this stage would silently advertise the
+    // set the run started with.
+    assert_eq!(
+        world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
+        "just_written"
+    );
+    assert_eq!(
+        world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
+        "other",
+        "another stage is not touched"
+    );
+    // No marker is consumed: the agent looks again before its next batch too.
+    assert!(world.get::<RescanBeforeDispatch>(entity).is_some());
+}
+
+/// Nothing changed on disk, so nothing is re-read - and the ordinary batch pays
+/// one question and no re-scan.
+#[test]
+fn an_unchanged_scan_leaves_the_advertised_set_alone() {
+    let mut world = World::new();
+    let service = Arc::new(StaleService {
+        stale: std::sync::atomic::AtomicBool::new(false),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    world.insert_resource(ToolServiceRes(service.clone()));
+    let entity = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            StageInferences(vec![stage_inf(&["old"])]),
+            ReadyForTools,
+            RescanBeforeDispatch,
+        ))
+        .id();
+
+    run_rescan(&mut world);
+
+    assert_eq!(
+        world.get::<StageInference>(entity).unwrap().tools[0].name,
+        "old"
+    );
+    assert_eq!(service.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// An agent that did not ask for it is never even asked, and neither is one
+/// that asked but is not dispatching this tick.
+#[test]
+fn only_an_agent_that_asked_and_is_dispatching_is_looked_at() {
+    let mut world = World::new();
+    let service = Arc::new(StaleService {
+        stale: std::sync::atomic::AtomicBool::new(true),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    world.insert_resource(ToolServiceRes(service.clone()));
+    // Dispatching, but its blueprint never asked.
+    let ordinary = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            StageInferences(vec![stage_inf(&["old"])]),
+            ReadyForTools,
+        ))
+        .id();
+    // Asked, but between batches.
+    let idle = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            StageInferences(vec![stage_inf(&["old"])]),
+            RescanBeforeDispatch,
+        ))
+        .id();
+
+    run_rescan(&mut world);
+
+    assert_eq!(
+        service.asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "neither agent is a candidate, so the question is never asked"
+    );
+    for entity in [ordinary, idle] {
+        assert_eq!(
+            world.get::<StageInference>(entity).unwrap().tools[0].name,
+            "old"
+        );
+    }
+}
+
+/// A service that does not answer the staleness question turns the mode off
+/// rather than re-scanning every batch.
+///
+/// The default matters for an embedder: a host that drives the runtime with its
+/// own tool service should not start paying for a mode it never implemented,
+/// and a blueprint asking for it should not start behaving as though it had.
+#[test]
+fn a_service_without_a_staleness_check_never_rescans() {
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec!["new_tool"]))));
+    let entity = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            StageInferences(vec![stage_inf(&["old"])]),
+            ReadyForTools,
+            RescanBeforeDispatch,
+        ))
+        .id();
+
+    run_rescan(&mut world);
+
+    assert_eq!(
+        world.get::<StageInference>(entity).unwrap().tools[0].name,
+        "old",
+        "the service said nothing changed, so nothing was re-read"
+    );
+}
+
 fn run_refresh(world: &mut World) {
     let mut schedule = Schedule::default();
     schedule.add_systems(refresh_advertised_tools);

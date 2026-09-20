@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
 use super::super::manifest::stage::StageMode;
-use super::{Blueprint, BlueprintSource, HintSetting, RegionKind, ToolDiscovery};
+use super::{Blueprint, BlueprintSource, HintSetting, RegionKind, ToolRescan};
 use crate::commands::serve::core::blueprints::{BlueprintSource as CoreSource, digest_of};
 
 /// A manifest exercising the fields this module maps.
@@ -16,7 +16,7 @@ fn manifest() -> String {
      description = \"writes code\"\n\
      entry_stage = \"plan\"\n\
      max_child_depth = 4\n\
-     dynamic_tools = true\n\
+     tool_rescan = \"before_dispatch\"\n\
      batch_tool_hint = false\n\
      \n\
      [read_paths]\n\
@@ -153,7 +153,7 @@ async fn a_blueprint_carries_its_agent_block() {
     let json = ask(
         &manifest(),
         CoreSource::Snapshot,
-        "{ blueprint { name version description maxChildDepth toolDiscovery readPaths
+        "{ blueprint { name version description maxChildDepth toolRescan readPaths
                        entryStage { name mode } } }",
     )
     .await;
@@ -162,9 +162,9 @@ async fn a_blueprint_carries_its_agent_block() {
     assert_eq!(bp["version"], "1.2.0");
     assert_eq!(bp["description"], "writes code");
     assert_eq!(bp["maxChildDepth"], 4);
-    // `dynamic_tools = true` decides when a run sees new tools, so it is named
-    // for that rather than for installing them.
-    assert_eq!(bp["toolDiscovery"], "RESCAN_AFTER_WRITES");
+    // The setting decides when a run looks for tools again, not whether it may
+    // install one, so it is named for that.
+    assert_eq!(bp["toolRescan"], "RESCAN_BEFORE_DISPATCH");
     assert_eq!(bp["readPaths"][0], "~/designs");
     // `entry_stage` names a stage rather than taking the first declared one.
     assert_eq!(bp["entryStage"]["name"], "plan");
@@ -184,18 +184,28 @@ async fn an_unnamed_entry_stage_is_the_first_declared() {
     assert_eq!(json["blueprint"]["entryStage"]["name"], "plan");
 }
 
-/// A tool set fixed at spawn says so, rather than reading as a missing field.
+/// Every value the setting can take reads back, including the flag it grew out
+/// of and a blueprint that says nothing.
 #[tokio::test]
-async fn a_blueprint_without_live_discovery_says_at_spawn_only() {
-    let text = manifest().replace("dynamic_tools = true", "dynamic_tools = false");
-    let json = ask(
-        &text,
-        CoreSource::Snapshot,
-        "{ blueprint { toolDiscovery } }",
-    )
-    .await;
-    assert_eq!(json["blueprint"]["toolDiscovery"], "AT_SPAWN_ONLY");
-    assert_eq!(ToolDiscovery::AtSpawnOnly, ToolDiscovery::AtSpawnOnly);
+async fn every_rescan_setting_reads_back() {
+    let cases = [
+        (r#"tool_rescan = "at_spawn""#, "AT_SPAWN_ONLY"),
+        (r#"tool_rescan = "after_writes""#, "RESCAN_AFTER_WRITES"),
+        (
+            r#"tool_rescan = "before_dispatch""#,
+            "RESCAN_BEFORE_DISPATCH",
+        ),
+        // The flag it replaced did exactly what `after_writes` does.
+        ("dynamic_tools = true", "RESCAN_AFTER_WRITES"),
+        // And a blueprint that mentions none of it is fixed at spawn.
+        ("", "AT_SPAWN_ONLY"),
+    ];
+    for (line, expected) in cases {
+        let text = manifest().replace(r#"tool_rescan = "before_dispatch""#, line);
+        let json = ask(&text, CoreSource::Snapshot, "{ blueprint { toolRescan } }").await;
+        assert_eq!(json["blueprint"]["toolRescan"], expected, "{line}");
+    }
+    assert_eq!(ToolRescan::AtSpawnOnly, ToolRescan::AtSpawnOnly);
 }
 
 /// The three states of a prompt hint, and what each one means.

@@ -480,6 +480,39 @@ pub(crate) struct DynamicToolCtx {
     pub unattended: bool,
     /// Set when the agent writes a tool file; drained by `wants_refresh`.
     pub dirty: Arc<AtomicBool>,
+    /// What the scanned directories looked like when they were last read, for
+    /// the per-batch staleness check a `before_dispatch` agent makes.
+    ///
+    /// Stamped at spawn, from the directories spawn itself read, so the first
+    /// batch of a run does not re-scan what was just scanned.
+    pub stamp: std::sync::Mutex<ScanStamp>,
+}
+
+/// Every `.rhai` file in the scanned directories with its mtime, sorted.
+///
+/// Compared whole rather than per file: a tool being *removed* has to read as a
+/// change too, and a missing directory that later appears has to start counting
+/// without anything having to notice it arrive.
+pub(crate) type ScanStamp = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+
+/// Stamp the scanned directories as they are now.
+///
+/// A directory that cannot be read stamps as nothing, exactly as discovery
+/// treats it, so the two cannot disagree about what is there.
+pub(crate) fn stamp_scan_dirs(dirs: &[PathBuf]) -> ScanStamp {
+    let mut stamp: ScanStamp = dirs
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(dir).ok().into_iter().flatten().flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|e| e.to_str()) == Some("rhai")).then(|| {
+                let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                (path, mtime)
+            })
+        })
+        .collect();
+    stamp.sort();
+    stamp
 }
 
 /// Execute a single (non-context) tool call against the script-tool, built-in,
@@ -1078,6 +1111,25 @@ impl ToolService for CliToolService {
             .and_then(|s| s.dynamic.as_ref())
             .map(|ctx| ctx.dirty.swap(false, Ordering::SeqCst))
             .unwrap_or(false)
+    }
+
+    fn scan_stale(&self, entity: Entity) -> bool {
+        let Some(ctx) = self
+            .states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entity)
+            .and_then(|state| state.dynamic.clone())
+        else {
+            return false;
+        };
+        let now = stamp_scan_dirs(&ctx.scan_dirs);
+        let mut last = ctx.stamp.lock().unwrap_or_else(PoisonError::into_inner);
+        if *last == now {
+            return false;
+        }
+        *last = now;
+        true
     }
 
     fn refresh_tools(
@@ -1806,6 +1858,9 @@ mod tests {
                 stage_required,
                 unattended,
                 dirty: Arc::new(AtomicBool::new(false)),
+                // Empty rather than stamped, so a test that asks about
+                // staleness gets the first answer a fresh run gets.
+                stamp: StdMutex::default(),
             })),
             config_source: test_config_source(),
         })
@@ -1956,6 +2011,56 @@ mod tests {
         svc.register(e, state);
         assert!(svc.wants_refresh(e)); // reads true...
         assert!(!svc.wants_refresh(e)); // ...and drained it to false
+    }
+
+    /// The stamp answers "did the scanned directories change", and answers it
+    /// without consuming anything: the dirty flag is drained by the poll that
+    /// runs between turns, and this runs in the middle of one.
+    #[test]
+    fn scan_stale_reports_a_change_once_and_leaves_the_dirty_flag_alone() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let state = dynamic_state(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![],
+            vec![vec![]],
+        );
+        let dirty = Arc::clone(&state.dynamic.as_ref().unwrap().dirty);
+        let svc = CliToolService::new();
+        let e = Entity::from_raw_u32(9).expect("a small literal index is always a valid entity id");
+        svc.register(e, state);
+
+        // Empty directories stamp as nothing, which is what an unstamped agent
+        // already reads as: there is nothing there and nothing has changed.
+        assert!(!svc.scan_stale(e), "an empty scan set is not a change");
+
+        std::fs::write(tools.path().join("fresh.rhai"), "// @tool fresh\n1").unwrap();
+        assert!(svc.scan_stale(e), "a new script is a change");
+        assert!(!svc.scan_stale(e), "read once, then quiet again");
+
+        std::fs::remove_file(tools.path().join("fresh.rhai")).unwrap();
+        assert!(svc.scan_stale(e), "and so is one going away");
+
+        // A file nothing scans for is not a change, whatever it does to the
+        // directory's own mtime.
+        std::fs::write(tools.path().join("notes.txt"), "hello").unwrap();
+        assert!(!svc.scan_stale(e), "only `.rhai` files count");
+
+        assert!(
+            !dirty.load(Ordering::SeqCst),
+            "the between-turns flag is untouched"
+        );
+    }
+
+    /// An agent this service has never seen is never stale: the question is
+    /// asked once per batch, so it has to answer without arranging anything.
+    #[test]
+    fn an_agent_that_does_not_rescan_is_never_stale() {
+        let svc = CliToolService::new();
+        let e =
+            Entity::from_raw_u32(11).expect("a small literal index is always a valid entity id");
+        assert!(!svc.scan_stale(e), "an agent it has never seen");
     }
 
     #[tokio::test]
