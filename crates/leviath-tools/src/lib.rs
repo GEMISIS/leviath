@@ -31,7 +31,7 @@ pub use defs::{
     submit_output_description,
 };
 pub use install::{
-    InstallProbes, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
+    InstallProbes, InstalledFor, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
     install_script_tool_with,
 };
 pub use platform::*;
