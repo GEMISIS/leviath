@@ -25,6 +25,7 @@ use super::types::machine::{
     ServeLimits, YoloProfile, YoloProfiles,
 };
 use super::types::run::{Run, RunStatus};
+use super::types::update::{DaemonStatus, UpdateInfo, UpdateJob};
 
 /// Sort order for the run listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -353,74 +354,11 @@ impl Query {
         // the file and hands back the config in force with its verdict, so the
         // two halves of one answer cannot disagree.
         let health = state.config.health();
-        let redacted = super::super::config::redact(
+        config_of(
             &health.config.clone(),
             &state.limits.request_limits,
             &health,
-        );
-        let mut configured = Vec::new();
-        for (name, present) in [
-            ("anthropic", redacted.has_anthropic_key),
-            ("openai", redacted.has_openai_key),
-            ("google", redacted.has_google_key),
-            ("openrouter", redacted.has_openrouter_key),
-            ("bedrock", redacted.has_bedrock_key),
-            ("xai", redacted.has_xai_key),
-            ("meta", redacted.has_meta_key),
-        ] {
-            if present {
-                configured.push(name.to_string());
-            }
-        }
-        Config {
-            default_provider: redacted.default_provider,
-            provider_order: redacted.provider_order,
-            override_model: redacted.override_model,
-            fallback_model: redacted.fallback_model,
-            configured_providers: configured,
-            gateways: redacted
-                .gateways
-                .iter()
-                .map(|gateway| Gateway {
-                    name: gateway.name.clone(),
-                    base_url: gateway.base_url.clone(),
-                    has_api_key: gateway.has_api_key,
-                    kind: gateway.kind.clone(),
-                })
-                .collect(),
-            agent_paths: redacted
-                .agent_paths
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            mcp_server_count: count(redacted.mcp_server_count),
-            api_version: redacted.api_version,
-            capabilities: redacted.capabilities,
-            limits: ServeLimits {
-                max_page_size: count(redacted.limits.max_limit),
-                max_ids: count(redacted.limits.max_ids),
-                max_file_bytes: BigInt(redacted.limits.max_file_bytes as i64),
-                max_listing_entries: count(redacted.limits.max_listing_entries),
-                max_search_scan: count(redacted.limits.max_search_scan),
-                max_history_limit: count(redacted.limits.max_history_limit),
-                max_concurrent_requests: BigInt(redacted.limits.max_concurrent_requests as i64),
-                max_upload_bytes: BigInt(state.limits.request_limits.max_upload_bytes as i64),
-                request_timeout_secs: i32::try_from(
-                    state.limits.request_limits.request_timeout_secs,
-                )
-                .unwrap_or(i32::MAX),
-            },
-            config_error: redacted.config_error.map(|error| ConfigError {
-                kind: error.kind,
-                path: error.path,
-                message: error.message,
-                line: error.line.and_then(|line| i32::try_from(line).ok()),
-                column: error.column.and_then(|col| i32::try_from(col).ok()),
-                key: error.key,
-                note: error.note,
-            }),
-            config_mtime: redacted.config_mtime.map(Timestamp),
-        }
+        )
     }
 
     /// Environment and configuration diagnostics.
@@ -430,18 +368,7 @@ impl Query {
     /// answer.
     async fn doctor(&self) -> DoctorReport {
         let report = super::super::doctor::offline_report().await;
-        DoctorReport {
-            ok: report.checks.iter().all(|check| check.ok),
-            checks: report
-                .checks
-                .into_iter()
-                .map(|check| DoctorCheck {
-                    name: check.name,
-                    ok: check.ok,
-                    detail: check.detail,
-                })
-                .collect(),
-        }
+        doctor_report(report.checks)
     }
 
     /// The MCP servers this machine has configured.
@@ -625,6 +552,51 @@ impl Query {
         })
     }
 
+    /// Who is on the other end of the control socket.
+    ///
+    /// A read this server answers from what it already knows, so it works while
+    /// the daemon is down: that is the point of asking. `connected` false does
+    /// not mean requests fail, it means the live frames have stopped.
+    async fn daemon(&self, ctx: &Context<'_>) -> DaemonStatus {
+        let state = ctx.data_unchecked::<AppState>();
+        DaemonStatus::of(&state.control)
+    }
+
+    /// What an update would do, and whether there is anything newer to get.
+    ///
+    /// Planning never reaches the network. The "is there anything newer" half is
+    /// whatever the last check found, and asking starts another one for whoever
+    /// asks next rather than waiting on one here, so this is cheap enough for a
+    /// page to ask every time it opens.
+    async fn update(&self, ctx: &Context<'_>) -> UpdateInfo {
+        let state = ctx.data_unchecked::<AppState>();
+        let plan = super::super::update::planned();
+        if state.current_config().update_check {
+            state.update_check.read_and_maybe_refresh(
+                plan.method.channel(),
+                super::super::config_types::API_VERSION,
+            );
+        }
+        UpdateInfo::from_plan(
+            &plan,
+            super::super::config_types::API_VERSION,
+            &state.update_check.peek(),
+        )
+    }
+
+    /// One update run, by id.
+    ///
+    /// Null when no job carries that id. The last few runs are kept, so an
+    /// operator reading back after the fact finds the job rather than nothing.
+    async fn update_job(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The job's id.")] id: String,
+    ) -> Option<UpdateJob> {
+        let state = ctx.data_unchecked::<AppState>();
+        state.update_jobs.get(&id).map(UpdateJob::from)
+    }
+
     /// Poll an export this server started.
     ///
     /// Null when no export carries that id: it was never started, or it has
@@ -754,6 +726,96 @@ fn human_word(human: crate::yolo::rules::Human) -> &'static str {
     match human {
         crate::yolo::rules::Human::Ask => "ask",
         crate::yolo::rules::Human::Auto => "auto",
+    }
+}
+
+/// The config as this schema describes it, with every secret left out.
+///
+/// Shared with the write side, so a config read and the answer to a config write
+/// are the same shape rather than two that drifted.
+pub(crate) fn config_of(
+    config: &crate::config::Config,
+    requests: &super::super::request_limits::RequestLimits,
+    health: &crate::daemon::config_reload::ConfigHealth,
+) -> Config {
+    let redacted = super::super::config::redact(config, requests, health);
+    let mut configured = Vec::new();
+    for (name, present) in [
+        ("anthropic", redacted.has_anthropic_key),
+        ("openai", redacted.has_openai_key),
+        ("google", redacted.has_google_key),
+        ("openrouter", redacted.has_openrouter_key),
+        ("bedrock", redacted.has_bedrock_key),
+        ("xai", redacted.has_xai_key),
+        ("meta", redacted.has_meta_key),
+    ] {
+        if present {
+            configured.push(name.to_string());
+        }
+    }
+    Config {
+        default_provider: redacted.default_provider,
+        provider_order: redacted.provider_order,
+        override_model: redacted.override_model,
+        fallback_model: redacted.fallback_model,
+        configured_providers: configured,
+        gateways: redacted
+            .gateways
+            .iter()
+            .map(|gateway| Gateway {
+                name: gateway.name.clone(),
+                base_url: gateway.base_url.clone(),
+                has_api_key: gateway.has_api_key,
+                kind: gateway.kind.clone(),
+            })
+            .collect(),
+        agent_paths: redacted
+            .agent_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        mcp_server_count: count(redacted.mcp_server_count),
+        api_version: redacted.api_version,
+        capabilities: redacted.capabilities,
+        limits: ServeLimits {
+            max_page_size: count(redacted.limits.max_limit),
+            max_ids: count(redacted.limits.max_ids),
+            max_file_bytes: BigInt(redacted.limits.max_file_bytes as i64),
+            max_listing_entries: count(redacted.limits.max_listing_entries),
+            max_search_scan: count(redacted.limits.max_search_scan),
+            max_history_limit: count(redacted.limits.max_history_limit),
+            max_concurrent_requests: BigInt(redacted.limits.max_concurrent_requests as i64),
+            max_upload_bytes: BigInt(requests.max_upload_bytes as i64),
+            request_timeout_secs: i32::try_from(requests.request_timeout_secs).unwrap_or(i32::MAX),
+        },
+        config_error: redacted.config_error.map(|error| ConfigError {
+            kind: error.kind,
+            path: error.path,
+            message: error.message,
+            line: error.line.and_then(|line| i32::try_from(line).ok()),
+            column: error.column.and_then(|col| i32::try_from(col).ok()),
+            key: error.key,
+            note: error.note,
+        }),
+        config_mtime: redacted.config_mtime.map(Timestamp),
+    }
+}
+
+/// One diagnostics run as this schema describes it.
+///
+/// Shared by the offline field and the live mutation: they run different checks
+/// and answer with the same shape, which is what lets a client render one view.
+pub(crate) fn doctor_report(checks: Vec<super::super::types::DoctorCheck>) -> DoctorReport {
+    DoctorReport {
+        ok: checks.iter().all(|check| check.ok),
+        checks: checks
+            .into_iter()
+            .map(|check| DoctorCheck {
+                name: check.name,
+                ok: check.ok,
+                detail: check.detail,
+            })
+            .collect(),
     }
 }
 

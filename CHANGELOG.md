@@ -115,6 +115,14 @@ same list.
   directory resolves against the run's working directory, and one that walks out
   of it is refused rather than followed.
 
+- The machine's own state and the acts that change it, over GraphQL: `daemon`,
+  `update` and `updateJob(id:)` as fields, and, behind `--allow-admin`,
+  `updateConfig`, `putScript`, `deleteScript`, `runDoctorLive`, `makeDirectory`
+  and `startUpdate` as mutations. `updateConfig` carries the REST route's three
+  states per setting (absent leaves it, `null` clears it, a value sets it) rather
+  than flattening them, and `putMimeRow` now takes the whole row, including its
+  token rule and magic bytes, which until now were REST-only.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

@@ -37,16 +37,7 @@ use crate::commands::update::{UpdateArgs, UpdateEnv, plan, plan_json};
 /// discovery degrades to worse detection rather than to an error - a copy this
 /// build cannot place is `unknown` with advice, an answer rather than a 500.
 pub(super) async fn get_update(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // `--check` is implied: this route only ever plans. The other fields are
-    // defaults, which is what a caller who is not choosing a channel means.
-    let args = UpdateArgs {
-        check: true,
-        ..UpdateArgs::default()
-    };
-    // `for_planning_offline` rather than `for_planning`: planning never fetches,
-    // and handing this path a fetcher it is trusted not to call is how a later
-    // edit turns a fast route into a slow one with nothing to catch it.
-    let plan = plan(&args, &UpdateEnv::for_planning_offline());
+    let plan = planned();
     // Reports what is known now and, if that has gone stale, starts a lookup for
     // whoever asks next. Never waits on one.
     //
@@ -59,6 +50,24 @@ pub(super) async fn get_update(State(state): State<AppState>) -> Json<serde_json
             .read_and_maybe_refresh(plan.method.channel(), API_VERSION);
     }
     Json(plan_json(&plan, API_VERSION, &state.update_check.peek()))
+}
+
+/// What an update would do, planned without reaching the network.
+///
+/// Both surfaces plan through here, so neither can plan differently from the
+/// other. `--check` is implied: this only ever plans, and the other arguments
+/// stay at their defaults, which is what a caller who is not choosing a channel
+/// means. `for_planning_offline` rather than `for_planning` because planning
+/// never fetches, and handing this path a fetcher it is trusted not to call is
+/// how a later edit turns a fast read into a slow one with nothing to catch it.
+pub(super) fn planned() -> crate::commands::update::UpdatePlan {
+    plan(
+        &UpdateArgs {
+            check: true,
+            ..UpdateArgs::default()
+        },
+        &UpdateEnv::for_planning_offline(),
+    )
 }
 
 /// `POST /api/update`: carry the plan out.

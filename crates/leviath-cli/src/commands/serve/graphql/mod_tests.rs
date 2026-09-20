@@ -7,9 +7,13 @@ use super::{MAX_COMPLEXITY, MAX_DEPTH, build_schema, sdl};
 
 /// A schema over a state that talks to no daemon.
 fn schema() -> super::LeviathSchema {
-    build_schema(crate::commands::serve::testutil::state_with_agent_paths(
-        Vec::new(),
-    ))
+    build_schema(
+        crate::commands::serve::testutil::state_with_agent_paths(Vec::new()),
+        // The published schema documents the admin surface whatever this server
+        // was started with: `sdl()` ignores visibility, deliberately, so one
+        // published schema describes every Leviath rather than this one.
+        true,
+    )
 }
 
 /// The SDL is what clients generate code from, so it carries the descriptions

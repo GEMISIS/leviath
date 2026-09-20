@@ -594,6 +594,7 @@ async fn execute_with_shutdown(
     // execution context instead.
     let app = app.layer(axum::extract::Extension(graphql::build_schema(
         state.clone(),
+        args.allow_admin,
     )));
 
     let app = app
@@ -1552,6 +1553,7 @@ mod tests {
         let app = api_router()
             .layer(axum::extract::Extension(graphql::build_schema(
                 state.clone(),
+                false,
             )))
             .with_state(state);
         let req = Request::builder()
@@ -1573,6 +1575,59 @@ mod tests {
         assert_eq!(json["data"]["__typename"], "Query");
     }
 
+    /// `--allow-admin` is what opens the GraphQL mutations that change the
+    /// machine, and the flag has to reach the schema for that to be true.
+    ///
+    /// The gate is inside the schema, so nothing about the router says whether
+    /// it was armed: a schema built without the flag refuses every admin
+    /// mutation, which reads exactly like a server started without it. This
+    /// asks the same server both ways.
+    #[tokio::test]
+    async fn allow_admin_opens_the_admin_mutations_over_graphql() {
+        for allow_admin in [false, true] {
+            let state = test_state();
+            let app = api_router()
+                .layer(axum::extract::Extension(graphql::build_schema(
+                    state.clone(),
+                    allow_admin,
+                )))
+                .with_state(state);
+            let req = Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "query": "{ __type(name: \"Mutation\") { fields { name } } }"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let names: Vec<String> = json["data"]["__type"]["fields"]
+                .as_array()
+                .expect("the mutation fields")
+                .iter()
+                .map(|field| field["name"].as_str().unwrap_or_default().to_string())
+                .collect();
+            assert!(
+                names.iter().any(|name| name == "spawnAgent"),
+                "the ordinary mutations are always there: {names:?}"
+            );
+            assert_eq!(
+                names.iter().any(|name| name == "addMcpServer"),
+                allow_admin,
+                "the admin mutations follow the flag (allow_admin: {allow_admin})"
+            );
+        }
+    }
+
     /// A query the schema refuses still answers 200, with the failure in
     /// `errors`. That is the GraphQL contract, and it is what lets one bad
     /// field travel beside forty-nine good ones.
@@ -1582,6 +1637,7 @@ mod tests {
         let app = api_router()
             .layer(axum::extract::Extension(graphql::build_schema(
                 state.clone(),
+                false,
             )))
             .with_state(state);
         let req = Request::builder()

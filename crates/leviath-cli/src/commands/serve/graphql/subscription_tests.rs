@@ -357,7 +357,7 @@ async fn a_subscription_runs_over_a_real_websocket() {
 
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(state);
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let app = Router::new()
         .route("/ws/graphql", get(crate::commands::serve::graphql::ws))
         .layer(axum::extract::Extension(schema));

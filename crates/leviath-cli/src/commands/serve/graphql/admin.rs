@@ -13,6 +13,9 @@
 
 use async_graphql::{Context, Guard, Object, SimpleObject};
 
+use super::super::types::AppState;
+use super::config_input::ConfigInput;
+
 use super::super::core::error::ServeError;
 use super::error::{IntoGraphql, graphql_error};
 
@@ -100,17 +103,32 @@ impl AdminMutation {
     }
 
     /// Add or update one row of the mime registry.
+    ///
+    /// Every field but the key is optional, because a row says only what it
+    /// changes: what a field leaves out stays as whatever broader row already
+    /// covers the type.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
     async fn put_mime_row(
         &self,
-        #[graphql(desc = "The type or pattern this row covers.")] mime_type: String,
-        #[graphql(desc = "The family providers key their encoders on.")] family: Option<String>,
-        #[graphql(desc = "Whether the bytes are text, and may travel inline.")] text: Option<bool>,
-        #[graphql(desc = "Extensions that imply this type, without the dot.")] extensions: Option<
-            Vec<String>,
-        >,
+        #[graphql(desc = "The row to write.")] row: MimeRowInput,
     ) -> async_graphql::Result<MimeRowWritten> {
-        let written = super::super::mime::write_row(&mime_type, family, text, extensions).gql()?;
+        let tokens = match row.tokens {
+            None => None,
+            Some(rates) => Some(rates.into_spec().gql()?),
+        };
+        let written = super::super::mime::write_edit(
+            &row.mime_type,
+            crate::commands::mime_rows::RowEdit {
+                family: row.family,
+                text: row.text,
+                tokens,
+                extensions: row.extensions,
+                magic: row.magic,
+                stand_in: row.stand_in,
+                check: row.check,
+            },
+        )
+        .gql()?;
         Ok(MimeRowWritten {
             mime_type: written.mime_type,
             created: written.created,
@@ -128,6 +146,239 @@ impl AdminMutation {
     ) -> async_graphql::Result<bool> {
         super::super::mime::remove_row_named(&mime_type).gql()
     }
+
+    /// Change the machine's config.
+    ///
+    /// A partial edit: a field left out leaves the setting alone, `null` clears
+    /// it, and a value sets it. An empty string is refused rather than read as a
+    /// clear, because a form that posts its empty box should be told rather than
+    /// obeyed. Every refusal happens before anything is written, so a request
+    /// that is going to fail leaves the file as it was.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn update_config(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "What to change.")] input: ConfigInput,
+    ) -> async_graphql::Result<super::types::machine::Config> {
+        let state = ctx.data_unchecked::<AppState>();
+        let written = super::super::core::config::write(input.into_request()).gql()?;
+        // The models a settings page asks for next are the new config's, so the
+        // catalogue starts on them now rather than when that request arrives.
+        state
+            .caches
+            .model_catalog
+            .request_refresh(state.current_config(), true);
+        Ok(super::query::config_of(
+            &written,
+            &state.limits.request_limits,
+            &state.config.health(),
+        ))
+    }
+
+    /// Write a Rhai script.
+    ///
+    /// Remote code execution by construction, like adding an MCP server: what is
+    /// written here is what an agent then runs. The answer says whether it
+    /// compiles, so an editor does not have to save and wait for a run to fail.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn put_script(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "Which registry: tool, region_hook, stage_hook, output_validator, \
+                          mime_check or provider."
+        )]
+        kind: String,
+        #[graphql(desc = "Its name, unique within that kind.")] name: String,
+        #[graphql(desc = "The script's source.")] content: String,
+        #[graphql(desc = "The agent whose directory it belongs to, for an agent-scoped script.")]
+        agent: Option<String>,
+    ) -> async_graphql::Result<ScriptWritten> {
+        let state = ctx.data_unchecked::<AppState>();
+        let written = super::super::scripts::write_one(
+            &state.current_config(),
+            &kind,
+            &name,
+            agent.as_deref(),
+            &content,
+        )
+        .gql()?;
+        Ok(ScriptWritten {
+            path: written.path,
+            compiles: written.compiles,
+            error: written.error,
+        })
+    }
+
+    /// Remove a script.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn delete_script(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which registry it belongs to.")] kind: String,
+        #[graphql(desc = "The script to remove.")] name: String,
+        #[graphql(desc = "The agent whose directory it is in.")] agent: Option<String>,
+    ) -> async_graphql::Result<bool> {
+        let state = ctx.data_unchecked::<AppState>();
+        super::super::scripts::remove_one(&state.current_config(), &kind, &name, agent.as_deref())
+            .gql()?;
+        Ok(true)
+    }
+
+    /// Run the diagnostics that reach the network.
+    ///
+    /// The plain `doctor` field answers from the config alone. This one asks a
+    /// provider whether a key works and the daemon whether it is there, which
+    /// costs a few seconds and is why it is a mutation rather than a field: it is
+    /// an act with a cost, and one runs at a time.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn run_doctor_live(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<super::types::machine::DoctorReport> {
+        let state = ctx.data_unchecked::<AppState>();
+        let checks = super::super::doctor::live_checks(state).await.gql()?;
+        Ok(super::query::doctor_report(checks))
+    }
+
+    /// Make one directory, so a picker can offer "New Folder" rather than one
+    /// that refuses.
+    ///
+    /// The three refusals are told apart on purpose: a path outside
+    /// `--workdir-root`, a parent that is not there, and a name already taken are
+    /// three different things to show somebody.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn make_directory(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The existing directory to make it in, absolute.")] path: String,
+        #[graphql(desc = "One directory name, not a path.")] name: String,
+    ) -> async_graphql::Result<MadeDirectory> {
+        let state = ctx.data_unchecked::<AppState>();
+        let made = super::super::fs::made(state, &path, &name).gql()?;
+        Ok(MadeDirectory {
+            path: made.path,
+            parent: made.parent,
+        })
+    }
+
+    /// Start a self-update, and hand back the job.
+    ///
+    /// Answers before the work is done, because the work is a download and an
+    /// install: a request held open for a package manager is a console showing a
+    /// spinner it made up. Poll `updateJob(id:)`, or watch the live frames. One
+    /// update at a time: two package-manager upgrades of the same binary racing
+    /// each other is not a state worth debugging.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn start_update(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Upgrade the binary.", default = true)] binary: bool,
+        #[graphql(desc = "Install the bundled blueprints.", default = true)] agents: bool,
+        #[graphql(desc = "Apply the config migrations.", default = true)] migrations: bool,
+    ) -> async_graphql::Result<super::types::update::UpdateJob> {
+        let state = ctx.data_unchecked::<AppState>();
+        let request = super::super::update_job::ApplyRequest {
+            binary,
+            agents,
+            migrations,
+        };
+        let id = state
+            .update_jobs
+            .spawn(request, &state.event_tx)
+            .map_err(|running| ServeError::Conflict(format!("update {running} is already running")))
+            .gql()?;
+        // Read back rather than assembled here, so what a client sees now is the
+        // same record `updateJob` will answer with in a moment.
+        state
+            .update_jobs
+            .get(&id)
+            .map(super::types::update::UpdateJob::from)
+            .ok_or_else(|| {
+                ServeError::Internal(format!("update '{id}' started but was not recorded"))
+            })
+            .gql()
+    }
+}
+
+/// One row of the mime registry, as a write sends it.
+#[derive(Debug, async_graphql::InputObject)]
+pub(crate) struct MimeRowInput {
+    /// The type or pattern this row covers: `image/png`, or `image/*`.
+    pub(crate) mime_type: String,
+    /// The family providers key their encoders on.
+    pub(crate) family: Option<String>,
+    /// Whether the bytes are text, and so may travel inline.
+    pub(crate) text: Option<bool>,
+    /// Extensions that imply this type, without the dot.
+    pub(crate) extensions: Option<Vec<String>>,
+    /// A hex prefix that identifies the bytes.
+    pub(crate) magic: Option<String>,
+    /// What a consumer that cannot take the type sees in the part's place.
+    pub(crate) stand_in: Option<String>,
+    /// A script the bytes must pass to be stored as this type. An empty string
+    /// lifts a check a broader row put on the type.
+    pub(crate) check: Option<String>,
+    /// How the tokens are counted.
+    pub(crate) tokens: Option<MimeTokensInput>,
+}
+
+/// How the tokens of a mime type are counted. Name exactly one rate.
+#[derive(Debug, async_graphql::InputObject)]
+pub(crate) struct MimeTokensInput {
+    /// Tokens per byte of the stored file.
+    pub(crate) per_byte: Option<f64>,
+    /// Pixels one token buys. Pair it with `max`.
+    pub(crate) per_pixel: Option<i32>,
+    /// The most one part may cost, and the answer when the dimensions are
+    /// unknown. Only with `perPixel`.
+    pub(crate) max: Option<i32>,
+    /// Tokens per second of audio or video.
+    pub(crate) per_second: Option<i32>,
+    /// Tokens per page of a document.
+    pub(crate) per_page: Option<i32>,
+    /// A flat charge, whatever the size.
+    pub(crate) fixed: Option<i32>,
+}
+
+impl MimeTokensInput {
+    /// The rule these rates describe, or why they describe none.
+    ///
+    /// Through the same reader the REST route uses, so "exactly one rate" means
+    /// the same thing on both surfaces.
+    fn into_spec(self) -> Result<crate::commands::mime_rows::TokenSpec, ServeError> {
+        super::super::mime::TokenRuleReq {
+            per_byte: self.per_byte,
+            per_pixel: self.per_pixel.map(i64::from),
+            per_second: self.per_second.map(i64::from),
+            per_page: self.per_page.map(i64::from),
+            fixed: self.fixed.map(i64::from),
+            max: self.max.map(i64::from),
+        }
+        .into_spec()
+        .map_err(ServeError::BadRequest)
+    }
+}
+
+/// What writing a script did.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ScriptWritten {
+    /// Where it was written.
+    pub(crate) path: String,
+    /// Whether it compiles. A script that does not is still written: an editor
+    /// saves work in progress, and the run is what refuses to use it.
+    pub(crate) compiles: bool,
+    /// Why it does not compile, when it does not.
+    pub(crate) error: Option<String>,
+}
+
+/// A directory that was made.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct MadeDirectory {
+    /// The new directory.
+    pub(crate) path: String,
+    /// The directory it was made in.
+    pub(crate) parent: String,
 }
 
 #[cfg(test)]

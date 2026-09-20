@@ -25,22 +25,22 @@ use crate::commands::mime_rows::{Added, RowEdit, TokenSpec, add_row, remove_row}
 #[derive(Debug, Deserialize)]
 pub(super) struct TokenRuleReq {
     /// `{ per_byte = 0.25 }`.
-    per_byte: Option<f64>,
+    pub(super) per_byte: Option<f64>,
     /// `{ per_pixel = 750 }`, with an optional `max`.
-    per_pixel: Option<i64>,
+    pub(super) per_pixel: Option<i64>,
     /// `{ per_second = 32 }`.
-    per_second: Option<i64>,
+    pub(super) per_second: Option<i64>,
     /// `{ per_page = 2000 }`.
-    per_page: Option<i64>,
+    pub(super) per_page: Option<i64>,
     /// `{ fixed = 1000 }`.
-    fixed: Option<i64>,
+    pub(super) fixed: Option<i64>,
     /// The cap, only alongside `per_pixel`.
-    max: Option<i64>,
+    pub(super) max: Option<i64>,
 }
 
 impl TokenRuleReq {
     /// The rule this describes, or the reason it is not one.
-    fn into_spec(self) -> Result<TokenSpec, String> {
+    pub(super) fn into_spec(self) -> Result<TokenSpec, String> {
         let named = [
             self.per_byte.is_some(),
             self.per_pixel.is_some(),
@@ -146,32 +146,8 @@ pub(super) async fn put_mime_row(
         .map_err(|e| super::core::error::as_api_error(&e))
 }
 
-/// Write one registry row: the fields both surfaces set.
-///
-/// The token rules and the magic bytes are REST-only for now, which is why
-/// this is the narrow door and [`write_edit`] is the wide one.
-pub(super) fn write_row(
-    mime_type: &str,
-    family: Option<String>,
-    text: Option<bool>,
-    extensions: Option<Vec<String>>,
-) -> Result<MimeRowWritten, super::core::error::ServeError> {
-    write_edit(
-        mime_type,
-        RowEdit {
-            family,
-            text,
-            tokens: None,
-            extensions,
-            magic: None,
-            stand_in: None,
-            check: None,
-        },
-    )
-}
-
-/// Write one registry row.
-fn write_edit(
+/// Write one registry row, for whichever surface asked.
+pub(super) fn write_edit(
     mime_type: &str,
     edit: RowEdit,
 ) -> Result<MimeRowWritten, super::core::error::ServeError> {

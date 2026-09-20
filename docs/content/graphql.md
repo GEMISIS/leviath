@@ -503,6 +503,58 @@ Without the flag, those fields are invisible to introspection and refused with
 boundary. The published schema file documents them either way, because it
 describes what the API is rather than what one server will do.
 
+## The machine's own state, and changing it
+
+`daemon` says who is on the other end of the control socket, `update` says what
+an upgrade would do, and `updateJob(id:)` follows one that is running.
+
+```graphql
+{
+  daemon { connected version build pid restarts restartAdvised }
+  update {
+    version installMethod channel latest updateAvailable
+    binary { __typename ... on UpgradeByCommand { shell } }
+    agents { name version change preselected }
+  }
+}
+```
+
+Planning never reaches the network. The "is there anything newer" half is
+whatever the last check found, and asking starts another for whoever asks next
+rather than waiting on one, so a page can ask every time it opens.
+
+Behind `--allow-admin`, the mutations that change the machine rather than a run:
+
+| Mutation | What it changes |
+|---|---|
+| `updateConfig` | The config file, a field at a time |
+| `putScript`, `deleteScript` | A Rhai script every agent then runs |
+| `putMimeRow`, `deleteMimeRow` | One row of the mime registry |
+| `addMcpServer`, `removeMcpServer` | A server the daemon spawns |
+| `runDoctorLive` | Nothing. It asks a provider and the daemon, which costs seconds |
+| `makeDirectory` | One directory, so a picker can offer "New Folder" |
+| `startUpdate` | Runs a package manager and rewrites the agents directory |
+
+`updateConfig` is a partial edit with three states per setting, which is why the
+keys take `null` rather than an empty string:
+
+```graphql
+mutation {
+  updateConfig(input: { overrideModel: null, providerOrder: ["openai", "anthropic"] }) {
+    defaultProvider overrideModel providerOrder
+  }
+}
+```
+
+A field left out leaves the setting alone. `null` clears it. A value sets it. An
+empty string is refused rather than read as a clear, because a form that posts its
+empty box should be told rather than obeyed. Every refusal happens before anything
+is written, so a request that is going to fail leaves the file as it was.
+
+`startUpdate` answers before the work is done, because the work is a download and
+an install. Poll `updateJob(id:)` or watch the live frames. One update runs at a
+time.
+
 ## Live frames
 
 `GET /ws/graphql` streams the same frames `/ws` carries, over
