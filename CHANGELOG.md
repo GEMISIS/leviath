@@ -103,6 +103,18 @@ same list.
   ids, so "what did this run execute" and "what is installed now" stay separate
   questions.
 
+- A run's files, one file's text and its context history over GraphQL, beside
+  the run they belong to: `files` answers either what the run recorded changing
+  or what is in its working directory now, a level at a time; `fileContent` reads
+  a window of text and says where the next one starts; `contextHistory` pages the
+  window's own history, newest first on request. Also `parent`, `currentStage`
+  and `interaction` on a run, so "what is this waiting for" and "where did this
+  come from" are fields rather than requests. The REST routes behind these were
+  split so both surfaces run one implementation, which is also how the GraphQL
+  listing gained the containment check the read path already had: a relative
+  directory resolves against the run's working directory, and one that walks out
+  of it is refused rather than followed.
+
 ### Changed
 
 - A run keeps its own copy of the blueprint it executed. Spawn writes the

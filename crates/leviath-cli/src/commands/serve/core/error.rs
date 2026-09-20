@@ -49,6 +49,18 @@ pub(crate) enum ServeError {
     #[error("This server needs a restart: {0}")]
     DaemonIncompatible(String),
 
+    /// The window asked for is not in the thing: an offset past the end of a
+    /// file. A different window of the same file is fine, which is what tells
+    /// this apart from a bad request.
+    #[error("{0}")]
+    RangeNotSatisfiable(String),
+
+    /// The bytes are not the kind of thing this read returns: a text read of a
+    /// file that is not text. The file is there, and fetching it whole through a
+    /// byte route works.
+    #[error("{0}")]
+    UnsupportedMedia(String),
+
     /// Something failed that the caller did nothing wrong to cause: a file
     /// this server wrote will not parse, a reply with no arm for it.
     #[error("{0}")]
@@ -69,6 +81,8 @@ impl ServeError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::DaemonUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::DaemonIncompatible(_) => StatusCode::BAD_GATEWAY,
+            Self::RangeNotSatisfiable(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            Self::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -85,6 +99,8 @@ impl ServeError {
             Self::Forbidden(_) => "FORBIDDEN",
             Self::DaemonUnavailable(_) => "DAEMON_UNAVAILABLE",
             Self::DaemonIncompatible(_) => "DAEMON_INCOMPATIBLE",
+            Self::RangeNotSatisfiable(_) => "RANGE_NOT_SATISFIABLE",
+            Self::UnsupportedMedia(_) => "UNSUPPORTED_MEDIA_TYPE",
             Self::Internal(_) => "INTERNAL",
         }
     }
@@ -102,6 +118,8 @@ impl ServeError {
             Self::Forbidden(_) => Self::Forbidden(said),
             Self::DaemonUnavailable(_) => Self::DaemonUnavailable(said),
             Self::DaemonIncompatible(_) => Self::DaemonIncompatible(said),
+            Self::RangeNotSatisfiable(_) => Self::RangeNotSatisfiable(said),
+            Self::UnsupportedMedia(_) => Self::UnsupportedMedia(said),
             Self::Internal(_) => Self::Internal(said),
         }
     }

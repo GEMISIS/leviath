@@ -11,3 +11,7 @@ pub(crate) mod machine;
 pub(crate) mod manifest;
 pub(crate) mod run;
 pub(crate) mod run_detail;
+
+#[cfg(test)]
+#[path = "run_files_tests.rs"]
+mod run_files_tests;

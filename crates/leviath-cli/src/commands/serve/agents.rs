@@ -1,18 +1,15 @@
 //! Agent CRUD endpoints: spawn, list, get, kill, children, context, logs, result.
 
-use std::path::PathBuf;
-
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use leviath_core::mime::MimeRegistry;
 
 use super::core::error::as_api_error;
 use super::core::lifecycle;
 use super::core::spawn as spawn_core;
 use super::runs::run_json;
 use super::types::*;
-use crate::runstate::{self, ContextSnapshot, RunMeta};
+use crate::runstate::{self, ContextSnapshot};
 
 /// `POST /api/agents`: spawn an agent into the shared-world daemon.
 ///
@@ -167,12 +164,6 @@ pub(super) async fn agent_context(
         })
 }
 
-/// Default number of history points returned when the client does not ask.
-pub(super) const HISTORY_DEFAULT_LIMIT: usize = 50;
-/// Largest history page. Lower than the run listing's cap because each item
-/// carries a whole context window rather than one struct of scalars.
-pub(super) const HISTORY_MAX_LIMIT: usize = 100;
-
 /// `GET /api/agents/{id}/context/history`: the run's context window over time.
 ///
 /// This returned **every** recorded point, each carrying a full
@@ -194,129 +185,20 @@ pub(super) async fn agent_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Page<leviath_core::run_archive::RunPoint>>, ApiError> {
-    use std::ops::ControlFlow;
+    use super::core::history;
 
-    let ascending = match query.order.as_deref() {
-        None | Some("asc") => true,
-        Some("desc") => false,
-        Some(other) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("Unknown order '{other}': expected asc or desc"),
-            ));
-        }
-    };
-    let limit = match query.limit {
-        None => HISTORY_DEFAULT_LIMIT,
-        Some(0) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "`limit` must be at least 1; omit it for the default".to_string(),
-            ));
-        }
-        Some(n) => n.min(HISTORY_MAX_LIMIT),
-    };
-
-    let digest = super::cursor::filter_digest(&[&id]);
-    let order_name = if ascending { "asc" } else { "desc" };
-    let cursor = match query.cursor.as_deref() {
-        None => None,
-        Some(raw) => Some(
-            super::cursor::decode(raw, "index", order_name, &digest)
-                .map_err(|e| err(StatusCode::BAD_REQUEST, e.message()))?,
-        ),
-    };
-
-    // One streamed pass to count, so `total` is honest and a descending window
-    // knows where to start. Counting folds the deltas but materializes nothing
-    // - and streaming means the journal is never parsed whole into memory:
-    // `read_run_archive` materialized every record (tens of MB for a mature
-    // run, 2-4x that as parsed structs) per request, which was this API's
-    // single largest transient allocation and the reason a page refresh
-    // stair-stepped the server's RSS.
-    let mut total = 0usize;
-    if runstate::visit_run_archive(&id, &mut |_| {
-        total += 1;
-        ControlFlow::Continue(())
-    })
-    .is_none()
-    {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!("No context history for run '{id}'"),
-        ));
-    }
-    if total == 0 && query.cursor.is_none() {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!("No context history for run '{id}'"),
-        ));
-    }
-
-    // Which indices this page wants, given the direction and where the cursor
-    // left off. Computed up front so the replay can skip everything else.
-    // This route only ever mints an integer key, so anything else means a
-    // cursor that did not come from here - and the `_` arm is what the common
-    // "no cursor at all" case takes too.
-    let after = match cursor.as_ref().map(|c| &c.key) {
-        Some(super::cursor::CursorKey::Int(i)) => usize::try_from(*i).ok(),
-        _ => None,
-    };
-    let wanted: Vec<usize> = if ascending {
-        let start = after.map(|i| i + 1).unwrap_or(0);
-        (start..total).take(limit + 1).collect()
-    } else {
-        let start = after
-            .map(|i| i.saturating_sub(1))
-            .unwrap_or_else(|| total.saturating_sub(1));
-        (0..=start).rev().take(limit + 1).collect()
-    };
-    let stop_at = wanted.iter().copied().max();
-
-    let mut collected: Vec<(usize, leviath_core::run_archive::RunPoint)> = Vec::new();
-    runstate::visit_run_archive(&id, &mut |point| {
-        if wanted.contains(&point.index) {
-            collected.push((
-                point.index,
-                leviath_core::run_archive::RunPoint {
-                    // Redacted for the same reason `runstate::context_history`
-                    // redacts: the journal stores RunMeta whole, secret and all.
-                    meta: point.meta.redacted(),
-                    context: point.context.clone(),
-                    at: point.at,
-                },
-            ));
-        }
-        match stop_at {
-            Some(last) if point.index >= last => ControlFlow::Break(()),
-            _ => ControlFlow::Continue(()),
-        }
-    });
-
-    if !ascending {
-        collected.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
-    }
-
-    let has_more = collected.len() > limit;
-    collected.truncate(limit);
-    let next_cursor = has_more
-        .then(|| collected.last())
-        .flatten()
-        .map(|(index, _)| {
-            super::cursor::encode(
-                "index",
-                order_name,
-                &digest,
-                super::cursor::CursorKey::Int(*index as i64),
-                "",
-            )
-        });
-
-    let items = collected.into_iter().map(|(_, point)| point).collect();
+    let spec = history::HistorySpec::resolve(
+        &id,
+        query.limit,
+        query.order.as_deref(),
+        query.cursor.as_deref(),
+    )
+    .map_err(|e| super::core::error::as_api_error(&e))?;
+    let page = history::page(&id, &spec).map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(Page::new(
-        items,
-        next_cursor,
-        Some(total),
+        page.points,
+        page.next_cursor,
+        Some(page.total),
         leviath_core::duration::now_secs(),
     )))
 }
@@ -361,9 +243,12 @@ pub(super) async fn agent_logs(
 /// 1 MiB, matching the file endpoint's cap.
 pub(super) const LOGS_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 
-/// How much of a file `GET /api/agents/{id}/files` returns: 1 MiB, enough for
-/// any report a browser would render, small enough to hand out in one JSON body.
-pub(super) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
+/// How much of a file `GET /api/agents/{id}/files` returns.
+///
+/// Re-exported from the service layer, which both surfaces read it from: 1 MiB,
+/// enough for any report a browser would render and small enough to hand out in
+/// one body.
+pub(super) use super::core::files::MAX_FILE_READ_BYTES;
 
 /// `GET /api/agents/{id}/files?path=<path>`: read a file the run wrote, so the
 /// browser can render an agent's report without shell access to the host.
@@ -381,310 +266,74 @@ pub(super) async fn agent_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileOrListing>, ApiError> {
+    use super::core::files;
+
     let meta = runstate::read_meta(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
-
-    let source = query
-        .file_source()
-        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
-
+    let source = files::FileSource::parse(query.source.as_deref())
+        .map_err(|e| super::core::error::as_api_error(&e))?;
     // A listing types each row by name with the same registry `/files/raw`
     // types the bytes with, so a console gets the run's answer, not its own.
     let registry = state.current_config().mime_registry_or_defaults();
 
     // No path means "what is there", which is a listing rather than a read.
     let Some(ref requested_path) = query.path else {
-        return list_run_files(&meta, source, None, query.hidden, &registry).map(Json);
+        let listed = files::listing(&meta, source, None, query.hidden, &registry)
+            .map_err(|e| super::core::error::as_api_error(&e))?;
+        return Ok(Json(FileOrListing::Listing(Box::new(listing_resp(listed)))));
     };
 
-    let workdir = PathBuf::from(&meta.workdir);
-    let requested = PathBuf::from(requested_path);
-    let resolved = match requested.is_absolute() {
-        true => requested,
-        false => workdir.join(&requested),
-    };
-    if !leviath_core::resolves_within(&resolved, &workdir) {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            format!("path '{requested_path}' is outside the run's working directory"),
-        ));
-    }
-
-    let size = match std::fs::metadata(&resolved) {
-        // A directory is the natural way to ask "what is in here", and the
-        // folder picker already answers that shape, so it lists instead of
-        // refusing.
-        Ok(m) if m.is_dir() => {
-            return list_run_files(
-                &meta,
-                FileSource::Workdir,
-                Some(&resolved),
-                query.hidden,
-                &registry,
-            )
-            .map(Json);
-        }
-        Ok(m) => m.len(),
-        Err(_) => {
-            return Err(err(
-                StatusCode::NOT_FOUND,
-                format!("file '{requested_path}' not found"),
-            ));
-        }
-    };
-
-    // Where in the file to start. A run's artifact can be far larger than one
-    // response - a dataset is the whole point of some agents - so a caller pages
-    // through with `offset` rather than being stuck with the first megabyte.
-    let offset = query.offset.unwrap_or(0);
-    if offset > size {
-        return Err(err(
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            format!("offset {offset} is past the end of '{requested_path}' ({size} bytes)"),
-        ));
-    }
-
-    let mut bytes = Vec::new();
-    if let Err(e) = std::fs::File::open(&resolved)
-        // Chained rather than `?`: the offset is already bounded by the file's
-        // size above, so a seek into it has no reachable failure of its own.
-        .and_then(|mut f| std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(offset)).map(|_| f))
-        .map(|f| std::io::Read::take(f, MAX_FILE_READ_BYTES))
-        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
+    match files::read(
+        &meta,
+        requested_path,
+        query.offset.unwrap_or(0),
+        query.hidden,
+        &registry,
+    )
+    .map_err(|e| super::core::error::as_api_error(&e))?
     {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!("could not read '{requested_path}': {e}"),
-        ));
-    }
-    let read_len = bytes.len();
-    let next_offset = offset + read_len as u64;
-    let truncated = next_offset < size;
-
-    // A byte offset can land mid-character at either end. Trimming a partial
-    // character off the front keeps the window aligned so the *next* page starts
-    // on a boundary, which is what makes concatenating pages give back the file.
-    let leading_partial = bytes
-        .iter()
-        .take(4)
-        .position(|b| !is_utf8_continuation(*b))
-        .filter(|_| offset > 0)
-        .unwrap_or(0);
-    let bytes = bytes.split_off(leading_partial);
-    let read_len = read_len - leading_partial;
-
-    let content = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        // The cap can land mid-character in a file that is otherwise valid
-        // UTF-8. That is the cap's doing, not the file's: drop the split
-        // character's leading bytes rather than calling a text file binary.
-        // (`valid_up_to` is at most 3 bytes short of the end when the only
-        // problem is the cut.)
-        Err(e) if truncated && e.utf8_error().valid_up_to() + 4 > read_len => {
-            let valid = e.utf8_error().valid_up_to();
-            let mut prefix = e.into_bytes();
-            prefix.truncate(valid);
-            String::from_utf8_lossy(&prefix).into_owned()
-        }
-        Err(_) => {
-            return Err(err(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("'{requested_path}' is not a text file"),
-            ));
-        }
-    };
-
-    Ok(Json(FileOrListing::File(FileContentResp {
-        path: resolved.to_string_lossy().into_owned(),
-        size,
-        // Where this window actually started and ended, so a caller can ask for
-        // the next one without guessing what the UTF-8 trim did.
-        offset: offset + leading_partial as u64,
-        next_offset: match truncated {
-            true => Some(offset + leading_partial as u64 + content.len() as u64),
-            false => None,
-        },
-        content,
-        truncated,
-    })))
-}
-
-/// Whether `b` is a UTF-8 continuation byte (`10xxxxxx`), i.e. the middle of a
-/// character rather than the start of one.
-fn is_utf8_continuation(b: u8) -> bool {
-    (b & 0b1100_0000) == 0b1000_0000
-}
-
-/// Most entries one directory listing returns.
-///
-/// A single `node_modules/.pnpm` really does hold six figures of entries, and
-/// the response is built in memory.
-pub(super) const MAX_LISTING_ENTRIES: usize = 1000;
-
-/// List what a run touched, or what is in its working directory.
-///
-/// Two genuinely different questions, and neither substitutes for the other:
-///
-/// - [`FileSource::Modified`] is the run's own record of what it changed. Free -
-///   it is already in `meta.json` - but capped at record time, so it is a claim
-///   about the run rather than about the disk.
-/// - [`FileSource::Workdir`] is what is actually there now, read **one directory
-///   level per request**. That bound is the answer to "a repo with
-///   node_modules": the client walks the tree itself, exactly as the existing
-///   folder picker does, instead of one request trying to enumerate everything.
-fn list_run_files(
-    meta: &RunMeta,
-    source: FileSource,
-    dir: Option<&std::path::Path>,
-    hidden: bool,
-    registry: &MimeRegistry,
-) -> Result<FileOrListing, ApiError> {
-    let workdir = PathBuf::from(&meta.workdir);
-    let listing = match source {
-        FileSource::Modified => modified_listing(meta, &workdir, registry),
-        FileSource::Workdir => workdir_listing(meta, &workdir, dir, hidden, registry)?,
-    };
-    Ok(FileOrListing::Listing(Box::new(listing)))
-}
-
-/// The type the registry gives a listing row from its name alone, empty for a
-/// directory. By extension, not sniffed - a listing must not read every file.
-fn entry_mime(name: &str, is_dir: bool, registry: &MimeRegistry) -> String {
-    match is_dir {
-        true => String::new(),
-        false => registry.resolve(None, Some(name), &[]).to_string(),
+        files::FileRead::Listing(listed) => Ok(Json(FileOrListing::Listing(Box::new(
+            listing_resp(*listed),
+        )))),
+        files::FileRead::Window(window) => Ok(Json(FileOrListing::File(FileContentResp {
+            path: window.path,
+            size: window.size,
+            offset: window.offset,
+            next_offset: window.next_offset,
+            content: window.content,
+            truncated: window.truncated,
+        }))),
     }
 }
 
-/// The paths the run recorded modifying, stat-ed against the workdir.
-fn modified_listing(
-    meta: &RunMeta,
-    workdir: &std::path::Path,
-    registry: &MimeRegistry,
-) -> RunFileListing {
-    let entries = meta
-        .flags
-        .modified_files
-        .iter()
-        .map(|rel| {
-            let resolved = if std::path::Path::new(rel).is_absolute() {
-                PathBuf::from(rel)
-            } else {
-                workdir.join(rel)
-            };
-            let stat = std::fs::metadata(&resolved).ok();
-            let name = std::path::Path::new(rel)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| rel.clone());
-            let is_dir = stat.as_ref().is_some_and(|m| m.is_dir());
-            RunFileEntry {
-                mime_type: entry_mime(&name, is_dir, registry),
-                name,
-                path: rel.clone(),
-                is_dir,
-                size: stat.as_ref().map(|m| m.len()),
-                // A recorded path can name a file since deleted, or - for a
-                // tool given an absolute path - one outside the workdir.
-                // Reported rather than filtered away, so the list stays a
-                // faithful account of what the run did.
-                exists: stat.is_some(),
-                outside_workdir: !leviath_core::resolves_within(&resolved, workdir),
-            }
-        })
-        .collect();
-
+/// A core listing in this route's own shape.
+///
+/// The wire shape is this route's, not the core's: `kind` is a literal a client
+/// discriminates on, and both are words rather than enums.
+fn listing_resp(listed: super::core::files::FileListing) -> RunFileListing {
     RunFileListing {
         kind: "listing",
-        source: "modified",
-        path: meta.workdir.clone(),
-        parent: None,
-        workdir: meta.workdir.clone(),
-        entries,
-        truncated: false,
-        // Both of the ways this list misleads, made visible in the response
-        // rather than left in the documentation. See the field docs.
-        modified_files_truncated: meta.flags.modified_files.len()
-            >= leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
-        modifying_tool_calls: meta.flags.modified_file_count,
+        source: listed.source.wire(),
+        path: listed.path,
+        parent: listed.parent,
+        workdir: listed.workdir,
+        entries: listed
+            .entries
+            .into_iter()
+            .map(|entry| RunFileEntry {
+                name: entry.name,
+                path: entry.path,
+                is_dir: entry.is_dir,
+                size: entry.size,
+                exists: entry.exists,
+                outside_workdir: entry.outside_workdir,
+                mime_type: entry.mime_type,
+            })
+            .collect(),
+        truncated: listed.truncated,
+        modified_files_truncated: listed.modified_files_truncated,
+        modifying_tool_calls: listed.modifying_tool_calls,
     }
-}
-
-/// One directory level of the run's working directory.
-fn workdir_listing(
-    meta: &RunMeta,
-    workdir: &std::path::Path,
-    dir: Option<&std::path::Path>,
-    hidden: bool,
-    registry: &MimeRegistry,
-) -> Result<RunFileListing, ApiError> {
-    let target = dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workdir.to_path_buf());
-    if !target.is_dir() {
-        // Distinguished from an ordinary 404 because a lost workspace is a
-        // known run outcome (`flags.workspace_lost`), and an empty listing
-        // would read as "this run touched nothing".
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!(
-                "the run's working directory '{}' no longer exists",
-                target.display()
-            ),
-        ));
-    }
-
-    let mut entries: Vec<RunFileEntry> = Vec::new();
-    let mut truncated = false;
-    for child in std::fs::read_dir(&target).into_iter().flatten().flatten() {
-        if entries.len() >= MAX_LISTING_ENTRIES {
-            truncated = true;
-            break;
-        }
-        let name = child.file_name().to_string_lossy().into_owned();
-        if !hidden && name.starts_with('.') {
-            continue;
-        }
-        let path = child.path();
-        // Per entry, not just for the directory asked for: a symlinked child
-        // can point outside the fence. The folder picker already does this.
-        if !leviath_core::resolves_within(&path, workdir) {
-            continue;
-        }
-        let stat = child.metadata().ok();
-        let is_dir = stat.as_ref().is_some_and(|m| m.is_dir());
-        entries.push(RunFileEntry {
-            path: path
-                .strip_prefix(workdir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned(),
-            mime_type: entry_mime(&name, is_dir, registry),
-            name,
-            is_dir,
-            size: stat.as_ref().map(|m| m.len()),
-            exists: true,
-            outside_workdir: false,
-        });
-    }
-    // Directories first, then by name - the grouping a file tree wants, done
-    // once here rather than in every client.
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-
-    Ok(RunFileListing {
-        kind: "listing",
-        source: "workdir",
-        path: target.to_string_lossy().into_owned(),
-        parent: (target != workdir)
-            .then(|| target.parent().map(|p| p.to_string_lossy().into_owned()))
-            .flatten(),
-        workdir: meta.workdir.clone(),
-        entries,
-        truncated,
-        modified_files_truncated: meta.flags.modified_files.len()
-            >= leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
-        modifying_tool_calls: meta.flags.modified_file_count,
-    })
 }
 
 pub(super) async fn agent_result(
@@ -1147,7 +796,10 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    fn test_state_with_agent_paths(paths: Vec<PathBuf>, control: ControlClient) -> AppState {
+    fn test_state_with_agent_paths(
+        paths: Vec<std::path::PathBuf>,
+        control: ControlClient,
+    ) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
@@ -2593,7 +2245,7 @@ system_prompt = "Plan the work"
     async fn a_workdir_listing_stops_at_the_entry_cap() {
         crate::runstate::with_isolated_runs_dir_async("agent_files_cap", |_d| async move {
             let workdir = tempfile::tempdir().unwrap();
-            for i in 0..MAX_LISTING_ENTRIES + 5 {
+            for i in 0..crate::commands::serve::core::files::MAX_LISTING_ENTRIES + 5 {
                 std::fs::write(workdir.path().join(format!("f{i}.txt")), "x").unwrap();
             }
             let run_id = unique_run_id("files-many");
@@ -2603,7 +2255,7 @@ system_prompt = "Plan the work"
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
                 listing["entries"].as_array().unwrap().len(),
-                MAX_LISTING_ENTRIES
+                crate::commands::serve::core::files::MAX_LISTING_ENTRIES
             );
             assert_eq!(listing["truncated"], true);
 

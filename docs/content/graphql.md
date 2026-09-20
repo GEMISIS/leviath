@@ -272,6 +272,58 @@ Links are relative, so they keep whatever host, scheme and port you reached the
 server on. A server guessing its own public URL would guess wrong behind a
 proxy.
 
+## A run's files and its history
+
+Two questions about files, and they are not the same one.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    recorded: files { entries { name exists } modifiedFilesTruncated }
+    onDisk: files(source: WORKDIR, path: "src") {
+      parent
+      entries { name isDir size mimeType }
+    }
+    fileContent(path: "out/report.md") { content nextOffset truncated }
+  } } }
+}
+```
+
+`MODIFIED`, the default, is the run's own record of what it changed. It is free,
+because it is already in the run's record, and it is a claim about the run rather
+than about the disk: `modifiedFilesTruncated` says when the run hit its tracked
+file cap, and a path that has since been deleted is listed with `exists: false`
+rather than dropped.
+
+`WORKDIR` is what is there now, one directory level per request. Pass an entry's
+own path back to go a level down. That bound is the answer to a repository with a
+`node_modules` in it, where one request trying to enumerate everything is no
+answer at all.
+
+`fileContent` reads text, at most a megabyte at a time, because the answer
+travels inside this one. Pass `nextOffset` back as `offset` for the next window,
+and the windows concatenate into the file. For bytes, and for anything that is
+not text, mint a `fileUrl` instead: a directory, a path outside the run's working
+directory, an offset past the end and a file that is not text each answer with
+their own code.
+
+`contextHistory` is how the run's context window changed over the run. Each point
+carries a whole window, so it is paged harder than the run listing is, and the
+region contents are their own field: asking for the shape of fifty windows does
+not read fifty windows' text.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    contextHistory(first: 20, descending: true) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges { node { at stage window { totalTokens maxTokens } } }
+    }
+  } } }
+}
+```
+
 ## The machine itself
 
 Three catalogues, sized by what you configured rather than by what has piled
