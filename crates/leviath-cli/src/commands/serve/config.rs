@@ -260,17 +260,31 @@ fn validate_base_url(url: &str) -> (bool, Option<String>) {
 }
 
 pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json<ValidateKeyResp> {
-    // The URL is checked first: a gateway with both wrong is more usefully
-    // told about the address than about the key, since the key cannot be
-    // judged beyond being present.
-    if let Some(base_url) = &req.base_url {
+    Json(checked_key(
+        &req.provider,
+        &req.key,
+        req.base_url.as_deref(),
+    ))
+}
+
+/// Whether a key looks like one of that provider's, for whichever surface asked.
+///
+/// Format only: nothing is dialled and nothing is written, which is what makes it
+/// safe to run on every keystroke of a form. `checkProvider` is the one that asks
+/// the account.
+///
+/// The URL is checked first, because a gateway with both wrong is more usefully
+/// told about the address: a key cannot be judged beyond being present until
+/// there is somewhere to send it.
+pub(super) fn checked_key(provider: &str, key: &str, base_url: Option<&str>) -> ValidateKeyResp {
+    if let Some(base_url) = base_url {
         let (valid, message) = validate_base_url(base_url);
         if !valid {
-            return Json(ValidateKeyResp { valid, message });
+            return ValidateKeyResp { valid, message };
         }
     }
-    let (valid, message) = validate_key_format(&req.provider, &req.key);
-    Json(ValidateKeyResp { valid, message })
+    let (valid, message) = validate_key_format(provider, key);
+    ValidateKeyResp { valid, message }
 }
 
 /// `GET /api/models`: every model every configured provider reports, from the

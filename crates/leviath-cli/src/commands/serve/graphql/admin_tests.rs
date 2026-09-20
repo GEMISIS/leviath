@@ -437,7 +437,7 @@ async fn a_script_can_be_written_and_removed() {
         let written = schema(true)
             .execute(Request::new(
                 r#"mutation { putScript(kind: "tool", name: "greet",
-                     content: "fn describe() { #{ name: \"greet\", description: \"hi\" } }")
+                     content: "// @tool greet\n// @description says hello\n\"hi\"")
                      { path compiles error } }"#,
             ))
             .await;
