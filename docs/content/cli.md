@@ -279,12 +279,14 @@ script entry whose `.rhai` file is not on disk is named along with the path that
 | warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge: an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
+| warning | `renamed-key-superseded` | A table sets both an old key and its current name, so the old line does nothing. See below |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
 | note | `long-context-price` | A stage's context can grow past the size at which its model bills at a higher rate. See below |
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
+| note | `renamed-key` | The blueprint uses an old spelling of a setting. Both are read; `lev update` offers to rewrite it. See below |
 | note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Twenty-three of those findings need more than a phrase.
+Twenty-five of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -375,6 +377,11 @@ path.
 **`read-paths-not-granted`** is the declaring-is-not-granting case. Those reads are refused at
 runtime, and the fix line carries the stanza that would grant them.
 
+**`renamed-key-superseded`** fires when a table sets a setting under both its old name and its
+current one, such as `[sandbox] persist = true` next to `keep_warm = true`. The parser reads the
+current name, so the old line is dead weight rather than a second, conflicting setting; the fix
+is to delete it.
+
 **`holds-under-yolo`** names an interaction point declaring `unattended = "ask"`, or a blocking tool
 a stage keeps in `required_tools`. Both are deliberate wherever they appear. It is a note because
 `--yolo` reads as "run without me".
@@ -386,6 +393,10 @@ the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token)
 **`safe-commands-declared`** applies only where you opt in. That is per agent via
 `[agent_safe_commands.<name>] allow_blueprint`, or globally via
 `[security] allow_blueprint_safe_commands`.
+
+**`renamed-key`** names a key this build still reads under an older spelling, such as `persist`
+under `[sandbox]` or a custom region's `persistent`. Nothing about the run changes: both names are
+read the same way. `lev update` can rewrite the file for you, or you can rename the key by hand.
 
 **`command-seed`** and **`read-paths-declared`** say what the blueprint will do before you run it.
 `read-paths-declared` carries the granted and declared counts, plus each entry's status.
@@ -1169,7 +1180,8 @@ sessions.
 ### `lev update`
 
 Update Leviath, then offer to bring everything else up to date with it: the binary, the bundled
-blueprints, and the config file, in that order.
+blueprints, the renamed keys in the blueprints you wrote yourself, and the config file, in that
+order.
 
 The binary is updated with the installer that put it there, and which one that was is read off the
 filesystem rather than guessed from the version string. The version cannot answer: every
@@ -1198,7 +1210,7 @@ not something to start because somebody typed `lev update`.
 | `--json` | Print the plan as JSON and change nothing |
 | `--channel <stable\|beta\|alpha>` | The channel to re-install. Only the install-script method reads it |
 | `--dry-run` | Walk the whole flow, prompts and all, printing each action instead of doing it |
-| `--yes` | Answer yes to the binary upgrade and the config write. It does **not** install blueprints |
+| `--yes` | Answer yes to the binary upgrade, respelling renamed keys, and the config write. It does **not** install blueprints |
 | `--install-agents` | Install the bundled blueprints without asking |
 
 ```bash
@@ -1209,10 +1221,12 @@ lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
   binary   brew update && brew upgrade leviath-beta
   agents   1 of 7 would change
              data-analyst - update 0.0.1 → 0.0.2
+  keys     2 renamed key(s) in 1 of your own blueprint(s)
+             researcher - 2
   config   nothing to migrate
 ```
 
-All three steps run every time, whatever the binary step did. That is the point of the command.
+All four steps run every time, whatever the binary step did. That is the point of the command.
 `brew upgrade` and `scoop update` hand you a new binary and say nothing about the blueprints in
 `~/.leviath/agents` or the config beside them. Anyone who has ever updated that way is running
 blueprints from whenever they last ran `lev setup`. A binary that needs no update is not evidence
@@ -1227,9 +1241,20 @@ A copy at the bundled version whose files differ from the bundled ones reads as 
 is named as edited, asked about on its own, and no flag covers it: installing removes the
 destination directory first and would take your edits, and any file you added, with it.
 
+The keys step is for a blueprint of your own, not one of the bundled ones: those are replaced
+wholesale by the step before it, so they need nothing. A setting like `[sandbox] persist` still
+loads exactly as it did, under a name this version would rather you wrote instead
+([`lev validate`](#lev-validate-path) flags the old spelling as `renamed-key`), and this step
+offers to respell every such line in the blueprints you installed yourself. It lists every old key
+it found, with what the setting actually does, and asks once for the whole set; `--yes` answers
+that question along with the binary and the config write. A table that already sets both names is
+left alone, since the old line there does nothing and that is `lev validate`'s to report, not this
+step's to guess at.
+
 The config step applies any migration this build knows how to make, printing every change before it
-asks to write anything. Today there are none: no released `config.toml` has to change to work with
-this version, so the step exists to explain a future one rather than to do work now.
+asks to write anything. A renamed top-level or `[sandbox]` key, such as the same `persist` becoming
+`keep_warm`, is one such migration; others fix a value whose default or meaning moved. Nothing to
+migrate means your file already says what this version reads.
 
 ### `lev tools`
 

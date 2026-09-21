@@ -1,0 +1,206 @@
+//! What a run's provider calls actually took, one page at a time.
+//!
+//! The usage records say what the calls that worked cost, which is the right
+//! shape for an invoice and the wrong shape for a post-mortem: a call refused
+//! three times and answered on the fourth is billed once, and a call that moved
+//! to another provider leaves nothing behind at all. This reads the other half
+//! back: one entry per trip to a provider, with the move that followed it where
+//! there was one.
+//!
+//! Read record by record rather than through
+//! [`leviath_core::run_archive::fold`], which is the one place this parts from
+//! the interactions listing. The pairing of a failover with the attempt it
+//! follows is the journal's own order, and the folded form keeps attempts and
+//! failovers in two separate lists: the adjacency this needs is there in the
+//! records and gone by the time they are folded. Neither record carries a
+//! request or a response body, so reading them costs no more than the run's own
+//! state already pays to load.
+
+use leviath_core::run_archive::{AttemptRecord, FailoverRecord, RunRecord};
+
+use super::error::ServeError;
+use crate::runstate;
+
+/// Default page size.
+pub(crate) const INFERENCES_DEFAULT_LIMIT: usize = 50;
+
+/// Largest page of attempts.
+///
+/// The same cap as the run listing and the interactions page: an attempt is a
+/// handful of fields plus a fixed-size digest, never a request body.
+pub(crate) const INFERENCES_MAX_LIMIT: usize = 200;
+
+/// Which page of a run's attempts to read.
+#[derive(Debug)]
+pub(crate) struct InferencesSpec {
+    /// How many to return.
+    pub(crate) limit: usize,
+    /// How many to skip, from the previous page's cursor.
+    pub(crate) after: Option<usize>,
+    /// The digest the cursor was minted against.
+    pub(crate) digest: String,
+}
+
+impl InferencesSpec {
+    /// Read the request's own words into a spec, refusing what cannot be
+    /// answered.
+    pub(crate) fn resolve(
+        run_id: &str,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<Self, ServeError> {
+        let limit = match limit {
+            None => INFERENCES_DEFAULT_LIMIT,
+            Some(0) => {
+                return Err(ServeError::BadRequest(
+                    "`limit` must be at least 1; omit it for the default".to_string(),
+                ));
+            }
+            Some(n) => n.min(INFERENCES_MAX_LIMIT),
+        };
+        // A digest of its own, so a cursor minted for another of this run's
+        // listings is refused rather than followed into a different sequence.
+        let digest = super::super::cursor::filter_digest(&["inferences", run_id]);
+        let after = match cursor {
+            None => None,
+            Some(raw) => {
+                let decoded = super::super::cursor::decode(raw, "index", "asc", &digest)
+                    .map_err(|e| ServeError::BadRequest(e.message()))?;
+                match decoded.key {
+                    super::super::cursor::CursorKey::Int(i) => usize::try_from(i).ok(),
+                    // This listing mints only an integer key, so anything else
+                    // is a cursor from somewhere else.
+                    _ => None,
+                }
+            }
+        };
+        Ok(Self {
+            limit,
+            after,
+            digest,
+        })
+    }
+}
+
+/// One trip to a provider, with the move that followed it.
+#[derive(Debug)]
+pub(crate) struct Attempt {
+    /// What the journal recorded about the attempt itself.
+    pub(crate) record: AttemptRecord,
+    /// The move to another provider recorded after it. Nothing for an attempt
+    /// the stage did not give up on.
+    pub(crate) failover: Option<FailoverRecord>,
+}
+
+/// One attempt, with the position it holds among the run's own.
+///
+/// The position is what a page cursor names. Nothing about an attempt is ever
+/// fetched separately, so it needs no journal offset of its own the way an
+/// execution does.
+#[derive(Debug)]
+pub(crate) struct IndexedAttempt {
+    /// Where this attempt sits among the run's attempts, in the order they were
+    /// made.
+    pub(crate) index: usize,
+    /// The attempt, and whatever followed it.
+    pub(crate) attempt: Attempt,
+}
+
+/// One page of a run's attempts.
+#[derive(Debug)]
+pub(crate) struct InferencesPage {
+    /// The attempts themselves, in the order they were made.
+    pub(crate) attempts: Vec<IndexedAttempt>,
+    /// Where the next page starts. Nothing when this page reached the end.
+    pub(crate) next_cursor: Option<String>,
+    /// How many the journal holds altogether.
+    pub(crate) total: usize,
+}
+
+/// Read one page of what a run's provider calls took.
+///
+/// Attempt order, always: the order the run made them, which is the order the
+/// retries and the moves between providers only make sense in.
+pub(crate) fn page(run_id: &str, spec: &InferencesSpec) -> Result<InferencesPage, ServeError> {
+    let attempts = read(run_id)?;
+    let total = attempts.len();
+    let start = spec.after.map(|i| i + 1).unwrap_or(0);
+    let mut wanted: Vec<IndexedAttempt> = attempts
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .take(spec.limit + 1)
+        .map(|(index, attempt)| IndexedAttempt { index, attempt })
+        .collect();
+    let has_more = wanted.len() > spec.limit;
+    wanted.truncate(spec.limit);
+    let next_cursor = has_more.then(|| wanted.last()).flatten().map(|last| {
+        super::super::cursor::encode(
+            "index",
+            "asc",
+            &spec.digest,
+            super::super::cursor::CursorKey::Int(last.index as i64),
+            "",
+        )
+    });
+    Ok(InferencesPage {
+        attempts: wanted,
+        next_cursor,
+        total,
+    })
+}
+
+/// Every trip to a provider a run's journal records, in the order it made them,
+/// each carrying the move that followed it.
+///
+/// A run with no journal is not an error here: a run that never called a
+/// provider made no trips, and an empty list says so. A journal with no header
+/// yet reads the same way, for the same reason.
+fn read(run_id: &str) -> Result<Vec<Attempt>, ServeError> {
+    let path = runstate::run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
+    let Ok(file) = std::fs::File::open(&path) else {
+        return Ok(Vec::new());
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let (_version, records) = leviath_core::run_archive::read_archive_lenient(&mut reader)
+        .map_err(|e| {
+            ServeError::Internal(format!("Run '{run_id}' has an unreadable journal: {e}"))
+        })?;
+    let mut attempts: Vec<Attempt> = Vec::new();
+    for record in &records {
+        match record {
+            RunRecord::InferenceAttempt(attempt) => attempts.push(Attempt {
+                record: attempt.clone(),
+                failover: None,
+            }),
+            RunRecord::InferenceFailover(failover) => {
+                // Matched on the target the move left rather than on position
+                // alone. A lane with no stage of its own journals its attempts
+                // into the same file, so the attempt written just before a
+                // failover is not always the call that failed over. A move
+                // whose attempt is not in the journal at all has nothing to
+                // hang on and is left out: this listing is attempts, and an
+                // entry naming none of them would be a row about nothing.
+                if let Some(attempt) = attempts.iter_mut().rev().find(|held| {
+                    (
+                        held.record.stage.as_str(),
+                        held.record.provider.as_str(),
+                        held.record.model.as_str(),
+                    ) == (
+                        failover.stage.as_str(),
+                        failover.from_provider.as_str(),
+                        failover.from_model.as_str(),
+                    )
+                }) {
+                    attempt.failover = Some(failover.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(attempts)
+}
+
+#[cfg(test)]
+#[path = "inferences_tests.rs"]
+mod tests;

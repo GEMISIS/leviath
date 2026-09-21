@@ -14,11 +14,14 @@
 
 pub(super) mod blueprints;
 pub(super) mod config;
+pub(super) mod context_changes;
 pub(super) mod error;
 pub(super) mod executions;
 pub(super) mod export;
 pub(super) mod files;
 pub(super) mod history;
+pub(super) mod inferences;
+pub(super) mod interactions;
 pub(super) mod lifecycle;
 pub(super) mod runs;
 pub(super) mod spawn;

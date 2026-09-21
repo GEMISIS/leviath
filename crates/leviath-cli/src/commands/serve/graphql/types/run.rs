@@ -721,12 +721,71 @@ impl Run {
         super::execution::page(self.meta.run_id.clone(), first, after).await
     }
 
-    /// How this run's context window changed over the run, paged.
+    /// Every question this run put to a person, in the order it asked them,
+    /// paged.
     ///
-    /// Each point carries a whole window, so this is paged harder than the run
-    /// listing is: ask for the regions you render rather than every point's
-    /// every region. Chronological by default, which is also the cheaper
-    /// direction to read.
+    /// The only record that this run stopped for somebody. `executions` says
+    /// what the run tried; this says what it needed a person for, and what
+    /// came back - including a scope that only ever lived here, since a
+    /// granted approval reads no differently from a call no policy ever
+    /// stopped once the tool has read it.
+    ///
+    /// Empty for an unattended run, which asks nobody: `--yolo` answers before
+    /// the question reaches a person, so an empty list on a run that plainly
+    /// did something dangerous means exactly that.
+    async fn interactions(
+        &self,
+        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<super::interaction::InteractionConnection> {
+        super::interaction::page(self.meta.run_id.clone(), first, after).await
+    }
+
+    /// Every trip this run made to a provider, in the order it made them,
+    /// paged.
+    ///
+    /// What `usage` and `cost` cannot say. They are per call that worked, so a
+    /// call refused three times and answered on the fourth is billed once and
+    /// reads here as the four trips it was. Each entry names the provider and
+    /// model asked, how the attempt ended, what the loop did next, and how long
+    /// the run waited before it; `failover` carries the move where the stage gave
+    /// up on a provider.
+    ///
+    /// Empty for a run whose journal holds no attempt records.
+    async fn inferences(
+        &self,
+        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<super::inference::InferenceAttemptConnection> {
+        super::inference::page(self.meta.run_id.clone(), first, after).await
+    }
+
+    /// Why each of this run's regions changed, in the order the changes landed,
+    /// paged.
+    ///
+    /// `contextHistory` serves the window snapshots: what every region held at
+    /// each point. This serves the reasons: which path through the runtime moved
+    /// a region, so one that lost its plan to a compaction reads differently
+    /// from one a stage-edge transform cleared and one the model deleted. No
+    /// content, since the snapshot on the same tick already holds the text.
+    ///
+    /// Empty for a run whose journal holds no change records, and for writes
+    /// whose path cannot name a cause.
+    async fn context_changes(
+        &self,
+        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<super::context_change::ContextChangeConnection> {
+        super::context_change::page(self.meta.run_id.clone(), first, after).await
+    }
+
+    /// Snapshots of this run's context window over the run, paged.
+    ///
+    /// What the window held at each point, not why it changed: `contextChanges`
+    /// is the reasons. Each point here carries a whole window, so this is paged
+    /// harder than the run listing is: ask for the regions you render rather
+    /// than every point's every region. Chronological by default, which is also
+    /// the cheaper direction to read.
     async fn context_history(
         &self,
         #[graphql(desc = "Page size.", default = 50)] first: i32,

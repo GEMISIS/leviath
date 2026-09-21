@@ -1,0 +1,210 @@
+//! Why a run's context regions changed.
+//!
+//! The half a snapshot cannot carry. `contextHistory` rebuilds the window turn
+//! by turn, and a region that lost the plan it was holding looks identical there
+//! whether a compaction summarised it away, a stage-edge transform cleared it,
+//! or the model called `context_delete` on it - three answers with a bug in
+//! three different places. These records name the path through the runtime that
+//! moved each region, recorded as it moved.
+
+use async_graphql::{Enum, SimpleObject};
+use leviath_core::run_archive::ContextChangeRecord;
+
+use super::super::error::IntoGraphql;
+use super::super::scalars::{BigInt, Cursor, Timestamp};
+use crate::commands::serve::blocking::blocking;
+use crate::commands::serve::core::context_changes;
+
+/// What changed a region of a context window.
+///
+/// A cause names a path through the runtime rather than a shape of edit: two
+/// paths that both append to the conversation stay two causes, because which of
+/// them ran is the question being asked. A write whose path has no cause of its
+/// own records nothing at all rather than borrowing the nearest neighbour, so
+/// this vocabulary never mislabels a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum ContextCause {
+    /// A region seeded from the blueprint or from caller input, at spawn or on
+    /// entry to a stage that declares its own layout.
+    Seed,
+    /// A message delivered into the running agent, landing in the region that
+    /// accepts messages.
+    Message,
+    /// The model's own reply, recorded as the assistant turn it was.
+    ModelReply,
+    /// A tool's answer landing in a region: the conversation by default,
+    /// wherever the stage's `tool_results` sends it, or the region a tool writes
+    /// on purpose.
+    ToolResult,
+    /// A part the model produced, kept somewhere other than the conversation:
+    /// routed by the stage's `output_routing`, attached by a mime tool, or
+    /// emitted as an artifact.
+    ProducedPart,
+    /// A compacting region summarising itself: the summary landing in its
+    /// history region, and the source region being emptied behind it.
+    Compaction,
+    /// A stage-edge transform carrying, summarising or clearing a region as the
+    /// run moves between stages, or as a child is seeded from its parent.
+    Transform,
+    /// A `context_*` or `todo_*` tool the model called: a write, an append, a
+    /// release, a checklist item.
+    ContextTool,
+    /// A region's own `on_write` or `on_overflow` script, or a stage hook,
+    /// writing on the region's behalf.
+    Hook,
+    /// A fan-out worker: the sources its window is seeded with, and the report it
+    /// hands back to its parent.
+    FanOut,
+    /// An interaction point: the document it publishes for review, and what a
+    /// person's answer puts in the conversation.
+    Interaction,
+    /// A resume rebuilding the window from the journal, region by region, before
+    /// the run carries on.
+    Resume,
+    /// The runtime's own bookkeeping: a system nudge, a watchdog note, the record
+    /// a transition choice leaves behind.
+    Framework,
+}
+
+impl From<leviath_core::ContextCause> for ContextCause {
+    fn from(cause: leviath_core::ContextCause) -> Self {
+        use leviath_core::ContextCause as Core;
+        match cause {
+            Core::Seed => Self::Seed,
+            Core::Message => Self::Message,
+            Core::ModelReply => Self::ModelReply,
+            Core::ToolResult => Self::ToolResult,
+            Core::ProducedPart => Self::ProducedPart,
+            Core::Compaction => Self::Compaction,
+            Core::Transform => Self::Transform,
+            Core::ContextTool => Self::ContextTool,
+            Core::Hook => Self::Hook,
+            Core::FanOut => Self::FanOut,
+            Core::Interaction => Self::Interaction,
+            Core::Resume => Self::Resume,
+            Core::Framework => Self::Framework,
+        }
+    }
+}
+
+/// One change to one region, as the journal recorded it.
+///
+/// No content: the window recorded on the same tick already holds the text, so
+/// repeating it here would double the journal to say nothing new. Read this
+/// beside `contextHistory` when the text matters.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ContextChange {
+    /// The region that changed.
+    pub(crate) region: String,
+    /// What changed it.
+    pub(crate) cause: ContextCause,
+    /// Entries the change added.
+    pub(crate) entries_added: i32,
+    /// Entries it removed, including any eviction the change itself triggered.
+    pub(crate) entries_removed: i32,
+    /// How the region's token count moved. Negative when the region shrank.
+    pub(crate) token_delta: BigInt,
+    /// When the change landed.
+    pub(crate) at: Timestamp,
+}
+
+impl From<ContextChangeRecord> for ContextChange {
+    fn from(record: ContextChangeRecord) -> Self {
+        Self {
+            region: record.region,
+            cause: ContextCause::from(record.cause),
+            entries_added: count(record.entries_added),
+            entries_removed: count(record.entries_removed),
+            token_delta: BigInt(record.token_delta),
+            at: Timestamp(record.at),
+        }
+    }
+}
+
+/// One page of a run's context changes.
+#[derive(SimpleObject)]
+pub(crate) struct ContextChangeConnection {
+    /// The changes on this page, in the order they landed.
+    pub(crate) edges: Vec<ContextChangeEdge>,
+    /// Where the next page starts.
+    pub(crate) page_info: super::super::connection::PageInfo,
+    /// How many the run's journal holds altogether.
+    pub(crate) total: i32,
+}
+
+/// One change and its cursor.
+#[derive(SimpleObject)]
+pub(crate) struct ContextChangeEdge {
+    /// Where this change sits among the run's own.
+    pub(crate) cursor: Cursor,
+    /// The change.
+    pub(crate) node: ContextChange,
+}
+
+/// Narrow a journal counter to the 32 bits GraphQL's `Int` carries.
+///
+/// Entry counts, which a region reaches the thousands of at most. Saturating
+/// rather than wrapping: an implausible ceiling reads as wrong, where a wrapped
+/// small number reads as fine.
+fn count(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// Read one page of a run's context changes.
+///
+/// Shared by the field on a run and by anything else that grows one later, the
+/// same way `interactions::page` is.
+pub(crate) async fn page(
+    run_id: String,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<ContextChangeConnection> {
+    use crate::commands::serve::core::error::ServeError;
+    let limit = usize::try_from(first)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
+        .gql()?;
+    if limit > context_changes::CONTEXT_CHANGES_MAX_LIMIT {
+        return Err(ServeError::BadRequest(format!(
+            "`first` may be at most {}, the context changes page cap",
+            context_changes::CONTEXT_CHANGES_MAX_LIMIT
+        )))
+        .gql();
+    }
+    let cursor = after.map(|cursor| cursor.0);
+    let for_read = run_id.clone();
+    let page = blocking(move || {
+        let spec = context_changes::ContextChangesSpec::resolve(
+            &for_read,
+            Some(limit),
+            cursor.as_deref(),
+        )?;
+        context_changes::page(&for_read, &spec)
+    })
+    .await
+    .gql()?;
+    let total = i32::try_from(page.total).unwrap_or(i32::MAX);
+    let end_cursor = page.next_cursor.clone().map(Cursor);
+    Ok(ContextChangeConnection {
+        edges: page
+            .changes
+            .into_iter()
+            .map(|indexed| ContextChangeEdge {
+                // The index among the run's own changes: several regions can
+                // change on one tick, so a timestamp could not name one of them.
+                cursor: Cursor(indexed.index.to_string()),
+                node: ContextChange::from(indexed.record),
+            })
+            .collect(),
+        page_info: super::super::connection::PageInfo {
+            end_cursor: end_cursor.clone(),
+            has_next_page: end_cursor.is_some(),
+        },
+        total,
+    })
+}
+
+#[cfg(test)]
+#[path = "context_change_tests.rs"]
+mod tests;

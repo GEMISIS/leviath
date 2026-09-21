@@ -7,7 +7,10 @@
 
 pub(crate) mod blueprint;
 pub(crate) mod catalog;
+pub(crate) mod context_change;
 pub(crate) mod execution;
+pub(crate) mod inference;
+pub(crate) mod interaction;
 pub(crate) mod machine;
 pub(crate) mod manifest;
 pub(crate) mod run;

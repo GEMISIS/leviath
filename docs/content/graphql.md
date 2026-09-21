@@ -307,10 +307,11 @@ not text, mint a `fileUrl` instead: a directory, a path outside the run's workin
 directory, an offset past the end and a file that is not text each answer with
 their own code.
 
-`contextHistory` is how the run's context window changed over the run. Each point
-carries a whole window, so it is paged harder than the run listing is, and the
-region contents are their own field: asking for the shape of fifty windows does
-not read fifty windows' text.
+`contextHistory` is snapshots of the run's context window, point by point. Each
+point carries a whole window, so it is paged harder than the run listing is, and
+the region contents are their own field: asking for the shape of fifty windows
+does not read fifty windows' text. For why a region moved rather than what it
+then held, see [why a region changed](#why-a-region-changed).
 
 ```graphql
 {
@@ -424,6 +425,124 @@ The same interface answers what a person is being asked to approve:
     toolCall { __typename ... on ShellCall { args { command } } } } }
 }
 ```
+
+## What a run asked
+
+`executions` says what a run tried. It says nothing about the calls a person
+had to approve, or the free-form questions a stage asked along the way: once a
+tool has read the answer, a granted call looks exactly like one no policy ever
+stopped. `interactions` is the only record that this run stopped and asked
+somebody at all.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    interactions(first: 50) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges { node {
+        requestId kind tool prompt stage askedAt settledAt
+        settlement { outcome approved scope choice text feedback }
+      } }
+    }
+  } } }
+}
+```
+
+Every field on `settlement` but `outcome` is null unless `outcome` is
+`ANSWERED`. Nobody answered a `TIMED_OUT` ask (the hub answered for them once
+the run's interaction timeout ran out) or a `CANCELLED` one (the run was
+cancelled, or the agent that asked it went away), so there is nothing for any
+of the rest to carry.
+
+`scope` is the one field worth a note against REST. This spells the widest
+grant `RUN`; the REST journal and the answer routes write `session` for the
+same scope. `ONCE` and `STAGE` spell the same on both sides.
+
+An unattended run asks nobody, so it has no interactions to list. `--yolo`
+answers for the person before the question reaches anyone, and an empty list on
+a run that plainly did something dangerous means exactly that: nobody was
+asked. What a profile waives is `yoloProfiles`, and what a run was started with
+is on the run itself.
+
+## What a run's provider calls took
+
+`usage` and `cost` are per call that worked. A call refused three times and
+answered on the fourth is billed once, so the time the run spent being refused is
+in neither of them. `inferences` is that half, read from the same journal: one
+entry per trip to a provider, in the order the run made them.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    inferences(first: 50) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges { node {
+        stage attempt provider model durationMs backoffMs at
+        outcome { kind failureKind transient capacity retry }
+        digest { systemHash messages tools maxTokens temperature }
+        failover { fromProvider fromModel toProvider toModel reason }
+      } }
+    }
+  } } }
+}
+```
+
+`outcome.kind` is `SUCCEEDED` or `FAILED`, and the four fields beside it are null
+unless it failed. `transient` and `capacity` are how the failure was judged at the
+time rather than now: what counts as transient is a policy that moves between
+releases. `retry` says what the loop did next. `SAME_MODEL` is the same provider
+again after a wait, and the next entry's `backoffMs` says how long that wait
+really was. `RENEWED_FILES` is an immediate retry that uploaded the files the
+request named afresh, so it spends no wait at all.
+
+`digest` identifies a request without carrying it. Two attempts with the same
+digest sent the same thing, which is the question a retry raises: a provider that
+kept refusing reads differently from a request that kept changing underneath the
+run. `systemHash` is opaque, so compare it and read nothing into the value.
+
+`failover` is the move to a different provider, and it is null on almost every
+attempt. A retry against the same provider is the next entry, not a move. Where it
+is set, the attempt after it went to `toProvider` and `toModel`, and `reason` says
+why the first provider was judged unusable. The journal records a move one tick
+after the attempt it follows, because the tick loop decides it rather than the
+call. This field puts the pair back together, so your client does not have to.
+
+## Why a region changed
+
+`contextHistory` serves snapshots of the window. `contextChanges` serves the
+reasons it moved. Both read the same journal, and neither answers for the other. A
+region that lost its plan looks identical in a snapshot, whether a compaction took
+it, a transform cleared it, or the model deleted it.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    contextChanges(first: 50) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges { node { region cause entriesAdded entriesRemoved tokenDelta at } }
+    }
+  } } }
+}
+```
+
+`cause` names a path through the runtime rather than a shape of edit. `SEED`,
+`MESSAGE`, `MODEL_REPLY`, `TOOL_RESULT`, `PRODUCED_PART`, `COMPACTION`,
+`TRANSFORM`, `CONTEXT_TOOL`, `HOOK`, `FAN_OUT`, `INTERACTION`, `RESUME` and
+`FRAMEWORK` are the whole vocabulary. Two paths that both append to the
+conversation stay two causes, because which of them ran is the question being
+asked.
+
+A change carries no content, because the snapshot recorded on the same tick
+already holds the text. Read `contextHistory` beside this when the words matter.
+`tokenDelta` is negative where the region shrank, and `entriesRemoved` counts any
+eviction the change itself triggered.
+
+An empty list means the journal holds no change records. A write whose path cannot
+name its cause records nothing rather than borrowing the nearest neighbour, so a
+gap here reads as a gap rather than as a wrong answer.
 
 ## The machine itself
 
