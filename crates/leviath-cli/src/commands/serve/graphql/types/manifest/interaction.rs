@@ -61,7 +61,7 @@ pub(crate) struct DirectiveEntry {
     pub(crate) instruction: String,
 }
 
-/// A checkpoint a stage raises, where the run waits for a person.
+/// The resolver state behind the `InteractionPoint` type.
 pub(crate) struct InteractionPoint {
     /// The blueprint the document region resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -69,6 +69,7 @@ pub(crate) struct InteractionPoint {
     point: leviath_core::blueprint::InteractionPoint,
 }
 
+/// A checkpoint a stage raises, where the run waits for a person.
 #[Object]
 impl InteractionPoint {
     /// The point's name, unique within the stage.

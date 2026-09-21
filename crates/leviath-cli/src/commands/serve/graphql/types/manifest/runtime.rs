@@ -144,7 +144,7 @@ pub(crate) struct SandboxConfig {
     /// daemon pick what is on the machine.
     pub(crate) engine: Option<String>,
     /// Whether the sandbox reaches the network.
-    pub(crate) network: bool,
+    pub(crate) allow_network: bool,
     /// Paths mounted into it, as written.
     pub(crate) mounts: Vec<String>,
     /// Whether one container is kept warm across the run's stages rather than
@@ -160,7 +160,7 @@ impl From<&leviath_core::sandbox::ToolSandboxConfig> for SandboxConfig {
             kind: SandboxKind::from(sandbox.kind),
             image: sandbox.image.clone(),
             engine: sandbox.engine.clone(),
-            network: sandbox.network,
+            allow_network: sandbox.network,
             mounts: sandbox.mounts.clone(),
             keep_warm: sandbox.keep_warm,
             on_unavailable: SandboxUnavailable::from(sandbox.on_unavailable),
@@ -257,10 +257,7 @@ impl From<&leviath_core::blueprint::RepetitionDetectionConfig> for RepetitionDet
     }
 }
 
-/// Keeping the files a run reads and writes in one region.
-///
-/// So a tool result can point at the region rather than repeating a file the
-/// context already holds.
+/// The resolver state behind the `FileTrackingConfig` type.
 pub(crate) struct FileTrackingConfig {
     /// The blueprint the region name resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -268,6 +265,10 @@ pub(crate) struct FileTrackingConfig {
     tracking: leviath_core::blueprint::FileTrackingConfig,
 }
 
+/// Keeping the files a run reads and writes in one region.
+///
+/// So a tool result can point at the region rather than repeating a file the
+/// context already holds.
 #[Object]
 impl FileTrackingConfig {
     /// The key-value region the files are synced to.

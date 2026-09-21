@@ -291,9 +291,16 @@ pub(crate) fn page_size(first: i32) -> Result<usize, ServeError> {
     }
 }
 
-/// The read side: runs, and the fleet's current state.
+/// The resolver state behind the `Query` type.
 pub(crate) struct Query;
 
+/// The whole read side: runs and their history, the blueprints and tools
+/// installed on this machine, and what the daemon itself is doing.
+///
+/// Start from `runs` to find work, and from `node(id:)` when you already hold
+/// an id: anything this schema gives an id to comes back from there, whatever
+/// type it is. Reading never changes a run, so a query is safe to repeat and
+/// safe to poll.
 #[Object]
 impl Query {
     /// The blueprints installed on this machine, by name.
@@ -442,7 +449,7 @@ impl Query {
                 mime_type: row.mime_type,
                 source: row.source,
                 family: row.family,
-                text: row.text,
+                is_text: row.text,
                 extensions: row.extensions.unwrap_or_default(),
             })
             .collect()

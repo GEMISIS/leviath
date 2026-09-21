@@ -1401,7 +1401,7 @@ fn the_admin_inputs_round_trip() {
     let row = MimeRowInput {
         mime_type: "image/webp".to_string(),
         family: Some("image".to_string()),
-        text: Some(false),
+        is_text: Some(false),
         extensions: Some(vec!["webp".to_string()]),
         magic: Some("52494646".to_string()),
         stand_in: Some("[a picture]".to_string()),
@@ -1419,7 +1419,7 @@ fn the_admin_inputs_round_trip() {
         panic!("a mime row reads back from its own value");
     };
     assert_eq!(read_back.mime_type, "image/webp");
-    assert_eq!(read_back.text, Some(false));
+    assert_eq!(read_back.is_text, Some(false));
     let tokens = read_back.tokens.expect("the rates come with it");
     assert_eq!(tokens.per_pixel, Some(750));
     assert_eq!(tokens.max, Some(1_600));
@@ -1639,7 +1639,7 @@ fn an_input_object_refuses_what_it_cannot_read() {
     assert!(
         MimeRowInput::parse(two(
             ("mimeType", Value::String("image/png".to_string())),
-            ("text", number()),
+            ("isText", number()),
         ))
         .is_err(),
         "whether the bytes are text is a yes or a no"

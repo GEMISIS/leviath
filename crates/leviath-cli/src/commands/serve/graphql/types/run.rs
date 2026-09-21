@@ -131,7 +131,7 @@ pub(crate) struct MetadataEntry {
     pub(crate) value: String,
 }
 
-/// One run of a blueprint.
+/// The resolver state behind the `Run` type.
 ///
 /// Holds the shared `RunMeta` and the wall-clock second the request was
 /// answered at, so every duration in one response is measured from one
@@ -143,6 +143,17 @@ pub(crate) struct Run {
     pub(crate) now: i64,
 }
 
+/// One execution of a blueprint: the work itself, from the task it was given
+/// to whatever it finally produced.
+///
+/// The `id` is the handle everything else in this API names a run by, and it
+/// outlives the run: a finished run is still readable, with its stages, its
+/// spend, its tool calls and the context it was holding. A run that spawns
+/// sub-agents is the `parent` of their runs, so a whole tree hangs off one id.
+///
+/// Every duration on a run is measured against the moment the request was
+/// answered, so the numbers in one response agree with each other rather than
+/// each being taken at its own instant.
 #[Object]
 impl Run {
     /// Globally unique run id, and the id every REST route names this run by.

@@ -129,7 +129,7 @@ impl AdminMutation {
             &row.mime_type,
             crate::commands::mime_rows::RowEdit {
                 family: row.family,
-                text: row.text,
+                text: row.is_text,
                 tokens,
                 extensions: row.extensions,
                 magic: row.magic,
@@ -472,7 +472,7 @@ pub(crate) struct MimeRowInput {
     /// The family providers key their encoders on.
     pub(crate) family: Option<String>,
     /// Whether the bytes are text, and so may travel inline.
-    pub(crate) text: Option<bool>,
+    pub(crate) is_text: Option<bool>,
     /// Extensions that imply this type, without the dot.
     pub(crate) extensions: Option<Vec<String>>,
     /// A hex prefix that identifies the bytes.

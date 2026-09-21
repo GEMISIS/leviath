@@ -1402,7 +1402,7 @@ async fn the_machine_listings_answer_for_a_bare_install() {
         let answer = run_query(
             "{ mcpServers { name transport endpoint auth }
                yoloProfiles { path exists error profiles { name default } }
-               mime { mimeType source family text extensions }
+               mime { mimeType source family isText extensions }
                scripts { kind name foundAt blueprint } }",
         )
         .await;

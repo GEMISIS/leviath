@@ -201,7 +201,7 @@ impl From<&leviath_core::region::RegionKind> for RegionKind {
     }
 }
 
-/// One context region a blueprint declares.
+/// The resolver state behind the `Region` type.
 pub(crate) struct Region {
     /// The blueprint this region belongs to, shared rather than copied.
     pub(crate) blueprint: Arc<CoreBlueprint>,
@@ -212,6 +212,13 @@ pub(crate) struct Region {
     pub(crate) at: usize,
 }
 
+/// One named slice of context a blueprint declares: what it is for, how large
+/// it may grow, and what it gives up when it fills.
+///
+/// A blueprint's context window is cut into regions so that a stage can carry
+/// one part of what it knows and compact or empty another. This is the
+/// declaration only. What a live run's region holds is `ContextRegion`, and
+/// the two are read separately on purpose.
 #[Object]
 impl Region {
     /// Region name, unique within the layout that declares it.
@@ -443,11 +450,7 @@ impl Region {
     }
 }
 
-/// A blueprint: the full manifest.
-///
-/// From a run, this is the manifest the run executed. From the blueprint
-/// listing, it is the definition installed now. The `source` field says which,
-/// and the digest in the id says whether they are the same bytes.
+/// The resolver state behind the `Blueprint` type.
 pub(crate) struct Blueprint {
     /// The parsed manifest, shared with the parse cache.
     pub(crate) parsed: Arc<CoreBlueprint>,
@@ -457,6 +460,15 @@ pub(crate) struct Blueprint {
     pub(crate) source: BlueprintSource,
 }
 
+/// A blueprint: the manifest that says what an agent is, whole.
+///
+/// Its stages, regions, tools and models are the declaration and nothing more.
+/// Nothing here belongs to any one execution: that is a `Run`, which carries
+/// its own frozen copy of the blueprint it started from.
+///
+/// So read from a run, this is the manifest that run executed; read from the
+/// blueprint listing, it is the definition installed now. The `source` field
+/// says which, and the digest in the id says whether they are the same bytes.
 #[Object]
 impl Blueprint {
     /// This revision's id: `<name>@<digest prefix>`.

@@ -61,10 +61,7 @@ pub(crate) struct OutputRequirement {
     pub(crate) reasks: i32,
 }
 
-/// What a stage's fan-out splits into, and how.
-///
-/// Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
-/// block of defaults nobody wrote.
+/// The resolver state behind the `FanOut` type.
 pub(crate) struct FanOut {
     /// The blueprint the stage and region names resolve in.
     blueprint: Arc<CoreBlueprint>,
@@ -72,6 +69,10 @@ pub(crate) struct FanOut {
     config: leviath_core::blueprint::FanOutConfig,
 }
 
+/// What a stage's fan-out splits into, and how.
+///
+/// Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
+/// block of defaults nobody wrote.
 #[Object]
 impl FanOut {
     /// A separate installed blueprint run as the worker, by name. It has to be
@@ -163,7 +164,7 @@ impl FanOut {
     }
 }
 
-/// Which regions a stage adds, hides or empties on its way in.
+/// The resolver state behind the `StageContext` type.
 pub(crate) struct StageContext {
     /// The stage this block belongs to.
     blueprint: Arc<CoreBlueprint>,
@@ -171,6 +172,7 @@ pub(crate) struct StageContext {
     at: usize,
 }
 
+/// Which regions a stage adds, hides or empties on its way in.
 #[Object]
 impl StageContext {
     /// Regions this stage declares of its own, beyond the blueprint's layout.
@@ -228,7 +230,7 @@ impl StageContext {
     }
 }
 
-/// One stage of a blueprint.
+/// The resolver state behind the `Stage` type.
 pub(crate) struct Stage {
     /// The blueprint this stage belongs to, shared rather than copied.
     pub(crate) blueprint: Arc<CoreBlueprint>,
@@ -236,6 +238,12 @@ pub(crate) struct Stage {
     pub(crate) at: usize,
 }
 
+/// One step of a blueprint: a prompt, the tools it may reach for, the slice of
+/// context it sees, and the edges leading out of it.
+///
+/// Everything here is what the blueprint declares, so a stage reads the same
+/// however many runs have passed through it. A run occupies one stage at a
+/// time and leaves along an edge once that edge's gate is satisfied.
 #[Object]
 impl Stage {
     /// Stage name, unique within the blueprint.

@@ -305,7 +305,7 @@ pub(crate) struct MimeRow {
     /// encoders on.
     pub(crate) family: Option<String>,
     /// Whether the bytes are text, and so may travel inline.
-    pub(crate) text: Option<bool>,
+    pub(crate) is_text: Option<bool>,
     /// The extensions this type is known by.
     pub(crate) extensions: Vec<String>,
 }

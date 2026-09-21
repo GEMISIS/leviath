@@ -177,6 +177,12 @@ impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
     }
 }
 
+/// The resolver state behind the `ModelInput` type.
+pub(crate) struct ModelInput {
+    /// What the journal recorded about the request.
+    pub(crate) record: leviath_core::run_archive::ModelInput,
+}
+
 /// What one attempt sent the model, and what the request was assembled from.
 ///
 /// The body itself is here only for a run whose operator asked for it, because a
@@ -189,11 +195,6 @@ impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
 /// answers what a digest cannot: which parameters were really in force after
 /// resolution, which tools the model was offered, and which build of the
 /// assembly produced the shape.
-pub(crate) struct ModelInput {
-    /// What the journal recorded about the request.
-    pub(crate) record: leviath_core::run_archive::ModelInput,
-}
-
 #[Object]
 impl ModelInput {
     /// Whether `request` is here, and where it went if it is not.
@@ -301,7 +302,7 @@ impl From<&FailoverRecord> for InferenceFailover {
     }
 }
 
-/// One trip a run made to a provider, as the journal recorded it.
+/// The resolver state behind the `InferenceAttempt` type.
 pub(crate) struct InferenceAttempt {
     /// What the journal recorded about the attempt.
     pub(crate) record: AttemptRecord,
@@ -309,6 +310,12 @@ pub(crate) struct InferenceAttempt {
     pub(crate) failover: Option<FailoverRecord>,
 }
 
+/// One trip a run made to a provider, as the journal recorded it.
+///
+/// Every trip is here, not just the ones that worked: a call answered on the
+/// third try leaves three attempts, and reading them in order is how a run's
+/// latency, backoff and moves between providers become visible. An attempt is
+/// a record of what happened, so nothing about it changes after the fact.
 #[Object]
 impl InferenceAttempt {
     /// The stage the run was in. Empty for a lane that has no stage of its own,

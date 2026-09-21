@@ -106,3 +106,42 @@ fn the_query_limits_are_the_documented_ones() {
     assert_eq!(MAX_DEPTH, 12);
     assert_eq!(MAX_COMPLEXITY, 10_000);
 }
+
+/// Every named type in the published schema says what it is.
+///
+/// A client generating code from the SDL sees the description and nothing
+/// else, so a type without one is a name and a shape with no explanation
+/// anywhere. The check parses the file rather than searching it, because a
+/// description belongs to a definition and a search cannot tell one from a
+/// sentence that happens to sit above it.
+///
+/// The file, not `sdl()`, because the file is what a client reads. The two
+/// cannot drift: `the_published_schema_is_the_one_this_build_serves` holds
+/// them byte for byte.
+#[test]
+fn every_named_type_says_what_it_is() {
+    use async_graphql::parser::parse_schema;
+    use async_graphql::parser::types::TypeSystemDefinition;
+
+    let parsed = parse_schema(include_str!(
+        "../../../../../../docs/schema/leviath.graphql"
+    ))
+    .expect("the schema parses");
+    let mut silent: Vec<String> = parsed
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            TypeSystemDefinition::Type(ty) if ty.node.description.is_none() => {
+                Some(ty.node.name.node.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    silent.sort();
+    assert!(
+        silent.is_empty(),
+        "{} types carry no description: {}",
+        silent.len(),
+        silent.join(", ")
+    );
+}

@@ -118,7 +118,7 @@ async fn a_workdir_listing_reads_one_level() {
         meta_in(workdir.path()),
         r#"{ run { files(source: WORKDIR) {
              source path parent workdir truncated modifiedFilesTruncated
-             entries { name path isDir size exists outsideWorkdir mimeType }
+             entries { name path isDir size exists isOutsideWorkdir mimeType }
            } } }"#,
     )
     .await;
@@ -182,7 +182,7 @@ async fn a_recorded_listing_keeps_what_the_run_touched() {
     let json = data(
         meta,
         r#"{ run { files { source modifyingToolCalls modifiedFilesTruncated
-             entries { name exists outsideWorkdir } } } }"#,
+             entries { name exists isOutsideWorkdir } } } }"#,
     )
     .await;
     let listing = &json["run"]["files"];

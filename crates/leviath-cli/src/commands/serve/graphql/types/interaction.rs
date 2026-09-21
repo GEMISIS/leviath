@@ -137,12 +137,19 @@ impl From<&leviath_core::interaction::Settlement> for Settlement {
     }
 }
 
-/// One question a run put to a person, as the journal recorded it.
+/// The resolver state behind the `Interaction` type.
 pub(crate) struct Interaction {
     /// What the journal recorded.
     pub(crate) record: InteractionRecord,
 }
 
+/// One question a run put to a person: a tool call to approve, a choice to
+/// make, some text to write, or a document to edit.
+///
+/// The run waits on the ask, so an unanswered one is a run going nowhere until
+/// somebody reads it. `settlement` says how it ended and what came back, and
+/// `requestId` is the handle an answer is sent against, over this API or from
+/// `lev respond`.
 #[Object]
 impl Interaction {
     /// The id the hub minted for this ask, which is what an answer arriving

@@ -76,7 +76,7 @@ impl ToolPermissionRule {
     }
 }
 
-/// Where one tool's results go, in place of the stage's default region.
+/// The resolver state behind the `ToolRouteOverride` type.
 pub(crate) struct ToolRouteOverride {
     /// The blueprint the region name resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -86,6 +86,7 @@ pub(crate) struct ToolRouteOverride {
     region: String,
 }
 
+/// Where one tool's results go, in place of the stage's default region.
 #[Object]
 impl ToolRouteOverride {
     /// The tool, by the name the manifest used. A name rather than a `Tool`: an
@@ -123,7 +124,7 @@ pub(crate) struct ToolTokenCeiling {
     pub(crate) max_result_tokens: i32,
 }
 
-/// Where a stage's tool results land in its context.
+/// The resolver state behind the `ToolRouting` type.
 pub(crate) struct ToolRouting {
     /// The blueprint the region names resolve in.
     blueprint: Arc<CoreBlueprint>,
@@ -131,6 +132,7 @@ pub(crate) struct ToolRouting {
     routing: leviath_core::blueprint::ToolResultRouting,
 }
 
+/// Where a stage's tool results land in its context.
 #[Object]
 impl ToolRouting {
     /// The region results go to when no override names another.
@@ -204,7 +206,7 @@ impl ToolRouting {
     }
 }
 
-/// Where the parts a stage produces are written, by mime pattern.
+/// The resolver state behind the `OutputRoute` type.
 pub(crate) struct OutputRoute {
     /// The blueprint the region name resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -214,6 +216,7 @@ pub(crate) struct OutputRoute {
     region: String,
 }
 
+/// Where the parts a stage produces are written, by mime pattern.
 #[Object]
 impl OutputRoute {
     /// The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The

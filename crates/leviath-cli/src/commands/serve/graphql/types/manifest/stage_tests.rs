@@ -439,7 +439,7 @@ async fn declared_and_effective_settings_are_both_answered() {
              effective {
                includesBatchHint shellHintEligible tracksTaint
                nudge { nudges max text }
-               sandbox { kind image network mounts keepWarm onUnavailable }
+               sandbox { kind image allowNetwork mounts keepWarm onUnavailable }
              }
            } }"#)
     .await;
@@ -456,7 +456,7 @@ async fn declared_and_effective_settings_are_both_answered() {
     // The blueprint's own blocks are what these resolve from.
     assert_eq!(effective["sandbox"]["kind"], "CONTAINER");
     assert_eq!(effective["sandbox"]["image"], "python:3.12");
-    assert_eq!(effective["sandbox"]["network"], false);
+    assert_eq!(effective["sandbox"]["allowNetwork"], false);
     assert_eq!(effective["tracksTaint"], true);
     assert_eq!(effective["nudge"]["max"], 5, "from the agent block");
     // A stage with checkpoints is not nudged: its text is its work product.
