@@ -5,7 +5,7 @@
 //! them is a run, and none grows without bound, so they are plain values and
 //! plain lists.
 
-use async_graphql::SimpleObject;
+use async_graphql::{ID, SimpleObject};
 
 use super::super::scalars::{BigInt, Timestamp};
 
@@ -137,6 +137,10 @@ pub(crate) struct DoctorReport {
 /// One MCP server in the config.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct McpServer {
+    /// `mcpServer:<name>`. A machine holds one server per name, so the name is
+    /// the whole key.
+    #[graphql(owned)]
+    pub(crate) id: ID,
     /// Unique server name.
     pub(crate) name: String,
     /// How it is reached.
@@ -149,6 +153,20 @@ pub(crate) struct McpServer {
     pub(crate) config_error: Option<String>,
     /// Where it stands on credentials.
     pub(crate) auth: McpAuth,
+}
+
+impl McpServer {
+    /// Describe one server this machine has configured.
+    pub(crate) fn from_info(info: super::super::super::mcp::McpServerInfo) -> Self {
+        Self {
+            id: super::super::node::mcp_server_id(&info.name),
+            name: info.name,
+            transport: McpServerTransport::from_wire(&info.transport),
+            endpoint: info.endpoint,
+            config_error: info.config_error,
+            auth: McpAuth::from_wire(&info.auth),
+        }
+    }
 }
 
 /// How a configured MCP server on this machine is reached.
@@ -219,6 +237,10 @@ impl McpAuth {
 /// waives, and `lev yolo show` prints the rules themselves.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct YoloProfile {
+    /// `yoloProfile:<name>`. One file holds the profiles, one profile per
+    /// name, so the name is the whole key.
+    #[graphql(owned)]
+    pub(crate) id: ID,
     /// The profile's name, as `--yolo=<name>` spells it.
     pub(crate) name: String,
     /// What tools with no explicit rule do.
@@ -291,16 +313,38 @@ pub(crate) struct MimeRow {
 /// One registered script.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Script {
+    /// `script:<kind>:<name>` for a script every blueprint gets, and
+    /// `script:<kind>@<blueprint>:<name>` for one blueprint's own.
+    ///
+    /// The kind and the owning blueprint as well as the name, because a name is
+    /// unique only within its kind and the directory it came from: one machine
+    /// can hold a global `tool` called `summarise` and a blueprint's own `tool`
+    /// of that name, and they are two scripts.
+    #[graphql(owned)]
+    pub(crate) id: ID,
     /// Which registry it belongs to: a tool, a hook, a validator, a mime check
     /// or a provider.
     pub(crate) kind: String,
-    /// Its name, unique within that kind.
+    /// Its name, unique within that kind and the directory it came from.
     pub(crate) name: String,
     /// Where it was found: the directory kind this script was read from.
     pub(crate) found_at: String,
     /// The blueprint whose directory it came from, for a blueprint-scoped
     /// script.
     pub(crate) blueprint: Option<String>,
+}
+
+impl Script {
+    /// Describe one script this machine has registered.
+    pub(crate) fn from_item(item: super::super::super::scripts::ScriptItem) -> Self {
+        Self {
+            id: super::super::node::script_id(&item.kind, item.agent.as_deref(), &item.name),
+            kind: item.kind,
+            name: item.name,
+            found_at: item.source,
+            blueprint: item.agent,
+        }
+    }
 }
 
 /// One directory, for a file picker.

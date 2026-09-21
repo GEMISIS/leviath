@@ -330,7 +330,7 @@ async fn an_update_job_carries_its_steps() {
     let jobs = crate::commands::serve::update_job::UpdateJobs::default();
     let started = jobs.start().expect("nothing else is running");
     let job = UpdateJob::from(started.clone());
-    assert_eq!(job.id, started.id);
+    assert_eq!(job.id.as_str(), started.id);
     assert_eq!(job.status, UpdateJobStatus::Running);
     // Every step, always: one that was not asked for reads as skipped rather
     // than being absent, so a client renders the same rows whatever was asked.

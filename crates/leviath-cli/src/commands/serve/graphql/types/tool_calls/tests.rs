@@ -10,6 +10,7 @@
 
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 
+use super::args_rest::SubmittedArtifact;
 use super::*;
 
 /// Every tool the catalog declares, with its declared parameter schema.
@@ -393,4 +394,55 @@ fn a_call_without_its_optional_arguments_still_types() {
     // spelling problem, and it has to survive both.
     assert_eq!(attach.args.mime_type.as_deref(), Some("image/png"));
     assert_eq!(attach.args.deliver, None);
+}
+
+/// An artifact is typed as whichever of the tool's two shapes it was written
+/// in, and which one that was is part of the answer.
+#[test]
+fn an_artifact_keeps_the_shape_the_model_wrote_it_in() {
+    let ToolCall::SubmitOutput(submit) = tool_call(
+        "submit_output",
+        None,
+        r#"{"content":"done","artifacts":["out/report.md",
+             {"path":"out/chart.png","name":"Chart","type":"image/png"},
+             {"path":"out/raw.bin"}]}"#,
+    ) else {
+        panic!("that is a submit_output call");
+    };
+    let artifacts = submit.args.artifacts.expect("three artifacts");
+    let SubmittedArtifact::Path(bare) = &artifacts[0] else {
+        panic!("a bare string is a path on its own");
+    };
+    assert_eq!(bare.path, "out/report.md");
+    let SubmittedArtifact::Described(full) = &artifacts[1] else {
+        panic!("an object is the described shape");
+    };
+    assert_eq!(full.path, "out/chart.png");
+    assert_eq!(full.name.as_deref(), Some("Chart"));
+    // `type` on the wire, `mimeType` in the schema, as everywhere else here.
+    assert_eq!(full.mime_type.as_deref(), Some("image/png"));
+    let SubmittedArtifact::Described(sparse) = &artifacts[2] else {
+        panic!("an object with only a path is still the described shape");
+    };
+    assert_eq!(sparse.name, None, "left to the file name");
+    assert_eq!(sparse.mime_type, None, "left to the registry");
+}
+
+/// An artifact in neither shape does not get a typed reading, and the call says
+/// so rather than dropping the entry.
+#[test]
+fn an_artifact_in_neither_shape_leaves_the_call_untyped() {
+    let call = tool_call(
+        "submit_output",
+        None,
+        r#"{"content":"done","artifacts":[{"file":"out/report.md"}]}"#,
+    );
+    let ToolCall::Untyped(untyped) = call else {
+        panic!("an artifact with no path is not what the tool takes");
+    };
+    assert_eq!(untyped.reason, UntypedCallReason::ArgumentsDidNotMatch);
+    assert_eq!(
+        untyped.raw_arguments.0["artifacts"][0]["file"],
+        serde_json::json!("out/report.md")
+    );
 }

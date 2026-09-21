@@ -58,11 +58,80 @@ pub(crate) struct EditDocumentArgs {
 pub(crate) struct SubmitOutputArgs {
     /// The final answer, in full.
     pub(crate) content: String,
-    /// Files produced alongside it. Each entry is raw JSON because the tool
-    /// takes either a bare path or an object, and a debugger showing what was
-    /// submitted must show whichever of the two the model chose.
+    /// Files produced alongside it, in whichever of the tool's two shapes the
+    /// model wrote each one. Absent when the answer named no files.
     #[serde(default)]
-    pub(crate) artifacts: Option<Vec<Json>>,
+    pub(crate) artifacts: Option<Vec<SubmittedArtifact>>,
+}
+
+/// One entry of `submit_output`'s `artifacts` argument.
+///
+/// The tool takes a bare path or an object, and which one the model chose is
+/// part of what was submitted, so it is a type here rather than a reading that
+/// flattens the two. The run's own record of what it produced is `artifacts` on
+/// the run, which is resolved and typed either way.
+#[derive(Debug, Deserialize, async_graphql::Union)]
+#[serde(from = "ArtifactWire")]
+pub(crate) enum SubmittedArtifact {
+    /// A path on its own.
+    Path(ArtifactByPath),
+    /// A path with what to call it, or what it is.
+    Described(ArtifactDescribed),
+}
+
+/// An artifact the model named by path alone.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ArtifactByPath {
+    /// The file, relative to the run's working directory.
+    pub(crate) path: String,
+}
+
+/// An artifact the model named and described.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ArtifactDescribed {
+    /// The file, relative to the run's working directory.
+    pub(crate) path: String,
+    /// What to call it. Null when the model left it to the file name.
+    pub(crate) name: Option<String>,
+    /// The `type` key the model wrote, which is a mime type. Null when it left
+    /// the type to the registry.
+    pub(crate) mime_type: Option<String>,
+}
+
+/// The two shapes the tool's schema accepts, before either is a type.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ArtifactWire {
+    /// `"out/report.md"`.
+    Path(String),
+    /// `{ "path": "out/report.md", "name": "Report", "type": "text/markdown" }`.
+    Described {
+        /// Where the file is.
+        path: String,
+        /// What to call it.
+        #[serde(default)]
+        name: Option<String>,
+        /// What it is.
+        #[serde(default, rename = "type")]
+        mime_type: Option<String>,
+    },
+}
+
+impl From<ArtifactWire> for SubmittedArtifact {
+    fn from(wire: ArtifactWire) -> Self {
+        match wire {
+            ArtifactWire::Path(path) => Self::Path(ArtifactByPath { path }),
+            ArtifactWire::Described {
+                path,
+                name,
+                mime_type,
+            } => Self::Described(ArtifactDescribed {
+                path,
+                name,
+                mime_type,
+            }),
+        }
+    }
 }
 
 /// One unit of work handed to a fan-out worker.
@@ -70,8 +139,11 @@ pub(crate) struct SubmitOutputArgs {
 pub(crate) struct FanOutItem {
     /// The item's own id, which names its child run.
     pub(crate) id: String,
-    /// Everything the worker gets, which the blueprint's author defines. Raw
-    /// JSON because nothing here knows its shape.
+    /// Everything the worker gets, which the blueprint's author defines.
+    ///
+    /// Raw JSON because the tool declares it as an object and nothing more: the
+    /// worker is seeded with whatever this holds, so its shape is a contract
+    /// between one blueprint's stages and nothing this schema can name.
     pub(crate) context: Json,
 }
 

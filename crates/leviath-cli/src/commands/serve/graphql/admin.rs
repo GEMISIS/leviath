@@ -419,7 +419,10 @@ impl AdminMutation {
     async fn probe_models(
         &self,
         #[graphql(desc = "Where the endpoint is.")] base_url: String,
-        #[graphql(desc = "Its API key, when it wants one.")] api_key: Option<String>,
+        #[graphql(desc = "Its API key, when it wants one. Used for this one call and \
+                    dropped: never written to the config, and this server logs no \
+                    request body, so it reaches nothing on disk.")]
+        api_key: Option<String>,
         #[graphql(desc = "Extra headers the request carries.")] headers: Option<
             Vec<super::config_input::EnvEntryInput>,
         >,

@@ -294,8 +294,11 @@ pub(crate) enum UpdateJobStatus {
 /// One update run.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateJob {
-    /// The job's id.
-    pub(crate) id: String,
+    /// The job's id, which `updateJob` and `node` both take. Unique to this
+    /// server: the jobs live in memory, so nothing answers to it after a
+    /// restart.
+    #[graphql(owned)]
+    pub(crate) id: async_graphql::ID,
     /// Where the run as a whole got to.
     pub(crate) status: UpdateJobStatus,
     /// Each step, in the order they run. A step that was not asked for is
@@ -308,7 +311,7 @@ impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
     fn from(job: super::super::super::update_job::UpdateJob) -> Self {
         use super::super::super::update_job::{JobStatus, Step, StepStatus};
         Self {
-            id: job.id,
+            id: async_graphql::ID(job.id),
             status: match job.status {
                 JobStatus::Running => UpdateJobStatus::Running,
                 JobStatus::Complete => UpdateJobStatus::Complete,

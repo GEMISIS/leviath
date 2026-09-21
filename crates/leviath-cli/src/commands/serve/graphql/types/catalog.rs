@@ -55,6 +55,11 @@ pub(crate) struct ModelPricing {
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Model {
     /// The model id, as the provider names it.
+    ///
+    /// Not unique on this machine and so not a `Node` id: `openai` and `codex`
+    /// both answer to `gpt-5.5` and bill to different places. Key on `provider`
+    /// and this together, which is also how `provider/model` is spelled
+    /// wherever one string has to name a model.
     pub(crate) id: String,
     /// The provider that serves it. Two providers can serve the same id and
     /// bill to different places, which is why this is part of the answer.
