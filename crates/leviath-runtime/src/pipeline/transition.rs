@@ -274,6 +274,13 @@ pub(crate) fn hold_for_gate(
 /// Not for conditions that are terminal by nature (a cancel, a completed run).
 /// This is for "this stage could not go on", which is exactly what an
 /// `error` edge exists to answer.
+///
+/// The one exception, which writes the status directly and says so where it does
+/// it: a run whose journal cannot be written (see
+/// [`fail_runs_with_unwritable_journals`](super::fail_runs_with_unwritable_journals)).
+/// A recovery stage is more work done on the same unwritable journal, and the
+/// recovery's own history would go unrecorded too, so that run stops rather than
+/// being routed.
 pub(crate) fn fail_stage(
     commands: &mut Commands,
     entity: Entity,

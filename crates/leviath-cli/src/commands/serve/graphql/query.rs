@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use async_graphql::{Context, Enum, InputObject, Object};
 
+use leviath_runtime::control_socket::ControlResponse;
+
 use super::super::blocking::blocking;
 use super::super::core::blueprints;
 use super::super::core::error::ServeError;
@@ -25,8 +27,8 @@ use super::scalars::{BigInt, Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
 use super::types::catalog::{Model, Provider, SkippedTool, Tool, ToolGroup, ToolInventory};
 use super::types::machine::{
-    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpServer, MimeRow, Script,
-    ServeLimits, YoloHuman, YoloProfile, YoloProfiles, YoloWaiver,
+    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, JournalHealth, McpServer,
+    MimeRow, Script, ServeLimits, YoloHuman, YoloProfile, YoloProfiles, YoloWaiver,
 };
 use super::types::run::{Run, RunStatus};
 use super::types::update::{DaemonStatus, UpdateInfo, UpdateJob};
@@ -563,6 +565,25 @@ impl Query {
     async fn daemon(&self, ctx: &Context<'_>) -> DaemonStatus {
         let state = ctx.data_unchecked::<AppState>();
         DaemonStatus::of(state.control.link(), state.control.code_mismatch())
+    }
+
+    /// Whether the daemon is still recording what its runs do.
+    ///
+    /// Null when the daemon cannot be reached, because this is the daemon's own
+    /// reading and no other copy of it exists - `daemon.reachable` says whether
+    /// that is why. Everything else about a run is read from disk and keeps
+    /// working while the daemon is down; this does not.
+    ///
+    /// Worth asking on any page that shows runs as healthy. A daemon whose
+    /// journal is refusing writes serves every field here exactly as it did
+    /// before, and a run whose journal record cannot be written is failed rather
+    /// than carried on.
+    async fn journal(&self, ctx: &Context<'_>) -> Option<JournalHealth> {
+        let state = ctx.data_unchecked::<AppState>();
+        match state.control.list().await {
+            Ok(ControlResponse::List { health, .. }) => Some(JournalHealth::of(&health.journal)),
+            Ok(_) | Err(_) => None,
+        }
     }
 
     /// What an update would do, and whether there is anything newer to get.

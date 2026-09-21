@@ -906,7 +906,10 @@ Start the [REST and WebSocket API](/docs/api).
 ### `lev doctor`
 
 Check that provider wiring works, end to end. Four checks run in order, the first failure stops the
-rest, and the one that fails is the diagnosis.
+rest, and the one that fails is the diagnosis. A fifth, `journal`, asks the running daemon whether
+it is still recording what its runs do. It runs early, costs nothing, and never cuts the run short,
+so a report stopped by a billing failure still carries it. `--no-daemon` and `--offline` skip it,
+because there is no daemon to ask.
 
 | Check | What it proves | A failure means |
 |---|---|---|
@@ -914,6 +917,7 @@ rest, and the one that fails is the diagnosis.
 | `resolve` | Your defaults pick a provider that is actually registered. See below | Nothing in `default_provider` or `provider_order` is configured: a key is missing or misspelled, or `lev setup` never ran |
 | `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
 | `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |
+| `journal` | The running daemon has written every run record it tried to | Something on the filesystem is stopping the daemon recording what its runs do |
 
 The `config` OK line also carries notes for a file that loads with problems in it: keys nothing
 reads, and `[model_providers.*]` script entries whose `.rhai` file is not on disk. With no
@@ -924,6 +928,7 @@ preference. The next check then picks a model from that provider's catalogue.
 $ lev doctor
 
   config     OK  default_provider=openrouter; registered: ollama, openrouter (script providers resolve by name)
+  journal    OK  1284 record(s) written, none lost
   resolve    OK  openrouter / anthropic/claude-sonnet-4.5
   inference  OK  12 in / 4 out / 16 total, replied PONG  (1.2s)
   daemon     OK  run doctor-1785649252-bf7b3d07a265 Complete after 1 iteration(s)  (0.3s)

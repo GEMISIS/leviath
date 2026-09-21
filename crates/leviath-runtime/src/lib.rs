@@ -85,6 +85,7 @@ pub mod interaction_points;
 pub(crate) mod lane_supervisor;
 pub(crate) mod mime_tools;
 pub(crate) mod output_tool;
+pub mod persist_stats;
 pub mod persistence;
 pub(crate) mod persistence_bridge;
 pub mod pipeline;

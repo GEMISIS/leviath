@@ -425,6 +425,21 @@ fn providers_footer(health: &DaemonHealth) -> Option<String> {
     ))
 }
 
+/// What the daemon has failed to write, when it has failed to write anything.
+///
+/// On its own line rather than folded into the lane footer, because it says
+/// something different from every other number here: those are about whether
+/// runs are moving, and this is about whether what the daemon says about them is
+/// being recorded at all. A listing whose rows all look fine while the journal
+/// refuses writes is the state most worth interrupting.
+fn journal_footer(health: &DaemonHealth) -> Option<String> {
+    let complaint = health.journal.complaint()?;
+    Some(format!(
+        "journal: {complaint}\n  the daemon cannot record what its runs do, and a run whose \
+         journal fails is stopped. Check the disk, then `lev doctor`"
+    ))
+}
+
 /// The READS cell: how many of the blueprint's `[read_paths]` entries the
 /// config granted, over how many it declared. `-` for a run that declared none,
 /// which is what nearly every agent does.
@@ -493,10 +508,14 @@ pub(crate) fn format_runs(
         // once even the finished records have aged out, and it reads as an idle
         // daemon rather than a factory that cannot start anything.
         // Say why the list is empty.
-        return match providers_footer(health) {
-            Some(footer) => format!("no agent runs active\n\n{footer}"),
-            None => "no agent runs active".to_string(),
-        };
+        let mut out = "no agent runs active".to_string();
+        for footer in [providers_footer(health), journal_footer(health)]
+            .into_iter()
+            .flatten()
+        {
+            out.push_str(&format!("\n\n{footer}"));
+        }
+        return out;
     }
     // READS only appears when some run has `[read_paths]` to report, which is
     // nearly never: an extra column of dashes on every ordinary listing would
@@ -608,6 +627,9 @@ pub(crate) fn format_runs(
         out.push_str(&format!("\n\n{footer}"));
     }
     if let Some(footer) = health_footer(health) {
+        out.push_str(&format!("\n\n{footer}"));
+    }
+    if let Some(footer) = journal_footer(health) {
         out.push_str(&format!("\n\n{footer}"));
     }
     out

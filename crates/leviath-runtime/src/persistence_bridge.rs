@@ -6,11 +6,24 @@
 //! files under `<runs_dir>/<run_id>/` **one at a time**, so writes for a given
 //! agent never race or land out of order. Each file is written to a temp path and
 //! atomically renamed into place, so a concurrent reader (the dashboard) never
-//! sees a half-written file. All errors are logged and swallowed - persistence is
-//! best-effort and must never stall or fail the world.
+//! sees a half-written file.
+//!
+//! Every error is logged and counted in
+//! [`PersistLaneStats`](crate::persist_stats::PersistLaneStats), and the lane
+//! itself never blocks or fails on one: a write that cannot be made is reported
+//! and the lane moves to the next message. A lost **journal** write also names
+//! its run there, and the world fails that run on its next tick, because a run
+//! whose history cannot record what it did must not go on doing things. The
+//! failure travels as an ordinary run-status change, so neither the lane nor the
+//! schedule waits for it.
+//!
+//! A write dropped because the run directory is gone is not a failure of any of
+//! this - see [`may_write`].
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::persist_stats::PersistLaneStats;
 
 use leviath_core::run_archive;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
@@ -59,12 +72,11 @@ pub(crate) struct PersistJob {
 
 /// What became of one append.
 ///
-/// An ack used to be a bare signal, which meant a dispatch could wait for its
-/// journal record and learn nothing about it. The three states are different
-/// facts about the run: one says where the record is, one says this world keeps
-/// no journal at all, and one says a write was attempted and lost. Only the last
-/// is a problem, and telling it apart from the second is why this is not a
-/// `bool`.
+/// The three states are different facts about the run: one says where the record
+/// is, one says there is no journal for it to be in, and one says a write was
+/// attempted and lost. Only the last is a problem, and telling it apart from the
+/// second is why this is not a `bool` - a dispatch waiting for its record has to
+/// be able to say which of them happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Appended {
     /// On disk, at this byte offset in the run's journal. Monotonic within a
@@ -78,9 +90,8 @@ pub(crate) enum Appended {
     /// journal (an in-memory world), or the run has no archive yet, or the run
     /// was deleted from under the lane.
     NoJournal,
-    /// The write was attempted and failed. The record is lost: the next
-    /// snapshot re-records what it carried, and until then a reader of the
-    /// journal cannot see what this record said.
+    /// The write was attempted, retried, and lost. The run is failed for it, so
+    /// nothing else happens that the journal would have to explain.
     Failed,
 }
 
@@ -150,9 +161,14 @@ pub(crate) enum PersistMsg {
 /// [`flush_and_stop`](crate::world::PipelineWorld::flush_and_stop) still joins
 /// it - and still acking appends, so a dispatch-side barrier never waits on a
 /// dead channel.
+///
+/// `stats` is shared with the world, which reads it for `lev ps`, `lev doctor`
+/// and the GraphQL schema, and drains the runs whose journal could not be
+/// written so it can fail them.
 pub(crate) async fn persistence_worker(
     runs_dir: Option<PathBuf>,
     mut jobs: UnboundedReceiver<PersistMsg>,
+    stats: std::sync::Arc<PersistLaneStats>,
 ) {
     let Some(runs_dir) = runs_dir else {
         while let Some(msg) = jobs.recv().await {
@@ -204,6 +220,10 @@ pub(crate) async fn persistence_worker(
         while let Ok(msg) = jobs.try_recv() {
             batch.push(msg);
         }
+        // What the lane was holding when it last looked. Taken here, once the
+        // queue has been drained into this batch, so it counts the work in hand
+        // rather than the moment between two messages.
+        stats.observe_queue(batch.len());
         let mut newest_snapshot: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for (i, msg) in batch.iter().enumerate() {
@@ -241,6 +261,20 @@ pub(crate) async fn persistence_worker(
                         status_before,
                     )
                     .await;
+                    // The journal half and the rest of the files are counted
+                    // apart because they mean different things: a lost
+                    // `meta.json` is put back by the next snapshot, and a lost
+                    // journal record is gone for good, which is what fails the
+                    // run.
+                    if let Some(record) = &outcome.journal {
+                        stats.append_attempted();
+                        if let Err(lost) = record {
+                            stats.journal_append_failed(&job.run_id, &lost.path, &lost.message);
+                        }
+                    }
+                    if let Some(lost) = &outcome.files {
+                        stats.snapshot_failed(&job.run_id, &lost.path, &lost.message);
+                    }
                     if let Some(key) = outcome.output {
                         last_output.insert(job.run_id.clone(), key);
                     }
@@ -248,14 +282,14 @@ pub(crate) async fn persistence_worker(
                     // written again), so the map stays bounded by the set of
                     // *live* runs rather than every run the daemon has ever
                     // seen.
-                    if outcome.archived {
+                    if outcome.archived() {
                         last_status.insert(job.run_id.clone(), job.meta.status.clone());
                     }
                     if is_terminal_run(&job.meta.status) {
                         last_context.remove(&job.run_id);
                         last_output.remove(&job.run_id);
                         last_status.remove(&job.run_id);
-                    } else if outcome.archived {
+                    } else if outcome.archived() {
                         // Only for a record that reached the file. If the append
                         // failed, the digest stays at the last state a reader
                         // can actually rebuild, so the next write diffs against
@@ -273,15 +307,16 @@ pub(crate) async fn persistence_worker(
                     ack,
                 } => {
                     let landed = if may_write(&runs_dir, &run_id, &mut staked, false) {
-                        append_record(&runs_dir, &run_id, &record).await
+                        stats.append_attempted();
+                        append_record(&runs_dir, &run_id, &record, &stats).await
                     } else {
                         Appended::NoJournal
                     };
-                    // Ack unconditionally - persistence is best-effort and the
-                    // dispatch-side barrier must never stall on a failed append,
-                    // or on a run that has been deleted out from under it. What
-                    // the ack now carries is which of those happened, so the
-                    // waiter can say so instead of assuming the record landed.
+                    // Ack unconditionally: the dispatch-side barrier must never
+                    // stall on a failed append, or on a run that has been
+                    // deleted out from under it. What the ack carries is which
+                    // of those happened, so the waiter can say so instead of
+                    // assuming the record landed.
                     if let Some(ack) = ack {
                         let _ = ack.send(landed);
                     }
@@ -328,13 +363,16 @@ pub(crate) async fn persistence_worker(
 /// `DELETE /api/runs/{id}` and an operator with `rm -rf` all say the same
 /// thing by removing it.
 ///
-/// So a write that finds the directory gone is not a gap to repair. It used to
-/// be repaired: every snapshot ran `create_dir_all` first, so a run came back
-/// from the dead - meta, context, stage logs, transcript and all - moments
-/// after the console said it was deleted. A cancelled run's closing write was
-/// enough on its own, which is why deleting a stuck run looked like it did
-/// nothing. The delete had worked; the daemon put it straight back, and the
-/// next list showed it again.
+/// So a write that finds the directory gone is not a gap to repair, and it is
+/// not a failure either. Repairing it - letting each snapshot run
+/// `create_dir_all` first - brings the run back from the dead, meta, context,
+/// stage logs, transcript and all, moments after the console said it was
+/// deleted; a cancelled run's closing write is enough on its own to do it, which
+/// is what makes deleting a stuck run look like it did nothing. Counting it as a
+/// fault is the opposite mistake: deleting a run would start failing runs, and
+/// the person who deleted it asked for exactly what happened. Both roads lead
+/// back here, to a write that is quietly dropped and reported as
+/// [`Appended::NoJournal`].
 ///
 /// One `stat` per message, taken inline rather than through the blocking pool:
 /// the hop would cost more than the syscall it is avoiding, and the lane is
@@ -389,8 +427,9 @@ fn vanished_task(e: tokio::task::JoinError) -> std::io::Error {
 ///
 /// `leviath-sys` owns the per-platform mode handling (including the Windows
 /// `icacls` path), and it is a blocking API, so the open happens on the blocking
-/// pool the same way the atomic writer's does. Best-effort like the rest of the
-/// lane: a failure is reported to the caller, which logs and moves on.
+/// pool the same way the atomic writer's does. A failure is handed back to the
+/// caller, which decides what it means: a lost journal record fails its run, a
+/// lost log line does not.
 async fn open_private_append(path: &Path) -> std::io::Result<tokio::fs::File> {
     let owned = path.to_path_buf();
     tokio::task::spawn_blocking(move || leviath_sys::open_private_append(&owned))
@@ -405,8 +444,14 @@ async fn open_private_append(path: &Path) -> std::io::Result<tokio::fs::File> {
 /// preamble/Header), so the append is skipped rather than corrupting the file -
 /// the single-worker lane makes that ordering all but impossible in practice,
 /// since the spawn tick's snapshot is queued before any batch can dispatch.
-/// Best-effort like the rest of the lane: a failure is reported back rather than
-/// raised.
+///
+/// A record that cannot be written after a retry is counted in `stats`, which
+/// also names the run so the world can fail it. **A run deleted from under the
+/// lane is not that.** Its directory going away is somebody saying they want it
+/// gone, and every write for it after that is a no-op by design - so the failure
+/// is classified against the run directory rather than against the error, and a
+/// delete that lands between the check and the open reads as
+/// [`Appended::NoJournal`] like any other delete.
 ///
 /// The position is the archive's length before the write, which is where this
 /// record's frame begins. One writer per run is what makes that true, and the
@@ -415,10 +460,10 @@ async fn append_record(
     runs_dir: &Path,
     run_id: &str,
     record: &leviath_core::run_archive::RunRecord,
+    stats: &PersistLaneStats,
 ) -> Appended {
-    let path = runs_dir
-        .join(run_id)
-        .join(leviath_core::files::ARCHIVE_FILE);
+    let run_dir = runs_dir.join(run_id);
+    let path = run_dir.join(leviath_core::files::ARCHIVE_FILE);
     let Ok(existing) = tokio::fs::metadata(&path).await else {
         tracing::warn!(run_id = %run_id, "persistence: record append skipped, no archive yet");
         return Appended::NoJournal;
@@ -430,13 +475,18 @@ async fn append_record(
     // Opening, writing and flushing are one outcome to everybody upstream: the
     // record either reached the file or it did not, and which of the three calls
     // failed belongs in the log rather than in the answer.
-    match append_bytes(&path, &buf).await {
-        Ok(()) => Appended::Landed { position },
-        Err(e) => {
-            tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
-            Appended::Failed
-        }
+    let Err(lost) = append_with_retry(&path, &buf, run_id).await else {
+        return Appended::Landed { position };
+    };
+    if !run_dir.is_dir() {
+        tracing::info!(
+            run_id = %run_id,
+            "persistence: the run was deleted while its record was being written; dropping it"
+        );
+        return Appended::NoJournal;
     }
+    stats.journal_append_failed(run_id, &lost.path, &lost.message);
+    Appended::Failed
 }
 
 /// Append `buf` to `path`, flushing before it returns.
@@ -487,30 +537,73 @@ fn load_or_create_machine_id(runs_dir: &Path) -> String {
     }
 }
 
-/// Write one job's `meta.json` + `context.json` under `<runs_dir>/<run_id>/`,
-/// each via a temp file + atomic rename. Best-effort: logs and returns on any
-/// error. Serialization is infallible for these plain serde structs, so a
+/// One write the lane attempted and lost, with what a person needs to act on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Lost {
+    /// The file that could not be written.
+    path: PathBuf,
+    /// What the operating system said about it.
+    message: String,
+}
+
+impl Lost {
+    /// Note `error` against `path`, for a caller collecting what a write lost.
+    fn at(path: &Path, error: &std::io::Error) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }
+    }
+}
+
+/// Keep the first loss of a write, so what is reported is the file that failed
+/// first rather than the last one tried.
+fn keep_first(slot: &mut Option<Lost>, lost: Lost) {
+    if slot.is_none() {
+        *slot = Some(lost);
+    }
+}
+
 /// What one snapshot write actually managed to put on disk.
 ///
-/// The two answers are independent and both matter to what the lane remembers
-/// next time. `output` is the sidecar watermark; `archived` says whether the
-/// journal record for this state reached `run.lvr`.
+/// The three answers are independent and each matters to somebody. `output` is
+/// the sidecar watermark the lane remembers; `journal` is what the run's
+/// append-only history got out of this write; `files` is whatever else the write
+/// could not place.
 #[derive(Default)]
 struct WriteOutcome {
     /// The `final_output` sidecar this write landed, if it wrote one.
     output: Option<(i64, usize)>,
-    /// Whether the run-archive record for this snapshot was durably appended.
+    /// What became of the run-archive record for this snapshot. `None` means the
+    /// write never got as far as trying, because the run directory could not be
+    /// made.
     ///
     /// The lane keeps a digest of the last archived context so the next write
     /// can be a compact diff. Advancing that digest for a record that never
     /// landed is unrecoverable: every later diff is then relative to a state no
     /// reader can reconstruct, so the folded archive drifts from the run for
     /// the rest of its life - while `context.json`, written whole each time,
-    /// stays correct. One swallowed append error is enough.
-    archived: bool,
+    /// stays correct. One unreported append error is enough.
+    journal: Option<Result<(), Lost>>,
+    /// The first of this write's other files it could not place: `meta.json`,
+    /// `context.json`, the stage index, the answer sidecar, or the waiting
+    /// state beside them. Counted, not fatal - the next snapshot rewrites every
+    /// one of them whole.
+    files: Option<Lost>,
 }
 
-/// serialize error is a bug rather than a runtime condition (`.expect`).
+impl WriteOutcome {
+    /// Whether the journal record for this snapshot is durably on disk.
+    fn archived(&self) -> bool {
+        matches!(self.journal, Some(Ok(())))
+    }
+}
+
+/// Write one job's `meta.json` + `context.json` under `<runs_dir>/<run_id>/`,
+/// each via a temp file + atomic rename, and report what reached disk.
+///
+/// Serialization is infallible for these plain serde structs, so a serialize
+/// error is a bug rather than a runtime condition (`.expect`).
 async fn write_snapshot(
     runs_dir: &Path,
     job: &PersistJob,
@@ -520,18 +613,27 @@ async fn write_snapshot(
     written_output: Option<(i64, usize)>,
     status_before: Option<&leviath_core::run_meta::RunStatus>,
 ) -> WriteOutcome {
+    let mut files = None;
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = create_private_dir(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
-        return WriteOutcome::default();
+        // Reported as a lost snapshot rather than a lost journal record, even
+        // though the record is lost with it: a directory that will not be made
+        // is also the shape a run deleted between the check and the write
+        // leaves, and a delete must never fail a run.
+        return WriteOutcome {
+            files: Some(Lost::at(&dir, &e)),
+            ..WriteOutcome::default()
+        };
     }
-    let archived =
+    let journal =
         append_run_archive(&dir, job, machine_id, world_id, prev_context, status_before).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
     write_bytes_atomic(
         &dir.join(leviath_core::files::META_FILE),
         meta_json.into_bytes(),
         &job.run_id,
+        &mut files,
     )
     .await;
     // Compact, not pretty: the context is the largest file the lane writes and
@@ -542,6 +644,7 @@ async fn write_snapshot(
         &dir.join(leviath_core::files::CONTEXT_FILE),
         ctx_json.into_bytes(),
         &job.run_id,
+        &mut files,
     )
     .await;
 
@@ -569,6 +672,7 @@ async fn write_snapshot(
             &dir.join(leviath_core::FINAL_OUTPUT_FILE),
             content.clone().into_bytes(),
             &job.run_id,
+            &mut files,
         )
         .await;
         wrote_output = submitted;
@@ -582,6 +686,7 @@ async fn write_snapshot(
             &dir.join(leviath_core::files::STAGES_FILE),
             stages_json.into_bytes(),
             &job.run_id,
+            &mut files,
         )
         .await;
     }
@@ -600,6 +705,7 @@ async fn write_snapshot(
             &stage_dir.join("taint_audit.json"),
             json.clone().into_bytes(),
             &job.run_id,
+            &mut files,
         )
         .await;
     }
@@ -608,7 +714,13 @@ async fn write_snapshot(
     let fanout_path = dir.join(leviath_core::files::FANOUT_FILE);
     match &job.fanout {
         Some(json) => {
-            write_bytes_atomic(&fanout_path, json.clone().into_bytes(), &job.run_id).await
+            write_bytes_atomic(
+                &fanout_path,
+                json.clone().into_bytes(),
+                &job.run_id,
+                &mut files,
+            )
+            .await
         }
         None => {
             let _ = tokio::fs::remove_file(&fanout_path).await;
@@ -619,7 +731,13 @@ async fn write_snapshot(
     let interactions_path = dir.join(leviath_core::files::INTERACTIONS_FILE);
     match &job.interactions {
         Some(json) => {
-            write_bytes_atomic(&interactions_path, json.clone().into_bytes(), &job.run_id).await
+            write_bytes_atomic(
+                &interactions_path,
+                json.clone().into_bytes(),
+                &job.run_id,
+                &mut files,
+            )
+            .await
         }
         None => {
             let _ = tokio::fs::remove_file(&interactions_path).await;
@@ -627,7 +745,8 @@ async fn write_snapshot(
     }
     WriteOutcome {
         output: wrote_output,
-        archived,
+        journal: Some(journal),
+        files,
     }
 }
 
@@ -642,8 +761,9 @@ async fn write_snapshot(
 /// - **ongoing** (a prior context is known): a compact `Progress` step carrying
 ///   the updated metadata + a `ContextDiff` since the previous point.
 ///
-/// The archive always folds to the run's latest resumable state. Best-effort -
-/// a failed write is logged and swallowed like the rest of the persistence lane.
+/// The archive always folds to the run's latest resumable state. A failed write
+/// is logged and reported back rather than raised: the lane finishes the rest of
+/// the snapshot, counts the loss, and the world fails the run on its next tick.
 async fn append_run_archive(
     dir: &Path,
     job: &PersistJob,
@@ -651,7 +771,7 @@ async fn append_run_archive(
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
     status_before: Option<&leviath_core::run_meta::RunStatus>,
-) -> bool {
+) -> Result<(), Lost> {
     use leviath_core::run_archive::{RunIdentity, RunRecord};
 
     let path = dir.join(leviath_core::files::ARCHIVE_FILE);
@@ -722,22 +842,93 @@ async fn append_run_archive(
     // the record is on disk or it is not. A partial write counts as failure -
     // it leaves a torn frame the lenient reader stops at, so the tail is lost
     // either way.
-    let landed = match open_private_append(&path).await {
-        // `and` rather than `?`: the flush runs either way, which is harmless
-        // after a failed write, and the write's error is the one reported.
-        Ok(mut file) => file.write_all(&buf).await.and(file.flush().await),
-        Err(e) => Err(e),
+    // Retried once before it counts as lost, for the same reason the record
+    // matters: a write that failed on a momentarily unavailable disk is worth
+    // asking again about, and a second failure is a real answer rather than a
+    // flake.
+    append_with_retry(&path, &buf, &job.run_id).await
+}
+
+/// How long to wait before asking the disk a second time.
+///
+/// Short enough that the lane is not held up - it is one pause, on the one
+/// message that already failed - and long enough to be past a momentary refusal
+/// rather than inside the same instant as it.
+const APPEND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Append `buf` to `path`, and if that fails, once more.
+///
+/// The retry is the difference between a journal that gives up at the first
+/// hiccup and one that gives up when the disk really will not take the record.
+/// Only the second failure is reported, because only the second is worth failing
+/// a run over.
+async fn append_with_retry(path: &Path, buf: &[u8], run_id: &str) -> Result<(), Lost> {
+    retrying(one_append, path, buf, APPEND_RETRY_DELAY, run_id).await
+}
+
+/// One attempt at an append: the call that puts `buf` on the end of `path`.
+///
+/// A function pointer rather than a generic parameter, so the loop below is
+/// compiled exactly once. A generic one is compiled per caller, and the lane's
+/// own copy would carry a path - the attempt that works the second time - that
+/// only a test's copy ever takes.
+type AppendAttempt = for<'a> fn(
+    &'a Path,
+    &'a [u8],
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>,
+>;
+
+/// [`append_bytes`] as an [`AppendAttempt`].
+fn one_append<'a>(
+    path: &'a Path,
+    buf: &'a [u8],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+    Box::pin(append_bytes(path, buf))
+}
+
+/// Make `attempt`, and after `delay` make it once more if it failed.
+///
+/// The whole append is retried, not the failed syscall within it: a write that
+/// stopped half way leaves a torn frame, and the archive reader stops at the
+/// first torn frame either way, so asking again can only recover a record that
+/// would otherwise be missing. Taking the attempt as a pointer is what lets a
+/// test drive both answers without a disk that has to fail on cue.
+async fn retrying(
+    attempt: AppendAttempt,
+    path: &Path,
+    buf: &[u8],
+    delay: std::time::Duration,
+    run_id: &str,
+) -> Result<(), Lost> {
+    let Err(first) = attempt(path, buf).await else {
+        return Ok(());
     };
-    if let Err(e) = &landed {
-        tracing::warn!(run_id = %job.run_id, error = %e, "persistence: run archive append failed");
-    }
-    landed.is_ok()
+    tracing::warn!(
+        run_id = %run_id,
+        error = %first,
+        "persistence: journal append failed, asking again"
+    );
+    tokio::time::sleep(delay).await;
+    let Err(second) = attempt(path, buf).await else {
+        return Ok(());
+    };
+    tracing::warn!(
+        run_id = %run_id,
+        path = %path.display(),
+        error = %second,
+        "persistence: journal append failed twice; the run is failed for it"
+    );
+    Err(Lost::at(path, &second))
 }
 
 /// Append one line (with a trailing newline) to `stages/<idx>/<file>` under the
-/// run dir, creating the stage directory if needed. Best-effort: a failed
-/// `create_dir_all` just makes the subsequent open fail, and the append write
-/// result is intentionally ignored - persistence must never stall the world.
+/// run dir, creating the stage directory if needed.
+///
+/// A failed `create_dir_all` just makes the subsequent open fail, and the append
+/// result is deliberately not reported: these are the readable logs beside the
+/// run, not the record of what it did, and a line that does not reach `logs.log`
+/// leaves nothing claiming otherwise. The journal is what a run is failed for.
 async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &str, run_id: &str) {
     let stage_dir = run_dir.join("stages").join(stage_idx.to_string());
     let _ = create_private_dir(&stage_dir).await;
@@ -757,8 +948,13 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
 }
 
 /// Write `bytes` to `path` via a sibling temp file + rename (atomic on the same
-/// filesystem, so a reader never sees a half-written file). Best-effort.
-async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str) {
+/// filesystem, so a reader never sees a half-written file).
+///
+/// A failure is logged and left in `lost` for the caller to count. The lane
+/// carries on with the rest of the snapshot either way: every one of these files
+/// is rewritten whole the next time the run changes, so one lost write costs the
+/// freshness of a file rather than its contents.
+async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str, lost: &mut Option<Lost>) {
     let tmp = path.with_extension("json.tmp");
     // `write_private`, not a plain write: these files carry the run's task
     // prompt, its conversation, its tool output, and - in `meta.json` - the
@@ -779,10 +975,12 @@ async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str) {
             .await;
     if let Err(e) = written.map_err(vanished_task).and_then(|r| r) {
         tracing::warn!(run_id = %run_id, error = %e, "persistence: temp write failed");
+        keep_first(lost, Lost::at(&tmp, &e));
         return;
     }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         tracing::warn!(run_id = %run_id, error = %e, "persistence: rename failed");
+        keep_first(lost, Lost::at(path, &e));
         let _ = tokio::fs::remove_file(&tmp).await;
     }
 }
@@ -812,6 +1010,11 @@ mod tests {
             max_tokens: 100,
             regions: vec![],
         }
+    }
+
+    /// Fresh counters, for a test that does not read them back.
+    fn health() -> std::sync::Arc<PersistLaneStats> {
+        std::sync::Arc::new(PersistLaneStats::new())
     }
 
     /// The whole loop, end to end: two snapshots for one run in a single batch,
@@ -856,7 +1059,7 @@ mod tests {
         tx.send(PersistMsg::Snapshot(answered("the answer")))
             .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         let sidecar = dir
             .path()
@@ -895,7 +1098,7 @@ mod tests {
         .unwrap();
         drop(tx); // close so the worker loop ends
 
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         let run_dir = dir.path().join("run-1");
         let meta_json = std::fs::read_to_string(run_dir.join("meta.json")).unwrap();
@@ -1157,6 +1360,7 @@ mod tests {
                 world_id: "w2".to_string(),
                 at: 1,
             },
+            &health(),
         )
         .await;
 
@@ -1367,7 +1571,7 @@ mod tests {
         tx.send(PersistMsg::Snapshot(Box::new(job_with_context("run-2", 1))))
             .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
@@ -1412,7 +1616,7 @@ mod tests {
             !dir.path().join("run-1").join("meta.json").exists()
         };
         assert!(meta_before);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         let run = dir.path().join("run-1");
         let out = std::fs::read_to_string(run.join("stages/0/output.log")).unwrap();
@@ -1436,7 +1640,7 @@ mod tests {
         terminal.meta.status = leviath_core::run_meta::RunStatus::Complete;
         tx.send(PersistMsg::Snapshot(Box::new(terminal))).unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
         assert!(dir.path().join("run-term").join("meta.json").exists());
     }
 
@@ -1465,7 +1669,7 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        persistence_worker(None, rx).await;
+        persistence_worker(None, rx, health()).await;
         // A world with no runs dir has no journal, and the ack says exactly
         // that rather than reporting a record that was never written.
         assert_eq!(ack_rx.await, Ok(Appended::NoJournal));
@@ -1519,7 +1723,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runs = dir.path().to_path_buf();
         let (tx, rx) = mpsc::unbounded_channel();
-        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx));
+        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx, health()));
 
         // The run establishes its directory the ordinary way. The lane handles
         // messages in order and an append carries an ack, so an acked append
@@ -1617,7 +1821,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runs = dir.path().to_path_buf();
         let (tx, rx) = mpsc::unbounded_channel();
-        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx));
+        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx, health()));
         tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
             .unwrap();
 
@@ -1686,7 +1890,7 @@ mod tests {
         // A directory where the archive belongs: it exists, so the append is
         // attempted, and opening it for writing cannot work.
         std::fs::create_dir_all(runs.join("run-1").join("run.lvr")).unwrap();
-        let landed = append_record(&runs, "run-1", &batch_record(0, "c1")).await;
+        let landed = append_record(&runs, "run-1", &batch_record(0, "c1"), &health()).await;
         assert_eq!(landed, Appended::Failed);
         assert!(landed.landed_at().is_none(), "a failure is nowhere");
     }
@@ -1695,7 +1899,7 @@ mod tests {
     #[tokio::test]
     async fn an_append_before_the_first_snapshot_has_no_journal() {
         let dir = tempfile::tempdir().unwrap();
-        let landed = append_record(dir.path(), "run-1", &batch_record(0, "c1")).await;
+        let landed = append_record(dir.path(), "run-1", &batch_record(0, "c1"), &health()).await;
         assert_eq!(landed, Appended::NoJournal);
         assert!(landed.landed_at().is_none(), "no journal is nowhere");
     }
@@ -1759,7 +1963,7 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         ack_rx.await.expect("append acked");
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
@@ -1784,7 +1988,7 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         ack_rx.await.expect("acked despite the skip");
         assert!(!dir.path().join("run-none").join("run.lvr").exists());
@@ -1797,7 +2001,7 @@ mod tests {
         // via the worker, exercised above - here we call the writer directly).
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("run-1").join("run.lvr")).unwrap();
-        append_record(dir.path(), "run-1", &batch_record(0, "c1")).await;
+        append_record(dir.path(), "run-1", &batch_record(0, "c1"), &health()).await;
     }
 
     #[test]
@@ -2085,7 +2289,7 @@ mod tests {
 
         // Nothing in the way: the record lands and the write says so.
         let ok = write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
-        assert!(ok.archived, "an unobstructed append lands");
+        assert!(ok.archived(), "an unobstructed append lands");
 
         // Now make `run.lvr` unopenable and try again.
         let blocked = tempfile::tempdir().expect("temp dir");
@@ -2093,7 +2297,7 @@ mod tests {
         std::fs::create_dir_all(run_dir.join("run.lvr")).expect("occupy the archive path");
         let failed = write_snapshot(blocked.path(), &j, "m", "w", None, None, None).await;
         assert!(
-            !failed.archived,
+            !failed.archived(),
             "an append that could not open its file must not report success"
         );
         // The rest of the write is unaffected - this is why the failure is
@@ -2127,7 +2331,7 @@ mod tests {
         ))))
         .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         // The context still landed; only the journal did not.
         assert!(run_dir.join("context.json").exists());
@@ -2140,7 +2344,7 @@ mod tests {
         ))))
         .unwrap();
         drop(tx);
-        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx, health()).await;
 
         let bytes = std::fs::read(run_dir.join("run.lvr")).unwrap();
         let (_, records) =
@@ -2183,7 +2387,8 @@ mod tests {
         // to the newest and there would be no transition to see.
         let (tx, rx) = mpsc::unbounded_channel();
         let runs_dir = dir.path().to_path_buf();
-        let worker = tokio::spawn(async move { persistence_worker(Some(runs_dir), rx).await });
+        let worker =
+            tokio::spawn(async move { persistence_worker(Some(runs_dir), rx, health()).await });
         tx.send(PersistMsg::Snapshot(Box::new(running))).unwrap();
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2207,6 +2412,239 @@ mod tests {
             changes,
             vec![&leviath_core::run_meta::RunStatus::Complete],
             "the transition, and not the opening status the Header already carries"
+        );
+    }
+
+    /// How many times [`busy_once`] has been asked.
+    static BUSY_ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// An attempt that refuses once and works after that, which is the disk the
+    /// retry exists for. A plain `fn`, because that is what the loop takes.
+    fn busy_once<'a>(
+        _path: &'a Path,
+        _buf: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+        let first = BUSY_ONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
+        Box::pin(async move {
+            match first {
+                true => Err(std::io::Error::other("the disk was busy")),
+                false => Ok(()),
+            }
+        })
+    }
+
+    /// How many times [`full_disk`] has been asked.
+    static FULL_DISK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// An attempt that never works, which is the disk a run is failed for.
+    fn full_disk<'a>(
+        _path: &'a Path,
+        _buf: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+        FULL_DISK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Box::pin(async { Err(std::io::Error::other("no space left on device")) })
+    }
+
+    /// The retry is what tells a momentary refusal from a disk that will not
+    /// take the record: an append that works the second time is not a loss.
+    #[tokio::test]
+    async fn an_append_that_works_the_second_time_is_not_a_loss() {
+        crate::test_support::with_tracing(|| {});
+        BUSY_ONCE.store(0, std::sync::atomic::Ordering::Relaxed);
+        let outcome = retrying(
+            busy_once,
+            Path::new("/runs/run-1/run.lvr"),
+            b"a record",
+            std::time::Duration::ZERO,
+            "run-1",
+        )
+        .await;
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(
+            BUSY_ONCE.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "asked again, and only once again"
+        );
+    }
+
+    /// Twice is the answer: the record is lost, and the loss names the file.
+    #[tokio::test]
+    async fn an_append_that_fails_twice_is_lost() {
+        crate::test_support::with_tracing(|| {});
+        FULL_DISK.store(0, std::sync::atomic::Ordering::Relaxed);
+        let outcome = retrying(
+            full_disk,
+            Path::new("/runs/run-1/run.lvr"),
+            b"a record",
+            std::time::Duration::ZERO,
+            "run-1",
+        )
+        .await;
+        let lost = outcome.expect_err("two refusals are a loss");
+        assert_eq!(lost.path, Path::new("/runs/run-1/run.lvr"));
+        assert!(lost.message.contains("no space left"), "{lost:?}");
+        assert_eq!(
+            FULL_DISK.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "not tried for ever"
+        );
+    }
+
+    /// A genuine write failure is counted, described, and names the run so the
+    /// world can fail it.
+    #[tokio::test]
+    async fn a_lost_record_is_counted_and_names_its_run() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        // A directory where the archive belongs: it exists, so the append is
+        // attempted, and opening it for writing cannot work.
+        std::fs::create_dir_all(runs.join("run-1").join("run.lvr")).unwrap();
+        let stats = health();
+
+        assert_eq!(
+            append_record(&runs, "run-1", &batch_record(0, "c1"), &stats).await,
+            Appended::Failed
+        );
+
+        let report = stats.report();
+        assert_eq!(report.appends_failed, 1);
+        assert!(!report.is_healthy());
+        let last = report.last_error.expect("the loss is described");
+        assert_eq!(last.run_id, "run-1");
+        assert!(last.path.ends_with("run.lvr"), "{}", last.path);
+        assert_eq!(
+            stats
+                .take_unwritable()
+                .iter()
+                .map(|e| e.run_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["run-1".to_string()],
+            "the run is named so it can be failed"
+        );
+    }
+
+    /// **Deleting a run must never fail it.** A delete that lands while the lane
+    /// is writing leaves exactly the shape a broken disk does - an open that
+    /// fails - and the two are told apart by looking for the run directory
+    /// afterwards, not by the error.
+    #[tokio::test]
+    async fn a_run_deleted_mid_write_is_not_a_failure() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        let run_dir = runs.join("run-1");
+        // The archive path is a directory, so every attempt to open it fails.
+        std::fs::create_dir_all(run_dir.join("run.lvr")).unwrap();
+        let gone = run_dir.clone();
+        // Deleted between the first attempt and the second, which is the window
+        // the retry opens and the one a real delete lands in.
+        let deleter = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            std::fs::remove_dir_all(&gone).expect("the run is deleted");
+        });
+        let stats = health();
+
+        let landed = append_record(&runs, "run-1", &batch_record(0, "c1"), &stats).await;
+        deleter.await.expect("the deleter finishes");
+
+        assert_eq!(landed, Appended::NoJournal, "a delete is not a failure");
+        let report = stats.report();
+        assert!(report.is_healthy(), "and nothing is counted against it");
+        assert!(
+            stats.take_unwritable().is_empty(),
+            "and no run is named to be failed"
+        );
+    }
+
+    /// A snapshot reports the first file it lost, not the last one it tried, so
+    /// what an operator reads is where the trouble started.
+    #[tokio::test]
+    async fn a_snapshot_reports_the_first_file_it_lost() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // Both temp paths occupied by directories: both writes fail.
+        std::fs::create_dir_all(run_dir.join("meta.json.tmp")).unwrap();
+        std::fs::create_dir_all(run_dir.join("context.json.tmp")).unwrap();
+
+        let outcome = write_snapshot(dir.path(), &job("r"), "m", "w", None, None, None).await;
+
+        let lost = outcome.files.as_ref().expect("two files were lost");
+        assert!(
+            lost.path.ends_with("meta.json.tmp"),
+            "the first one: {lost:?}"
+        );
+        assert!(
+            outcome.archived(),
+            "the journal record is unaffected by either"
+        );
+    }
+
+    /// End to end through the lane: a snapshot whose journal record cannot be
+    /// written counts against the journal and names its run, while a snapshot
+    /// that only lost an ordinary file counts as a snapshot and names nobody.
+    #[tokio::test]
+    async fn the_lane_counts_the_journal_apart_from_the_files_beside_it() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        // run-lost cannot have its journal written; run-meta cannot have its
+        // `meta.json` written.
+        std::fs::create_dir_all(runs.join("run-lost").join("run.lvr")).unwrap();
+        std::fs::create_dir_all(runs.join("run-meta").join("meta.json.tmp")).unwrap();
+        let stats = health();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-lost"))))
+            .unwrap();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-meta"))))
+            .unwrap();
+        drop(tx);
+
+        persistence_worker(Some(runs), rx, stats.clone()).await;
+
+        let report = stats.report();
+        assert_eq!(report.appends_attempted, 2, "one per snapshot");
+        assert_eq!(report.appends_failed, 1);
+        assert_eq!(report.snapshots_failed, 1);
+        assert_eq!(report.queue_depth, 2, "both arrived in one batch");
+        assert_eq!(
+            stats
+                .take_unwritable()
+                .iter()
+                .map(|e| e.run_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["run-lost".to_string()],
+            "only the run whose history is missing a record"
+        );
+    }
+
+    /// A snapshot that cannot make its run directory never gets as far as the
+    /// journal, so nothing is counted as an append and no run is failed for it:
+    /// a directory that will not be made is also what a delete leaves behind.
+    #[tokio::test]
+    async fn a_snapshot_with_nowhere_to_write_counts_no_append() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        // A file where the run directory belongs, so `create_dir_all` fails.
+        std::fs::write(runs.join("run-blocked"), b"in the way").unwrap();
+        let stats = health();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-blocked"))))
+            .unwrap();
+        drop(tx);
+
+        persistence_worker(Some(runs), rx, stats.clone()).await;
+
+        let report = stats.report();
+        assert_eq!(report.appends_attempted, 0, "the journal was never reached");
+        assert_eq!(report.appends_failed, 0);
+        assert_eq!(report.snapshots_failed, 1);
+        assert!(
+            stats.take_unwritable().is_empty(),
+            "and no run is failed for it"
         );
     }
 }

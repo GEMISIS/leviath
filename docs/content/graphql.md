@@ -888,6 +888,25 @@ Planning never reaches the network. The "is there anything newer" half is
 whatever the last check found, and asking starts another for whoever asks next
 rather than waiting on one, so a page can ask every time it opens.
 
+`journal` says whether the daemon is still recording what its runs do:
+
+```graphql
+{
+  journal {
+    healthy appendsAttempted appendsFailed snapshotsFailed queueDepth
+    lastError { runId path message at }
+  }
+}
+```
+
+Worth asking on any page that shows runs as healthy. A daemon whose journal is
+refusing writes serves every other field here exactly as it did before, and a run
+whose journal record cannot be written is failed rather than carried on. `healthy`
+stays false for the life of the daemon once a write has been lost, because a
+record that went missing does not come back. The field is null when the daemon
+cannot be reached, since this reading exists nowhere else; `daemon.reachable` says
+whether that is why.
+
 Behind `--allow-admin`, the mutations that change the machine rather than a run:
 
 | Mutation | What it changes |
