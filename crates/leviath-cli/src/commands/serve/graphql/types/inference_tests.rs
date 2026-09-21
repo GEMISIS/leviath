@@ -95,8 +95,36 @@ fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunR
             max_tokens: 2048,
             temperature: 0.25,
         },
+        model_input: None,
         at: 200,
     })
+}
+
+/// One attempt whose journal recorded a model input in `status`.
+fn attempt_with_input(status: run_archive::CaptureStatus) -> RunRecord {
+    let retained = status == run_archive::CaptureStatus::Retained;
+    let body = serde_json::json!({ "model": "claude-sonnet-4-5", "messages": [] });
+    let RunRecord::InferenceAttempt(mut record) =
+        attempt(1, "anthropic", "claude", AttemptOutcome::Succeeded)
+    else {
+        unreachable!("attempt builds an attempt record")
+    };
+    record.model_input = Some(run_archive::ModelInput {
+        capture_status: status,
+        request: retained.then(|| body.clone()),
+        bytes: body.to_string().len() as u64,
+        source_context_digest: "0f0f0f0f0f0f0f0f".to_string(),
+        parameters: [
+            ("temperature".to_string(), serde_json::json!(0.25)),
+            ("max_output_tokens".to_string(), serde_json::json!(2048)),
+            ("top_p".to_string(), serde_json::json!(0.9)),
+        ]
+        .into_iter()
+        .collect(),
+        tool_catalog_version: "fedcba9876543210".to_string(),
+        assembly_version: "1".to_string(),
+    });
+    RunRecord::InferenceAttempt(record)
 }
 
 /// One failover record, with whatever classification the error carried.
@@ -408,4 +436,96 @@ fn every_retry_decision_has_a_word() {
     for (core, served) in cases {
         assert_eq!(Served::from(core), served, "{core:?}");
     }
+}
+
+/// Every capture state maps to its own word, with no fallback swallowing one.
+///
+/// Only two are ever written today - a run is captured or it is not - and the
+/// other two describe a record whose body was removed after the fact, which is a
+/// state a reader has to be able to tell from "never taken".
+#[test]
+fn every_capture_state_has_a_word() {
+    use super::CaptureStatus as Served;
+    let cases = [
+        (run_archive::CaptureStatus::Retained, Served::Retained),
+        (run_archive::CaptureStatus::NotCaptured, Served::NotCaptured),
+        (run_archive::CaptureStatus::Redacted, Served::Redacted),
+        (run_archive::CaptureStatus::Expired, Served::Expired),
+    ];
+    for (core, served) in cases {
+        assert_eq!(Served::from(core), served, "{core:?}");
+    }
+}
+
+/// A captured attempt hands back the request itself, beside the window it was
+/// assembled from and the parameters it really carried.
+#[tokio::test]
+async fn a_captured_attempt_serves_the_request_it_sent() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-model-input", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![attempt_with_input(
+            run_archive::CaptureStatus::Retained,
+        )]);
+
+        let json = data(
+            r#"{ run { inferences(first: 10) { edges { node { modelInput {
+                 captureStatus request bytes sourceContextDigest
+                 toolCatalogVersion assemblyVersion
+                 parameters {
+                   temperature
+                   maxOutputTokens { __typename ... on MaxTokensCount { tokens } }
+                   providerParams
+                 }
+               } } } } } }"#,
+        )
+        .await;
+        let input = &json["run"]["inferences"]["edges"][0]["node"]["modelInput"];
+        assert_eq!(input["captureStatus"], "RETAINED");
+        assert_eq!(input["request"]["model"], "claude-sonnet-4-5");
+        assert_eq!(input["bytes"], 43);
+        assert_eq!(input["sourceContextDigest"], "0f0f0f0f0f0f0f0f");
+        assert_eq!(input["toolCatalogVersion"], "fedcba9876543210");
+        assert_eq!(input["assemblyVersion"], "1");
+        // The blueprint reader's own parameter shape, over the effective values:
+        // the completion budget is an absolute count because that is what went
+        // out, and a pass-through key stays where a declared one would.
+        let parameters = &input["parameters"];
+        assert_eq!(parameters["temperature"], 0.25);
+        assert_eq!(
+            parameters["maxOutputTokens"]["__typename"],
+            "MaxTokensCount"
+        );
+        assert_eq!(parameters["maxOutputTokens"]["tokens"], 2048);
+        assert_eq!(parameters["providerParams"]["top_p"], 0.9);
+    })
+    .await;
+}
+
+/// An uncaptured attempt says so, and still answers everything capture does not
+/// pay for.
+#[tokio::test]
+async fn an_uncaptured_attempt_carries_no_body_and_no_window_fingerprint() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-no-capture", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            attempt_with_input(run_archive::CaptureStatus::NotCaptured),
+            attempt(2, "openai", "gpt-5", AttemptOutcome::Succeeded),
+        ]);
+
+        let json = data(
+            r#"{ run { inferences(first: 10) { edges { node { modelInput {
+                 captureStatus request toolCatalogVersion
+               } } } } } }"#,
+        )
+        .await;
+        let edges = &json["run"]["inferences"]["edges"];
+        let input = &edges[0]["node"]["modelInput"];
+        assert_eq!(input["captureStatus"], "NOT_CAPTURED");
+        assert!(input["request"].is_null(), "{input}");
+        assert_eq!(input["toolCatalogVersion"], "fedcba9876543210");
+        // And an attempt whose journal recorded no model input at all is null
+        // rather than an invented uncaptured one.
+        assert!(edges[1]["node"]["modelInput"].is_null(), "{edges}");
+    })
+    .await;
 }

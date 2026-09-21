@@ -945,6 +945,132 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     // was advertised and the stage's own budget was asked for.
     assert_eq!(record.digest.tools, 1);
     assert!(record.digest.max_tokens > 0, "{:?}", record.digest);
+
+    // Nobody asked for this run's prompts, so the body is absent - and the rest
+    // of the model input is there anyway, because the parameters, the tool set
+    // and the assembly version cost nothing to record and answer questions the
+    // digest cannot. The window fingerprint is the one field capture pays for.
+    let input = record.model_input.as_ref().expect("a model input");
+    assert_eq!(
+        input.capture_status,
+        leviath_core::run_archive::CaptureStatus::NotCaptured
+    );
+    assert!(input.request.is_none(), "{input:?}");
+    assert_eq!(input.bytes, 0);
+    assert_eq!(input.source_context_digest, "");
+    assert!(
+        input.parameters.contains_key("max_output_tokens"),
+        "{input:?}"
+    );
+    assert!(!input.tool_catalog_version.is_empty());
+    assert_eq!(
+        input.assembly_version,
+        crate::pipeline::MODEL_INPUT_ASSEMBLY_VERSION
+    );
+}
+
+/// A run the operator asked to capture writes the request itself, and says which
+/// window it came from.
+///
+/// The marker is the whole switch: the same world without it is the test above,
+/// and every difference between the two records is what turning capture on buys.
+#[tokio::test]
+async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from() {
+    let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.spawn((
+        agent_state(),
+        window(),
+        stage("m", vec![tool("read_file")], None),
+        ReadyToInfer,
+        crate::pipeline::CaptureModelInput,
+    ));
+
+    run(&mut world);
+    assert!(rx.recv().await.expect("outcome").result.is_ok());
+
+    let records = crate::inference_bridge::journaled_attempts(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let input = records[0].model_input.as_ref().expect("a model input");
+    assert_eq!(
+        input.capture_status,
+        leviath_core::run_archive::CaptureStatus::Retained
+    );
+    let body = input.request.as_ref().expect("a retained body");
+    // The request Leviath assembled, field for field: the model it named and the
+    // conversation it carried are both readable, which is the point.
+    assert_eq!(body["model"], "m");
+    assert!(body["messages"].is_array(), "{body}");
+    assert_eq!(input.bytes, body.to_string().len() as u64);
+    // The window this came from, folded from the same digest the snapshot lane
+    // computes, and stable for a window that has not moved.
+    assert_eq!(
+        input.source_context_digest,
+        crate::pipeline::source_context_digest(&window(), "s")
+    );
+}
+
+/// The tool catalogue identifier answers one question: were these two attempts
+/// offered the same tools?
+#[test]
+fn a_tool_set_identifies_itself_by_what_is_in_it_and_in_what_order() {
+    let read = tool("read_file");
+    let write = tool("write_file");
+    let one = crate::pipeline::tool_catalog_version(&[read.clone(), write.clone()]);
+    assert_eq!(
+        one,
+        crate::pipeline::tool_catalog_version(&[read.clone(), write.clone()])
+    );
+    assert_ne!(
+        one,
+        crate::pipeline::tool_catalog_version(&[write, read.clone()])
+    );
+    assert_ne!(one, crate::pipeline::tool_catalog_version(&[read]));
+    // A description or a schema is part of what the model was offered, so a tool
+    // that kept its name and changed either is a different catalogue.
+    let mut described = tool("read_file");
+    described.description = "reads a file".to_string();
+    assert_ne!(
+        crate::pipeline::tool_catalog_version(&[tool("read_file")]),
+        crate::pipeline::tool_catalog_version(&[described])
+    );
+    let mut schema = tool("read_file");
+    schema.parameters = serde_json::json!({ "type": "object" });
+    assert_ne!(
+        crate::pipeline::tool_catalog_version(&[tool("read_file")]),
+        crate::pipeline::tool_catalog_version(&[schema])
+    );
+}
+
+/// The parameters recorded are the request's own, not the stage's declaration.
+#[test]
+fn the_effective_parameters_are_read_off_the_request_that_was_built() {
+    let bare = leviath_providers::InferenceRequest {
+        system: Vec::new(),
+        messages: Vec::new(),
+        model: "m".to_string(),
+        max_tokens: 512,
+        temperature: 0.0,
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+        request_timeout_secs: None,
+    };
+    let table = crate::pipeline::effective_parameters(&bare);
+    assert_eq!(table["temperature"], serde_json::json!(0.0));
+    assert_eq!(table["max_output_tokens"], serde_json::json!(512));
+    assert_eq!(table.len(), 2, "{table:?}");
+
+    // A stage's pass-through parameters and its per-call deadline are flattened
+    // in beside them, because both went out on the request.
+    let full = leviath_providers::InferenceRequest {
+        extra: serde_json::json!({ "top_p": 0.9 }),
+        request_timeout_secs: Some(90),
+        ..bare
+    };
+    let table = crate::pipeline::effective_parameters(&full);
+    assert_eq!(table["top_p"], serde_json::json!(0.9));
+    assert_eq!(table["request_timeout_secs"], serde_json::json!(90));
 }
 
 #[tokio::test]

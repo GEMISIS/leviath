@@ -142,8 +142,10 @@ pub(crate) use response::{
 mod inference;
 #[cfg(test)]
 pub(crate) use inference::{
-    BATCH_TOOL_HINT, WINDOWS_SHELL_HINT, build_request, hint_blocks, shell_guidance_for,
+    BATCH_TOOL_HINT, WINDOWS_SHELL_HINT, build_request, effective_parameters, hint_blocks,
+    shell_guidance_for, source_context_digest, tool_catalog_version,
 };
+pub use inference::{CaptureModelInput, MODEL_INPUT_ASSEMBLY_VERSION};
 pub(crate) use inference::{
     InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
 };

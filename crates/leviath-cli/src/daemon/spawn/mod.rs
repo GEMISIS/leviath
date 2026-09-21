@@ -289,6 +289,10 @@ struct RunRecordParts {
     auto_gate: bool,
     /// The profile's name when `--yolo=<name>` named one.
     yolo_profile: Option<String>,
+    /// Whether this run writes the exact request it sends the model into its
+    /// journal. Either the machine asked for every run, or this spawn asked for
+    /// this one.
+    capture_model_input: bool,
 }
 
 /// Record the run on its entity: metadata, counters, and the markers that
@@ -368,6 +372,19 @@ fn attach_run_record(
         parts
             .auto_checkpoints
             .then_some(leviath_runtime::components::InteractionAutoApprove)
+            .into_iter()
+            .for_each(|marker| {
+                entity_mut.insert(marker);
+            });
+        // The operator asked for this run's prompts to be written down, machine-
+        // wide or for this run alone. Absent on every other run, which is what
+        // keeps a prompt - and the file contents, command output and credentials
+        // inside it - out of a journal nobody asked to hold them.
+        // (`.then_some(..).into_iter()` keeps the ordinary path branch-free,
+        // matching the checkpoint marker above.)
+        parts
+            .capture_model_input
+            .then_some(leviath_runtime::pipeline::CaptureModelInput)
             .into_iter()
             .for_each(|marker| {
                 entity_mut.insert(marker);
@@ -1081,6 +1098,8 @@ fn build_agent_inner(
                 .is_some_and(|p| p.spec.checkpoints.is_auto()),
             auto_gate: profile.as_ref().is_some_and(|p| p.spec.gate.is_auto()),
             yolo_profile: yolo_profile_name.clone(),
+            capture_model_input: deps.config.observability.capture_model_input
+                || args.capture_model_input,
         },
     );
 
@@ -1486,6 +1505,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             worker_stage: None,
             output: None,
             parts: Vec::new(),
+            capture_model_input: false,
         }
     }
 
@@ -2920,6 +2940,59 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(!cli.take(entity).expect("tool state registered").unattended);
     }
 
+    /// Capture is off for a plain run, on when the machine asked for every run,
+    /// and on when one spawn asked for itself. Off by default is the safety
+    /// property, so the absence is asserted as hard as the presence.
+    #[tokio::test]
+    async fn the_capture_marker_lands_only_when_the_machine_or_the_spawn_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let path = manifest.to_string_lossy().to_string();
+        let captured = |config: &Config, args: &SpawnArgs| {
+            let (mut world, cli) = test_world();
+            let hub = InteractionHub::new();
+            let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+            let entity = build_agent(
+                world.world_mut(),
+                SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config,
+                    shared_mcp: mcp,
+                    mcp_tool_defs: &[],
+                    mcp_tool_owners: &Default::default(),
+                    hub: &hub,
+                    now_secs: 100,
+                    subagent_tx: sub_tx(),
+                },
+                args,
+            )
+            .expect("spawn succeeds");
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::CaptureModelInput>(entity)
+                .is_some()
+        };
+
+        let plain = Config::default();
+        assert!(!captured(&plain, &spawn_args(&path)));
+
+        let mut machine_wide = Config::default();
+        machine_wide.observability.capture_model_input = true;
+        assert!(captured(&machine_wide, &spawn_args(&path)));
+
+        let asked = SpawnArgs {
+            capture_model_input: true,
+            ..spawn_args(&path)
+        };
+        assert!(captured(&plain, &asked));
+    }
+
     #[tokio::test]
     async fn build_agent_no_security_block_leaves_taint_off_by_default() {
         // A blueprint with no `[security]` block and a default (taint-off)
@@ -4118,6 +4191,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             worker_stage: None,
             output: None,
             parts: Vec::new(),
+            capture_model_input: false,
         }
     }
 

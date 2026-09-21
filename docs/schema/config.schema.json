@@ -562,6 +562,11 @@
           "minimum": 0,
           "default": 5242880,
           "description": "Bytes a log file Leviath writes for itself (daemon.log, serve-<name>.log) may reach before it is rolled to <name>.1. 0 never rolls. 5 MiB by default."
+        },
+        "capture_model_input": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write the exact request each run sends the model into its journal, once per provider attempt. Off by default: a captured request is the whole prompt, holding whatever the run's context held, and there is no size cap, so a captured run's journal grows by roughly the context size per attempt."
         }
       }
     },

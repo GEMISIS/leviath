@@ -595,6 +595,27 @@ pub struct ContextDigest {
     pub regions: Vec<RegionDigest>,
 }
 
+impl ContextDigest {
+    /// This fingerprint folded into one opaque hex string, for a record that
+    /// needs to name a window rather than compare it region by region.
+    ///
+    /// Folded from the per-entry hashes the coalescing lane already computes, so
+    /// two windows that this digest calls identical fold to the same string and
+    /// nothing hashes the context twice.
+    pub fn fingerprint(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for region in &self.regions {
+            region.name.hash(&mut hasher);
+            region.kind.hash(&mut hasher);
+            region.current_tokens.hash(&mut hasher);
+            region.max_tokens.hash(&mut hasher);
+            region.entries.hash(&mut hasher);
+        }
+        format!("{:016x}", hasher.finish())
+    }
+}
+
 /// Hash one region entry. Every field participates: two entries that differ
 /// anywhere must digest differently, or a real change would be recorded as
 /// "unchanged" and the folded archive would silently drift from the run.
@@ -719,7 +740,9 @@ mod codec;
 mod executions;
 mod points;
 
-pub use attempt::{AttemptOutcome, AttemptRecord, FailoverRecord, RequestDigest, Retry};
+pub use attempt::{
+    AttemptOutcome, AttemptRecord, CaptureStatus, FailoverRecord, ModelInput, RequestDigest, Retry,
+};
 pub use codec::{
     Frame, Frames, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
     read_archive_start, read_frame, read_record, write_archive_start, write_record,
@@ -1394,6 +1417,28 @@ mod tests {
         assert_eq!(&base, b);
     }
 
+    /// The folded fingerprint says the same thing the digest does, in one
+    /// string: two windows the digest calls identical fold together, and any
+    /// change the digest notices moves it.
+    #[test]
+    fn the_folded_fingerprint_follows_the_digest_it_is_folded_from() {
+        let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let same = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let grown = snapshot(
+            "s1",
+            vec![region("conv", vec![entry("hi", 1), entry("there", 2)])],
+        );
+        let renamed = snapshot("s1", vec![region("plan", vec![entry("hi", 1)])]);
+        let print = |snap: &ContextSnapshot| digest_context(snap).fingerprint();
+        assert_eq!(print(&a).len(), 16);
+        assert_eq!(print(&a), print(&same));
+        assert_ne!(print(&a), print(&grown));
+        assert_ne!(print(&a), print(&renamed));
+        // An empty window still fingerprints, so a record never has to choose
+        // between a fingerprint and a window that held nothing.
+        assert_eq!(ContextDigest::default().fingerprint().len(), 16);
+    }
+
     #[test]
     fn digest_diff_append_only_growth_is_compact() {
         let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
@@ -1604,6 +1649,17 @@ mod tests {
                     max_tokens: 1024,
                     temperature: 0.7,
                 },
+                model_input: Some(ModelInput {
+                    capture_status: CaptureStatus::Retained,
+                    request: Some(serde_json::json!({ "model": "claude-sonnet-5" })),
+                    bytes: 31,
+                    source_context_digest: "0123456789abcdef".to_string(),
+                    parameters: [("temperature".to_string(), serde_json::json!(0.7))]
+                        .into_iter()
+                        .collect(),
+                    tool_catalog_version: "fedcba9876543210".to_string(),
+                    assembly_version: "1".to_string(),
+                }),
                 at: 102,
             }),
             RunRecord::InferenceFailover(FailoverRecord {

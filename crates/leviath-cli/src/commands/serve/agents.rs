@@ -86,6 +86,7 @@ pub(super) async fn spawn_agent(
         yolo_profile: body.yolo_profile.clone(),
         allow: body.allow.clone(),
         no_seed_commands: body.no_seed_commands,
+        capture_model_input: body.capture_model_input,
         regions: body.regions.clone(),
         metadata: body.metadata.clone(),
         callback_url: body.callback_url.clone(),

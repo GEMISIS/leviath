@@ -355,6 +355,11 @@ fn reload_one(
         // blueprint's partway through, and the caller would never see why.
         output: meta.output_request.clone(),
         parts: Vec::new(),
+        // Unlike `yolo`, not restored: losing it writes less into the journal
+        // rather than more, which is the direction `allow` and `max_depth` are
+        // dropped for. A machine-wide `capture_model_input` still applies here,
+        // because `build_agent` reads the config it is handed.
+        capture_model_input: false,
     };
     let entity = build_agent_for_reload(world.world_mut(), deps, &args)?;
 

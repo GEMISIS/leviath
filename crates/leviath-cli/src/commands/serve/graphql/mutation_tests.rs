@@ -1330,6 +1330,7 @@ fn every_input_object_round_trips() {
         output_instructions: Some("one object".to_string()),
         callback_url: Some("https://example.test/hook".to_string()),
         callback_secret: Some("shh".to_string()),
+        capture_model_input: Some(true),
     };
     let Ok(read_back) = SpawnRunInput::parse(Some(spawn.to_value())) else {
         panic!("a spawn input reads back from its own value");

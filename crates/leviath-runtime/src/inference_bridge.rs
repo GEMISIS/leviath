@@ -345,6 +345,58 @@ pub(crate) struct AttemptJournal {
     /// stored parts are named by, and the digest counts messages and tools
     /// rather than looking inside them.
     pub digest: leviath_core::run_archive::RequestDigest,
+    /// Whether the exact request is kept, and the things about it that are the
+    /// same for every attempt at this call.
+    pub model_input: ModelInputPlan,
+}
+
+/// What each attempt records about its request, decided where the request was
+/// assembled.
+///
+/// Everything here but the body itself is settled before the first trip to the
+/// provider: the window the request came from, the parameters it carries and the
+/// tools it advertises do not move between retries. The body is taken per
+/// attempt, because a file renewal rewrites the ids the stored parts are named
+/// by and a reader comparing two attempts has to see that.
+pub(crate) struct ModelInputPlan {
+    /// Whether the body is kept. False for every run whose operator did not ask,
+    /// which is the default.
+    pub capture: bool,
+    /// The fingerprint of the window the request was assembled from, or empty
+    /// when the body is not kept: computing it costs a walk of the whole window.
+    pub source_context_digest: String,
+    /// The parameters the request really carries.
+    pub parameters: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The tool set this call offers the model.
+    pub tool_catalog_version: String,
+}
+
+impl ModelInputPlan {
+    /// This attempt's model input, with the body when the plan keeps bodies.
+    fn record(&self, request: &InferenceRequest) -> leviath_core::run_archive::ModelInput {
+        use leviath_core::run_archive::{CaptureStatus, ModelInput};
+        // A struct always serializes to an object, so the fallback is the empty
+        // value rather than a panic on a path that cannot be reached.
+        let body = self
+            .capture
+            .then(|| serde_json::to_value(request).unwrap_or_default());
+        ModelInput {
+            capture_status: match self.capture {
+                true => CaptureStatus::Retained,
+                false => CaptureStatus::NotCaptured,
+            },
+            // Measured off the body that is kept, so the size and the body can
+            // never describe two different requests.
+            bytes: body
+                .as_ref()
+                .map_or(0, |value| value.to_string().len() as u64),
+            request: body,
+            source_context_digest: self.source_context_digest.clone(),
+            parameters: self.parameters.clone(),
+            tool_catalog_version: self.tool_catalog_version.clone(),
+            assembly_version: crate::pipeline::MODEL_INPUT_ASSEMBLY_VERSION.to_string(),
+        }
+    }
 }
 
 impl AttemptJournal {
@@ -355,6 +407,7 @@ impl AttemptJournal {
         outcome: leviath_core::run_archive::AttemptOutcome,
         took: Duration,
         waited: Duration,
+        request: &InferenceRequest,
     ) {
         let _ = self
             .lane
@@ -370,6 +423,7 @@ impl AttemptJournal {
                         duration_ms: millis(took),
                         backoff_ms: millis(waited),
                         digest: self.digest.clone(),
+                        model_input: Some(self.model_input.record(request)),
                         at: chrono::Utc::now().timestamp(),
                     },
                 )),
@@ -656,9 +710,12 @@ pub(crate) async fn run_inference_job(
         let mut waited = Duration::ZERO;
         // Nothing waits on these appends, so a world with no lane simply writes
         // nothing and the loop behaves exactly as it does with one.
-        let record = |attempt, outcome, took, waited| {
+        // The request is a parameter rather than something the closure captures:
+        // a file renewal takes it mutably, and a record has to carry the bodies
+        // as they were when each attempt went out.
+        let record = |attempt, outcome, took, waited, request: &InferenceRequest| {
             if let Some(journal) = journal.as_ref() {
-                journal.record(attempt, outcome, took, waited);
+                journal.record(attempt, outcome, took, waited, request);
             }
         };
         loop {
@@ -692,6 +749,7 @@ pub(crate) async fn run_inference_job(
                         leviath_core::run_archive::AttemptOutcome::Succeeded,
                         took,
                         waited,
+                        &request,
                     );
                     break Ok(response);
                 }
@@ -708,6 +766,7 @@ pub(crate) async fn run_inference_job(
                         failed(&e, leviath_core::run_archive::Retry::RenewedFiles),
                         took,
                         waited,
+                        &request,
                     );
                     renewed_files = true;
                     // Taken at once, so the next attempt's record says it waited
@@ -728,6 +787,7 @@ pub(crate) async fn run_inference_job(
                             failed(&e, leviath_core::run_archive::Retry::SameModel),
                             took,
                             waited,
+                            &request,
                         );
                         tokio::time::sleep(delay).await;
                         spent = spent.saturating_add(delay);
@@ -740,6 +800,7 @@ pub(crate) async fn run_inference_job(
                             failed(&e, leviath_core::run_archive::Retry::Reported),
                             took,
                             waited,
+                            &request,
                         );
                         break Err(e);
                     }
@@ -1663,6 +1724,14 @@ mod tests {
                 tools: 0,
                 max_tokens: 100,
                 temperature: 0.0,
+            },
+            model_input: ModelInputPlan {
+                capture: false,
+                source_context_digest: String::new(),
+                parameters: [("temperature".to_string(), serde_json::json!(0.0))]
+                    .into_iter()
+                    .collect(),
+                tool_catalog_version: "no-tools".to_string(),
             },
         });
         (job, records)

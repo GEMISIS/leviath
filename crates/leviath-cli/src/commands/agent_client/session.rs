@@ -96,6 +96,10 @@ pub(super) fn spawn_args(
             }),
         },
         parts,
+        // The protocol carries no field for it, and an editor session is the
+        // last place to start writing prompts to disk unasked. A machine-wide
+        // `[observability] capture_model_input` still applies.
+        capture_model_input: false,
     }
 }
 

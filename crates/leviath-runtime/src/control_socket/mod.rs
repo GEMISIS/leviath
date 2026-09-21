@@ -1378,6 +1378,7 @@ mod tests {
                 worker_stage: None,
                 output: None,
                 parts: Vec::new(),
+                capture_model_input: true,
             }),
         })
         .await;

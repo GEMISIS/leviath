@@ -311,6 +311,21 @@ The run listing and `GET /api/agents/{id}` carry the name back as `yolo_profile`
 `unattended`, so a console can show that a run is unattended *under* something rather than
 unattended outright.
 
+### Capturing one run's prompts
+
+`POST /api/agents` takes `"capture_model_input": true` to write that run's exact requests into its
+journal, once per provider attempt. It applies to the one run and leaves every other alone, so it
+is the switch to reach for when the question is about a single run rather than a machine.
+
+**Read the warning before you send it.** A captured request is the whole prompt, holding whatever
+the run's context held: file contents a tool read, command output, and anything somebody pasted.
+There is no size cap, so the journal grows by roughly the context size per attempt. See
+[capturing what went to the model](/docs/observability#capturing-what-went-to-the-model).
+
+`[observability] capture_model_input` does the same for every run on the machine, and either one is
+enough. Read the captured requests back on `InferenceAttempt.modelInput` over
+[GraphQL](/docs/graphql#what-one-call-sent).
+
 ### Answering a question
 
 `GET /api/agents/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`

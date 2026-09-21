@@ -4703,6 +4703,7 @@ enabled = false
                 endpoint: Some("http://collector:4318".to_string()),
                 service_name: Some("leviath-prod".to_string()),
                 log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
+                capture_model_input: false,
             },
             sandbox: Some(leviath_core::ToolSandboxConfig {
                 kind: leviath_core::SandboxKind::Container,

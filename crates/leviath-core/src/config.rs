@@ -91,6 +91,25 @@ pub struct ObservabilityConfig {
     /// directory. `0` never rolls. Default: 5 MiB.
     #[serde(default = "default_log_file_max_bytes")]
     pub log_file_max_bytes: u64,
+
+    /// Whether every run writes the exact request it sent the model into its
+    /// journal, once per provider attempt (default: false).
+    ///
+    /// **A captured request is the whole prompt.** It holds whatever the run's
+    /// context held at that moment: file contents a tool read, command output,
+    /// pasted credentials, the task somebody typed. A run directory is a plain
+    /// file on disk with no encryption of its own, so turning this on makes
+    /// every reader of that directory a reader of every prompt.
+    ///
+    /// There is no size cap. Each call re-sends the whole window, so a captured
+    /// run's journal grows by roughly the context size per attempt, and a long
+    /// run with a large window can write hundreds of megabytes.
+    ///
+    /// Read at spawn, so a change applies to runs started after it. One run can
+    /// be captured on its own with the `capture_model_input` spawn option, which
+    /// is the setting to reach for when the question is about a single run.
+    #[serde(default)]
+    pub capture_model_input: bool,
 }
 
 fn default_log_file_max_bytes() -> u64 {
@@ -98,9 +117,9 @@ fn default_log_file_max_bytes() -> u64 {
 }
 
 impl Default for ObservabilityConfig {
-    /// Export off, the OTLP exporter when it is turned on, and the default
-    /// log cap. Hand-written so the empty-table serde default and `Default`
-    /// agree on the cap.
+    /// Export off, request capture off, the OTLP exporter when export is turned
+    /// on, and the default log cap. Hand-written so the empty-table serde
+    /// default and `Default` agree on the cap.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -108,6 +127,7 @@ impl Default for ObservabilityConfig {
             endpoint: None,
             service_name: None,
             log_file_max_bytes: DEFAULT_LOG_FILE_MAX_BYTES,
+            capture_model_input: false,
         }
     }
 }
