@@ -15,6 +15,30 @@ same list.
 
 ### Added
 
+- The journal records why a context window changed, not only what it then held.
+  Every write that can name its cause records one beside the snapshot: a region
+  seeded at spawn or on stage entry, a message delivered into the run, the
+  model's own reply, a routed tool result, a part the model produced, a
+  compacting region summarising itself, a stage-edge transform, a `context_*` or
+  `todo_*` tool the model called, a region or stage hook, a fan-out worker, an
+  interaction point, a resume rebuilding the window, and the runtime's own
+  bookkeeping. Each entry names the region, the cause, the entries that arrived
+  and left, and how its token count moved, so a window that lost its plan no
+  longer reads the same whether a compaction took it, a transform cleared it, or
+  the model released it. No content is written: the snapshot recorded beside it
+  already carries the window. `fold` hands them back as `context_changes`.
+
+- The journal records one entry per trip to a provider, so a retried call and a
+  first-time success no longer read the same. Each entry says which attempt it
+  was, which provider and model it went to, whether it succeeded, how the failure
+  was classified, how long the attempt took and how long the run slept before it,
+  beside a hundred-byte digest of the request. Two attempts carrying the same
+  digest are the same request sent twice, which is the question a retry raises;
+  no request or response body is written. A move to another provider is its own
+  entry, naming what it left and what it took, so a run that changed model no
+  longer looks like one that was always configured that way. `fold` hands both
+  back as `attempts` and `failovers`.
+
 - `lev serve` answers GraphQL at `POST /graphql`, beside its REST routes. One
   request names exactly the fields it wants, at any depth, and a field nobody
   selected is never read from disk: a fleet view that costs a listing plus one
@@ -162,6 +186,36 @@ same list.
   untyped with a reason rather than tidied. The same typed call answers what a
   person is being asked to approve, which used to name the tool without saying
   what it would run. Announced as `graphql.executions`.
+
+- What a run asked, over GraphQL: `Run.interactions` pages over the same
+  journal, and is the only record that a run stopped and asked a person
+  something at all. Once a tool has read the answer, a granted call reads no
+  differently from one no policy ever stopped, and the scope a person chose
+  (this call, this stage, the rest of the run) is otherwise gone the moment
+  it does. Each entry carries its kind, the tool an approval was for, the
+  prompt and stage, and a typed settlement: whether it was answered, timed
+  out, or cancelled, with the approval, choice, text and feedback filled in
+  only when it was answered. The settlement's widest approval scope is
+  spelled `RUN` here, where the REST journal writes `session` for the same
+  thing. Announced as `graphql.interactions`.
+
+- What a run's provider calls took, over GraphQL: `Run.inferences` pages the
+  attempt records in its journal, one entry per trip to a provider. Each carries
+  the provider and model asked, which attempt it was, how it ended, what the
+  retry loop did next, how long the attempt took and how long the run slept
+  before it, beside the digest that says whether two attempts sent the same
+  request. The move to another provider is a nullable field on the attempt it
+  followed rather than a listing of its own: the journal records it a tick later,
+  from the tick loop that decided it, and pairing them here saves every client
+  the join. Announced as `graphql.inferences`.
+
+- Why a run's regions changed, over GraphQL: `Run.contextChanges` pages the
+  change records in its journal, naming the region, the cause, the entries that
+  arrived and left, and how the region's token count moved. `Run.contextHistory`
+  goes on serving the window snapshots, and both fields now say which of the two
+  they are: a region that lost its plan looks identical in a snapshot whether a
+  compaction took it, a transform cleared it, or the model deleted it. Announced
+  as `graphql.context_changes`.
 
 ### Changed
 

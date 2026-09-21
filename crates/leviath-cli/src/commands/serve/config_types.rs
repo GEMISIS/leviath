@@ -453,6 +453,27 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // would draw is empty without it: the run's own counters say how many tool
     // calls there were, never which ones were refused or cut off.
     "graphql.executions",
+    // `Run.interactions`: every question a run put to a person, read from its
+    // journal, with the settlement typed - how it ended, and what was
+    // answered. Announced because nothing else in the API carries this: a run
+    // counter says how many tool calls there were, never which of them a
+    // person stopped to approve, and once a tool has read the answer a
+    // granted call looks exactly like one no policy ever stopped.
+    "graphql.interactions",
+    // `Run.inferences`: every trip a run made to a provider, read from its
+    // journal, with the move to another provider on the attempt it followed.
+    // Announced because the run's own usage is per call that worked: a call
+    // refused three times and answered on the fourth is billed once, so a
+    // console without this can show what the calls cost and never what getting
+    // them took.
+    "graphql.inferences",
+    // `Run.contextChanges`: why each of a run's regions changed, read from its
+    // journal, beside the snapshots `Run.contextHistory` serves. Announced
+    // because the snapshots cannot answer it: a region that lost its plan looks
+    // identical whether a compaction took it, a transform cleared it, or the
+    // model deleted it, and a console that cannot tell those apart is showing
+    // three different bugs as one.
+    "graphql.context_changes",
     // Short-lived signed URLs on the byte routes, which is what lets a browser
     // put a run's picture in an `<img src>`. Announced because the alternative
     // a client writes without it - fetch with the token, hold the bytes, mint a

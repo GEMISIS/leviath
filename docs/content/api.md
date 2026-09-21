@@ -1745,6 +1745,9 @@ than that feature, not broken.
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
 | `graphql.executions` | `Run.executions`: what a run tried, with each call typed |
+| `graphql.interactions` | `Run.interactions`: every question a run put to a person, with the settlement typed |
+| `graphql.inferences` | `Run.inferences`: every trip a run made to a provider, retries and failovers included |
+| `graphql.context_changes` | `Run.contextChanges`: why each of a run's regions changed, beside the snapshots |
 | `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
 | `runs.export` | `bulkExportRuns` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |

@@ -362,6 +362,55 @@ type AskUserTextCall implements ToolCall {
 }
 
 """
+How one trip to a provider ended, and how the failure was judged when there
+was one.
+
+`failureKind`, `transient`, `capacity` and `retry` are null unless `kind` is
+`FAILED`: an attempt that worked has no failure to classify. What the answer
+cost is on the run's `usage` and `cost`, not here.
+"""
+type AttemptOutcome {
+	"""
+	Whether the provider answered.
+	"""
+	kind: AttemptOutcomeKind!
+	"""
+	A stable label for what went wrong. Null for an attempt that worked, and
+	for a failure the provider gave no classification for at all.
+	"""
+	failureKind: String
+	"""
+	Whether a retry could plausibly have cleared it. Recorded as judged at
+	the time rather than inferred now: what counts as transient is a policy
+	that moves between releases.
+	"""
+	transient: Boolean
+	"""
+	Whether the provider said it was at capacity, which is what buys the slow
+	backoff schedule rather than the blip-sized one.
+	"""
+	capacity: Boolean
+	"""
+	What the loop did next.
+	"""
+	retry: RetryDecision
+}
+
+"""
+How one trip to a provider ended.
+"""
+enum AttemptOutcomeKind {
+	"""
+	The provider answered.
+	"""
+	SUCCEEDED
+	"""
+	It produced no answer.
+	"""
+	FAILED
+}
+
+"""
 A 64-bit integer, serialized as a JSON number. GraphQL's `Int` is 32-bit:
 it cannot hold a 2 GiB file size or a large aggregate token count. Every
 magnitude this API produces is well under 2^53, so it round-trips through
@@ -1214,6 +1263,150 @@ type ContextAttachCall implements ToolCall {
 	The call's arguments.
 	"""
 	args: ContextAttachArgs!
+}
+
+"""
+What changed a region of a context window.
+
+A cause names a path through the runtime rather than a shape of edit: two
+paths that both append to the conversation stay two causes, because which of
+them ran is the question being asked. A write whose path has no cause of its
+own records nothing at all rather than borrowing the nearest neighbour, so
+this vocabulary never mislabels a change.
+"""
+enum ContextCause {
+	"""
+	A region seeded from the blueprint or from caller input, at spawn or on
+	entry to a stage that declares its own layout.
+	"""
+	SEED
+	"""
+	A message delivered into the running agent, landing in the region that
+	accepts messages.
+	"""
+	MESSAGE
+	"""
+	The model's own reply, recorded as the assistant turn it was.
+	"""
+	MODEL_REPLY
+	"""
+	A tool's answer landing in a region: the conversation by default,
+	wherever the stage's `tool_results` sends it, or the region a tool writes
+	on purpose.
+	"""
+	TOOL_RESULT
+	"""
+	A part the model produced, kept somewhere other than the conversation:
+	routed by the stage's `output_routing`, attached by a mime tool, or
+	emitted as an artifact.
+	"""
+	PRODUCED_PART
+	"""
+	A compacting region summarising itself: the summary landing in its
+	history region, and the source region being emptied behind it.
+	"""
+	COMPACTION
+	"""
+	A stage-edge transform carrying, summarising or clearing a region as the
+	run moves between stages, or as a child is seeded from its parent.
+	"""
+	TRANSFORM
+	"""
+	A `context_*` or `todo_*` tool the model called: a write, an append, a
+	release, a checklist item.
+	"""
+	CONTEXT_TOOL
+	"""
+	A region's own `on_write` or `on_overflow` script, or a stage hook,
+	writing on the region's behalf.
+	"""
+	HOOK
+	"""
+	A fan-out worker: the sources its window is seeded with, and the report it
+	hands back to its parent.
+	"""
+	FAN_OUT
+	"""
+	An interaction point: the document it publishes for review, and what a
+	person's answer puts in the conversation.
+	"""
+	INTERACTION
+	"""
+	A resume rebuilding the window from the journal, region by region, before
+	the run carries on.
+	"""
+	RESUME
+	"""
+	The runtime's own bookkeeping: a system nudge, a watchdog note, the record
+	a transition choice leaves behind.
+	"""
+	FRAMEWORK
+}
+
+"""
+One change to one region, as the journal recorded it.
+
+No content: the window recorded on the same tick already holds the text, so
+repeating it here would double the journal to say nothing new. Read this
+beside `contextHistory` when the text matters.
+"""
+type ContextChange {
+	"""
+	The region that changed.
+	"""
+	region: String!
+	"""
+	What changed it.
+	"""
+	cause: ContextCause!
+	"""
+	Entries the change added.
+	"""
+	entriesAdded: Int!
+	"""
+	Entries it removed, including any eviction the change itself triggered.
+	"""
+	entriesRemoved: Int!
+	"""
+	How the region's token count moved. Negative when the region shrank.
+	"""
+	tokenDelta: BigInt!
+	"""
+	When the change landed.
+	"""
+	at: Timestamp!
+}
+
+"""
+One page of a run's context changes.
+"""
+type ContextChangeConnection {
+	"""
+	The changes on this page, in the order they landed.
+	"""
+	edges: [ContextChangeEdge!]!
+	"""
+	Where the next page starts.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many the run's journal holds altogether.
+	"""
+	total: Int!
+}
+
+"""
+One change and its cursor.
+"""
+type ContextChangeEdge {
+	"""
+	Where this change sits among the run's own.
+	"""
+	cursor: Cursor!
+	"""
+	The change.
+	"""
+	node: ContextChange!
 }
 
 """
@@ -2497,6 +2690,137 @@ enum HintSetting {
 	OMIT
 }
 
+type InferenceAttempt {
+	"""
+	The stage the run was in. Empty for a lane that has no stage of its own,
+	such as the pass that titles a run.
+	"""
+	stage: String!
+	"""
+	Which trip to the provider this was, from 1, counting every trip. A
+	retry that spends none of the retry budget still gets its own number, so
+	that two attempts at one call can always be told apart.
+	"""
+	attempt: Int!
+	"""
+	The provider that was called, named as the run's configuration names it
+	rather than as the provider names itself, so this joins to the run's
+	spend.
+	"""
+	provider: String!
+	"""
+	The model it was asked for, likewise as configured.
+	"""
+	model: String!
+	"""
+	How the attempt ended.
+	"""
+	outcome: AttemptOutcome!
+	"""
+	How long this attempt itself took, in milliseconds, not counting the wait
+	before it.
+	"""
+	durationMs: BigInt!
+	"""
+	How long the loop slept before making this attempt, in milliseconds.
+	Zero for the first attempt at a call, and for a retry taken at once.
+	"""
+	backoffMs: BigInt!
+	"""
+	What went out.
+	"""
+	digest: RequestDigest!
+	"""
+	When the attempt finished.
+	"""
+	at: Timestamp!
+	"""
+	The move to a different provider that followed this attempt.
+	
+	Null for every attempt the stage did not give up on, which is most of
+	them: a retry against the same provider is the next attempt, not a move.
+	Where this is set, the attempt after it went to `toProvider` and
+	`toModel`.
+	"""
+	failover: InferenceFailover
+}
+
+"""
+One page of a run's provider attempts.
+"""
+type InferenceAttemptConnection {
+	"""
+	The attempts on this page, in the order they were made.
+	"""
+	edges: [InferenceAttemptEdge!]!
+	"""
+	Where the next page starts.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many the run's journal holds altogether.
+	"""
+	total: Int!
+}
+
+"""
+One attempt and its cursor.
+"""
+type InferenceAttemptEdge {
+	"""
+	Where this attempt sits among the run's own.
+	"""
+	cursor: Cursor!
+	"""
+	The attempt.
+	"""
+	node: InferenceAttempt!
+}
+
+"""
+One provider judged unusable, and the model tried in its place.
+"""
+type InferenceFailover {
+	"""
+	The stage whose call moved.
+	"""
+	stage: String!
+	"""
+	The stage-local iteration, which the move leaves alone: the agent still
+	has not had a turn.
+	"""
+	iteration: Int!
+	"""
+	The provider that would not serve.
+	"""
+	fromProvider: String!
+	"""
+	The model it was asked for.
+	"""
+	fromModel: String!
+	"""
+	The provider tried instead.
+	"""
+	toProvider: String!
+	"""
+	The model asked of it.
+	"""
+	toModel: String!
+	"""
+	Why the first provider was judged unusable.
+	"""
+	reason: String!
+	"""
+	A stable label for the failure itself, the same vocabulary the attempt's
+	`failureKind` uses. Null when the error carried no classification.
+	"""
+	failureKind: String
+	"""
+	When the move was made.
+	"""
+	at: Timestamp!
+}
+
 """
 A shell command for one operating system.
 """
@@ -2621,6 +2945,74 @@ type InstallSelfToolCall implements ToolCall {
 	The call's arguments.
 	"""
 	args: InstallSelfToolArgs!
+}
+
+type Interaction {
+	"""
+	The id the hub minted for this ask, which is what an answer arriving
+	over the API or from `lev respond` carries.
+	"""
+	requestId: String!
+	"""
+	What kind of answer it took.
+	"""
+	kind: InteractionKind!
+	"""
+	The tool an approval was for. Null for every other kind.
+	"""
+	tool: String
+	"""
+	The question as the person saw it.
+	"""
+	prompt: String!
+	"""
+	The stage the run was in when it asked.
+	"""
+	stage: String!
+	"""
+	How it ended, and what the answer was.
+	"""
+	settlement: Settlement!
+	"""
+	When the question was asked.
+	"""
+	askedAt: Timestamp!
+	"""
+	When it settled: answered, timed out, or cancelled.
+	"""
+	settledAt: Timestamp!
+}
+
+"""
+One page of what a run asked a person.
+"""
+type InteractionConnection {
+	"""
+	The interactions on this page, in the order the run asked them.
+	"""
+	edges: [InteractionEdge!]!
+	"""
+	Where the next page starts.
+	"""
+	pageInfo: PageInfo!
+	"""
+	How many the run's journal holds altogether.
+	"""
+	total: Int!
+}
+
+"""
+One interaction and its cursor.
+"""
+type InteractionEdge {
+	"""
+	Where this interaction sits among the run's own.
+	"""
+	cursor: Cursor!
+	"""
+	The interaction.
+	"""
+	node: Interaction!
 }
 
 """
@@ -4819,6 +5211,62 @@ type RepetitionDetection {
 	maxReadonlyStreak: Int
 }
 
+"""
+What went out on one attempt, in the little of it worth keeping.
+
+Two attempts carrying the same digest sent the same request, which is the
+question a retry raises: the same provider refusing repeatedly reads
+differently from a request that kept changing underneath the run. No bodies,
+because a digest that grew with the prompt would put a copy of the whole
+window in the journal once per retry.
+"""
+type RequestDigest {
+	"""
+	The assembled system prefix, as an opaque lowercase-hex digest. Compare
+	it between attempts; nothing else is promised about the value.
+	"""
+	systemHash: String!
+	"""
+	How many conversation messages went out.
+	"""
+	messages: Int!
+	"""
+	How many tools the request advertised.
+	"""
+	tools: Int!
+	"""
+	The completion budget it asked for.
+	"""
+	maxTokens: Int!
+	"""
+	The sampling temperature it asked for.
+	"""
+	temperature: Float!
+}
+
+"""
+What the retry loop did after an attempt failed.
+"""
+enum RetryDecision {
+	"""
+	Nothing. The failure went back to the run, either because it was
+	permanent or because the attempts and the backoff budget were spent.
+	"""
+	REPORTED
+	"""
+	The same provider and model again, after a wait. The next attempt's
+	`backoffMs` says how long that wait really was.
+	"""
+	SAME_MODEL
+	"""
+	The same provider and model again, at once, with every file the request
+	named uploaded afresh because the provider said one of them was gone. It
+	spends no wait and none of the retry budget, so it is the one case where
+	two attempts can share a `backoffMs` of zero.
+	"""
+	RENEWED_FILES
+}
+
 type Run {
 	"""
 	Globally unique run id.
@@ -5129,12 +5577,83 @@ type Run {
 		after: Cursor
 	): ToolExecutionConnection!
 	"""
-	How this run's context window changed over the run, paged.
+	Every question this run put to a person, in the order it asked them,
+	paged.
 	
-	Each point carries a whole window, so this is paged harder than the run
-	listing is: ask for the regions you render rather than every point's
-	every region. Chronological by default, which is also the cheaper
-	direction to read.
+	The only record that this run stopped for somebody. `executions` says
+	what the run tried; this says what it needed a person for, and what
+	came back - including a scope that only ever lived here, since a
+	granted approval reads no differently from a call no policy ever
+	stopped once the tool has read it.
+	
+	Empty for an unattended run, which asks nobody: `--yolo` answers before
+	the question reaches a person, so an empty list on a run that plainly
+	did something dangerous means exactly that.
+	"""
+	interactions(
+		"""
+		Page size.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page.
+		"""
+		after: Cursor
+	): InteractionConnection!
+	"""
+	Every trip this run made to a provider, in the order it made them,
+	paged.
+	
+	What `usage` and `cost` cannot say. They are per call that worked, so a
+	call refused three times and answered on the fourth is billed once and
+	reads here as the four trips it was. Each entry names the provider and
+	model asked, how the attempt ended, what the loop did next, and how long
+	the run waited before it; `failover` carries the move where the stage gave
+	up on a provider.
+	
+	Empty for a run whose journal holds no attempt records.
+	"""
+	inferences(
+		"""
+		Page size.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page.
+		"""
+		after: Cursor
+	): InferenceAttemptConnection!
+	"""
+	Why each of this run's regions changed, in the order the changes landed,
+	paged.
+	
+	`contextHistory` serves the window snapshots: what every region held at
+	each point. This serves the reasons: which path through the runtime moved
+	a region, so one that lost its plan to a compaction reads differently
+	from one a stage-edge transform cleared and one the model deleted. No
+	content, since the snapshot on the same tick already holds the text.
+	
+	Empty for a run whose journal holds no change records, and for writes
+	whose path cannot name a cause.
+	"""
+	contextChanges(
+		"""
+		Page size.
+		"""
+		first: Int! = 50,
+		"""
+		Cursor from the previous page.
+		"""
+		after: Cursor
+	): ContextChangeConnection!
+	"""
+	Snapshots of this run's context window over the run, paged.
+	
+	What the window held at each point, not why it changed: `contextChanges`
+	is the reasons. Each point here carries a whole window, so this is paged
+	harder than the run listing is: ask for the regions you render rather
+	than every point's every region. Chronological by default, which is also
+	the cheaper direction to read.
 	"""
 	contextHistory(
 		"""
@@ -5976,6 +6495,86 @@ type ServeLimits {
 	The per-request deadline, in seconds.
 	"""
 	requestTimeoutSecs: Int!
+}
+
+"""
+How far an approval that settled an ask reached.
+
+The REST journal and the answer routes write this scope's widest value as
+`session`; this field always spells it `RUN`, so a client reading GraphQL
+never has to know the REST name for the same thing.
+"""
+enum SettledApprovalScope {
+	"""
+	Just the one call it was asked about.
+	"""
+	ONCE
+	"""
+	Every later call it covered, until the run left the stage it was asked
+	in.
+	"""
+	STAGE
+	"""
+	Every later call it covered, for the rest of the run.
+	"""
+	RUN
+}
+
+"""
+How a question this run asked ended up, and what the answer was.
+
+`approved`, `scope`, `choice`, `text` and `feedback` are null unless
+`outcome` is `ANSWERED`. Nobody answered a `TIMED_OUT` or `CANCELLED` ask,
+so there is nothing for any of them to carry.
+"""
+type Settlement {
+	"""
+	How it ended.
+	"""
+	outcome: SettlementOutcome!
+	"""
+	Whether a tool approval was granted. Null for every kind of ask but a
+	tool approval that was answered.
+	"""
+	approved: Boolean
+	"""
+	The scope an approval was given at: this call, this stage, or the rest
+	of the run. Null where none was offered, or where nobody answered.
+	"""
+	scope: SettledApprovalScope
+	"""
+	Which option was picked, for a question that offered a list.
+	"""
+	choice: Int
+	"""
+	What was typed, for a question that took text. An edited document
+	comes back here too, exactly as it was left.
+	"""
+	text: String
+	"""
+	What the person told the model to do instead, on a denial.
+	"""
+	feedback: String
+}
+
+"""
+How a question a run asked ended up.
+"""
+enum SettlementOutcome {
+	"""
+	A person answered it.
+	"""
+	ANSWERED
+	"""
+	Nobody answered before the run's interaction timeout ran out, so the
+	hub answered for them.
+	"""
+	TIMED_OUT
+	"""
+	The request was withdrawn: the run was cancelled, or the agent that
+	asked it went away.
+	"""
+	CANCELLED
 }
 
 """
