@@ -45,44 +45,11 @@ fn install(root: &Path, name: &str) -> String {
 async fn a_pointer_without_a_pin_is_the_name_it_was_given() {
     let state = state_with_agent_paths(Vec::new());
     let input = BlueprintInput {
-        name: Some("coder".to_string()),
-        ..BlueprintInput::default()
+        name: "coder".to_string(),
+        digest: None,
     };
     let name = input.installed(&state).await.expect("a bare name is fine");
     assert_eq!(name, "coder");
-}
-
-/// A pointer has to name something.
-#[tokio::test]
-async fn a_pointer_with_no_name_is_refused() {
-    let state = state_with_agent_paths(Vec::new());
-    let error = BlueprintInput::default()
-        .installed(&state)
-        .await
-        .expect_err("nothing to point at");
-    assert!(
-        matches!(&error, ServeError::BadRequest(message) if message.contains("`name`")),
-        "it says which field is missing: {error}"
-    );
-}
-
-/// Manifest text is not a pointer at an installed blueprint.
-#[tokio::test]
-async fn a_pointer_carrying_content_is_refused() {
-    let state = state_with_agent_paths(Vec::new());
-    let input = BlueprintInput {
-        name: Some("coder".to_string()),
-        content: Some(manifest("coder")),
-        ..BlueprintInput::default()
-    };
-    let error = input
-        .installed(&state)
-        .await
-        .expect_err("text is not a pointer");
-    assert!(
-        matches!(&error, ServeError::BadRequest(message) if message.contains("`content`")),
-        "it says which field does not belong: {error}"
-    );
 }
 
 /// A pin that matches what is installed passes, and the name comes back.
@@ -94,9 +61,8 @@ async fn a_pin_that_matches_the_installed_manifest_passes() {
         .scope(agents.path().to_path_buf(), async move {
             let state = state_with_agent_paths(Vec::new());
             let input = BlueprintInput {
-                name: Some("pinned".to_string()),
+                name: "pinned".to_string(),
                 digest: Some(digest),
-                ..BlueprintInput::default()
             };
             let name = input.installed(&state).await.expect("the pin holds");
             assert_eq!(name, "pinned");
@@ -114,9 +80,8 @@ async fn a_stale_pin_is_a_conflict_naming_both_digests() {
             let state = state_with_agent_paths(Vec::new());
             let stale = "0".repeat(64);
             let input = BlueprintInput {
-                name: Some("drifted".to_string()),
+                name: "drifted".to_string(),
                 digest: Some(stale.clone()),
-                ..BlueprintInput::default()
             };
             let error = input.installed(&state).await.expect_err("the pin is stale");
             let ServeError::Conflict(message) = &error else {
@@ -142,9 +107,8 @@ async fn a_pin_on_an_uninstalled_name_is_a_not_found() {
         .scope(agents.path().to_path_buf(), async move {
             let state = state_with_agent_paths(Vec::new());
             let input = BlueprintInput {
-                name: Some("absent".to_string()),
+                name: "absent".to_string(),
                 digest: Some("a".repeat(64)),
-                ..BlueprintInput::default()
             };
             let error = input
                 .installed(&state)
@@ -156,50 +120,6 @@ async fn a_pin_on_an_uninstalled_name_is_a_not_found() {
             );
         })
         .await;
-}
-
-/// A definition is the text, plus the agent it is read as.
-#[test]
-fn a_definition_carries_its_text_and_its_scope() {
-    let input = BlueprintInput {
-        name: Some("coder".to_string()),
-        content: Some(manifest("coder")),
-        ..BlueprintInput::default()
-    };
-    let definition = input.definition().expect("text and a scope");
-    assert!(definition.content.contains("[agent]"));
-    assert_eq!(definition.name.as_deref(), Some("coder"));
-}
-
-/// A definition needs text to read.
-#[test]
-fn a_definition_with_no_content_is_refused() {
-    let error = BlueprintInput {
-        name: Some("coder".to_string()),
-        ..BlueprintInput::default()
-    }
-    .definition()
-    .expect_err("nothing to check");
-    assert!(
-        matches!(&error, ServeError::BadRequest(message) if message.contains("`content`")),
-        "it says which field is missing: {error}"
-    );
-}
-
-/// A pin has nothing to pin when the text is right there.
-#[test]
-fn a_definition_carrying_a_digest_is_refused() {
-    let error = BlueprintInput {
-        content: Some(manifest("coder")),
-        digest: Some("a".repeat(64)),
-        ..BlueprintInput::default()
-    }
-    .definition()
-    .expect_err("a pin means an installed revision");
-    assert!(
-        matches!(&error, ServeError::BadRequest(message) if message.contains("`digest`")),
-        "it says which field does not belong: {error}"
-    );
 }
 
 /// One object with a single field set.
@@ -219,16 +139,14 @@ fn one(field: &str, value: Value) -> Option<Value> {
 fn both_inputs_round_trip_through_their_own_value_form() {
     let digest = "b".repeat(64);
     let blueprint = BlueprintInput {
-        name: Some("coder".to_string()),
+        name: "coder".to_string(),
         digest: Some(digest.clone()),
-        content: Some("[agent]".to_string()),
     };
     let Ok(read_back) = BlueprintInput::parse(Some(blueprint.to_value())) else {
         panic!("a blueprint input reads back from its own value");
     };
-    assert_eq!(read_back.name.as_deref(), Some("coder"));
+    assert_eq!(read_back.name, "coder");
     assert_eq!(read_back.digest, Some(digest));
-    assert_eq!(read_back.content.as_deref(), Some("[agent]"));
 
     let region = RegionInput {
         name: "plan".to_string(),
@@ -242,8 +160,8 @@ fn both_inputs_round_trip_through_their_own_value_form() {
 /// Both inputs refuse what they cannot read, field by field.
 ///
 /// Each field is read in turn, so an object whose *last* field is wrong takes a
-/// path no test of the first one enters. `BlueprintInput` has three optional
-/// fields, which is three of those paths and no required-field path at all.
+/// path no test of the first one enters. `BlueprintInput` reads `name` and then
+/// `digest`, so both positions are checked here.
 #[test]
 fn both_inputs_refuse_what_they_cannot_read() {
     let number = || Value::Number(7.into());
@@ -256,16 +174,12 @@ fn both_inputs_refuse_what_they_cannot_read() {
         "a name is a string"
     );
     assert!(
-        BlueprintInput::parse(one("digest", number())).is_err(),
-        "a digest is a string"
-    );
-    assert!(
-        BlueprintInput::parse(one("content", number())).is_err(),
-        "content is a string"
+        BlueprintInput::parse(one("digest", text("abc"))).is_err(),
+        "a pin without a name points at nothing"
     );
     assert!(
         BlueprintInput::parse(None).is_err(),
-        "no value at all is no pointer, even though every field of one is optional"
+        "no value at all is no pointer"
     );
 
     let mut with_bad_digest = IndexMap::new();
