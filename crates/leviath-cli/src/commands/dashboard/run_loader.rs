@@ -413,11 +413,15 @@ mod tests {
             feed.show(Some("r1"));
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut seen_context = false;
+            // Whether a round of the wait finds a snapshot ready is the
+            // scheduler's business: the loader can finish both its rounds
+            // before the first `take`, or not be started yet. `is_some_and`
+            // keeps that out of the test's own branches, which are counted.
             while !seen_context && std::time::Instant::now() < deadline {
-                if let Some(snapshot) = feed.take() {
+                seen_context = feed.take().is_some_and(|snapshot| {
                     assert_eq!(snapshot.runs.len(), 1);
-                    seen_context = snapshot.context.is_some();
-                }
+                    snapshot.context.is_some()
+                });
                 std::thread::yield_now();
             }
             assert!(seen_context, "the run on screen had its context read");
