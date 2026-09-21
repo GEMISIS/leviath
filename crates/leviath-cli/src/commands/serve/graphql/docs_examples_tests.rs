@@ -11,16 +11,25 @@
 //! formed. So the check is the walk the spec itself describes: start at the root
 //! type for the operation, look each selected field up on the type that carries
 //! it, and descend into whatever that field returns.
+//!
+//! An argument's value is walked the same way, against the type the schema
+//! declares for it. The line it holds is the server's: a value the server would
+//! coerce is accepted, and one the server would refuse is a failure naming the
+//! coordinate. So a single value stands for the list of one, a scalar this
+//! schema defines reads whatever it is handed, and a variable fits wherever it
+//! is written - while a string where an input object belongs, a list where one
+//! value belongs, an enum value the enum does not name and a null the schema
+//! refuses are each caught here rather than by a reader.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use async_graphql::parser::types::{
     BaseType, ExecutableDocument, Field, FieldDefinition, FragmentSpread, InputValueDefinition,
-    OperationType, Selection, SelectionSet, TypeKind, TypeSystemDefinition,
+    OperationType, Selection, SelectionSet, Type, TypeKind, TypeSystemDefinition,
 };
 use async_graphql::parser::{Pos, parse_query, parse_schema};
-use async_graphql::{Positioned, Value};
+use async_graphql::{Name, Positioned, Value};
 
 use super::sdl;
 
@@ -168,19 +177,77 @@ fn query_value(line: &str) -> Option<String> {
 /// What kind of type this is, as far as a walk cares.
 #[derive(PartialEq, Eq)]
 enum Kind {
-    /// A scalar or an enum: the end of a selection, with nothing to look inside.
-    Leaf,
+    /// One of the five scalars the spec defines. What each takes is written
+    /// down, so a value handed to one can be judged.
+    Builtin,
+    /// A scalar the schema defines itself. It reads whatever its own parser
+    /// accepts - `JSON` takes an object whose keys are the caller's business -
+    /// so a value handed to one is taken as it comes.
+    Custom,
+    /// An enum, with the values it names.
+    Enum(HashSet<String>),
     /// An object, an interface or a union: a selection set belongs here.
     Composite,
     /// An input object: the shape an argument value is checked against.
     Input,
 }
 
+/// A type exactly as an argument or an input field declares it.
+///
+/// The wrappers are the part that matters on the way in: a list where one value
+/// belongs is an error, one value where a list belongs is not, and a null is an
+/// error only where the schema refuses one.
+enum TypeRef {
+    /// A named type, and whether this position refuses null.
+    Named { name: String, required: bool },
+    /// A list of another type, and whether this position refuses null.
+    List { item: Box<TypeRef>, required: bool },
+}
+
+impl TypeRef {
+    /// The name left after every `!` and `[]` comes off.
+    fn named(&self) -> &str {
+        match self {
+            Self::Named { name, .. } => name,
+            Self::List { item, .. } => item.named(),
+        }
+    }
+
+    /// Whether this position refuses a null.
+    fn required(&self) -> bool {
+        match self {
+            Self::Named { required, .. } | Self::List { required, .. } => *required,
+        }
+    }
+}
+
+/// One declared type, read into the form a value walk uses.
+fn type_ref(ty: &Type) -> TypeRef {
+    let required = !ty.nullable;
+    match &ty.base {
+        BaseType::Named(name) => TypeRef::Named {
+            name: name.to_string(),
+            required,
+        },
+        BaseType::List(item) => TypeRef::List {
+            item: Box::new(type_ref(item)),
+            required,
+        },
+    }
+}
+
+/// What a variable becomes on the way into a value walk.
+///
+/// An example writes a variable where a client would put a value, and what that
+/// value is is the client's business, so it has to fit wherever it is written.
+/// The name is one no schema can declare: the spec reserves the `__` prefix.
+const VARIABLE_STANDIN: &str = "__variable";
+
 /// One type of the schema, reduced to what a walk asks of it.
 struct Shape {
     kind: Kind,
-    /// Field name to what that field offers. Empty for a leaf, and for a union,
-    /// which is why selecting a field on either fails.
+    /// Field name to what that field offers. Empty for a scalar, an enum and a
+    /// union, which is why selecting a field on any of them fails.
     fields: HashMap<String, FieldShape>,
     /// The types a fragment may name while standing on this one.
     ///
@@ -194,12 +261,13 @@ struct Shape {
 
 /// One field, or one input field, reduced the same way.
 struct FieldShape {
-    /// Argument name to the name of that argument's type, so an input object
-    /// nested inside a value is checked against the same table of types.
-    arguments: HashMap<String, String>,
-    /// The field's type with the `!` and the `[]` taken off. What a selection set
-    /// or an argument value is checked against.
-    named_type: String,
+    /// Argument name to the type that argument declares, so a value given for
+    /// one is checked against the same table of types.
+    arguments: HashMap<String, TypeRef>,
+    /// The field's own declared type. A selection set is checked against the
+    /// name at the bottom of it, and an input field's value against the whole
+    /// of it, wrappers included.
+    ty: TypeRef,
 }
 
 /// The schema an example is checked against.
@@ -228,14 +296,6 @@ impl fmt::Display for Fault {
     }
 }
 
-/// The name left after the `!` and the `[]` wrappers come off a type.
-fn named_type(ty: &BaseType) -> String {
-    match ty {
-        BaseType::Named(name) => name.to_string(),
-        BaseType::List(inner) => named_type(&inner.base),
-    }
-}
-
 /// The fields of an object or an interface, with their arguments.
 fn output_fields(fields: &[Positioned<FieldDefinition>]) -> HashMap<String, FieldShape> {
     fields
@@ -248,7 +308,7 @@ fn output_fields(fields: &[Positioned<FieldDefinition>]) -> HashMap<String, Fiel
                 .map(|argument| {
                     (
                         argument.node.name.node.to_string(),
-                        named_type(&argument.node.ty.node.base),
+                        type_ref(&argument.node.ty.node),
                     )
                 })
                 .collect();
@@ -256,7 +316,7 @@ fn output_fields(fields: &[Positioned<FieldDefinition>]) -> HashMap<String, Fiel
                 field.node.name.node.to_string(),
                 FieldShape {
                     arguments,
-                    named_type: named_type(&field.node.ty.node.base),
+                    ty: type_ref(&field.node.ty.node),
                 },
             )
         })
@@ -272,7 +332,7 @@ fn input_fields(fields: &[Positioned<InputValueDefinition>]) -> HashMap<String, 
                 field.node.name.node.to_string(),
                 FieldShape {
                     arguments: HashMap::new(),
-                    named_type: named_type(&field.node.ty.node.base),
+                    ty: type_ref(&field.node.ty.node),
                 },
             )
         })
@@ -304,7 +364,7 @@ impl Surface {
             types.insert(
                 scalar.to_string(),
                 Shape {
-                    kind: Kind::Leaf,
+                    kind: Kind::Builtin,
                     fields: HashMap::new(),
                     covers: HashSet::new(),
                 },
@@ -347,7 +407,18 @@ impl Surface {
                             (Kind::Composite, HashMap::new())
                         }
                         TypeKind::InputObject(input) => (Kind::Input, input_fields(&input.fields)),
-                        TypeKind::Scalar | TypeKind::Enum(_) => (Kind::Leaf, HashMap::new()),
+                        TypeKind::Enum(enumeration) => {
+                            let values = enumeration
+                                .values
+                                .iter()
+                                .map(|value| value.node.value.node.to_string())
+                                .collect();
+                            (Kind::Enum(values), HashMap::new())
+                        }
+                        // A scalar written in the SDL is one this schema
+                        // defines, whatever it is called: the five the spec
+                        // gives are registered above and never redeclared.
+                        TypeKind::Scalar => (Kind::Custom, HashMap::new()),
                     };
                     let covers = HashSet::from([name.clone()]);
                     types.insert(
@@ -487,13 +558,12 @@ impl Walk<'_> {
                     format!("`{ty}.{name}` takes no argument `{given}` (at {here})"),
                 )
             })?;
-            // A variable stands in for a value the example never shows, and the
-            // names inside a value are all this checks, so every variable
-            // becomes a null and the shape around it survives.
+            // A variable becomes the stand-in, so the shape around it is still
+            // walked while the value it carries is left to the client.
             let constant = value
                 .node
                 .clone()
-                .into_const_with(|_| Ok::<_, ()>(Value::Null))
+                .into_const_with(|_| Ok::<_, ()>(Value::Enum(Name::new(VARIABLE_STANDIN))))
                 .unwrap_or_default();
             self.surface.walk_value(
                 argument_type,
@@ -503,7 +573,7 @@ impl Walk<'_> {
             )?;
         }
         let selection = &field.node.selection_set.node;
-        let returns = &definition.named_type;
+        let returns = definition.ty.named();
         let target = self.surface.shape(returns, field.pos, &here)?;
         match (target.kind == Kind::Composite, selection.items.is_empty()) {
             (true, true) => Err(Fault::at(
@@ -521,7 +591,7 @@ impl Walk<'_> {
             (true, false) => {
                 let inner = Spot {
                     shape: target,
-                    ty: returns.clone(),
+                    ty: returns.to_string(),
                     path: here,
                 };
                 self.selection_set(&inner, selection)
@@ -591,35 +661,84 @@ impl Walk<'_> {
 impl Surface {
     /// Walk one argument value against the type it is given for.
     ///
-    /// Only names are checked, and only where the schema says a name is what
-    /// comes next: a `JSON` argument holds an object whose keys are the caller's
-    /// own business, so a value is opened up only when its type is an input
-    /// object.
-    fn walk_value(&self, ty: &str, value: &Value, path: &str, pos: Pos) -> Result<(), Fault> {
-        match value {
-            Value::List(items) => {
-                for item in items {
-                    self.walk_value(ty, item, path, pos)?;
+    /// What the server would coerce, this accepts: a single value stands for the
+    /// list of one, a null is fine wherever the schema allows one, and a scalar
+    /// the schema defines itself reads whatever it is handed. What the server
+    /// would refuse, this refuses, and says where.
+    fn walk_value(&self, ty: &TypeRef, value: &Value, path: &str, pos: Pos) -> Result<(), Fault> {
+        if matches!(value, Value::Enum(name) if name.as_str() == VARIABLE_STANDIN) {
+            return Ok(());
+        }
+        if value == &Value::Null {
+            return match ty.required() {
+                true => Err(Fault::at(
+                    pos,
+                    format!("a null is not allowed here (at {path})"),
+                )),
+                false => Ok(()),
+            };
+        }
+        match ty {
+            TypeRef::List { item, .. } => match value {
+                Value::List(items) => {
+                    for (index, inner) in items.iter().enumerate() {
+                        self.walk_value(item, inner, &format!("{path}[{index}]"), pos)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Value::Object(given) => {
-                let shape = self.shape(ty, pos, path)?;
-                if shape.kind != Kind::Input {
-                    return Ok(());
-                }
-                for (name, inner) in given {
-                    let field = shape.fields.get(name.as_str()).ok_or_else(|| {
+                // One value where a list belongs is the list of one. The spec
+                // coerces it, so it is read as an item of that list.
+                single => self.walk_value(item, single, path, pos),
+            },
+            TypeRef::Named { name, .. } => self.named_value(name, value, path, pos),
+        }
+    }
+
+    /// Walk one value against a named type, with no wrappers left on it.
+    fn named_value(&self, name: &str, value: &Value, path: &str, pos: Pos) -> Result<(), Fault> {
+        let shape = self.shape(name, pos, path)?;
+        match (&shape.kind, value) {
+            (Kind::Custom, _) => Ok(()),
+            (_, Value::List(_)) => Err(Fault::at(
+                pos,
+                format!("`{name}` takes one value, and `{value}` is a list (at {path})"),
+            )),
+            (Kind::Input, Value::Object(given)) => {
+                for (field, inner) in given {
+                    let declared = shape.fields.get(field.as_str()).ok_or_else(|| {
                         Fault::at(
                             pos,
-                            format!("`{ty}` has no input field `{name}` (at {path})"),
+                            format!("`{name}` has no input field `{field}` (at {path})"),
                         )
                     })?;
-                    self.walk_value(&field.named_type, inner, &format!("{path}.{name}"), pos)?;
+                    self.walk_value(&declared.ty, inner, &format!("{path}.{field}"), pos)?;
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            (Kind::Input, other) => Err(Fault::at(
+                pos,
+                format!("`{name}` is an input object, and `{other}` is not one (at {path})"),
+            )),
+            (Kind::Enum(values), Value::Enum(given)) => match values.contains(given.as_str()) {
+                true => Ok(()),
+                false => Err(Fault::at(
+                    pos,
+                    format!("`{name}` has no value `{given}` (at {path})"),
+                )),
+            },
+            (Kind::Enum(_), other) => Err(Fault::at(
+                pos,
+                format!("`{name}` is an enum, and `{other}` is not one of its values (at {path})"),
+            )),
+            (Kind::Builtin, Value::Object(_)) => Err(Fault::at(
+                pos,
+                format!("`{name}` is a scalar, and `{value}` is an object (at {path})"),
+            )),
+            (Kind::Builtin, _) => Ok(()),
+            (Kind::Composite, _) => Err(Fault::at(
+                pos,
+                format!("`{name}` is not an input type (at {path})"),
+            )),
         }
     }
 }
@@ -770,6 +889,185 @@ fn an_input_field_the_schema_does_not_have_is_refused() {
         message,
         "1:28: `SpawnRunInput` has no input field `blueprnt` \
          (at Mutation.spawnRun(input:))",
+        "{message}"
+    );
+}
+
+/// A bare value where an input object belongs.
+///
+/// This is the shape a renamed argument leaves behind: `blueprint:` took a name
+/// once and takes an object now, and an example still handing it a string reads
+/// like the documented one until somebody sends it.
+#[test]
+fn a_value_where_an_input_object_belongs_is_refused() {
+    let example =
+        "mutation { spawnRun(input: { blueprint: \"coder\", task: \"t\" })\n  { run { id } } }";
+    let message = refusal(&served(), example);
+    assert_eq!(
+        message,
+        "1:28: `BlueprintInput` is an input object, and `\"coder\"` is not one \
+         (at Mutation.spawnRun(input:).blueprint)",
+        "{message}"
+    );
+}
+
+/// An object where a scalar belongs, which is the same mistake mirrored.
+#[test]
+fn an_object_where_a_scalar_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: { n: 5 }) { total } }");
+    assert_eq!(
+        message, "1:15: `Int` is a scalar, and `{n: 5}` is an object (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// A list where one value belongs.
+///
+/// The coercion runs one way only: the spec wraps a single value into a list,
+/// and never unwraps a list into a single value.
+#[test]
+fn a_list_where_one_value_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: [1, 2]) { total } }");
+    assert_eq!(
+        message, "1:15: `Int` takes one value, and `[1, 2]` is a list (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// One value where a list belongs is the list of one, which the walk accepts
+/// because the server does.
+#[test]
+fn one_value_where_a_list_belongs_is_accepted() {
+    let surface = served();
+    assert!(
+        surface
+            .check("{ runs(filter: { ids: \"run-1\" }) { total } }")
+            .is_ok()
+    );
+    assert!(
+        surface
+            .check("{ runs(filter: { ids: [\"run-1\", \"run-2\"] }) { total } }")
+            .is_ok()
+    );
+}
+
+/// A fault inside a list says which item it was in.
+#[test]
+fn a_fault_inside_a_list_names_the_item_it_was_in() {
+    let example = "mutation { spawnRun(input: { task: \"t\", regions: [\n  { region: { name: \"plan\" }, text: \"x\" },\n  { regin: { name: \"plan\" }, text: \"x\" }\n] }) { run { id } } }";
+    let message = refusal(&served(), example);
+    assert_eq!(
+        message,
+        "1:28: `RegionSeedInput` has no input field `regin` \
+         (at Mutation.spawnRun(input:).regions[1])",
+        "{message}"
+    );
+}
+
+/// An enum value the enum does not name.
+#[test]
+fn an_enum_value_the_schema_does_not_have_is_refused() {
+    let message = refusal(
+        &served(),
+        "{ runs(filter: { status: FINISHED }) { total } }",
+    );
+    assert_eq!(
+        message, "1:16: `RunStatus` has no value `FINISHED` (at Query.runs(filter:).status)",
+        "{message}"
+    );
+}
+
+/// A quoted string where an enum value belongs, which the server refuses even
+/// when the letters inside the quotes are a member's.
+#[test]
+fn a_string_where_an_enum_value_belongs_is_refused() {
+    let message = refusal(
+        &served(),
+        "{ runs(filter: { status: \"RUNNING\" }) { total } }",
+    );
+    assert_eq!(
+        message,
+        "1:16: `RunStatus` is an enum, and `\"RUNNING\"` is not one of its values \
+         (at Query.runs(filter:).status)",
+        "{message}"
+    );
+}
+
+/// An enum value the enum does name is walked through.
+#[test]
+fn an_enum_value_the_schema_has_is_accepted() {
+    assert!(
+        served()
+            .check("{ runs(filter: { status: RUNNING, sort: STARTED_AT }) { total } }")
+            .is_ok()
+    );
+}
+
+/// A null where the schema will not take one.
+#[test]
+fn a_null_where_the_schema_requires_a_value_is_refused() {
+    let example = "mutation { spawnRun(input: { blueprint: { name: \"coder\" }, task: null })\n  { run { id } } }";
+    let message = refusal(&served(), example);
+    assert_eq!(
+        message, "1:28: a null is not allowed here (at Mutation.spawnRun(input:).task)",
+        "{message}"
+    );
+}
+
+/// A null where the schema does take one, at both an argument and a list.
+#[test]
+fn a_null_where_null_is_allowed_is_accepted() {
+    let surface = served();
+    assert!(surface.check("{ runs(filter: null) { total } }").is_ok());
+    assert!(
+        surface
+            .check("{ runs(filter: { ids: null }) { total } }")
+            .is_ok()
+    );
+}
+
+/// A scalar the schema defines itself reads whatever it is handed, so a value
+/// for one is taken as it comes.
+#[test]
+fn a_value_for_a_scalar_the_schema_defines_is_left_alone() {
+    let surface = served();
+    assert!(
+        surface
+            .check("{ runs(after: \"cursor-1\") { total } }")
+            .is_ok()
+    );
+    assert!(
+        surface
+            .check("{ runs(filter: { startedAt: { gte: 1757894400 } }) { total } }")
+            .is_ok()
+    );
+}
+
+/// A variable stands in for a value the example never shows, so it fits
+/// wherever it is written - including where a null would not.
+#[test]
+fn a_variable_fits_wherever_it_is_written() {
+    let example = "mutation Spawn($task: String!) {\n  \
+        spawnRun(input: { blueprint: { name: \"coder\" }, task: $task }) { run { id } }\n}";
+    assert!(
+        served().check(example).is_ok(),
+        "{:?}",
+        served().check(example).err().map(|f| f.to_string())
+    );
+}
+
+/// An argument whose type is an output type, which no value can satisfy.
+///
+/// Written against a schema of its own: the served one is generated from Rust
+/// types that cannot express it, and a walk still has to say something rather
+/// than wave the value through.
+#[test]
+fn an_output_type_as_an_argument_is_refused() {
+    let surface =
+        Surface::parse("type Query { ping(at: Thing): String } type Thing { id: String }");
+    let message = refusal(&surface, "{ ping(at: { id: \"x\" }) }");
+    assert_eq!(
+        message, "1:12: `Thing` is not an input type (at Query.ping(at:))",
         "{message}"
     );
 }
