@@ -168,6 +168,23 @@ pub(crate) struct RunFilter {
     /// installed, so the pin is how a client asking "this agent's runs" finds
     /// out the agent has been edited under it.
     pub(crate) blueprint: Option<BlueprintInput>,
+    /// Runs where some stage ran an inference on a provider this accepts.
+    ///
+    /// The question is about the run's stages, so one stage matching keeps the
+    /// run. That makes `ne` "a stage ran on something else" rather than "no
+    /// stage ran on this"; wrap the filter in `not` for the second. A run that
+    /// has billed no call, and a run recorded before Leviath kept this, match
+    /// nothing here.
+    pub(crate) stage_provider: Option<StringFilter>,
+    /// Runs where some stage ran an inference on a model this accepts, matched
+    /// as the serving provider spells it.
+    ///
+    /// Quantified over the run's stages exactly as `stageProvider` is, with
+    /// the same reading of `ne`. Set beside `stageProvider`, the two are
+    /// separate conditions rather than one pair: a run whose first stage ran
+    /// on one provider and whose second ran on another provider's model
+    /// satisfies both.
+    pub(crate) stage_model: Option<StringFilter>,
     /// Whether the run was spawned unattended.
     pub(crate) unattended: Option<BooleanFilter>,
     /// The yolo profile the run named at spawn. A run that named none matches
@@ -244,6 +261,10 @@ pub(crate) enum RunMatcher {
     Task(Text),
     /// The yolo profile the run named.
     YoloProfileName(Text),
+    /// Some stage of the run ran on a provider this accepts.
+    StageProvider(Text),
+    /// Some stage of the run ran on a model this accepts.
+    StageModel(Text),
     /// Whether the run is unattended.
     Unattended(Flag),
     /// When the run started.
@@ -284,6 +305,17 @@ impl RunPredicate for RunMatcher {
             Self::Title(text) => text.matches_option(meta.title.as_deref()),
             Self::Task(text) => text.matches(&meta.task),
             Self::YoloProfileName(text) => text.matches_option(meta.yolo_profile.as_deref()),
+            // Over the run's own record, which the listing has already parsed.
+            // The per-stage lists live in `stages.json`, and consulting that
+            // would be a second file opened for every run on the machine.
+            Self::StageProvider(text) => meta
+                .stage_models
+                .iter()
+                .any(|used| text.matches(&used.provider)),
+            Self::StageModel(text) => meta
+                .stage_models
+                .iter()
+                .any(|used| text.matches(&used.model)),
             Self::Unattended(flag) => flag.matches(meta.yolo),
             Self::StartedAt(bounds) => bounds.matches(&meta.started_at),
             Self::UpdatedAt(bounds) => bounds.matches(&meta.updated_at),
@@ -321,6 +353,8 @@ impl RunPredicate for RunMatcher {
             | Self::Title(_)
             | Self::Task(_)
             | Self::YoloProfileName(_)
+            | Self::StageProvider(_)
+            | Self::StageModel(_)
             | Self::Unattended(_)
             | Self::StartedAt(_)
             | Self::UpdatedAt(_)
@@ -508,6 +542,12 @@ fn compile<'a>(
         }
         if let Some(text) = filter.yolo_profile_name {
             parts.push(RunMatcher::YoloProfileName(text.compiled()));
+        }
+        if let Some(text) = filter.stage_provider {
+            parts.push(RunMatcher::StageProvider(text.compiled()));
+        }
+        if let Some(text) = filter.stage_model {
+            parts.push(RunMatcher::StageModel(text.compiled()));
         }
         if let Some(flag) = filter.unattended {
             parts.push(RunMatcher::Unattended(flag.compiled()));

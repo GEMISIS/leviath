@@ -296,6 +296,19 @@ pub(crate) struct RegionPeak {
     pub(crate) tokens: i32,
 }
 
+/// One provider and model a stage ran an inference on.
+///
+/// Both halves, because neither identifies what ran on its own: one provider
+/// serves many models, and one model is spelled differently by each provider
+/// that routes to it.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct StageModelUse {
+    /// The registered provider that served the call.
+    pub(crate) provider: String,
+    /// The model the call named, spelled as that provider spells it.
+    pub(crate) model: String,
+}
+
 /// One stage's record within a run: what it cost, and how often it ran.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageRecord {
@@ -311,6 +324,20 @@ pub(crate) struct StageRecord {
     pub(crate) usage: TokenUsage,
     /// Spend roll-up for this stage, across every visit.
     pub(crate) cost: CostBreakdown,
+    /// What this stage actually ran on, in the order it first reached each
+    /// entry.
+    ///
+    /// A list because a stage that fails over runs on more than one: the first
+    /// entry is where it started, the last is where it ended up, and one entry
+    /// means it never moved. Each pair appears once however many calls it
+    /// served, so this is what ran and not how often.
+    ///
+    /// Null when the stage has run no inference at all - one the run never
+    /// entered, one whose first call has not come back, one whose provider
+    /// could not be reached, and every stage of a run that finished before
+    /// Leviath recorded this. Choosing a model is not running on one, so there
+    /// is nothing here to read as the stage's intended model.
+    pub(crate) models: Option<Vec<StageModelUse>>,
     /// How many times the run entered this stage.
     pub(crate) visit_count: i32,
     /// One entry per stay, capped when recorded. When `visitCount` is larger
@@ -355,6 +382,23 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                 cost_priced_usd: Decimal(record.cost_priced_usd),
                 cost_is_exact: record.cost_is_exact,
                 unpriced_calls: count(record.unpriced_calls),
+            },
+            // An empty list would read as "this stage ran on nothing", which is
+            // a claim; null is the absence of the answer, which is the truth
+            // for a stage that has not run and for a run recorded before this
+            // was kept.
+            models: match record.models.is_empty() {
+                true => None,
+                false => Some(
+                    record
+                        .models
+                        .iter()
+                        .map(|used| StageModelUse {
+                            provider: used.provider.clone(),
+                            model: used.model.clone(),
+                        })
+                        .collect(),
+                ),
             },
             visit_count: count(record.visit_count),
             visits: record

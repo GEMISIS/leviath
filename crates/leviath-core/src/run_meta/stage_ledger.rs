@@ -209,6 +209,37 @@ impl StageVisitRecord {
     }
 }
 
+/// One provider and model a stage ran an inference on.
+///
+/// The pair, and not either half alone: the same model is reached by more than
+/// one route (`gpt-5.5` on OpenAI is `openai/gpt-5.5` on OpenRouter), and the
+/// same provider serves more than one model, so neither string identifies what
+/// ran on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageModelUse {
+    /// The registered provider that served the call.
+    pub provider: String,
+    /// The model the call named, spelled as that provider spells it.
+    pub model: String,
+}
+
+/// The distinct pairs every stage in `stages` ran on, in the order the run
+/// first reached each.
+///
+/// The run-level roll-up of [`StageRecord::models`], for
+/// [`RunMeta::stage_models`]. It answers which models a run touched and never
+/// which stage touched which: two stages on one model contribute one entry,
+/// and the entry names no stage.
+pub fn stage_models_of(stages: &[StageRecord]) -> Vec<StageModelUse> {
+    let mut out: Vec<StageModelUse> = Vec::new();
+    for used in stages.iter().flat_map(|stage| stage.models.iter()) {
+        if !out.contains(used) {
+            out.push(used.clone());
+        }
+    }
+    out
+}
+
 /// Metadata record for a single stage within a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageRecord {
@@ -271,6 +302,26 @@ pub struct StageRecord {
     /// does not restart this stage's accounting from zero.
     #[serde(default)]
     pub cost_priced_usd: f64,
+    /// Every provider and model this stage has run an inference on, in the
+    /// order it first reached each.
+    ///
+    /// A list rather than one pair because a stage that fails over runs on
+    /// more than one, and a single value would have to pick between the entry
+    /// it started on and the entry it ended on while showing a reader neither
+    /// the choice nor the move. The first entry is where the stage started,
+    /// the last is where it ended up, and a stage with one entry never moved.
+    ///
+    /// Each pair appears once however many calls it served, so this says what
+    /// ran and not how often; the journal's `InferenceUsage` records are the
+    /// call-by-call account. Every call billed to the stage counts, including
+    /// the compaction and routing calls made on its behalf.
+    ///
+    /// Empty when the stage has run no inference: a stage the run never
+    /// entered, a stage whose first call has not come back, a stage whose only
+    /// provider could not be reached - choosing a model is not running on one -
+    /// and every stage of a run recorded before Leviath kept this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<StageModelUse>,
     /// Each contiguous stay in this stage, oldest first.
     ///
     /// The record above accumulates across revisits, which is the right total
@@ -370,6 +421,7 @@ impl StageRecord {
             unpriced_calls: 0,
             cost_is_exact: true,
             cost_priced_usd: 0.0,
+            models: Vec::new(),
             visits: Vec::new(),
             visit_count: 0,
             region_tokens: std::collections::BTreeMap::new(),
@@ -408,6 +460,30 @@ impl StageRecord {
         if let Some(visit) = self.open_visit(at) {
             visit.record_call(call);
         }
+    }
+
+    /// Note that this stage ran an inference on `provider`'s `model`.
+    ///
+    /// Called where a call is billed rather than where a stage's model is
+    /// chosen, because those are different facts: a stage resolves its model
+    /// at entry and may never reach it, and it may move to a second entry
+    /// mid-stay. What lands here is what a provider actually answered.
+    ///
+    /// Kept once per pair, appended in the order the stage first reached each.
+    /// A repeat would turn [`models`](Self::models) into a call log that grows
+    /// with the run, in a file rewritten whole on every persist tick.
+    pub fn record_model(&mut self, provider: &str, model: &str) {
+        if self
+            .models
+            .iter()
+            .any(|used| used.provider == provider && used.model == model)
+        {
+            return;
+        }
+        self.models.push(StageModelUse {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        });
     }
 
     /// The visit in progress, starting one at `at` if the last has been closed
@@ -715,5 +791,89 @@ mod tests {
         assert_eq!(back.cost_usd, None, "no field is not a zero");
         assert!(back.visits.is_empty());
         assert_eq!(back.visit_count, 0);
+    }
+
+    /// A record written before Leviath kept the models still loads, and says
+    /// nothing about what its stage ran on rather than guessing.
+    #[test]
+    fn a_record_from_an_older_build_reports_no_models() {
+        let old = r#"{"name":"plan","index":0,"status":"complete",
+            "prompt_tokens":900,"completion_tokens":120,
+            "started_at":10,"ended_at":40}"#;
+        let back: StageRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(back.prompt_tokens, 900, "the rest of it still reads");
+        assert!(
+            back.models.is_empty(),
+            "a run that predates this has nothing to report"
+        );
+        // And a record with nothing to say writes no key, so an older reader
+        // sees the file it already knows.
+        let fresh = StageRecord::new("plan".to_string(), 0);
+        let json = serde_json::to_string(&fresh).unwrap();
+        assert!(!json.contains("models"), "{json}");
+    }
+
+    /// A stage that failed over says so: both entries, in the order it reached
+    /// them, and neither one repeated per call.
+    #[test]
+    fn a_stage_that_moved_providers_lists_both_in_order() {
+        let mut rec = StageRecord::new("plan".to_string(), 0);
+        rec.record_model("anthropic", "claude-opus-5");
+        rec.record_model("anthropic", "claude-opus-5");
+        rec.record_model("openrouter", "anthropic/claude-opus-5");
+        rec.record_model("anthropic", "claude-opus-5");
+        assert_eq!(
+            rec.models,
+            vec![
+                StageModelUse {
+                    provider: "anthropic".to_string(),
+                    model: "claude-opus-5".to_string(),
+                },
+                StageModelUse {
+                    provider: "openrouter".to_string(),
+                    model: "anthropic/claude-opus-5".to_string(),
+                },
+            ],
+        );
+
+        // One provider serving two models is two entries, so neither half of
+        // the pair is taken as the whole identity.
+        let mut two = StageRecord::new("plan".to_string(), 0);
+        two.record_model("openai", "gpt-5.5");
+        two.record_model("openai", "gpt-5.4");
+        assert_eq!(two.models.len(), 2);
+
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: StageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.models, rec.models);
+    }
+
+    /// The run-level roll-up is a set over the stages, in first-use order, and
+    /// it names no stage.
+    #[test]
+    fn the_run_level_rollup_is_every_pair_once() {
+        let mut plan = StageRecord::new("plan".to_string(), 0);
+        plan.record_model("anthropic", "claude-opus-5");
+        let mut code = StageRecord::new("code".to_string(), 1);
+        code.record_model("anthropic", "claude-opus-5");
+        code.record_model("openai", "gpt-5.5");
+        let never = StageRecord::new("review".to_string(), 2);
+
+        let rolled = stage_models_of(&[plan, code, never]);
+        assert_eq!(
+            rolled,
+            vec![
+                StageModelUse {
+                    provider: "anthropic".to_string(),
+                    model: "claude-opus-5".to_string(),
+                },
+                StageModelUse {
+                    provider: "openai".to_string(),
+                    model: "gpt-5.5".to_string(),
+                },
+            ],
+            "the pair two stages shared appears once"
+        );
+        assert!(stage_models_of(&[]).is_empty());
     }
 }

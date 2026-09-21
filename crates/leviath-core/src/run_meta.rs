@@ -16,7 +16,8 @@ mod stage_ledger;
 // moved out of this file because the file got long, and that is a fact about
 // where the source lives, not about what a caller should have to type.
 pub use stage_ledger::{
-    MAX_STAGE_VISITS, StageCall, StageRecord, StageRunStatus, StageVisitRecord,
+    MAX_STAGE_VISITS, StageCall, StageModelUse, StageRecord, StageRunStatus, StageVisitRecord,
+    stage_models_of,
 };
 
 /// Current status of a background run.
@@ -404,6 +405,25 @@ pub struct RunMeta {
     /// before resolution. Later stages may use a different one; this is not
     /// rewritten to follow them.
     pub model: Option<String>,
+    /// Every provider and model some stage of this run has run an inference
+    /// on, in the order the run first reached each.
+    ///
+    /// The set, not the assignment: an entry says the run ran on that pair and
+    /// never which stage did, and one pair two stages shared appears once.
+    /// [`StageRecord::models`] is the per-stage answer, and `stages.json` is
+    /// where to read it.
+    ///
+    /// Here as well as there because a listing reads this file per run and
+    /// nothing else, so "which runs ran on this model" is a question the
+    /// listing can answer without opening a ledger for every run on the
+    /// machine.
+    ///
+    /// Empty on a run that has billed no call, and on every run recorded
+    /// before Leviath kept this. Never reconstructed from
+    /// [`model`](Self::model), which is the entry stage's resolution and says
+    /// nothing about the stages after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_models: Vec<StageModelUse>,
     /// Always 0. There is no worker process per run: the daemon hosts every run
     /// as an entity in one shared world, so no run has a pid of its own.
     ///
@@ -847,6 +867,7 @@ impl RunMeta {
             agent_path,
             task,
             model,
+            stage_models: Vec::new(),
             pid: 0,
             status: RunStatus::Starting,
             current_stage: String::new(),
@@ -1780,5 +1801,51 @@ mod tests {
         assert!(!json.to_string().contains("flags"));
         let back: RunMeta = serde_json::from_value(json).unwrap();
         assert_eq!(back.flags, RunFlags::default());
+    }
+
+    /// A `meta.json` from a build that never recorded the models still loads,
+    /// and reports none rather than being filled in from `model`.
+    #[test]
+    fn run_meta_from_an_older_file_reports_no_stage_models() {
+        let meta = sample_meta();
+        let mut json = serde_json::to_value(&meta).unwrap();
+        // The key is absent on a fresh record too, since the roll-up is empty;
+        // removing it is what makes this a file no build of Leviath wrote it
+        // into rather than one that wrote it empty.
+        assert!(
+            json.as_object_mut()
+                .unwrap()
+                .remove("stage_models")
+                .is_none(),
+            "an empty roll-up writes no key"
+        );
+        let back: RunMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(back.run_id, "run-1", "the rest of the record still reads");
+        assert_eq!(back.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!(
+            back.stage_models.is_empty(),
+            "the entry stage's model is not evidence about any other stage"
+        );
+    }
+
+    /// The roll-up reaches the file, so a listing that has parsed `meta.json`
+    /// can answer which models a run ran on without opening its ledger.
+    #[test]
+    fn run_meta_carries_the_stage_model_rollup() {
+        let mut meta = sample_meta();
+        meta.stage_models = vec![
+            StageModelUse {
+                provider: "anthropic".to_string(),
+                model: "claude-opus-5".to_string(),
+            },
+            StageModelUse {
+                provider: "openai".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        ];
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"stage_models\""), "{json}");
+        let back: RunMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stage_models, meta.stage_models);
     }
 }

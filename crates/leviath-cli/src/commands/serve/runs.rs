@@ -232,7 +232,7 @@ pub(super) fn known_fields() -> HashSet<String> {
     serialized_keys(&probe_meta())
 }
 
-/// A `RunMeta` with every `skip_serializing_if` option set, so that
+/// A `RunMeta` with every `skip_serializing_if` field filled, so that
 /// serializing it names every key a real run can carry.
 fn probe_meta() -> RunMeta {
     let mut probe = RunMeta::new(
@@ -251,6 +251,10 @@ fn probe_meta() -> RunMeta {
     probe.model_override = Some(String::new());
     probe.yolo_profile = Some(String::new());
     probe.blueprint_digest = Some(String::new());
+    probe.stage_models = vec![leviath_core::run_meta::StageModelUse {
+        provider: String::new(),
+        model: String::new(),
+    }];
     probe
 }
 

@@ -90,6 +90,12 @@ pub(crate) fn record_call(
             },
             at,
         );
+        // Beside the money, and for the same reason: this is where a call that
+        // actually happened lands. A stage records its model where it is
+        // billed rather than where it is resolved, so a failover that moved
+        // the stage to a second provider shows as two entries and a resolution
+        // nothing ever reached shows as none.
+        rec.record_model(call.provider, call.model);
     }
     let (Some(persist), Some(md)) = (persist, metadata) else {
         return;
@@ -378,6 +384,61 @@ mod tests {
 
         // Neither: a no-op that must not panic.
         record_call(None, None, None, None, &call(InferenceKind::Routing, &u));
+    }
+
+    /// The stage the call was billed to records what served it, and a stage
+    /// that moved between providers keeps both in the order it reached them.
+    ///
+    /// The title call names no stage, so it matches no record and leaves the
+    /// ledger alone: it is billed to the run rather than to any stage of it.
+    #[test]
+    fn a_stage_records_every_provider_and_model_that_served_it() {
+        use leviath_core::run_meta::{StageModelUse, StageRecord};
+
+        let u = usage();
+        let mut ledger = crate::pipeline::StageLedger(vec![
+            StageRecord::new("plan".to_string(), 0),
+            StageRecord::new("code".to_string(), 1),
+        ]);
+        for (stage, provider, model) in [
+            ("plan", "anthropic", "claude-opus-5"),
+            ("plan", "anthropic", "claude-opus-5"),
+            ("plan", "openrouter", "anthropic/claude-opus-5"),
+            ("", "openai", "gpt-5-mini"),
+        ] {
+            record_call(
+                None,
+                Some(&mut ledger),
+                None,
+                None,
+                &CallUsage {
+                    kind: InferenceKind::Stage,
+                    stage,
+                    iteration: 1,
+                    provider,
+                    model,
+                    usage: &u,
+                    pricing: None,
+                },
+            );
+        }
+        assert_eq!(
+            ledger.0[0].models,
+            vec![
+                StageModelUse {
+                    provider: "anthropic".to_string(),
+                    model: "claude-opus-5".to_string(),
+                },
+                StageModelUse {
+                    provider: "openrouter".to_string(),
+                    model: "anthropic/claude-opus-5".to_string(),
+                },
+            ],
+        );
+        assert!(
+            ledger.0[1].models.is_empty(),
+            "a stage the run has not run in has nothing to report"
+        );
     }
 
     /// Totals accumulate across calls rather than being overwritten - the bug

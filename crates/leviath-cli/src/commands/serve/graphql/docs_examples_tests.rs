@@ -66,7 +66,7 @@ const PAGES: &[Page] = &[
 /// passing, over nothing. A floor set under what is really there is the same rot
 /// more slowly, because the gap is how many examples may quietly stop being
 /// checked. This one is the count itself.
-const FEWEST_EXAMPLES: usize = 39;
+const FEWEST_EXAMPLES: usize = 40;
 
 /// Exactly the queries the pages carry inside a request body.
 ///

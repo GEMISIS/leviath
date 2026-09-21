@@ -109,6 +109,7 @@ field you set has to hold, so one filter object is an `and` of its own fields.
 | `waitReason`, `waitReasonIn` | Why a parked run is parked |
 | `title`, `task`, `blueprintName`, `yoloProfileName` | A `StringFilter` on that text |
 | `blueprint` | One installed blueprint, by name, with an optional digest pin |
+| `stageProvider`, `stageModel` | A `StringFilter` on what some stage of the run ran on |
 | `unattended` | A `BooleanFilter` on whether approvals resolve without a person |
 | `startedAt`, `updatedAt` | A `TimestampFilter` in unix epoch seconds |
 | `ageSecs`, `workingSecs` | An `IntFilter` in seconds |
@@ -207,6 +208,40 @@ so a client can offer the right fix rather than parse a sentence.
   }
 }
 ```
+
+### What each stage ran on
+
+A blueprint picks a model per stage and names a list to fall back through, so
+one run can honestly have used three providers. `stages { models }` is where
+that is answered, stage by stage, in the order each stage reached them.
+
+```graphql
+{
+  runs(filter: { stageModel: { contains: "opus" } }) {
+    edges { node {
+      id
+      stages { name entered models { provider model } }
+    } }
+    total
+  }
+}
+```
+
+There is no run-level answer, on purpose. The one on the run record is the entry
+stage's resolution and is never rewritten to follow the stages after it, so it
+would be right about one stage and silent about the rest. The list on a stage is
+what that stage actually ran on: the first entry is where it started, the last is
+where it ended up, and one entry means it never moved.
+
+`models` is null, never an empty list, on a stage that has run no inference. A
+stage the run never entered, a stage whose first call is still in flight, and a
+stage whose only provider could not be reached all answer null, as does every
+stage of a run that finished before Leviath recorded this.
+
+`stageProvider` and `stageModel` keep a run when *any* of its stages matches. So
+`stageModel: { ne: "gpt-5.5" }` selects runs with a stage that ran on something
+else, which is not the same question as "runs no stage of which ran on
+`gpt-5.5`" - wrap the filter in `not` for that one.
 
 ## Blueprints
 

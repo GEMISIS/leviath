@@ -566,6 +566,13 @@ pub(crate) fn dispatch_persistence(
                 .find(|(agent_id, _)| *agent_id == state.agent_id)
                 .map(|(_, req)| req.kind)
         });
+        // Rolled up from the ledger rather than tracked separately, so the set
+        // on `meta.json` and the per-stage lists in `stages.json` are the same
+        // fact written twice and cannot drift into two answers.
+        let stage_models = ledger
+            .as_deref()
+            .map(|l| leviath_core::run_meta::stage_models_of(&l.0))
+            .unwrap_or_default();
         let meta = build_run_meta(
             crate::persistence::RunMetaSources {
                 md,
@@ -573,6 +580,7 @@ pub(crate) fn dispatch_persistence(
                 totals,
                 flags: &flags,
                 final_output,
+                stage_models,
                 parked,
             },
             crate::persistence::RunPosition {

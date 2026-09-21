@@ -250,6 +250,14 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // an older daemon serves stage records with no cost at all, and `null`
     // there means unknown for a different reason than it does here.
     "runs.stages.cost",
+    // `models` on each stage record: the provider and model pairs the stage
+    // actually ran an inference on, in the order it reached them. Announced
+    // because an absent list and an empty one read the same in JSON and mean
+    // opposite things: an older daemon never recorded this, while a stage that
+    // has not run yet has nothing to record. A console offering "which model
+    // ran this stage" needs to know which of the two it is looking at before
+    // it draws an answer.
+    "runs.stages.models",
     "logs.stage",
     "logs.stream",
     "context.history.page",

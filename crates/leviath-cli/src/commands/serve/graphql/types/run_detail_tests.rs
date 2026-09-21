@@ -204,6 +204,33 @@ fn a_stage_record_carries_its_ledger() {
     assert_eq!(working.since.map(|t| t.0), Some(180), "a span in progress");
 }
 
+/// What a stage ran on is served in the order it reached each entry, and a
+/// stage that has run nothing answers null rather than an empty list.
+///
+/// The difference is the whole point: an empty list is a claim that the stage
+/// ran on nothing, and null is the absence of the answer, which is what a
+/// stage the run never entered and a record from an older build both have.
+#[test]
+fn a_stage_says_what_it_ran_on_or_says_nothing() {
+    let mut core = leviath_core::run_meta::StageRecord::new("build".to_string(), 1);
+    core.record_model("anthropic", "claude-opus-5");
+    core.record_model("openrouter", "anthropic/claude-opus-5");
+
+    let record = StageRecord::from(&core);
+    let models = record.models.expect("the stage ran on something");
+    assert_eq!(models.len(), 2, "the move is visible, not hidden");
+    assert_eq!(models[0].provider, "anthropic");
+    assert_eq!(models[0].model, "claude-opus-5");
+    assert_eq!(models[1].provider, "openrouter");
+    assert_eq!(models[1].model, "anthropic/claude-opus-5");
+
+    let never = leviath_core::run_meta::StageRecord::new("review".to_string(), 2);
+    assert!(
+        StageRecord::from(&never).models.is_none(),
+        "nothing ran here, so there is no answer to give"
+    );
+}
+
 /// Every stage state the daemon records has one schema value.
 #[test]
 fn every_stage_status_maps_to_one_value() {
