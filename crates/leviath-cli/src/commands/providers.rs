@@ -988,17 +988,26 @@ retention = "zero""#,
     #[tokio::test]
     async fn list_says_when_nothing_is_configured_and_no_order_is_set() {
         let (_d, env) = env_with(Config::default());
-        execute_with(ProvidersArgs::list_for_test(), &env)
+        // Loading a config overlays every provider key from the process
+        // environment, and a neighbouring test setting one through `temp_env`
+        // sets it for the whole process while this one runs. Without clearing
+        // them here, whether this config reads as having no provider at all
+        // depends on which test happens to be running beside it.
+        let vars = crate::config::config_isolation_vars(env.config_path.parent().expect("a dir"));
+        temp_env::async_with_vars(vars, async {
+            execute_with(ProvidersArgs::list_for_test(), &env)
+                .await
+                .expect("bare list on an empty config");
+            execute_with(
+                ProvidersArgs {
+                    command: Some(ProvidersCommand::List(ListArgs { json: true })),
+                },
+                &env,
+            )
             .await
-            .expect("bare list on an empty config");
-        execute_with(
-            ProvidersArgs {
-                command: Some(ProvidersCommand::List(ListArgs { json: true })),
-            },
-            &env,
-        )
-        .await
-        .expect("json on an empty config");
+            .expect("json on an empty config");
+        })
+        .await;
     }
 
     #[tokio::test]
