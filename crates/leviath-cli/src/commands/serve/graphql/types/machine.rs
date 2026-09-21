@@ -298,8 +298,9 @@ pub(crate) struct Script {
     pub(crate) name: String,
     /// Where it was found: the directory kind this script was read from.
     pub(crate) found_at: String,
-    /// The agent whose directory it came from, for an agent-scoped script.
-    pub(crate) agent: Option<String>,
+    /// The blueprint whose directory it came from, for a blueprint-scoped
+    /// script.
+    pub(crate) blueprint: Option<String>,
 }
 
 /// One directory, for a file picker.

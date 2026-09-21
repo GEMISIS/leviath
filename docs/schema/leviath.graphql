@@ -1,138 +1,4 @@
 """
-A run reached a terminal status.
-"""
-type AgentCompleted {
-	"""
-	The run.
-	"""
-	runId: String!
-	"""
-	The agent's live id.
-	"""
-	agentId: String!
-	"""
-	The terminal status.
-	"""
-	status: String!
-	"""
-	The run's error, when that is how it ended.
-	"""
-	error: String
-	"""
-	The answer it submitted, when there is one.
-	"""
-	finalOutput: CompletedOutput
-}
-
-"""
-What a lifecycle mutation answers with.
-"""
-type AgentPayload {
-	"""
-	The run, read back after the act, so its status is what the act made
-	it rather than what the caller hoped.
-	"""
-	run: Run!
-	"""
-	Retired checks the mutation noticed. Empty unless something was
-	superseded.
-	"""
-	warnings: [String!]!
-}
-
-"""
-A run spawned.
-"""
-type AgentSpawned {
-	"""
-	The run's durable id.
-	"""
-	runId: String!
-	"""
-	The agent's live id in the world, which a run outlives.
-	"""
-	agentId: String!
-	"""
-	The blueprint it was spawned from, by name.
-	"""
-	blueprint: String!
-	"""
-	The run that spawned it, for a sub-agent.
-	"""
-	parentId: String
-}
-
-"""
-Spend crossed a threshold.
-"""
-type AgentSpend {
-	"""
-	The run.
-	"""
-	runId: String!
-	"""
-	The agent's live id.
-	"""
-	agentId: String!
-	"""
-	The figure that was crossed, in dollars.
-	"""
-	thresholdUsd: Decimal!
-	"""
-	What the run has spent so far, in dollars.
-	"""
-	totalUsd: Decimal!
-	"""
-	Whether every call behind that total could be priced. When false the
-	run has spent at least this and more by an unknown amount, so it must
-	not be shown as a final figure.
-	"""
-	complete: Boolean!
-	"""
-	The stage that was running when it crossed.
-	"""
-	stage: String!
-}
-
-"""
-A run's status, stage or counters moved.
-"""
-type AgentStatusChanged {
-	"""
-	The run.
-	"""
-	runId: String!
-	"""
-	The agent's live id.
-	"""
-	agentId: String!
-	"""
-	The status, in the daemon's own spelling.
-	"""
-	status: String!
-	"""
-	The stage it is in, by name.
-	"""
-	stage: String!
-	"""
-	Inference turns in that stage.
-	"""
-	iteration: Int!
-	"""
-	Tool calls across the whole run.
-	"""
-	toolCalls: Int!
-	"""
-	Whether a message reaches this run right now.
-	"""
-	acceptsMessages: Boolean!
-	"""
-	Its title, once it has one.
-	"""
-	title: String
-}
-
-"""
 Answer a confirm or a tool approval.
 """
 input AnswerApprovalInput {
@@ -2278,9 +2144,9 @@ type EnvironmentInfoCall implements ToolCall {
 This subscription fell behind, and frames were dropped.
 
 The daemon's broadcast is bounded, and a subscriber that cannot keep up is
-skipped past rather than allowed to hold the fan-out. Silently, before
-this: a client could not tell a quiet run from a missed one. Re-query the
-state you render when you see this.
+skipped past rather than allowed to hold the fan-out. This frame is what
+tells a quiet run from a missed one. Re-query the state you render when you
+see it.
 """
 type EventsDropped {
 	"""
@@ -3861,23 +3727,23 @@ type Mutation {
 	Read `run.status` on the way back: `PAUSED` means the pause landed.
 	A finished run is a `CONFLICT`, never a silent no-op.
 	"""
-	pauseAgent(
+	pauseRun(
 		"""
 		The run to pause.
 		"""
 		runId: String!
-	): AgentPayload!
+	): RunPayload!
 	"""
 	Resume a paused run.
 	
 	Read `run.status`: `RUNNING` means it is moving again.
 	"""
-	resumeAgent(
+	resumeRun(
 		"""
 		The run to resume.
 		"""
 		runId: String!
-	): AgentPayload!
+	): RunPayload!
 	"""
 	Start a run.
 	
@@ -3889,12 +3755,12 @@ type Mutation {
 	`--workdir-root`, an unattended run on a `--no-remote-yolo` server, or a
 	callback URL the outbound policy will not allow, each answer `FORBIDDEN`.
 	"""
-	spawnAgent(
+	spawnRun(
 		"""
 		Everything about the new run.
 		"""
-		input: SpawnAgentInput!
-	): AgentPayload!
+		input: SpawnRunInput!
+	): RunPayload!
 	"""
 	Send a message to a run that is going.
 	
@@ -3915,13 +3781,13 @@ type Mutation {
 		Deliver into this context region instead of the default one.
 		"""
 		targetRegion: String
-	): AgentPayload!
+	): RunPayload!
 	"""
 	Install a blueprint.
 	
 	A name that is already installed is a `CONFLICT`: replacing somebody's
-	agent is what `updateBlueprint` is for, and doing it silently here is
-	how an agent disappears without anybody asking for it.
+	blueprint is what `updateBlueprint` is for, and doing it silently here
+	is how a blueprint disappears without anybody asking for it.
 	"""
 	createBlueprint(
 		"""
@@ -4030,12 +3896,12 @@ type Mutation {
 	already finished is a `CONFLICT`, which tells a client the difference
 	between "you stopped it" and "it was over before you asked".
 	"""
-	cancelAgent(
+	cancelRun(
 		"""
 		The run to cancel.
 		"""
 		runId: String!
-	): AgentPayload!
+	): RunPayload!
 	"""
 	Add an MCP server to the config.
 	
@@ -4118,7 +3984,7 @@ type Mutation {
 	Write a Rhai script.
 	
 	Remote code execution by construction, like adding an MCP server: what is
-	written here is what an agent then runs. The answer says whether it
+	written here is what a run then executes. The answer says whether it
 	compiles, so an editor does not have to save and wait for a run to fail.
 	"""
 	putScript(
@@ -4135,9 +4001,9 @@ type Mutation {
 		"""
 		content: String!,
 		"""
-		The agent whose directory it belongs to, for an agent-scoped script.
+		The blueprint whose directory it belongs to, for a blueprint-scoped script.
 		"""
-		agent: String
+		blueprint: String
 	): ScriptWritten!
 	"""
 	Remove a script.
@@ -4152,9 +4018,9 @@ type Mutation {
 		"""
 		name: String!,
 		"""
-		The agent whose directory it is in.
+		The blueprint whose directory it is in.
 		"""
-		agent: String
+		blueprint: String
 	): Boolean!
 	"""
 	Run the diagnostics that reach the network.
@@ -4624,7 +4490,7 @@ type Query {
 		"""
 		Only this blueprint's own scripts, plus the global ones.
 		"""
-		agent: String
+		blueprint: String
 	): [Script!]!
 	"""
 	The directories under a path, for a file picker.
@@ -4671,14 +4537,14 @@ type Query {
 	"""
 	The tools an agent on this machine can call.
 	
-	Scoped to one blueprint's own directory when `agent` names one, which
-	is what an editor offering an `available_tools` list wants.
+	Scoped to one blueprint's own directory when `blueprint` names one,
+	which is what an editor offering an `available_tools` list wants.
 	"""
 	tools(
 		"""
 		Scope to this blueprint's own tools directory.
 		"""
-		agent: String
+		blueprint: String
 	): ToolInventory!
 	"""
 	Who is on the other end of the control socket.
@@ -4768,9 +4634,9 @@ type Query {
 		"""
 		manifest: String!,
 		"""
-		Check it as this installed agent, so its own scripts resolve.
+		Check it as this installed blueprint, so its own scripts resolve.
 		"""
-		agent: String
+		blueprint: String
 	): ValidationReport!
 	"""
 	Whether a provider key looks like one of that provider's.
@@ -5273,9 +5139,9 @@ type Run {
 	"""
 	id: String!
 	"""
-	The agent name from the blueprint this run was spawned from.
+	The name of the blueprint this run was spawned from.
 	"""
-	agentName: String!
+	blueprintName: String!
 	"""
 	Human title, set by the titling pass; null until it lands.
 	"""
@@ -5719,6 +5585,32 @@ type Run {
 }
 
 """
+A run reached a terminal status.
+"""
+type RunCompleted {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The terminal status.
+	"""
+	status: String!
+	"""
+	The run's error, when that is how it ended.
+	"""
+	error: String
+	"""
+	The answer it submitted, when there is one.
+	"""
+	finalOutput: CompletedOutput
+}
+
+"""
 A keyset-paged run listing.
 """
 type RunConnection {
@@ -5770,23 +5662,24 @@ type RunEdge {
 """
 One frame off the daemon broadcast.
 """
-union RunEvent = AgentSpawned | AgentStatusChanged | RunRenamed | TokensUpdated | ContextUpdated | StageTransition | ToolCallStarted | ToolCallFinished | LogLine | AgentSpend | InteractionNeeded | AgentCompleted | DaemonLinkChanged | ConfigHealthChanged | UpdateProgress | UpdateFinished | EventsDropped
+union RunEvent = RunSpawned | RunStatusChanged | RunRenamed | TokensUpdated | ContextUpdated | StageTransition | ToolCallStarted | ToolCallFinished | LogLine | RunSpend | InteractionNeeded | RunCompleted | DaemonLinkChanged | ConfigHealthChanged | UpdateProgress | UpdateFinished | EventsDropped
 
 """
 One frame type off the daemon broadcast.
 
-Subscribe with the types you render. The names match the frame names `/ws`
-uses, so a client moving over reads the same vocabulary.
+Subscribe with the types you render. Each value names the union member it
+selects for, so a client reads one vocabulary for the filter and for the
+frames it gets back.
 """
 enum RunEventType {
 	"""
 	A run spawned.
 	"""
-	AGENT_SPAWNED
+	RUN_SPAWNED
 	"""
 	A run's status, stage or counters moved.
 	"""
-	AGENT_STATUS
+	RUN_STATUS_CHANGED
 	"""
 	A run got its title.
 	"""
@@ -5818,7 +5711,7 @@ enum RunEventType {
 	"""
 	Spend crossed a threshold.
 	"""
-	AGENT_SPEND
+	RUN_SPEND
 	"""
 	A run parked on a prompt somebody has to answer.
 	"""
@@ -5826,7 +5719,7 @@ enum RunEventType {
 	"""
 	A run reached a terminal status.
 	"""
-	AGENT_COMPLETED
+	RUN_COMPLETED
 	"""
 	The serving daemon's identity or link state changed.
 	"""
@@ -5973,6 +5866,22 @@ type RunFlags {
 }
 
 """
+What a lifecycle mutation answers with.
+"""
+type RunPayload {
+	"""
+	The run, read back after the act, so its status is what the act made
+	it rather than what the caller hoped.
+	"""
+	run: Run!
+	"""
+	Retired checks the mutation noticed. Empty unless something was
+	superseded.
+	"""
+	warnings: [String!]!
+}
+
+"""
 A run got its title.
 """
 type RunRenamed {
@@ -6006,6 +5915,60 @@ enum RunSort {
 	Runs that moved most recently first.
 	"""
 	LAST_PROGRESS_AT
+}
+
+"""
+A run spawned.
+"""
+type RunSpawned {
+	"""
+	The run's durable id.
+	"""
+	runId: String!
+	"""
+	The agent's live id in the world, which a run outlives.
+	"""
+	agentId: String!
+	"""
+	The blueprint it was spawned from, by name.
+	"""
+	blueprint: String!
+	"""
+	The run that spawned it, for a sub-agent.
+	"""
+	parentId: String
+}
+
+"""
+Spend crossed a threshold.
+"""
+type RunSpend {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The figure that was crossed, in dollars.
+	"""
+	thresholdUsd: Decimal!
+	"""
+	What the run has spent so far, in dollars.
+	"""
+	totalUsd: Decimal!
+	"""
+	Whether every call behind that total could be priced. When false the
+	run has spent at least this and more by an unknown amount, so it must
+	not be shown as a final figure.
+	"""
+	complete: Boolean!
+	"""
+	The stage that was running when it crossed.
+	"""
+	stage: String!
 }
 
 """
@@ -6048,6 +6011,44 @@ enum RunStatus {
 	Stopped from outside. Nothing went wrong; somebody decided.
 	"""
 	CANCELLED
+}
+
+"""
+A run's status, stage or counters moved.
+"""
+type RunStatusChanged {
+	"""
+	The run.
+	"""
+	runId: String!
+	"""
+	The agent's live id.
+	"""
+	agentId: String!
+	"""
+	The status, in the daemon's own spelling.
+	"""
+	status: String!
+	"""
+	The stage it is in, by name.
+	"""
+	stage: String!
+	"""
+	Inference turns in that stage.
+	"""
+	iteration: Int!
+	"""
+	Tool calls across the whole run.
+	"""
+	toolCalls: Int!
+	"""
+	Whether a message reaches this run right now.
+	"""
+	acceptsMessages: Boolean!
+	"""
+	Its title, once it has one.
+	"""
+	title: String
 }
 
 """
@@ -6191,9 +6192,10 @@ type Script {
 	"""
 	foundAt: String!
 	"""
-	The agent whose directory it came from, for an agent-scoped script.
+	The blueprint whose directory it came from, for a blueprint-scoped
+	script.
 	"""
-	agent: String
+	blueprint: String
 }
 
 """
@@ -6222,9 +6224,10 @@ type ScriptTool implements Tool {
 	"""
 	path: String!
 	"""
-	The agent whose directory it came from, for an agent-scoped script.
+	The blueprint whose directory it came from, for a blueprint-scoped
+	script.
 	"""
-	agent: String
+	blueprint: String
 	"""
 	Platform capabilities it declares with `@requires`. A tool the platform
 	cannot satisfy is not offered at all, so an entry here is one this
@@ -6765,7 +6768,7 @@ type SpawnAgentCall implements ToolCall {
 """
 Everything about a new run.
 """
-input SpawnAgentInput {
+input SpawnRunInput {
 	"""
 	The blueprint to start, by name.
 	"""
