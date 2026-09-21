@@ -679,6 +679,11 @@ fetched. A part with no name exports as its short hash plus the extension its ty
 
 Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the open ones.
 
+`REQUEST_ID` can be the start of an id rather than the whole thing, so a prompt is answered
+without copying forty-odd characters. It has to leave exactly one open interaction: a start
+that fits two is refused with both of them listed, and nothing is answered. An id given in
+full always answers that interaction, even where longer ids begin with it.
+
 | Flag | Purpose |
 |---|---|
 | `--choice <INDEX>` | Answer a multiple-choice interaction by zero-based option index |

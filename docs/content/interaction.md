@@ -301,8 +301,29 @@ lev respond <request-id> "here" --attach sketch.png:sprites                # or 
 ```
 
 A request id is opaque, and it names the run that asked: two runs stopped on the same tool call are
-two questions with two ids, and answering one says nothing about the other. Copy it from the listing
-rather than typing it.
+two questions with two ids, and answering one says nothing about the other.
+
+The id can be cut short. `lev respond` takes the start of one, as long as that start fits exactly
+one open interaction:
+
+```bash
+lev respond probe-1789971553 --approve   # the whole id is probe-1789971553-793b8652da33-approve-call_1
+```
+
+Since the run comes first in an id, the run's own id is usually short enough on its own. A start
+that fits two open interactions answers neither. It is refused, both are listed, and you type a few
+more characters:
+
+```
+'probe-' is the start of 2 open interactions, so nothing was answered; give enough of an id to name just one:
+  probe-1789971553-793b8652da33-approve-call_1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
+  probe-1789971554-8a2b1c3d4e5f-approve-call_1  [tool-approval]  agent=probe-1789971554-8a2b1c3d4e5f  stage=work
+```
+
+Matching runs from the start of the id, so the tail of one (`approve-call_1`) names nothing. That
+tail is the part two runs are most likely to share. An id given in full answers that interaction
+whatever longer ids begin with it, and a start that fits nothing is `no such open interaction`, the
+same as an id that was never open.
 
 A text answer carries files the way a message does. Every `--attach` and every `@path` in the
 words become typed [parts](/docs/mime) stored by the run, and written beside the answer in the

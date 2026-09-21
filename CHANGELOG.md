@@ -114,6 +114,19 @@ same list.
   answered from the run's own record, so filtering ten thousand runs by model
   opens no more files than listing them does.
 
+- `lev respond` takes the start of a request id, not only the whole thing. An
+  id names the run that raised the question, so it runs to forty-odd characters
+  and a person answering a prompt was retyping all of them; the run's own id is
+  usually enough. The start has to fit exactly one open interaction. One that
+  fits two is refused with both listed and nothing answered, because an answer
+  sent to the wrong run approves work nobody looked at. An id given in full
+  always answers that interaction, even where longer ids begin with it, and one
+  that fits nothing reports `no such open interaction` as before. Matching is
+  from the start of the id only: the tail is the part two runs are most likely
+  to share. The CLI alone reads a short id - a program sends back the id it was
+  handed, so `POST /api/agents/{id}/interaction` and `answerInteraction` are
+  unchanged.
+
 - A run can be asked to journal the exact request it sent the model, once per
   provider attempt. **Off by default**, because a captured request is the whole
   prompt: it holds whatever the run's context held, including file contents a
