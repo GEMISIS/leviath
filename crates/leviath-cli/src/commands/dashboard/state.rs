@@ -3948,9 +3948,13 @@ mod tests {
             );
             assert!(dash.deleted_runs.contains_key("gone-run"));
 
-            while std::time::Instant::now() <= deleted_at {
-                std::thread::yield_now();
-            }
+            // Waited out rather than spun on: whether a spin's body runs at all
+            // depends on how long the lines above took, so on a slower machine
+            // the clock is already past the tombstone and the body is a region
+            // no run enters. Sleeping the remaining time plus a millisecond
+            // passes the same deadline with no branch to be uncovered.
+            let remaining = deleted_at.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining + std::time::Duration::from_millis(1));
             let after = loader.collect(None, true);
             dash.apply_run_snapshot(&after);
             assert!(dash.deleted_runs.is_empty());
