@@ -39,7 +39,7 @@ pub(crate) struct RegionSeedInput {
 
 /// Everything about a new run.
 #[derive(InputObject)]
-pub(crate) struct SpawnAgentInput {
+pub(crate) struct SpawnRunInput {
     /// The blueprint to start, by name.
     pub(crate) blueprint: String,
     /// The initial ask.
@@ -219,7 +219,7 @@ pub(crate) struct InteractionPayload {
 
 /// What a lifecycle mutation answers with.
 #[derive(SimpleObject)]
-pub(crate) struct AgentPayload {
+pub(crate) struct RunPayload {
     /// The run, read back after the act, so its status is what the act made
     /// it rather than what the caller hoped.
     pub(crate) run: Run,
@@ -229,7 +229,7 @@ pub(crate) struct AgentPayload {
 }
 
 /// The output shape a spawn request asks for, when it asks for one.
-fn output_spec(input: &SpawnAgentInput) -> Option<leviath_core::output::OutputSpec> {
+fn output_spec(input: &SpawnRunInput) -> Option<leviath_core::output::OutputSpec> {
     if input.output_format.is_none() && input.output_instructions.is_none() {
         return None;
     }
@@ -262,7 +262,7 @@ fn installed(
 }
 
 /// Read a run back after a mutation moved it.
-fn read_back(run_id: &str, warnings: Vec<String>) -> Result<AgentPayload, ServeError> {
+fn read_back(run_id: &str, warnings: Vec<String>) -> Result<RunPayload, ServeError> {
     let meta = runstate::read_meta(run_id).map_err(|e| {
         // The daemon accepted the act, so the run exists. A record that will
         // not read is this server's problem, and saying "not found" about a run
@@ -271,7 +271,7 @@ fn read_back(run_id: &str, warnings: Vec<String>) -> Result<AgentPayload, ServeE
             "Run '{run_id}' changed, but its record would not read: {e}"
         ))
     })?;
-    Ok(AgentPayload {
+    Ok(RunPayload {
         run: Run {
             meta: std::sync::Arc::new(meta),
             now: leviath_core::duration::now_secs(),
@@ -285,7 +285,7 @@ async fn act_and_read(
     ctx: &Context<'_>,
     run_id: &str,
     action: Action,
-) -> async_graphql::Result<AgentPayload> {
+) -> async_graphql::Result<RunPayload> {
     let state = ctx.data_unchecked::<AppState>();
     lifecycle::act(state, run_id, action).await.gql()?;
     let meta = runstate::read_meta(run_id)
@@ -299,7 +299,7 @@ async fn act_and_read(
             ))
         })
         .gql()?;
-    Ok(AgentPayload {
+    Ok(RunPayload {
         run: Run {
             meta: std::sync::Arc::new(meta),
             now: leviath_core::duration::now_secs(),
@@ -319,22 +319,22 @@ impl RunMutation {
     ///
     /// Read `run.status` on the way back: `PAUSED` means the pause landed.
     /// A finished run is a `CONFLICT`, never a silent no-op.
-    async fn pause_agent(
+    async fn pause_run(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The run to pause.")] run_id: String,
-    ) -> async_graphql::Result<AgentPayload> {
+    ) -> async_graphql::Result<RunPayload> {
         act_and_read(ctx, &run_id, Action::Pause).await
     }
 
     /// Resume a paused run.
     ///
     /// Read `run.status`: `RUNNING` means it is moving again.
-    async fn resume_agent(
+    async fn resume_run(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The run to resume.")] run_id: String,
-    ) -> async_graphql::Result<AgentPayload> {
+    ) -> async_graphql::Result<RunPayload> {
         act_and_read(ctx, &run_id, Action::Resume).await
     }
 
@@ -347,11 +347,11 @@ impl RunMutation {
     /// The refusals are the server's, not the daemon's: a workdir outside
     /// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, or a
     /// callback URL the outbound policy will not allow, each answer `FORBIDDEN`.
-    async fn spawn_agent(
+    async fn spawn_run(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Everything about the new run.")] input: SpawnAgentInput,
-    ) -> async_graphql::Result<AgentPayload> {
+        #[graphql(desc = "Everything about the new run.")] input: SpawnRunInput,
+    ) -> async_graphql::Result<RunPayload> {
         let state = ctx.data_unchecked::<AppState>();
         let max_depth = match input.max_depth {
             None => None,
@@ -409,7 +409,7 @@ impl RunMutation {
         #[graphql(desc = "What to say to it.")] message: String,
         #[graphql(desc = "Deliver into this context region instead of the default one.")]
         target_region: Option<String>,
-    ) -> async_graphql::Result<AgentPayload> {
+    ) -> async_graphql::Result<RunPayload> {
         let state = ctx.data_unchecked::<AppState>();
         spawn_core::send_message(state, &run_id, message, target_region, Vec::new())
             .await
@@ -420,8 +420,8 @@ impl RunMutation {
     /// Install a blueprint.
     ///
     /// A name that is already installed is a `CONFLICT`: replacing somebody's
-    /// agent is what `updateBlueprint` is for, and doing it silently here is
-    /// how an agent disappears without anybody asking for it.
+    /// blueprint is what `updateBlueprint` is for, and doing it silently here
+    /// is how a blueprint disappears without anybody asking for it.
     async fn create_blueprint(
         &self,
         ctx: &Context<'_>,
@@ -581,11 +581,11 @@ impl RunMutation {
     /// Read `run.status`: `CANCELLED` means the cancel landed. A run that had
     /// already finished is a `CONFLICT`, which tells a client the difference
     /// between "you stopped it" and "it was over before you asked".
-    async fn cancel_agent(
+    async fn cancel_run(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The run to cancel.")] run_id: String,
-    ) -> async_graphql::Result<AgentPayload> {
+    ) -> async_graphql::Result<RunPayload> {
         act_and_read(ctx, &run_id, Action::Cancel).await
     }
 }

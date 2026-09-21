@@ -86,7 +86,7 @@ same list.
   invalidates every link it handed out. GraphQL mints them: `blobs`, `artifacts`
   and `fileUrl` on a run.
 
-- The GraphQL write side: `spawnAgent`, `sendMessage` and `answerInteraction`,
+- The GraphQL write side: `spawnRun`, `sendMessage` and `answerInteraction`,
   each answering with the run as it is afterwards, plus `openInteractions`, the
   approval inbox. Answers take exactly one variant, decided by the request's own
   kind, so there is no combination to get wrong; `feedback` is refused beside an
@@ -219,10 +219,33 @@ same list.
 
 ### Changed
 
+- The GraphQL API names a run a run. `spawnAgent` is now `spawnRun`, and
+  `pauseAgent`, `resumeAgent` and `cancelAgent` are now `pauseRun`, `resumeRun`
+  and `cancelRun`. They answer with a `RunPayload`, which is what `AgentPayload`
+  is now called, and `spawnRun` takes a `SpawnRunInput`, which is what
+  `SpawnAgentInput` is now called. `Run.agentName` is now `Run.blueprintName`,
+  since it holds the installed blueprint's name.
+
+  The argument that scopes a read to one blueprint is now `blueprint:` rather
+  than `agent:`, on `scripts`, `tools`, `validateBlueprint`, `putScript` and
+  `deleteScript`. The field that names that blueprint is now `blueprint` on both
+  `Script` and `ScriptTool`.
+
+  In the live frames, `AgentSpawned`, `AgentStatusChanged`, `AgentSpend` and
+  `AgentCompleted` are now `RunSpawned`, `RunStatusChanged`, `RunSpend` and
+  `RunCompleted`. The `RunEventType` values that select them are now
+  `RUN_SPAWNED`, `RUN_STATUS_CHANGED`, `RUN_SPEND` and `RUN_COMPLETED`.
+
+  A blueprint is what an author writes, a run is one execution of it, and an
+  agent id is the live handle in the world that a run outlives. So `agentId` is
+  untouched, on every one of those frames included: it is that handle, and
+  nothing else names it. The REST routes, their JSON and the `/ws` frames are
+  unchanged, `agent_status` and its siblings included.
+
 - `Tool` is an interface over `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
   script always has a file and a built-in never does, so the file, the owning
-  agent and the declared capabilities are fields on the one that has them rather
-  than nulls on all three. Every entry now also carries the tool's description
+  blueprint and the declared capabilities are fields on the one that has them
+  rather than nulls on all three. Every entry now also carries the tool's description
   and the JSON Schema of its arguments, on both surfaces: the inventory had them
   and dropped them, so a picker showing what a tool takes had to compile the
   script itself.

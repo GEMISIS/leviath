@@ -764,12 +764,12 @@ fn a_fragment_on_an_unrelated_type_is_refused() {
 /// A field inside an argument's input object that the input type does not have.
 #[test]
 fn an_input_field_the_schema_does_not_have_is_refused() {
-    let example = "mutation { spawnAgent(input: { blueprnt: \"coder\" }) { run { id } } }";
+    let example = "mutation { spawnRun(input: { blueprnt: \"coder\" }) { run { id } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "1:30: `SpawnAgentInput` has no input field `blueprnt` \
-         (at Mutation.spawnAgent(input:))",
+        "1:28: `SpawnRunInput` has no input field `blueprnt` \
+         (at Mutation.spawnRun(input:))",
         "{message}"
     );
 }

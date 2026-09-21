@@ -9,7 +9,7 @@ use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 
 use super::{
     AnswerApprovalInput, AnswerChoiceInput, AnswerInteractionInput, AnswerTextInput, ApprovalScope,
-    MetadataEntryInput, Mutation, RegionSeedInput, SpawnAgentInput,
+    MetadataEntryInput, Mutation, RegionSeedInput, SpawnRunInput,
 };
 use crate::commands::serve::graphql::checks::YoloTestInput;
 use crate::commands::serve::graphql::query::Query;
@@ -51,7 +51,7 @@ async fn each_act_answers_with_the_run() {
     crate::runstate::with_isolated_runs_dir_async("graphql-mutation-acts", |_d| async move {
         create_run(&run_in("run-a", RunStatus::Running)).expect("run written");
 
-        for field in ["pauseAgent", "resumeAgent", "cancelAgent"] {
+        for field in ["pauseRun", "resumeRun", "cancelRun"] {
             let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
             let answer = mutate(
                 control,
@@ -83,7 +83,7 @@ async fn a_finished_run_is_refused_with_a_conflict() {
 
         let answer = mutate(
             no_daemon_client(),
-            "mutation { pauseAgent(runId: \"run-done\") { run { id } } }",
+            "mutation { pauseRun(runId: \"run-done\") { run { id } } }",
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -109,7 +109,7 @@ async fn a_run_the_daemon_refuses_is_not_found() {
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
         let answer = mutate(
             control,
-            "mutation { resumeAgent(runId: \"ghost\") { run { id } } }",
+            "mutation { resumeRun(runId: \"ghost\") { run { id } } }",
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -134,7 +134,7 @@ async fn an_unreachable_daemon_is_told_apart_from_a_missing_run() {
         create_run(&run_in("run-a", RunStatus::Running)).expect("run written");
         let answer = mutate(
             no_daemon_client(),
-            "mutation { cancelAgent(runId: \"run-a\") { run { id } } }",
+            "mutation { cancelRun(runId: \"run-a\") { run { id } } }",
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -161,7 +161,7 @@ async fn a_record_that_will_not_read_after_the_act_is_internal() {
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
         let answer = mutate(
             control,
-            "mutation { pauseAgent(runId: \"run-gone\") { run { id } } }",
+            "mutation { pauseRun(runId: \"run-gone\") { run { id } } }",
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -222,7 +222,7 @@ async fn a_spawn_answers_with_the_run_it_started() {
 
         let answer = schema
             .execute(Request::new(
-                r#"mutation { spawnAgent(input: {
+                r#"mutation { spawnRun(input: {
                      blueprint: "coder", task: "write the thing", workdir: "/tmp",
                      metadata: [{ key: "ticket", value: "42" }]
                    }) { run { id task status metadata { key value } } warnings } }"#,
@@ -230,7 +230,7 @@ async fn a_spawn_answers_with_the_run_it_started() {
             .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
-        let run = &json["spawnAgent"]["run"];
+        let run = &json["spawnRun"]["run"];
         assert!(
             run["id"].as_str().unwrap_or_default().starts_with("coder-"),
             "{run}"
@@ -265,7 +265,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
 
         let answer = schema
             .execute(Request::new(
-                r#"mutation { spawnAgent(input: {
+                r#"mutation { spawnRun(input: {
                      blueprint: "coder", task: "t", workdir: "/tmp", yolo: true
                    }) { run { id } } }"#,
             ))
@@ -282,7 +282,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
 
         let negative = schema
             .execute(Request::new(
-                r#"mutation { spawnAgent(input: {
+                r#"mutation { spawnRun(input: {
                      blueprint: "coder", task: "t", maxDepth: -1
                    }) { run { id } } }"#,
             ))
@@ -1058,7 +1058,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
         let answer = mutate_with_agents(
             control,
             agents.path(),
-            r#"mutation { spawnAgent(input: {
+            r#"mutation { spawnRun(input: {
                  blueprint: "coder", task: "fix the parser", model: "gpt-5.6",
                  workdir: "/work", maxDepth: 3, yolo: true, yoloProfile: "cautious",
                  outputFormat: "json", outputInstructions: "one object",
@@ -1069,7 +1069,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
-        assert_eq!(json["spawnAgent"]["run"]["id"], "coder-1");
+        assert_eq!(json["spawnRun"]["run"]["id"], "coder-1");
     })
     .await;
 }
@@ -1086,7 +1086,7 @@ async fn a_record_that_will_not_read_after_a_spawn_is_internal() {
         let answer = mutate_with_agents(
             control,
             agents.path(),
-            r#"mutation { spawnAgent(input: { blueprint: "coder", task: "t" }) { run { id } } }"#,
+            r#"mutation { spawnRun(input: { blueprint: "coder", task: "t" }) { run { id } } }"#,
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -1157,12 +1157,12 @@ async fn a_cancel_reaches_the_daemon_as_a_cancel() {
         });
         let answer = mutate(
             control,
-            r#"mutation { cancelAgent(runId: "run-a") { run { id status } } }"#,
+            r#"mutation { cancelRun(runId: "run-a") { run { id status } } }"#,
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
-        assert_eq!(json["cancelAgent"]["run"]["id"], "run-a");
+        assert_eq!(json["cancelRun"]["run"]["id"], "run-a");
     })
     .await;
 }
@@ -1308,7 +1308,7 @@ async fn an_export_and_a_delete_refuse_what_the_listing_refuses() {
 fn every_input_object_round_trips() {
     use async_graphql::InputType;
 
-    let spawn = SpawnAgentInput {
+    let spawn = SpawnRunInput {
         blueprint: "coder".to_string(),
         task: "fix the parser".to_string(),
         model: Some("gpt-5.6".to_string()),
@@ -1331,7 +1331,7 @@ fn every_input_object_round_trips() {
         callback_url: Some("https://example.test/hook".to_string()),
         callback_secret: Some("shh".to_string()),
     };
-    let Ok(read_back) = SpawnAgentInput::parse(Some(spawn.to_value())) else {
+    let Ok(read_back) = SpawnRunInput::parse(Some(spawn.to_value())) else {
         panic!("a spawn input reads back from its own value");
     };
     assert_eq!(read_back.blueprint, "coder");
@@ -1426,9 +1426,9 @@ fn every_input_object_refuses_what_it_cannot_read() {
     assert!(RegionSeedInput::parse(scalar()).is_err());
     assert!(RegionSeedInput::parse(None).is_err());
     assert!(RegionSeedInput::parse(one("region", number())).is_err());
-    assert!(SpawnAgentInput::parse(scalar()).is_err());
-    assert!(SpawnAgentInput::parse(None).is_err());
-    assert!(SpawnAgentInput::parse(one("blueprint", number())).is_err());
+    assert!(SpawnRunInput::parse(scalar()).is_err());
+    assert!(SpawnRunInput::parse(None).is_err());
+    assert!(SpawnRunInput::parse(one("blueprint", number())).is_err());
     assert!(AnswerChoiceInput::parse(scalar()).is_err());
     assert!(AnswerChoiceInput::parse(None).is_err());
     assert!(AnswerChoiceInput::parse(one("requestId", number())).is_err());
@@ -1461,7 +1461,7 @@ fn every_input_object_refuses_what_it_cannot_read() {
         "no text"
     );
     assert!(
-        SpawnAgentInput::parse(one("blueprint", text("coder"))).is_err(),
+        SpawnRunInput::parse(one("blueprint", text("coder"))).is_err(),
         "no task"
     );
     assert!(
@@ -1500,7 +1500,7 @@ fn every_input_object_refuses_what_it_cannot_read() {
     spawn.insert(Name::new("blueprint"), text("coder"));
     spawn.insert(Name::new("task"), text("fix it"));
     spawn.insert(Name::new("callbackSecret"), number());
-    assert!(SpawnAgentInput::parse(Some(Value::Object(spawn))).is_err());
+    assert!(SpawnRunInput::parse(Some(Value::Object(spawn))).is_err());
 
     let mut approval = IndexMap::new();
     approval.insert(Name::new("requestId"), text("a"));

@@ -231,8 +231,9 @@ pub(crate) struct ScriptTool {
     pub(crate) origin: ToolOrigin,
     /// The file behind it.
     pub(crate) path: String,
-    /// The agent whose directory it came from, for an agent-scoped script.
-    pub(crate) agent: Option<String>,
+    /// The blueprint whose directory it came from, for a blueprint-scoped
+    /// script.
+    pub(crate) blueprint: Option<String>,
     /// Platform capabilities it declares with `@requires`. A tool the platform
     /// cannot satisfy is not offered at all, so an entry here is one this
     /// machine meets.
@@ -257,7 +258,7 @@ impl Tool {
                 arguments,
                 origin,
                 path: path.display().to_string(),
-                agent: entry.agent,
+                blueprint: entry.agent,
                 requires: entry.requires,
             }),
             (ToolSource::Subagent, _) => Self::Subagent(SubagentTool {

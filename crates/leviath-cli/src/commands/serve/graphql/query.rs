@@ -445,21 +445,22 @@ impl Query {
     async fn scripts(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Only this blueprint's own scripts, plus the global ones.")] agent: Option<
-            String,
-        >,
+        #[graphql(desc = "Only this blueprint's own scripts, plus the global ones.")]
+        blueprint: Option<String>,
     ) -> async_graphql::Result<Vec<Script>> {
         let state = ctx.data_unchecked::<AppState>();
-        Ok(super::super::scripts::registered(state, agent.as_deref())
-            .gql()?
-            .into_iter()
-            .map(|script| Script {
-                kind: script.kind,
-                name: script.name,
-                found_at: script.source,
-                agent: script.agent,
-            })
-            .collect())
+        Ok(
+            super::super::scripts::registered(state, blueprint.as_deref())
+                .gql()?
+                .into_iter()
+                .map(|script| Script {
+                    kind: script.kind,
+                    name: script.name,
+                    found_at: script.source,
+                    blueprint: script.agent,
+                })
+                .collect(),
+        )
     }
 
     /// The directories under a path, for a file picker.
@@ -524,22 +525,25 @@ impl Query {
 
     /// The tools an agent on this machine can call.
     ///
-    /// Scoped to one blueprint's own directory when `agent` names one, which
-    /// is what an editor offering an `available_tools` list wants.
+    /// Scoped to one blueprint's own directory when `blueprint` names one,
+    /// which is what an editor offering an `available_tools` list wants.
     async fn tools(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Scope to this blueprint's own tools directory.")] agent: Option<String>,
+        #[graphql(desc = "Scope to this blueprint's own tools directory.")] blueprint: Option<
+            String,
+        >,
     ) -> async_graphql::Result<ToolInventory> {
         let state = ctx.data_unchecked::<AppState>();
         let config = state.current_config();
-        let dir = match agent.as_deref() {
+        let dir = match blueprint.as_deref() {
             Some(name) => Some(super::super::tools::agent_dir(&config, name).gql()?),
             None => None,
         };
-        // The walk over an agent directory belongs on the blocking pool.
+        // The walk over a blueprint's own directory belongs on the blocking
+        // pool.
         let inventory = blocking(move || {
-            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), agent.as_deref())
+            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), blueprint.as_deref())
         })
         .await;
         Ok(ToolInventory {
@@ -725,8 +729,8 @@ impl Query {
     // ─── The pure checks ──────────────────────────────────────────────────
     //
     // Text in, verdict out: nothing is written, nothing is dialled, nothing is
-    // run. They were mutations because each one usually precedes a write, which
-    // is where it sits in a form, not what it does.
+    // run. Each one usually precedes a write, which is where it sits in a form,
+    // not what it does, so each is a field rather than a mutation.
 
     /// Check a manifest without installing it.
     ///
@@ -735,10 +739,10 @@ impl Query {
     async fn validate_blueprint(
         &self,
         #[graphql(desc = "The manifest text to check.")] manifest: String,
-        #[graphql(desc = "Check it as this installed agent, so its own scripts resolve.")]
-        agent: Option<String>,
+        #[graphql(desc = "Check it as this installed blueprint, so its own scripts resolve.")]
+        blueprint: Option<String>,
     ) -> async_graphql::Result<ValidationReport> {
-        let dir = match agent.as_deref() {
+        let dir = match blueprint.as_deref() {
             Some(name) => blueprints::blueprint_dir(name).gql()?,
             None => std::path::PathBuf::new(),
         };

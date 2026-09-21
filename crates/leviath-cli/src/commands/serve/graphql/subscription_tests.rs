@@ -93,13 +93,13 @@ async fn frames(query: &str, events: Vec<ServerEvent>, want: usize) -> Vec<serde
 async fn an_unscoped_subscription_sees_every_frame() {
     let out = frames(
         "subscription { events { __typename
-            ... on AgentStatusChanged { runId status iteration toolCalls acceptsMessages }
+            ... on RunStatusChanged { runId status iteration toolCalls acceptsMessages }
             ... on LogLine { runId line } } }",
         vec![status("run-a"), log("run-b", "hello")],
         2,
     )
     .await;
-    assert_eq!(out[0]["events"]["__typename"], "AgentStatusChanged");
+    assert_eq!(out[0]["events"]["__typename"], "RunStatusChanged");
     assert_eq!(out[0]["events"]["runId"], "run-a");
     assert_eq!(out[0]["events"]["status"], "running");
     assert_eq!(out[0]["events"]["toolCalls"], 2);
@@ -163,7 +163,7 @@ async fn descendants_spawned_later_are_included() {
     let out = frames(
         r#"subscription { events(runId: "root", includeDescendants: true) {
              __typename
-             ... on AgentSpawned { runId parentId }
+             ... on RunSpawned { runId parentId }
              ... on LogLine { runId line } } }"#,
         vec![
             spawned("worker-1", Some("root")),
@@ -173,7 +173,7 @@ async fn descendants_spawned_later_are_included() {
         2,
     )
     .await;
-    assert_eq!(out[0]["events"]["__typename"], "AgentSpawned");
+    assert_eq!(out[0]["events"]["__typename"], "RunSpawned");
     assert_eq!(out[0]["events"]["runId"], "worker-1");
     assert_eq!(out[0]["events"]["parentId"], "root");
     // The worker's own frames now arrive, and an unrelated run's still do not.
@@ -223,7 +223,7 @@ async fn a_spawn_from_another_tree_does_not_widen_the_scope() {
 async fn a_top_level_spawn_is_scoped_by_its_own_id() {
     let out = frames(
         r#"subscription { events(runId: "root", includeDescendants: true) {
-             ... on AgentSpawned { runId parentId } } }"#,
+             ... on RunSpawned { runId parentId } } }"#,
         vec![spawned("stranger", None), spawned("root", None)],
         1,
     )

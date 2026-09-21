@@ -714,7 +714,7 @@ async fn the_parent_comes_from_the_index() {
         child.parent_run_id = Some("root".to_string());
         crate::runstate::create_run(&child).expect("run written");
 
-        let json = data(child, "{ run { parent { id agentName } } }").await;
+        let json = data(child, "{ run { parent { id blueprintName } } }").await;
         assert_eq!(json["run"]["parent"]["id"], "root");
 
         // A run nobody started has no parent, and a parent that is not in the

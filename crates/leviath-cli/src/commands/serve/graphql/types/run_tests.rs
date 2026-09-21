@@ -103,7 +103,7 @@ fn a_counter_that_cannot_fit_saturates() {
 async fn a_run_carries_its_identity_counters_and_spend() {
     let json = ask(
         meta(),
-        r#"{ run { id agentName task status startedAt updatedAt ageSecs workingSecs
+        r#"{ run { id blueprintName task status startedAt updatedAt ageSecs workingSecs
                    usage { promptTokens completionTokens cachedTokens cacheWriteTokens }
                    cost { costUsd costPricedUsd costIsExact unpricedCalls }
                    workdir } }"#,
@@ -111,7 +111,7 @@ async fn a_run_carries_its_identity_counters_and_spend() {
     .await;
     let run = &json["run"];
     assert_eq!(run["id"], "coder-1788924523-abc123");
-    assert_eq!(run["agentName"], "coder");
+    assert_eq!(run["blueprintName"], "coder");
     assert_eq!(run["task"], "fix the parser");
     assert_eq!(run["status"], "STARTING");
     assert_eq!(run["startedAt"], 1_788_924_523i64);

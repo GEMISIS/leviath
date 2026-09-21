@@ -1644,7 +1644,7 @@ mod tests {
                 .map(|field| field["name"].as_str().unwrap_or_default().to_string())
                 .collect();
             assert!(
-                names.iter().any(|name| name == "spawnAgent"),
+                names.iter().any(|name| name == "spawnRun"),
                 "the ordinary mutations are always there: {names:?}"
             );
             assert_eq!(

@@ -48,7 +48,7 @@ async fn the_admin_fields_are_hidden_without_the_flag() {
         .map(|field| field["name"].as_str().unwrap_or_default().to_string())
         .collect();
     assert!(
-        names.iter().any(|name| name == "spawnAgent"),
+        names.iter().any(|name| name == "spawnRun"),
         "the ordinary mutations are there: {names:?}"
     );
     assert!(

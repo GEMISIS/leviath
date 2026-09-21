@@ -163,7 +163,7 @@ fn an_inventory_entry_reads_back_as_its_own_kind() {
         panic!("an agent script is a script tool");
     };
     assert_eq!(script.path, "/a/tools/t.rhai");
-    assert_eq!(script.agent.as_deref(), Some("coder"));
+    assert_eq!(script.blueprint.as_deref(), Some("coder"));
     assert_eq!(script.requires, vec!["network".to_string()]);
     assert_eq!(script.description, "does a thing");
     assert!(matches!(

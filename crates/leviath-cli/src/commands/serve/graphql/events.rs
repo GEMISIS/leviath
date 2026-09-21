@@ -7,9 +7,9 @@
 //! frames.
 //!
 //! The union below is one type per frame the daemon can send, plus one the
-//! daemon cannot: [`EventsDropped`]. A subscriber that falls behind used to be
-//! silently skipped past, so it could not tell "nothing happened" from "you
-//! missed some of it". Now it is told, with a count.
+//! daemon cannot: [`EventsDropped`]. A subscriber that falls behind is skipped
+//! past rather than allowed to hold the fan-out, and it is told so with a
+//! count, which is what tells "nothing happened" from "you missed some of it".
 
 use async_graphql::{Enum, SimpleObject, Union};
 
@@ -18,14 +18,15 @@ use super::scalars::{BigInt, Decimal, Timestamp};
 
 /// One frame type off the daemon broadcast.
 ///
-/// Subscribe with the types you render. The names match the frame names `/ws`
-/// uses, so a client moving over reads the same vocabulary.
+/// Subscribe with the types you render. Each value names the union member it
+/// selects for, so a client reads one vocabulary for the filter and for the
+/// frames it gets back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Enum)]
 pub(crate) enum RunEventType {
     /// A run spawned.
-    AgentSpawned,
+    RunSpawned,
     /// A run's status, stage or counters moved.
-    AgentStatus,
+    RunStatusChanged,
     /// A run got its title.
     RunRenamed,
     /// Token usage ticked up.
@@ -41,11 +42,11 @@ pub(crate) enum RunEventType {
     /// One log line.
     Log,
     /// Spend crossed a threshold.
-    AgentSpend,
+    RunSpend,
     /// A run parked on a prompt somebody has to answer.
     InteractionNeeded,
     /// A run reached a terminal status.
-    AgentCompleted,
+    RunCompleted,
     /// The serving daemon's identity or link state changed.
     DaemonLink,
     /// The config file's health changed.
@@ -62,8 +63,8 @@ impl RunEventType {
     /// The type of one frame.
     pub(crate) fn of(event: &ServerEvent) -> Self {
         match event {
-            ServerEvent::AgentSpawned { .. } => Self::AgentSpawned,
-            ServerEvent::AgentStatus { .. } => Self::AgentStatus,
+            ServerEvent::AgentSpawned { .. } => Self::RunSpawned,
+            ServerEvent::AgentStatus { .. } => Self::RunStatusChanged,
             ServerEvent::RunRenamed { .. } => Self::RunRenamed,
             ServerEvent::Tokens { .. } => Self::Tokens,
             ServerEvent::ContextUpdate { .. } => Self::ContextUpdate,
@@ -71,9 +72,9 @@ impl RunEventType {
             ServerEvent::ToolCallStarted { .. } => Self::ToolCallStarted,
             ServerEvent::ToolCallFinished { .. } => Self::ToolCallFinished,
             ServerEvent::Log { .. } => Self::Log,
-            ServerEvent::AgentSpend { .. } => Self::AgentSpend,
+            ServerEvent::AgentSpend { .. } => Self::RunSpend,
             ServerEvent::InteractionNeeded { .. } => Self::InteractionNeeded,
-            ServerEvent::AgentCompleted { .. } => Self::AgentCompleted,
+            ServerEvent::AgentCompleted { .. } => Self::RunCompleted,
             ServerEvent::DaemonLink { .. } => Self::DaemonLink,
             ServerEvent::ConfigHealth { .. } => Self::ConfigHealth,
             ServerEvent::UpdateProgress { .. } => Self::UpdateProgress,
@@ -84,7 +85,7 @@ impl RunEventType {
 
 /// A run spawned.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct AgentSpawned {
+pub(crate) struct RunSpawned {
     /// The run's durable id.
     pub(crate) run_id: String,
     /// The agent's live id in the world, which a run outlives.
@@ -97,7 +98,7 @@ pub(crate) struct AgentSpawned {
 
 /// A run's status, stage or counters moved.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct AgentStatusChanged {
+pub(crate) struct RunStatusChanged {
     /// The run.
     pub(crate) run_id: String,
     /// The agent's live id.
@@ -230,7 +231,7 @@ pub(crate) struct LogLine {
 
 /// Spend crossed a threshold.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct AgentSpend {
+pub(crate) struct RunSpend {
     /// The run.
     pub(crate) run_id: String,
     /// The agent's live id.
@@ -344,7 +345,7 @@ pub(crate) struct InteractionNeeded {
 
 /// A run reached a terminal status.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct AgentCompleted {
+pub(crate) struct RunCompleted {
     /// The run.
     pub(crate) run_id: String,
     /// The agent's live id.
@@ -450,9 +451,9 @@ pub(crate) struct UpdateFinished {
 /// This subscription fell behind, and frames were dropped.
 ///
 /// The daemon's broadcast is bounded, and a subscriber that cannot keep up is
-/// skipped past rather than allowed to hold the fan-out. Silently, before
-/// this: a client could not tell a quiet run from a missed one. Re-query the
-/// state you render when you see this.
+/// skipped past rather than allowed to hold the fan-out. This frame is what
+/// tells a quiet run from a missed one. Re-query the state you render when you
+/// see it.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct EventsDropped {
     /// How many frames this subscription missed.
@@ -463,9 +464,9 @@ pub(crate) struct EventsDropped {
 #[derive(Union)]
 pub(crate) enum RunEvent {
     /// A run spawned.
-    AgentSpawned(AgentSpawned),
+    RunSpawned(RunSpawned),
     /// A run's status, stage or counters moved.
-    AgentStatusChanged(AgentStatusChanged),
+    RunStatusChanged(RunStatusChanged),
     /// A run got its title.
     RunRenamed(RunRenamed),
     /// Token usage ticked up.
@@ -481,11 +482,11 @@ pub(crate) enum RunEvent {
     /// One log line.
     LogLine(LogLine),
     /// Spend crossed a threshold.
-    AgentSpend(AgentSpend),
+    RunSpend(RunSpend),
     /// A run parked on a prompt somebody has to answer.
     InteractionNeeded(InteractionNeeded),
     /// A run reached a terminal status.
-    AgentCompleted(AgentCompleted),
+    RunCompleted(RunCompleted),
     /// The link to the daemon changed.
     DaemonLinkChanged(DaemonLinkChanged),
     /// The config file's health changed.
@@ -506,7 +507,7 @@ impl From<ServerEvent> for RunEvent {
                 run_id,
                 parent_id,
                 blueprint,
-            } => Self::AgentSpawned(AgentSpawned {
+            } => Self::RunSpawned(RunSpawned {
                 run_id,
                 agent_id,
                 blueprint,
@@ -522,7 +523,7 @@ impl From<ServerEvent> for RunEvent {
                 accepts_messages,
                 title,
                 ..
-            } => Self::AgentStatusChanged(AgentStatusChanged {
+            } => Self::RunStatusChanged(RunStatusChanged {
                 run_id,
                 agent_id,
                 status,
@@ -626,7 +627,7 @@ impl From<ServerEvent> for RunEvent {
                 total_usd,
                 complete,
                 stage,
-            } => Self::AgentSpend(AgentSpend {
+            } => Self::RunSpend(RunSpend {
                 run_id,
                 agent_id,
                 threshold_usd: Decimal(threshold_usd),
@@ -656,7 +657,7 @@ impl From<ServerEvent> for RunEvent {
                 status,
                 result,
                 final_output,
-            } => Self::AgentCompleted(AgentCompleted {
+            } => Self::RunCompleted(RunCompleted {
                 run_id,
                 agent_id,
                 status,

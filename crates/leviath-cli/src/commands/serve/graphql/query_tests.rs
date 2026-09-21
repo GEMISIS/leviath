@@ -265,7 +265,7 @@ async fn a_query_reads_runs_newest_first_and_pages() {
 
         let answer = run_query(
             r#"{ runs(first: 2) {
-                    edges { cursor node { id agentName status task } }
+                    edges { cursor node { id blueprintName status task } }
                     pageInfo { hasNextPage endCursor }
                     total
                     scanTruncated
@@ -283,7 +283,10 @@ async fn a_query_reads_runs_newest_first_and_pages() {
         assert_eq!(json["runs"]["pageInfo"]["hasNextPage"], true);
         assert!(json["runs"]["serverTime"].as_i64().unwrap_or_default() > 0);
         assert_eq!(json["runs"]["edges"][0]["node"]["status"], "STARTING");
-        assert_eq!(json["runs"]["edges"][0]["node"]["agentName"], "test-agent");
+        assert_eq!(
+            json["runs"]["edges"][0]["node"]["blueprintName"],
+            "test-agent"
+        );
     })
     .await;
 }
@@ -699,7 +702,8 @@ async fn a_script_that_cannot_be_offered_is_reported() {
         )
         .expect("script written");
 
-        let answer = run_query(r#"{ tools(agent: "coder") { skipped { path reason } } }"#).await;
+        let answer =
+            run_query(r#"{ tools(blueprint: "coder") { skipped { path reason } } }"#).await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let skipped = json["tools"]["skipped"].as_array().expect("skipped");
@@ -726,7 +730,7 @@ async fn a_script_that_cannot_be_offered_is_reported() {
 #[tokio::test]
 async fn a_tool_scope_refuses_an_unsafe_agent_name() {
     crate::commands::serve::testutil::with_home(|_home| async move {
-        let answer = run_query(r#"{ tools(agent: "../etc") { tools { name } } }"#).await;
+        let answer = run_query(r#"{ tools(blueprint: "../etc") { tools { name } } }"#).await;
         let error = answer.errors.first().expect("a refusal");
         assert!(
             error.message.contains("Invalid agent name"),
@@ -1266,7 +1270,7 @@ async fn the_machine_listings_answer_for_a_bare_install() {
             "{ mcpServers { name transport endpoint auth }
                yoloProfiles { path exists error profiles { name default } }
                mime { mimeType source family text extensions }
-               scripts { kind name foundAt agent } }",
+               scripts { kind name foundAt blueprint } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1531,7 +1535,7 @@ mod machine_listings {
             )
             .expect("a tool");
 
-            let answer = run_query("{ scripts { kind name foundAt agent } }").await;
+            let answer = run_query("{ scripts { kind name foundAt blueprint } }").await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
             let scripts = json["scripts"].as_array().expect("the scripts");
@@ -1541,11 +1545,14 @@ mod machine_listings {
                 .expect("the tool that was just written");
             assert_eq!(tool["kind"], "tool");
             assert_eq!(tool["foundAt"], "global");
-            assert!(tool["agent"].is_null(), "a global tool belongs to nobody");
+            assert!(
+                tool["blueprint"].is_null(),
+                "a global tool belongs to nobody"
+            );
 
             // An agent nothing knows about is not a refusal: the global scripts
             // are still the answer, and that agent simply has none.
-            let scoped = run_query(r#"{ scripts(agent: "coder") { name } }"#).await;
+            let scoped = run_query(r#"{ scripts(blueprint: "coder") { name } }"#).await;
             assert!(scoped.errors.is_empty(), "{:?}", scoped.errors);
         })
         .await;
@@ -1558,7 +1565,7 @@ mod machine_listings {
         crate::commands::serve::testutil::with_home(|_home| async move {
             let answer = run_query(
                 "{ tools { tools { name origin description
-                       ... on ScriptTool { path agent requires } }
+                       ... on ScriptTool { path blueprint requires } }
                      groups { name description } skipped { path reason } } }",
             )
             .await;
@@ -1840,8 +1847,8 @@ mod the_awkward_shapes {
             .expect("a tool");
 
             let answer = run_query(
-                r#"{ tools(agent: "coder") { tools { name origin
-                     ... on ScriptTool { path agent requires } } } }"#,
+                r#"{ tools(blueprint: "coder") { tools { name origin
+                     ... on ScriptTool { path blueprint requires } } } }"#,
             )
             .await;
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1851,7 +1858,7 @@ mod the_awkward_shapes {
                 .iter()
                 .find(|tool| tool["name"] == "summarize")
                 .expect("the agent's own tool");
-            assert_eq!(own["agent"], "coder", "whose tool it is");
+            assert_eq!(own["blueprint"], "coder", "whose tool it is");
             assert!(
                 own["path"]
                     .as_str()
@@ -1957,7 +1964,7 @@ async fn an_unparseable_config_is_reported_rather_than_read_as_empty() {
 /// way out of the agents directory. An empty list would look like an answer.
 #[tokio::test]
 async fn scripts_of_an_unsafe_blueprint_name_are_refused() {
-    let answer = run_query(r#"{ scripts(agent: "../../etc") { name } }"#).await;
+    let answer = run_query(r#"{ scripts(blueprint: "../../etc") { name } }"#).await;
     let message = &answer.errors.first().expect("a refusal").message;
     assert!(message.contains("Invalid agent name"), "{message}");
 }
@@ -2290,7 +2297,7 @@ async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
             r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
-                 agent: "../elsewhere") { valid } }"#,
+                 blueprint: "../elsewhere") { valid } }"#,
         )
         .await;
         let error = answer.errors.first().expect("a refusal");

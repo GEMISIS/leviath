@@ -556,7 +556,7 @@ up, so they are plain lists with no paging.
   tools {
     tools {
       name origin description arguments
-      ... on ScriptTool { path agent requires }
+      ... on ScriptTool { path blueprint requires }
     }
     groups { name description }
     skipped { path reason }
@@ -588,7 +588,7 @@ up, so they are plain lists with no paging.
 * `directories(path:)` is the file picker. It is confined to `--workdir-root`
   when the operator set one, which is why `parent` is null at that fence rather
   than leading above it.
-* `tools(agent: "coder")` scopes the inventory to one blueprint's own tools
+* `tools(blueprint: "coder")` scopes the inventory to one blueprint's own tools
   directory, which is what an editor offering an `available_tools` list wants.
   `skipped` names scripts that were found and could not be offered, with the
   reason, because a tool an author believes exists and silently is not there is
@@ -601,7 +601,7 @@ guess whether the act landed, and you do not need a second request to find out.
 
 ```graphql
 mutation {
-  spawnAgent(input: { blueprint: "coder", task: "fix the parser", workdir: "/work" }) {
+  spawnRun(input: { blueprint: "coder", task: "fix the parser", workdir: "/work" }) {
     run { id status task }
     warnings
   }
@@ -620,10 +620,10 @@ mutation { sendMessage(runId: "coder-1788924523-abc123", message: "keep going") 
 ```
 
 ```graphql
-mutation { pauseAgent(runId: "coder-1788924523-abc123") { run { id status } } }
+mutation { pauseRun(runId: "coder-1788924523-abc123") { run { id status } } }
 ```
 
-* `pauseAgent`, `resumeAgent` and `cancelAgent` each answer with the run.
+* `pauseRun`, `resumeRun` and `cancelRun` each answer with the run.
 * A run that has already finished answers `CONFLICT`. That is the difference
   between "you stopped it" and "it was over before you asked".
 * A run that does not take messages says that, rather than reading as missing:
@@ -720,7 +720,7 @@ rather than as an error, because two people clicking one prompt is ordinary.
 
 `createBlueprint`, `updateBlueprint` and `deleteBlueprint` are ordinary
 mutations. A name that is already installed is a `CONFLICT` on create:
-replacing somebody's agent is what an edit is for. Uninstalling one leaves
+replacing somebody's blueprint is what an edit is for. Uninstalling one leaves
 every run that used it intact, because each run holds its own snapshot.
 
 The four checks are queries, not mutations: `validateBlueprint`,
@@ -769,7 +769,7 @@ Behind `--allow-admin`, the mutations that change the machine rather than a run:
 | Mutation | What it changes |
 |---|---|
 | `updateConfig` | The config file, a field at a time |
-| `putScript`, `deleteScript` | A Rhai script every agent then runs |
+| `putScript`, `deleteScript` | A Rhai script every run then executes |
 | `putMimeRow`, `deleteMimeRow` | One row of the mime registry |
 | `addMcpServer`, `removeMcpServer` | A server the daemon spawns |
 | `runDoctorLive` | Nothing. It asks a provider and the daemon, which costs seconds |
@@ -827,9 +827,9 @@ put a header on a WebSocket handshake.
 
 ```graphql
 subscription Watch($run: ID!) {
-  events(runId: $run, includeDescendants: true, types: [AGENT_STATUS, LOG, INTERACTION_NEEDED]) {
+  events(runId: $run, includeDescendants: true, types: [RUN_STATUS_CHANGED, LOG, INTERACTION_NEEDED]) {
     __typename
-    ... on AgentStatusChanged { runId status stage }
+    ... on RunStatusChanged { runId status stage }
     ... on LogLine { runId line }
     ... on InteractionNeeded { runId request { id kind prompt options } }
     ... on EventsDropped { count }

@@ -149,8 +149,8 @@ impl Run {
         &self.meta.run_id
     }
 
-    /// The agent name from the blueprint this run was spawned from.
-    async fn agent_name(&self) -> &str {
+    /// The name of the blueprint this run was spawned from.
+    async fn blueprint_name(&self) -> &str {
         &self.meta.agent_name
     }
 

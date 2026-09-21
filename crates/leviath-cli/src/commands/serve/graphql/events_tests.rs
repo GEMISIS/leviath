@@ -159,12 +159,12 @@ fn every_frame_converts_with_its_fields() {
         let kind = RunEventType::of(&frame);
         let event = RunEvent::from(frame);
         match (kind, event) {
-            (RunEventType::AgentSpawned, RunEvent::AgentSpawned(spawned)) => {
+            (RunEventType::RunSpawned, RunEvent::RunSpawned(spawned)) => {
                 assert_eq!(spawned.run_id, "run-a");
                 assert_eq!(spawned.parent_id.as_deref(), Some("root"));
                 assert_eq!(spawned.blueprint, "coder");
             }
-            (RunEventType::AgentStatus, RunEvent::AgentStatusChanged(status)) => {
+            (RunEventType::RunStatusChanged, RunEvent::RunStatusChanged(status)) => {
                 assert_eq!(status.status, "running");
                 assert_eq!(status.iteration, 3);
                 assert_eq!(status.tool_calls, 4);
@@ -200,7 +200,7 @@ fn every_frame_converts_with_its_fields() {
             (RunEventType::Log, RunEvent::LogLine(line)) => {
                 assert_eq!(line.line, "a line");
             }
-            (RunEventType::AgentSpend, RunEvent::AgentSpend(spend)) => {
+            (RunEventType::RunSpend, RunEvent::RunSpend(spend)) => {
                 assert_eq!(spend.threshold_usd.0, 1.0);
                 assert_eq!(spend.total_usd.0, 1.25);
                 // Incomplete, so a client must not show it as a final figure.
@@ -216,7 +216,7 @@ fn every_frame_converts_with_its_fields() {
                 assert_eq!(request.stage_name, "plan");
                 assert!(request.required);
             }
-            (RunEventType::AgentCompleted, RunEvent::AgentCompleted(completed)) => {
+            (RunEventType::RunCompleted, RunEvent::RunCompleted(completed)) => {
                 assert_eq!(completed.status, "complete");
                 assert!(completed.error.is_none());
                 let output = completed.final_output.expect("an answer");

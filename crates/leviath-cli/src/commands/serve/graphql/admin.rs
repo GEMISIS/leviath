@@ -189,7 +189,7 @@ impl AdminMutation {
     /// Write a Rhai script.
     ///
     /// Remote code execution by construction, like adding an MCP server: what is
-    /// written here is what an agent then runs. The answer says whether it
+    /// written here is what a run then executes. The answer says whether it
     /// compiles, so an editor does not have to save and wait for a run to fail.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
     async fn put_script(
@@ -202,15 +202,17 @@ impl AdminMutation {
         kind: String,
         #[graphql(desc = "Its name, unique within that kind.")] name: String,
         #[graphql(desc = "The script's source.")] content: String,
-        #[graphql(desc = "The agent whose directory it belongs to, for an agent-scoped script.")]
-        agent: Option<String>,
+        #[graphql(
+            desc = "The blueprint whose directory it belongs to, for a blueprint-scoped script."
+        )]
+        blueprint: Option<String>,
     ) -> async_graphql::Result<ScriptWritten> {
         let state = ctx.data_unchecked::<AppState>();
         let written = super::super::scripts::write_one(
             &state.current_config(),
             &kind,
             &name,
-            agent.as_deref(),
+            blueprint.as_deref(),
             &content,
         )
         .gql()?;
@@ -228,11 +230,16 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "Which registry it belongs to.")] kind: String,
         #[graphql(desc = "The script to remove.")] name: String,
-        #[graphql(desc = "The agent whose directory it is in.")] agent: Option<String>,
+        #[graphql(desc = "The blueprint whose directory it is in.")] blueprint: Option<String>,
     ) -> async_graphql::Result<bool> {
         let state = ctx.data_unchecked::<AppState>();
-        super::super::scripts::remove_one(&state.current_config(), &kind, &name, agent.as_deref())
-            .gql()?;
+        super::super::scripts::remove_one(
+            &state.current_config(),
+            &kind,
+            &name,
+            blueprint.as_deref(),
+        )
+        .gql()?;
         Ok(true)
     }
 
