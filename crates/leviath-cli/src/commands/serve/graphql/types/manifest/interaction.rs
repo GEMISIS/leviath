@@ -51,7 +51,7 @@ pub(crate) struct DirectiveEntry {
     pub(crate) option: String,
     /// What the stage is told to do next. It re-runs in place rather than
     /// transitioning, so the decision is the runtime's and the work is the
-    /// agent's.
+    /// run's.
     pub(crate) instruction: String,
 }
 

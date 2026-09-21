@@ -101,7 +101,7 @@ pub(crate) struct BlueprintDependency {
     /// A sentence telling the person how to satisfy it, shown wherever the miss
     /// is reported.
     pub(crate) remedy: Option<String>,
-    /// One line on why the agent needs it.
+    /// One line on why the blueprint needs it.
     pub(crate) description: Option<String>,
     /// How it can be installed, when the blueprint says.
     pub(crate) install: Option<DependencyInstall>,

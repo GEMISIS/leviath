@@ -62,7 +62,7 @@ pub(crate) struct ConfigError {
 /// A custom model gateway from `[model_providers]`.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Gateway {
-    /// The name an agent references, and the table key.
+    /// The name a blueprint references, and the table key.
     pub(crate) name: String,
     /// Where the gateway lives, when the entry names one.
     pub(crate) base_url: Option<String>,
@@ -245,7 +245,7 @@ pub(crate) struct YoloProfile {
     pub(crate) name: String,
     /// What tools with no explicit rule do.
     pub(crate) default: YoloWaiver,
-    /// What happens to the agent's own questions.
+    /// What happens to the run's own questions.
     pub(crate) questions: YoloHuman,
     /// What happens at blueprint checkpoints.
     pub(crate) checkpoints: YoloHuman,

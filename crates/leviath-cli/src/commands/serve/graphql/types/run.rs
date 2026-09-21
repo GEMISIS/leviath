@@ -1,4 +1,4 @@
-//! `Run`: one agent run, and the values that hang off it.
+//! `Run`: one run of a blueprint, and the values that hang off it.
 //!
 //! A run is read from the shared index, so the object below holds the same
 //! `Arc<RunMeta>` the REST listing holds: a page of fifty is fifty pointer
@@ -41,7 +41,7 @@ pub(crate) enum RunStatus {
     Paused,
     /// Finished with an answer or a terminal state.
     Complete,
-    /// Every required stage finished but the agent still accepts messages.
+    /// Every required stage finished but the run still accepts messages.
     CompleteInteractive,
     /// Unrecoverable failure; `Run.error` carries what went wrong.
     Error,
@@ -131,7 +131,7 @@ pub(crate) struct MetadataEntry {
     pub(crate) value: String,
 }
 
-/// One agent run.
+/// One run of a blueprint.
 ///
 /// Holds the shared `RunMeta` and the wall-clock second the request was
 /// answered at, so every duration in one response is measured from one

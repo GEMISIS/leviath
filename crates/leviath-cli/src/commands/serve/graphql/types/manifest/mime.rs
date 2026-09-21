@@ -1,7 +1,7 @@
 //! The mime rows a blueprint ships with itself.
 //!
-//! An agent that works in a file type the machine has never heard of carries the
-//! row that describes it, so installing the agent is all it takes.
+//! A blueprint that works in a file type the machine has never heard of carries
+//! the row that describes it, so installing the blueprint is all it takes.
 
 use async_graphql::SimpleObject;
 

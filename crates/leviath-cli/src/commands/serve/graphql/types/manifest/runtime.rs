@@ -209,7 +209,7 @@ impl From<&leviath_core::blueprint::StageHooks> for StageHooks {
 /// what an operator reads when they are deciding whether to write it in.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SafeCommands {
-    /// Tools the agent would like allowed outright.
+    /// Tools the blueprint would like allowed outright.
     pub(crate) tools: Vec<String>,
     /// Shell command lines it would like allowed outright.
     pub(crate) shell: Vec<String>,
@@ -282,7 +282,7 @@ impl From<&leviath_core::blueprint::FileTrackingConfig> for FileTrackingConfig {
 /// The model that summarizes a region when it fills.
 ///
 /// Its own model on purpose: compaction is cheap, frequent and not the work, so
-/// an agent running on an expensive model usually summarizes on a small one.
+/// a run on an expensive model usually summarizes on a small one.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct CompactionConfig {
     /// The provider that serves the summarizer.

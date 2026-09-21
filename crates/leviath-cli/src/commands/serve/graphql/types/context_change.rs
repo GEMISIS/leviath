@@ -33,8 +33,8 @@ pub(crate) enum ContextCause {
     /// A region seeded from the blueprint or from caller input, at spawn or on
     /// entry to a stage that declares its own layout.
     Seed,
-    /// A message delivered into the running agent, landing in the region that
-    /// accepts messages.
+    /// A message delivered into the run while it runs, landing in the region
+    /// that accepts messages.
     Message,
     /// The model's own reply, recorded as the assistant turn it was.
     ModelReply,

@@ -29,7 +29,7 @@ impl From<leviath_core::output::OnValidatorError> for ValidatorErrorPolicy {
 /// `artifacts` is what it produced.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct OutputArtifact {
-    /// The name the agent hands it back under.
+    /// The name the run hands it back under.
     pub(crate) name: String,
     /// The mime type or pattern it must be.
     pub(crate) mime_type: String,
